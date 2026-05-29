@@ -108,6 +108,13 @@ func (c *Controller) Start() {
 	c.resolveDevEnrollSecret()
 
 	r := mux.NewRouter()
+	// Surface non-2xx admin responses in the chassis log alongside
+	// their body. Without this, a 500 from handleCreateDraft (etc.)
+	// sends a useful "lookup_stack: database table is locked: stacks"
+	// payload to the client but logs nothing server-side — leaving
+	// operators to read DevTools to learn what failed. Bypasses
+	// static-asset paths and /healthz; see error_logging.go.
+	r.Use(c.errorLoggingMiddleware)
 	// Unauthenticated probes.
 	r.HandleFunc("/healthz", c.handleHealth).Methods(http.MethodGet)
 	// Caddy on_demand_tls authorization hook for customer custom

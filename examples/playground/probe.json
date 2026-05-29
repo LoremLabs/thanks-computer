@@ -6,7 +6,7 @@
       "method": "GET",
       "path": "/",
       "status": 200,
-      "contains": "hello world"
+      "contains": "hello cruel world"
     },
     {
       "name": "/mcp → mcp-server initialize",

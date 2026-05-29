@@ -85,7 +85,9 @@ func checksumOf(data []byte) string {
 // readVarval reads a single varvals row; "" if absent. Caller's sql driver
 // (go-sqlite3) must be registered.
 func readVarval(dbPath, key string) (string, error) {
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	// Same WAL-coexistence settings as Export's dump — readVarval also
+	// runs against the live runtime DB (it's called by Export).
+	db, err := sql.Open("sqlite3", liveReadDSN(dbPath))
 	if err != nil {
 		return "", err
 	}
@@ -101,12 +103,51 @@ func readVarval(dbPath, key string) (string, error) {
 	return val, nil
 }
 
+// liveReadDSN builds the DSN used to read the runtime DB while a
+// chassis may have it open. `txco snapshot export|publish` runs as a
+// SEPARATE process from the chassis (overwhelmingly via `docker exec
+// txco-txco-1 …`), so it can't share the chassis's *sql.DB the way
+// chassis/dbcache does — it opens its own connection to the same file.
+// Since the chassis runs SQLite in WAL mode (chassis/app/app.go), that
+// reader must coexist:
+//
+//   - _busy_timeout=5000 — wait out a checkpoint or commit-lock the
+//                          live writer is holding instead of failing
+//                          instantly. The bare sqlite3dump.Dump(path)
+//                          open had NO busy_timeout — fine for a cold
+//                          DB, but it can spuriously error against a
+//                          live WAL writer mid-checkpoint.
+//   - mode=ro            — pure read; never let the dumper mutate the
+//                          live DB. A WAL reader attaches via the
+//                          existing -shm/-wal the chassis maintains and
+//                          sees the latest committed state.
+//
+// Edge case: a chassis that crashed UNCLEANLY can leave an
+// un-checkpointed -wal that a mode=ro reader can't replay. That's rare,
+// pre-existing (the old bare Dump had the same limitation), and out of
+// scope here — the dominant path is a live or cleanly-stopped chassis.
+func liveReadDSN(dbPath string) string {
+	return "file:" + dbPath + "?mode=ro&_busy_timeout=5000"
+}
+
 // Export dumps runtimeDBPath into a self-contained artifact + manifest.
 func Export(runtimeDBPath string) ([]byte, Manifest, error) {
 	var b bytes.Buffer
 	w := bufio.NewWriter(&b)
-	if err := sqlite3dump.Dump(runtimeDBPath, w); err != nil {
-		return nil, Manifest{}, fmt.Errorf("snapshot: dump %s: %w", runtimeDBPath, err)
+	// Open our own read-only, WAL-coexisting connection and dump
+	// through it (DumpDB) rather than letting sqlite3dump.Dump open the
+	// bare path — see liveReadDSN for why that matters against a live
+	// chassis.
+	db, err := sql.Open("sqlite3", liveReadDSN(runtimeDBPath))
+	if err != nil {
+		return nil, Manifest{}, fmt.Errorf("snapshot: open %s: %w", runtimeDBPath, err)
+	}
+	if derr := sqlite3dump.DumpDB(db, w); derr != nil {
+		_ = db.Close()
+		return nil, Manifest{}, fmt.Errorf("snapshot: dump %s: %w", runtimeDBPath, derr)
+	}
+	if cerr := db.Close(); cerr != nil {
+		return nil, Manifest{}, fmt.Errorf("snapshot: close %s: %w", runtimeDBPath, cerr)
 	}
 	if err := w.Flush(); err != nil {
 		return nil, Manifest{}, err

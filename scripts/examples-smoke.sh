@@ -16,7 +16,10 @@
 #      one example on a private port block, apply any hostname bindings,
 #      and fire each HTTP check (status + body substring). A passing
 #      check transitively proves cold-boot → apply → server-side
-#      validate → activate → route → execute.
+#      validate → activate → route → execute. Checks that hit an async
+#      (`mode = "async"`) pipeline get a 202 + continuation poll URL;
+#      the harness follows it to the terminal result before asserting,
+#      so a probe just declares the final outcome (see CONTINUATION_* ).
 #
 # Examples run SEQUENTIALLY, so the Node apps several examples hardcode
 # on the same ports (4100/9009/4242/4200) never collide. If an example's
@@ -37,6 +40,21 @@ ADMIN_PORT=18181
 WEB_PORT=18180
 ADMIN_URL="http://localhost:${ADMIN_PORT}"
 WEB_URL="http://localhost:${WEB_PORT}"
+
+# --- async-continuation polling ---
+# An example op with `WITH mode = "async"` (e.g. hello-world/150's
+# research → the worker app on :9009) suspends the pipeline: the inlet
+# returns 202 + `Location: <path>?_txc.continuation=<rcid>` and the
+# worker calls back later. The poll URL returns 202 while running, 200
+# (the rendered result) once the worker completes, 502 on failure, 404
+# if unknown — see OPS/_sys/txc-continuation. So a check that declares
+# the FINAL outcome (status 200, body substring) must follow the 202 to
+# its conclusion. The smoke shortens the worker's job via WORKER_JOB_MS
+# (see run_checks), so the callback lands in well under a second; we
+# poll every 1s and keep a generous budget as a safety net (e.g. if the
+# override doesn't take and the worker falls back to its ~20-26s default).
+CONTINUATION_BUDGET_S=45
+CONTINUATION_POLL_S=1
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 if [[ -z "${REPO_ROOT}" ]]; then
@@ -63,6 +81,7 @@ fi
 LOG_DIR="$(mktemp -d -t examples-smoke-logs-XXXXXX)"
 DEV_PID=          # process group of the currently-running `txco dev`
 DEV_WS=           # temp workspace of the currently-running example
+DEV_APP_PORTS=    # the current example's app ports (from txco.yaml)
 EXIT_CODE=0
 PASS=0
 FAIL=0
@@ -79,8 +98,13 @@ teardown_dev() {
         sleep 2
         kill -KILL "-${DEV_PID}" 2>/dev/null || kill -KILL "${DEV_PID}" 2>/dev/null
     fi
-    # Belt + suspenders: stamp out anything left on our private ports.
-    for p in "${ADMIN_PORT}" "${WEB_PORT}"; do
+    # Belt + suspenders: stamp out anything left on our private ports AND
+    # the example's app ports. Without the app ports, a Node app that
+    # outlives its parent dev's process group (e.g. the :4100 api server)
+    # lingers past teardown — and since several examples hardcode the same
+    # app ports (4100/9009/…), the NEXT example sees the port busy and
+    # skips its checks. Killing them here keeps sequential runs isolated.
+    for p in "${ADMIN_PORT}" "${WEB_PORT}" ${DEV_APP_PORTS}; do
         local pid
         pid="$(lsof -ti tcp:"${p}" 2>/dev/null || true)"
         [[ -n "${pid}" ]] && kill -KILL "${pid}" 2>/dev/null
@@ -89,6 +113,7 @@ teardown_dev() {
     [[ -n "${DEV_WS}" ]] && rm -rf "${DEV_WS}"
     DEV_PID=
     DEV_WS=
+    DEV_APP_PORTS=
     set -uo pipefail
 }
 
@@ -157,6 +182,49 @@ for c in p.get("checks", []):
 PY
 }
 
+# fire_once <method> <url> <host> <body> <body_file> <hdr_file> → echoes
+# the HTTP status code. Response body lands in body_file, headers in
+# hdr_file (so the caller can read Location for continuation polling).
+# No -L: we follow continuations explicitly, not HTTP redirects.
+fire_once() {
+    local method="$1" url="$2" host="$3" body="$4" body_file="$5" hdr_file="$6"
+    local -a args=(-sS -o "${body_file}" -D "${hdr_file}" -w '%{http_code}'
+        -X "${method}" "${url}" -H "Host: ${host}")
+    if [[ -n "${body}" ]]; then
+        args+=(-H 'Content-Type: application/json' -d "${body}")
+    fi
+    curl "${args[@]}" 2>/dev/null
+}
+
+# continuation_poll_url <hdr_file> <body_file> <base_path> → echoes the
+# relative poll URL for a 202 continuation, or empty if none found.
+#
+# Two 202 shapes exist (chassis/processor):
+#   - continuable / same-scope barrier (emitContinuation202): sets a
+#     `Location:` header + body {"status":"running","continuation":…}.
+#   - async / deferred-join suspend: NO Location header; the rcid is
+#     only in the body, {"status":"waiting","continuation":"rc_…"}.
+# So prefer the Location header, then fall back to the body's
+# `continuation` field combined with the request's base path
+# (<path>?_txc.continuation=<rcid> — the poll form the chassis honors).
+continuation_poll_url() {
+    local hdr="$1" body="$2" base="$3" loc rcid sep
+    loc="$(grep -i '^location:' "${hdr}" 2>/dev/null | head -1 \
+        | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r' \
+        | sed 's/[[:space:]]*$//')"
+    if [[ -n "${loc}" ]]; then
+        printf '%s' "${loc}"
+        return
+    fi
+    rcid="$(grep -oE '"continuation"[[:space:]]*:[[:space:]]*"[^"]+"' "${body}" 2>/dev/null \
+        | head -1 | sed -E 's/.*"continuation"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+    if [[ -n "${rcid}" ]]; then
+        sep='?'
+        [[ "${base}" == *\?* ]] && sep='&'
+        printf '%s%s_txc.continuation=%s' "${base}" "${sep}" "${rcid}"
+    fi
+}
+
 # run_checks <name> <probe.json> — boot dev for the example workspace in
 # $DEV_WS, apply binds, run checks. Sets a non-empty $RUN_ERR on failure.
 RUN_ERR=
@@ -170,7 +238,26 @@ run_checks() {
     sed -i.bak "s#localhost:8081#localhost:${ADMIN_PORT}#g" "${DEV_WS}/txco.yaml" 2>/dev/null
     rm -f "${DEV_WS}/txco.yaml.bak"
 
-    ( cd "${DEV_WS}" && "${TXCO}" dev \
+    # TXCO_DEBUG_BREAKPOINTS=false: `txco dev` enables breakpoints by
+    # default, and the inlet then stamps _txc.flag_breakpoint on every
+    # request — which the processor uses to DISABLE response streaming
+    # (chassis/processor/processor.go: "Breakpoints pre-empt streaming
+    # entirely"). The smoke verifies examples as they behave in
+    # PRODUCTION (where breakpoints are off), so we force them off here.
+    # Without this, stream-demo's /stream returns a buffered final body
+    # ("done.") instead of the streamed chunks ("starting…" first), and
+    # its probe can never match. startChassis sets dev defaults
+    # set-if-missing, so this parent env var wins.
+    # WORKER_JOB_MS=500: example async workers (APPS/worker) default to a
+    # ~20-26s simulated job to look realistic for a human; that's dead
+    # wait for the smoke. The worker reads WORKER_JOB_MS as an override
+    # (dev passes its env down to spawned apps), so a short value still
+    # exercises the full 202→poll→200 continuation path in ~1s. Harmless
+    # for examples without a worker.
+    ( cd "${DEV_WS}" && \
+        TXCO_DEBUG_BREAKPOINTS=false \
+        WORKER_JOB_MS=500 \
+        "${TXCO}" dev \
         --chassis-addr ":${ADMIN_PORT}" \
         --web-addr ":${WEB_PORT}" \
         --watch=false ) >"${log}" 2>&1 &
@@ -206,22 +293,54 @@ run_checks() {
             ;;
         CHECK)
             # a=name b=method c=host d=path e=status f=contains g=body
-            local body_file out status
+            local body_file hdr_file out status
             body_file="${LOG_DIR}/${name}.body"
-            local -a curlargs=(-sS -o "${body_file}" -w '%{http_code}'
-                -X "${b}" "${WEB_URL}${d}" -H "Host: ${c}")
-            if [[ -n "${g}" ]]; then
-                curlargs+=(-H 'Content-Type: application/json' -d "${g}")
+            hdr_file="${LOG_DIR}/${name}.hdr"
+            status="$(fire_once "${b}" "${WEB_URL}${d}" "${c}" "${g}" "${body_file}" "${hdr_file}")"
+
+            # Follow an async continuation to its terminal result. A
+            # pipeline with a `mode = "async"` op returns 202 + a poll
+            # URL in Location; the poll itself returns 202 while the
+            # worker runs, then a terminal status (200 result / 502
+            # failed / 404 unknown). The probe declares the FINAL
+            # outcome, so the harness transparently drives the poll to
+            # completion. Each poll is a GET (regardless of the original
+            # method) with no body.
+            if [[ "${status}" == "202" ]]; then
+                local poll_url deadline
+                # Derive the poll URL ONCE from the first 202 (the rcid is
+                # stable for the run); subsequent polls reuse it, so we
+                # don't depend on every interim 202 echoing the rcid.
+                poll_url="$(continuation_poll_url "${hdr_file}" "${body_file}" "${d}")"
+                if [[ -z "${poll_url}" ]]; then
+                    RUN_ERR="check '${a}': got 202 but no continuation (Location header or body rcid) to poll"
+                    return
+                fi
+                deadline=$(( $(date +%s) + CONTINUATION_BUDGET_S ))
+                while [[ "${status}" == "202" ]]; do
+                    if (( $(date +%s) >= deadline )); then
+                        RUN_ERR="check '${a}': continuation did not resolve within ${CONTINUATION_BUDGET_S}s (still 202)"
+                        return
+                    fi
+                    sleep "${CONTINUATION_POLL_S}"
+                    status="$(fire_once GET "${WEB_URL}${poll_url}" "${c}" "" "${body_file}" "${hdr_file}")"
+                done
+                note "check '${a}': followed async continuation → HTTP ${status}"
             fi
-            status="$(curl "${curlargs[@]}" 2>/dev/null)"
+
             out="$(cat "${body_file}" 2>/dev/null)"
-            rm -f "${body_file}"
+            rm -f "${body_file}" "${hdr_file}"
             if [[ "${status}" != "${e}" ]]; then
                 RUN_ERR="check '${a}': got HTTP ${status}, want ${e}"
                 return
             fi
             if [[ -n "${f}" ]] && ! grep -qF -- "${f}" <<<"${out}"; then
-                RUN_ERR="check '${a}': body missing substring '${f}'"
+                # Show a snippet of what we actually got — a missing
+                # substring is usually a stale probe expectation, and the
+                # real body tells you what to assert instead.
+                local snippet
+                snippet="$(printf '%s' "${out}" | tr -d '\r\n' | cut -c1-160)"
+                RUN_ERR="check '${a}': body missing substring '${f}' (got: ${snippet})"
                 return
             fi
             pass "check '${a}' → HTTP ${status}, body contains '${f}'"
@@ -263,10 +382,15 @@ run_example() {
     rm -rf "${DEV_WS}/.txco" "${DEV_WS}/chassis"
     rm -f "${DEV_WS}/probe.json"
 
+    # Record the example's app ports so teardown can free them (some
+    # examples share ports like :4100, and a lingering app would make the
+    # next example skip).
+    DEV_APP_PORTS="$(app_ports "${DEV_WS}" | tr '\n' ' ')"
+
     # If the example's app ports are taken on this machine, dev's app
     # health checks would fail — skip CHECKS (baseline already passed).
     local busy=
-    for p in $(app_ports "${DEV_WS}"); do
+    for p in ${DEV_APP_PORTS}; do
         if port_busy "${p}"; then busy="${p}"; break; fi
     done
     if [[ -n "${busy}" ]]; then

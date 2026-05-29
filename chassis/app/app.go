@@ -576,7 +576,15 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 			logger.Fatal("Db migration transaction start error",
 				zap.String("kind", kind), zap.String("err", err.Error()))
 		}
-		if _, err := db.Exec(string(body)); err != nil {
+		// Run the migration SQL and the varvals upsert THROUGH `tx`, not
+		// the parent `db`. The earlier shape — db.Exec(body) + tx.Commit
+		// of an unused transaction — happened to work because SQLite DDL
+		// inside `db.Exec` auto-commits on whatever pool connection it
+		// gets, but the `tx.Rollback()` paths on error were dead code:
+		// they rolled back an empty transaction while the DDL stayed
+		// committed on the other connection. Funnelling both through
+		// `tx` makes the rollback meaningful and keeps migration atomic.
+		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 			_ = tx.Rollback()
 			logger.Fatal("db setup err",
 				zap.String("kind", kind), zap.String("dberr", err.Error()),
@@ -589,7 +597,7 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 		// pgx is strict and refuses (OID 25). Bind the changeset id as
 		// a string so the same statement works on both engines — the
 		// read side scans TEXT→int via database/sql's converter.
-		if _, err := db.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			dialect.Rebind(`INSERT INTO varvals (var, val) VALUES (?, ?)
 			 ON CONFLICT(var) DO UPDATE SET val = excluded.val`),
 			changesetVar, strconv.Itoa(fileID),

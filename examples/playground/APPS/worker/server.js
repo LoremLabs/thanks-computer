@@ -24,8 +24,13 @@ const PORT = 9009;
 // no result.json).
 const SIMULATE_FAILURE = false;
 
-// How long the "long-running job" takes before calling back.
-const JOB_MS = 20000 + Math.floor(Math.random() * 6000);
+// How long the "long-running job" takes before calling back. The
+// default (~20-26s) simulates a realistically slow job so a human
+// running the example sees the chassis promote to a continuation and
+// land on the wait page. Override with WORKER_JOB_MS (milliseconds) —
+// the examples-smoke harness sets a small value so the 202→poll→200
+// continuation path is exercised end-to-end without the long wait.
+const JOB_MS = Number(process.env.WORKER_JOB_MS) || (20000 + Math.floor(Math.random() * 6000));
 
 function postCallback(callbackURL, token, body) {
   const u = new URL(callbackURL);
