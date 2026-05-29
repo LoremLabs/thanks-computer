@@ -18,6 +18,17 @@
     import TracesList from './components/TracesList.svelte'
     import VersionsList from './components/VersionsList.svelte'
 
+    // DemoView is loaded on-demand: it owns ~50 KB of source (Runner +
+    // Walkthrough + 411-line tutorial curriculum) that admin-only
+    // sessions never need. The const + `{#await}` pattern fires the
+    // import the first time the `showDemo` branch renders and never
+    // again (browser-cached after the first hit). Vite emits this as a
+    // separate chunk because it's the only dynamic import reaching
+    // DemoView. Same pattern is used at three other lazy points
+    // (TxclEditor, DiffPanel, demo CodeEditor) to split CodeMirror and
+    // `diff` out of the main bundle.
+    const DemoViewPromise = import('./views/DemoView.svelte')
+
     onMount(() => {
         // Auth-first boot: probe /auth/browser/session before any
         // tenant/stacks fetches. In open-dev mode the chassis returns
@@ -27,6 +38,18 @@
         // noisily error in the console.
         ;(async () => {
             await store.refreshSession()
+            // Probe `/v1/demo/info` once — its existence signals the
+            // chassis is running under `txco demo`. Sets state.demoMode
+            // so the App ladder + syncFromHash can branch on it before
+            // we land the user on a route.
+            await store.probeDemoMode()
+            // First-visit landing for demo-mode chassis: if the URL has
+            // no hash yet, send the user straight to #demo (which
+            // syncFromHash picks up below). Subsequent visits whose
+            // history already carries a hash are left alone.
+            if (store.state.demoMode && !window.location.hash) {
+                window.location.hash = 'demo'
+            }
             // If the URL we landed on has #login?t=<token>, syncFromHash
             // picks it up and calls tryExchange. Trigger it here too
             // so the deep-link flow works on a clean reload (not just
@@ -232,6 +255,24 @@
 
 {#if showLogin}
     <Login />
+{:else if store.state.showDemo}
+    <!-- Demo route: renders today's standalone demo-ui inside the admin
+         SPA shell. No admin header, no admin sidebar — DemoView brings
+         its own. Activated when the user clicks #demo in their history
+         OR when probeDemoMode set state.demoMode=true and onMount
+         redirected the empty hash. Lazy-loaded — see DemoViewPromise. -->
+    {#await DemoViewPromise}
+        <div class="flex h-screen items-center justify-center text-sm italic text-neutral-400">
+            loading demo…
+        </div>
+    {:then m}
+        {@const DemoView = m.default}
+        <DemoView />
+    {:catch err}
+        <div class="flex h-screen items-center justify-center p-4 text-sm text-red-600">
+            failed to load demo: {err instanceof Error ? err.message : String(err)}
+        </div>
+    {/await}
 {:else}
 <div class="flex h-screen flex-col bg-neutral-50 text-neutral-900">
     <header class="flex shrink-0 items-center gap-2 border-b border-neutral-200 bg-white px-2 py-2 text-sm sm:gap-4 sm:px-4">
@@ -330,7 +371,7 @@
     <main class="relative flex flex-1 overflow-hidden">
         <!-- Desktop sidebar: in-flow at md+ only. -->
         <aside class="hidden w-72 shrink-0 overflow-y-auto border-r border-neutral-200 bg-white md:block">
-            <SidebarNav current={currentNav} onSelect={selectNav} />
+            <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} />
             <OpTree
                 ops={store.state.ops}
                 selectedId={store.state.selectedId}
@@ -356,7 +397,7 @@
                 : '-translate-x-full'}"
             aria-hidden={!sidebarOpen}
         >
-            <SidebarNav current={currentNav} onSelect={selectNav} />
+            <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} />
             <OpTree
                 ops={store.state.ops}
                 selectedId={store.state.selectedId}
@@ -384,7 +425,6 @@
                 <VersionsList
                     stack={store.state.showVersionsList}
                     versions={store.state.versionsByStack[store.state.showVersionsList] ?? []}
-                    activeVersion={focusedStackRow?.active_version}
                     onSelectVersion={(n) => {
                         store.setStackVersion(store.state.showVersionsList, n)
                         store.selectStack(store.state.showVersionsList)

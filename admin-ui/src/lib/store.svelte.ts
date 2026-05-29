@@ -7,6 +7,7 @@ import {
     deleteSession,
     diffVersions,
     exchangeToken,
+    getDemoInfo,
     getSession,
     getTrace,
     getVersion,
@@ -56,8 +57,10 @@ interface Selection {
     // (with an optional `loginToken` to auto-exchange on landing).
     // 'traces' = render the trace stream (list or per-rid detail).
     // 'secrets' = render the secrets list or per-secret detail.
+    // 'demo' = render the txcl walkthrough — only present when the
+    // chassis runs in demo mode (see state.demoMode + probeDemoMode).
     // Otherwise '' (op-or-stack view).
-    page: 'versions' | 'login' | 'traces' | 'secrets' | ''
+    page: 'versions' | 'login' | 'traces' | 'secrets' | 'demo' | ''
     // Captured from `#login?t=<token>` and consumed once by
     // syncFromHash → tryExchange. Not part of the persistent URL.
     loginToken?: string
@@ -217,6 +220,16 @@ function createStore() {
         loginPending: false,
         loginError: null as string | null,
         intendedHash: '' as string,
+        // True when this chassis exposes /v1/demo/info — set by
+        // probeDemoMode() at boot. The App ladder uses it to decide
+        // whether to render the demo route (and whether to auto-land
+        // users on #demo when no hash is present).
+        demoMode: false as boolean,
+        // True when the URL hash is #demo (or it was set to #demo at
+        // boot because demoMode === true and no hash was present).
+        // Mirrors the showTraces / showSecrets pattern but boolean —
+        // the demo route has no inner detail/list distinction.
+        showDemo: false as boolean,
         // Live-trace cache: keyed by rid, holding the full ClosedTrace
         // shape received over /traces/stream. Populated by TracesList
         // as events arrive; consumed by TraceDetail to avoid an
@@ -312,6 +325,28 @@ function createStore() {
             state.ops = []
         } finally {
             state.loading = false
+        }
+    }
+
+    // refreshStacks re-fetches just the per-tenant stack list (with each
+    // stack's current active_version pointer). The lighter cousin of
+    // refresh(): no rebuildOps, no version-detail fetches, no
+    // state.loading flip. Use it when something out-of-band has changed
+    // active_version on stacks the admin views might be reading — e.g.
+    // the demo Runner seeds and activates ~15 per-step stacks at mount,
+    // and admin's state.stacks would otherwise stay frozen at boot's
+    // snapshot. Cheaper than full refresh() because the user is usually
+    // sitting in #demo when this fires; admin only needs the pointers
+    // fresh for when they navigate over.
+    //
+    // Best-effort: a failed fetch is swallowed (admin keeps showing the
+    // stale snapshot rather than wiping the sidebar mid-demo).
+    async function refreshStacks() {
+        if (!state.currentTenant) return
+        try {
+            state.stacks = await listStacks(state.currentTenant)
+        } catch {
+            // ignore — UI keeps prior snapshot
         }
     }
 
@@ -656,6 +691,7 @@ function createStore() {
             state.selectedStack = ''
             state.showVersionsList = ''
             state.showSecrets = ''
+            state.showDemo = false
             state.showTraces = h.traceRid && h.traceRid !== '' ? h.traceRid : '__list__'
             return
         }
@@ -665,9 +701,21 @@ function createStore() {
             state.selectedStack = ''
             state.showVersionsList = ''
             state.showTraces = ''
+            state.showDemo = false
             state.showSecrets =
                 h.secretName && h.secretName !== '' ? h.secretName : '__list__'
             if (!state.secretsLoaded) refreshSecrets()
+            return
+        }
+        // Demo route — no stack context, no inner detail. The App
+        // ladder swaps in DemoView and hides admin chrome.
+        if (h.page === 'demo') {
+            state.selectedId = ''
+            state.selectedStack = ''
+            state.showVersionsList = ''
+            state.showTraces = ''
+            state.showSecrets = ''
+            state.showDemo = true
             return
         }
         state.selectedId = h.op
@@ -675,6 +723,7 @@ function createStore() {
         state.showVersionsList = h.page === 'versions' ? h.stack : ''
         state.showTraces = ''
         state.showSecrets = ''
+        state.showDemo = false
         if (h.stack && typeof h.version === 'number') {
             // The hash carries an explicit version pin; honor it.
             // Fire-and-forget: setStackVersion fetches + rebuilds ops.
@@ -682,6 +731,20 @@ function createStore() {
         }
         if (h.page === 'versions' && h.stack && !state.versionsByStack[h.stack]) {
             refreshVersions(h.stack)
+        }
+    }
+
+    // probeDemoMode best-effort fetches /v1/demo/info. The endpoint
+    // exists only when the chassis is running under `txco demo`, so
+    // presence ⇒ demo mode. Failure (404 / network) leaves
+    // state.demoMode at its initial false. Called once at boot before
+    // syncFromHash so the App ladder can branch on the result.
+    async function probeDemoMode() {
+        try {
+            const info = await getDemoInfo()
+            state.demoMode = !!info
+        } catch {
+            state.demoMode = false
         }
     }
 
@@ -1098,7 +1161,9 @@ function createStore() {
         getCachedTrace,
         patchDraftFile,
         patchMockFile,
+        probeDemoMode,
         refresh,
+        refreshStacks,
         refreshSecrets,
         refreshSession,
         refreshTenants,
@@ -1315,6 +1380,13 @@ function readHash(): Selection {
         return { op: '', stack: '', version: null, page: 'secrets', secretName: sm[1] }
     }
 
+    // Demo route — only renders when state.demoMode is true (probed from
+    // /v1/demo/info at boot). Outside demo mode this still parses fine
+    // but the App ladder's `page === 'demo'` branch shows an empty state.
+    if (h === '#demo' || h === '#demo/') {
+        return { op: '', stack: '', version: null, page: 'demo' }
+    }
+
     // Op detail with optional version override.
     // Two forms: <stack>/<scope>/<name> or <stack>/v<N>/<scope>/<name>.
     let m = h.match(/^#ops\/(.+?)\/v(\d+)\/(\d+)\/(.+)$/)
@@ -1353,6 +1425,8 @@ function writeHash(sel: Selection) {
         next = sel.traceRid ? `#traces/${sel.traceRid}` : '#traces'
     } else if (sel.page === 'secrets') {
         next = sel.secretName ? `#secrets/${sel.secretName}` : '#secrets'
+    } else if (sel.page === 'demo') {
+        next = '#demo'
     } else if (sel.page === 'versions' && sel.stack) {
         next = `#stack/${sel.stack}/versions`
     } else if (sel.op) {

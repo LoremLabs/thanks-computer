@@ -52,23 +52,19 @@ jobs:
           cache-dependency-path: |
             admin-ui/pnpm-lock.yaml
             continuation-ui/pnpm-lock.yaml
-            demo-ui/pnpm-lock.yaml
 
       # Vite writes each bundle straight into its //go:embed dir
-      # (chassis/server/{admin,continuation,demo}/ui/dist) — see each
-      # vite.config.ts. Missing any of these leaves the embed at the
+      # (chassis/server/{admin,continuation}/ui/dist) — see each
+      # vite.config.ts. Missing either leaves the embed at the
       # ".gitkeep-only" placeholder, which boots fine but serves the
-      # "UI bundle not built" stub at runtime.
+      # "UI bundle not built" stub at runtime. (The standalone demo-ui
+      # was merged into admin-ui as the #demo route — no separate build.)
       - name: build admin UI
         working-directory: admin-ui
         run: pnpm install --frozen-lockfile && pnpm run build
 
       - name: build continuation UI
         working-directory: continuation-ui
-        run: pnpm install --frozen-lockfile && pnpm run build
-
-      - name: build demo UI
-        working-directory: demo-ui
         run: pnpm install --frozen-lockfile && pnpm run build
 
       - uses: actions/setup-go@v6

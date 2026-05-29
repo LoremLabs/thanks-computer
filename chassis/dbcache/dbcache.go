@@ -50,6 +50,16 @@ type DbCache struct {
 	Logger *zap.Logger
 	Mu     sync.Mutex
 
+	// Source is the chassis's runtime *sql.DB handle — the live,
+	// configured connection pool that the rest of the chassis writes
+	// through. Reload() dumps from this handle (via
+	// sqlite3dump.DumpDB) rather than opening its own connection to
+	// the file: in WAL mode a second uncoordinated connection races
+	// the main one's .db-shm state and fails with "database is
+	// locked" on first boot. Going through the same pool means there
+	// is no second connection to race.
+	Source *sql.DB
+
 	// OnReload, if set, runs at the end of every Reload against the
 	// freshly-built in-memory DB while the cache lock is still held —
 	// so no request ever observes the snapshot before the overlay is
@@ -62,6 +72,10 @@ type DbCache struct {
 
 // New Create a new in-memory DB cache.
 //
+// `source` is the chassis's runtime *sql.DB — the live connection
+// pool that Reload() reads from. Required: passing nil here would
+// fail at the first Reload. See DbCache.Source for the WAL rationale.
+//
 // Critical: go-sqlite3 gives each *connection* in the pool its own
 // `:memory:` database. So if connection #1 loads the schema and a later
 // concurrent query opens connection #2, that second connection sees an
@@ -71,7 +85,7 @@ type DbCache struct {
 // are fast and the cache is read-only on the hot path; serializing
 // through one connection costs nothing visible but guarantees
 // consistency under concurrent load.
-func New(conf config.Config, logger *zap.Logger, ctx context.Context) (*DbCache, error) {
+func New(conf config.Config, logger *zap.Logger, ctx context.Context, source *sql.DB) (*DbCache, error) {
 
 	var dbc = &DbCache{}
 	dbc.Mu = sync.Mutex{}
@@ -84,6 +98,7 @@ func New(conf config.Config, logger *zap.Logger, ctx context.Context) (*DbCache,
 
 	dbc.Conf = conf
 	dbc.Db = db
+	dbc.Source = source
 	dbc.Logger = logger
 	dbc.Ctx = ctx
 
@@ -126,8 +141,16 @@ func (dbc *DbCache) Reload() error {
 	var b bytes.Buffer
 	out := bufio.NewWriter(&b)
 
-	dbfile := strings.TrimPrefix(dbc.Conf.DbRuntimeDsn, "file:")
-	if err := sqlite3dump.Dump(dbfile, out); err != nil {
+	// Dump THROUGH the chassis's own *sql.DB handle (Source) — not
+	// by opening the file again with sqlite3dump.Dump(path). The
+	// bare-path version opens a SECOND connection to the same file
+	// with default SQLite settings, which under WAL mode races the
+	// main connection's .db-shm coordination state and fails with
+	// "database is locked" on the very first reload at boot. Going
+	// through the same pool means there's no second connection to
+	// race, and any contention is the standard pool-level kind that
+	// busy_timeout handles.
+	if err := sqlite3dump.DumpDB(dbc.Source, out); err != nil {
 		dbc.Logger.Warn("reload cachedb err", zap.String("err", err.Error()))
 		return err
 	}
@@ -142,7 +165,9 @@ func (dbc *DbCache) Reload() error {
 	// connection gets its own `:memory:` DB, so without this any second
 	// connection in the pool would be empty.
 	dbNew.SetMaxOpenConns(1)
-	dbc.Logger.Debug("dbcache reload", zap.String("file", dbfile), zap.Int("dump_bytes", b.Len()))
+	dbc.Logger.Debug("dbcache reload",
+		zap.String("source", dbc.Conf.DbRuntimeDsn),
+		zap.Int("dump_bytes", b.Len()))
 	_, err = dbNew.Exec(b.String())
 	if err != nil {
 		dbc.Logger.Warn("reload cachedb open db err", zap.String("err", err.Error()))

@@ -24,7 +24,6 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
-	demoui "github.com/loremlabs/thanks-computer/chassis/server/demo/ui"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
@@ -122,12 +121,15 @@ func (c *Controller) Start() {
 	r.PathPrefix("/admin/").Handler(ui.Handler("/admin"))
 	r.Handle("/admin", http.RedirectHandler("/admin/", http.StatusMovedPermanently))
 	// Demo UI: the txcl learning environment, launched by `txco demo`.
-	// Same static-SPA treatment as /admin/ (unauthenticated shell; its
-	// /v1 + /traces fetches still flow through the auth middleware). Its
-	// execution hop is /v1/demo/fire, registered on the protected
-	// subrouter below.
-	r.PathPrefix("/demo/").Handler(demoui.Handler("/demo"))
-	r.Handle("/demo", http.RedirectHandler("/demo/", http.StatusMovedPermanently))
+	// The standalone /demo/ SPA was merged into admin-ui as the #demo
+	// route — redirect any stale bookmark or older `txco demo` shim to
+	// its new home. Browsers honor the fragment in Location; CLI clients
+	// that strip it land on /admin/ and the SPA's probeDemoMode +
+	// syncFromHash route them to #demo. The execution hop endpoints
+	// (/v1/demo/fire, /v1/demo/info, /v1/demo/op/build) live on the
+	// protected subrouter below — unchanged.
+	r.Handle("/demo", http.RedirectHandler("/admin/#demo", http.StatusMovedPermanently))
+	r.Handle("/demo/", http.RedirectHandler("/admin/#demo", http.StatusMovedPermanently))
 	// Bare root is a convenience entry point: send it to the admin UI.
 	// 302 (not 301) — this is a UX entry redirect, not a canonical
 	// resource move, so it stays uncached if the landing target changes.
@@ -219,6 +221,14 @@ func (c *Controller) Start() {
 	// dev).
 	protected.HandleFunc("/v1/demo/fire", c.handleDemoFire).Methods(http.MethodPost)
 	protected.HandleFunc("/v1/demo/info", c.handleDemoInfo).Methods(http.MethodGet)
+	// Demo walkthrough curriculum: the source of truth for the
+	// tracks/steps/ops the admin-ui's #demo route renders. Single
+	// data structure lives in chassis/demo (Go); the SPA fetches it
+	// here on mount rather than embedding a duplicate copy. The
+	// same data is used by `txco demo`'s pre-seed (chassis/cli/demo
+	// → demo.Seed), so what the SPA shows always matches what was
+	// actually seeded into this chassis.
+	protected.HandleFunc("/v1/demo/curriculum", c.handleDemoCurriculum).Methods(http.MethodGet)
 	// Demo compute-op build hop: bundle + compile a single JS/TS source
 	// via the same toolchain `txco apply` uses, then store the wasm
 	// artifact in this chassis's astore so the runtime resolver finds it

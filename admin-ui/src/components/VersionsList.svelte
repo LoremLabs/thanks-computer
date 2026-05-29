@@ -1,18 +1,21 @@
 <script lang="ts">
     import { ValidationFailedError, type Version } from '../lib/api'
     import Ago from './Ago.svelte'
-    import DiffPanel from './DiffPanel.svelte'
+
+    // DiffPanel pulls in the `diff` library (~20 KB) and DiffFileView,
+    // none of which is needed unless the user actually expands a
+    // version row. Lazy-loading it splits both out of the main bundle.
+    const DiffPanelPromise = import('./DiffPanel.svelte')
 
     interface Props {
         stack: string
         versions: Version[]
-        activeVersion?: number
         onSelectVersion: (n: number) => void
         onActivate: (n: number) => Promise<void>
         onCreateDraft: () => Promise<void>
     }
 
-    let { stack, versions, activeVersion, onSelectVersion, onActivate, onCreateDraft }: Props = $props()
+    let { stack, versions, onSelectVersion, onActivate, onCreateDraft }: Props = $props()
 
     let creatingDraft = $state(false)
     let createDraftError = $state('')
@@ -44,9 +47,20 @@
     let expandedRow = $state<Record<number, boolean>>({})
 
     function statusLabel(v: Version): string {
-        if (v.is_active || (activeVersion && v.version_number === activeVersion)) {
-            return 'active'
-        }
+        // Per-row `is_active` is computed server-side against
+        // `stacks.active_version` on every `listVersions` response (see
+        // chassis/server/admin/stacks.go:470). It's the single source of
+        // truth and is fresh by construction. Earlier this function also
+        // OR'd in `v.version_number === activeVersion` as a defensive
+        // fallback — but the `activeVersion` prop comes from
+        // `state.stacks` which the admin-ui doesn't always refresh after
+        // an out-of-band activate (e.g., the demo's Runner re-activates
+        // stacks at mount but doesn't touch the stacks cache). That
+        // fallback then matched a stale version_number and labelled TWO
+        // versions "active" at once. Dropping it removes the false
+        // positive without losing correctness — the server is
+        // authoritative.
+        if (v.is_active) return 'active'
         return v.status
     }
 
@@ -180,11 +194,16 @@
                         {#if expanded && prior}
                             <tr class="bg-neutral-50">
                                 <td colspan="5" class="px-3 py-2">
-                                    <DiffPanel
-                                        {stack}
-                                        v1={prior.version_number}
-                                        v2={v.version_number}
-                                    />
+                                    {#await DiffPanelPromise}
+                                        <div class="text-xs italic text-neutral-400">loading diff…</div>
+                                    {:then m}
+                                        {@const DiffPanel = m.default}
+                                        <DiffPanel
+                                            {stack}
+                                            v1={prior.version_number}
+                                            v2={v.version_number}
+                                        />
+                                    {/await}
                                 </td>
                             </tr>
                         {/if}

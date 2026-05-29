@@ -1,21 +1,43 @@
 <script lang="ts">
-    import Runner from './components/Runner.svelte'
-    import Walkthrough from './components/Walkthrough.svelte'
-    import { tracks } from './lib/tutorial'
+    import { onMount } from 'svelte'
+    import Runner from '../components/demo/Runner.svelte'
+    import Walkthrough from '../components/demo/Walkthrough.svelte'
+    import { getCurriculum, type Curriculum } from '../lib/api'
 
-    // Run lives in the header (primary CTA); it triggers the Runner's
+    // Run lives in the demo header (primary CTA); it triggers the Runner's
     // exported run(). `running` is bound from the Runner so the button
     // reflects in-flight state. The URL-action button (Open + break-at)
     // lives in the Runner itself, next to the path field.
+    //
+    // This view renders its OWN header + sidebar (no admin chrome) — see
+    // App.svelte's `{#if store.state.page !== 'demo'}` gate around the
+    // shared header/aside that suppresses admin chrome on this route. The
+    // visual result matches the standalone demo-ui App.svelte byte-for-byte.
     let runner = $state<Runner | undefined>()
     let running = $state(false)
 
-    // Guided walkthrough: App owns the track + step index and drives the
-    // Runner (which loads + runs the step's ops). The Runner auto-runs
+    // The walkthrough curriculum (tracks, steps, ops, request shape)
+    // lives on the chassis at /v1/demo/curriculum — single source of
+    // truth shared with the Go-side pre-seed (chassis/cli/demo →
+    // demo.Seed). Fetch on mount; gate the Runner + Walkthrough on it
+    // being loaded so neither has to defend against null data.
+    let curriculum = $state<Curriculum | null>(null)
+    let loadError = $state('')
+    onMount(async () => {
+        try {
+            curriculum = await getCurriculum()
+        } catch (e) {
+            loadError = e instanceof Error ? e.message : String(e)
+        }
+    })
+
+    // Guided walkthrough: this view owns the track + step index and drives
+    // the Runner (which loads + runs the step's ops). The Runner auto-runs
     // track 0 / step 0 on mount, so we only call load() on navigation.
     let trackIdx = $state(0)
     let stepIdx = $state(0)
-    const steps = $derived(tracks[trackIdx].steps)
+    const tracks = $derived(curriculum?.tracks ?? [])
+    const steps = $derived(tracks[trackIdx]?.steps ?? [])
 
     function goTo(i: number) {
         if (i < 0 || i >= steps.length) return
@@ -44,7 +66,7 @@
         <div class="flex shrink-0 items-center gap-3">
             <button
                 type="button"
-                disabled={running}
+                disabled={running || !curriculum}
                 onclick={() => runner?.run()}
                 class="rounded bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:bg-neutral-800 disabled:opacity-50"
             >
@@ -61,39 +83,54 @@
         <aside class="flex w-56 shrink-0 flex-col overflow-y-auto border-r border-neutral-200 bg-white">
             <!-- Top section: utility / external links. Grows over time —
                  same row vocabulary as admin-ui's SidebarNav (colored `o`
-                 glyph + label). -->
+                 glyph + label). `#traces` is a same-SPA navigation now
+                 (was: opens in a new tab via /admin/#traces); the admin
+                 chrome shows, demo chrome disappears, browser back returns. -->
             <nav class="flex flex-col gap-0.5 px-2 pt-3 pb-2">
                 <a
-                    href="/admin/#traces"
-                    target="_blank"
-                    rel="noopener"
-                    title="open the admin's traces view in a new tab — open auth in demo mode, no login needed"
+                    href="#traces"
+                    title="navigate to the admin's traces view"
                     class="flex items-center gap-2 rounded px-2 py-1 text-sm text-neutral-700 hover:bg-neutral-100"
                 >
                     <span class="inline-block w-4 shrink-0 text-center font-semibold tracking-tight text-brand-magenta" aria-hidden="true">o</span>
-                    traces ↗
+                    traces
                 </a>
             </nav>
 
             <!-- Divider between utility links and the walkthrough. -->
             <div class="mx-2 border-t border-neutral-200"></div>
 
-            <Walkthrough
-                tracks={tracks.map((t) => t.title)}
-                trackIndex={trackIdx}
-                onSelectTrack={selectTrack}
-                stepTitles={steps.map((s) => s.title)}
-                step={steps[stepIdx]}
-                index={stepIdx}
-                total={steps.length}
-                onSelectStep={goTo}
-                onPrev={() => goTo(stepIdx - 1)}
-                onNext={() => goTo(stepIdx + 1)}
-            />
+            {#if curriculum && steps[stepIdx]}
+                <Walkthrough
+                    tracks={tracks.map((t) => t.title)}
+                    trackIndex={trackIdx}
+                    onSelectTrack={selectTrack}
+                    stepTitles={steps.map((s) => s.title)}
+                    step={steps[stepIdx]}
+                    index={stepIdx}
+                    total={steps.length}
+                    onSelectStep={goTo}
+                    onPrev={() => goTo(stepIdx - 1)}
+                    onNext={() => goTo(stepIdx + 1)}
+                />
+            {/if}
         </aside>
 
         <main class="flex-1 overflow-auto px-6 py-6">
-            <Runner bind:this={runner} bind:running />
+            {#if loadError}
+                <div class="rounded border border-red-300 bg-red-50 p-4 text-sm text-red-800">
+                    Failed to load demo curriculum: {loadError}
+                </div>
+            {:else if curriculum}
+                <Runner
+                    bind:this={runner}
+                    bind:running
+                    tracks={curriculum.tracks}
+                    hostSuffix={curriculum.host_suffix}
+                />
+            {:else}
+                <div class="text-sm italic text-neutral-400">loading walkthrough…</div>
+            {/if}
         </main>
     </div>
 </div>

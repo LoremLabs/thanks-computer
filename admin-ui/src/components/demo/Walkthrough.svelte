@@ -1,5 +1,5 @@
 <script lang="ts">
-    import type { Step } from '../lib/tutorial'
+    import type { DemoStep as Step } from '../../lib/api'
 
     interface Props {
         tracks: string[]

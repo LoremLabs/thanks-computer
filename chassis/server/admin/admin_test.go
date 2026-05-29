@@ -53,7 +53,7 @@ func newTestController(t *testing.T, conf config.Config) *Controller {
 		Logger:    logger,
 		RuntimeDB: db,
 		AuthDB:    db,
-		Dbc:       &dbcache.DbCache{Db: db, Logger: logger},
+		Dbc:       &dbcache.DbCache{Db: db, Source: db, Logger: logger},
 		Mux:       radix.New(),
 	}
 	c := &Controller{ctx: context.Background(), pu: pu}

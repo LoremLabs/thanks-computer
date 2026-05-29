@@ -61,7 +61,7 @@ func newHarness(t *testing.T) *harness {
 		FeedSourceFileDir: feedDir,
 		FeedPollPeriod:    1,
 	}
-	dbc, err := dbcache.New(conf, zap.NewNop(), context.Background())
+	dbc, err := dbcache.New(conf, zap.NewNop(), context.Background(), db)
 	if err != nil {
 		t.Fatalf("dbcache: %v", err)
 	}

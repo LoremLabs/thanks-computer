@@ -1,23 +1,22 @@
 <script lang="ts">
     import { onMount } from 'svelte'
-    import CodeEditor from './CodeEditor.svelte'
-    import JsonPre from './JsonPre.svelte'
-    import StackView from './StackView.svelte'
-    import TxclHelp from './TxclHelp.svelte'
-    import { opId, type Op } from '../lib/types'
-    import {
-        tracks,
-        allSteps,
-        DEMO_HOST_SUFFIX,
-        type OpFile,
-        type Method,
-        type Step,
-    } from '../lib/tutorial'
+    import JsonPre from '../JsonPre.svelte'
+    import StackView from '../StackView.svelte'
+    import TxclHelp from '../TxclHelp.svelte'
+    import { store } from '../../lib/store.svelte'
+    import { opId, type Op } from '../../lib/types'
+
+    // CodeEditor (CodeMirror) is shared with admin's TxclEditor through
+    // the same dynamic-import chunk Vite emits — see OpDetail.svelte's
+    // TxclEditorPromise. Loading it dynamically here means the chunk
+    // arrives once when the user first interacts with an editor in
+    // EITHER route, browser-cached for everything after.
+    const CodeEditorPromise = import('./CodeEditor.svelte')
     import {
         createDraft,
         putDraftFiles,
         validateVersion,
-        activate,
+        activateStack,
         bindHostname,
         fireRequest,
         getDemoInfo,
@@ -25,15 +24,36 @@
         buildDemoOp,
         type FireResult,
         type TraceResponse,
-        type StackFile,
-    } from '../lib/api'
+        type DemoOpFile as OpFile,
+        type DemoStep as Step,
+        type DemoTrack as Track,
+    } from '../../lib/api'
 
-    // `running` is owned by the parent (App) so the Run CTA can live in
-    // the header; run() sets it. run() is exported so the header button
+    // The Method union used to live in tutorial.ts; now it's also in
+    // api.ts as a literal type. Re-declare here as a named local so
+    // existing references downstream keep reading naturally.
+    type Method = 'GET' | 'POST' | 'PUT' | 'DELETE'
+
+    // Props: parent (DemoView) fetches the curriculum from
+    // /v1/demo/curriculum and passes it down here. `tracks` is the
+    // walkthrough data; `hostSuffix` is the wildcard DNS suffix
+    // (e.g. "local.thanks.computer") for the per-step hostnames. The
+    // chassis has ALREADY pre-seeded every step's stack via
+    // chassis/cli/demo → demo.Seed before the browser opened, so this
+    // component never has to do the initial seed — it just renders.
+    //
+    // `running` is owned by the parent so the Run CTA can live in the
+    // header; run() sets it. run() is exported so the header button
     // can trigger it via bind:this.
     let {
+        tracks,
+        hostSuffix,
         running = $bindable(false),
-    }: { running?: boolean } = $props()
+    }: {
+        tracks: Track[]
+        hostSuffix: string
+        running?: boolean
+    } = $props()
 
     // Optional scope to break at when "Open" is clicked. null = no break;
     // a number = `?_txc.break=<currentStack>/<scope>` appended to the URL.
@@ -47,15 +67,24 @@
     // wildcard *.local.thanks.computer resolves to 127.0.0.1 publicly, so
     // these "look like real subdomains" but stay loopback.
     function hostnameFor(stack: string): string {
-        return `${stack}.${DEMO_HOST_SUFFIX}`
+        return `${stack}.${hostSuffix}`
     }
 
     // Ops + request + current stack are seeded from the walkthrough's
-    // first step. Each step has its OWN stack name (set by tutorial.ts
-    // withStacks); `currentStack` tracks which one is "live" — its
-    // hostname is what fired requests target.
+    // first step. Each step has its OWN stack name (server-assigned in
+    // chassis/demo/curriculum.go via `<trackID>-<i+1>`); `currentStack`
+    // tracks which one is "live" — its hostname is what fired requests
+    // target.
+    //
+    // svelte-ignore state_referenced_locally
+    //   `tracks` is a prop and Svelte warns that this captures its
+    //   initial value rather than tracking changes. That's intentional
+    //   here: DemoView fetches the curriculum ONCE before mounting
+    //   this component (gated on a loading state), so `tracks` never
+    //   changes for this instance's lifetime. The captured snapshot
+    //   IS the source-of-truth seed.
     const seed = tracks[0].steps[0]
-    let currentStack = $state(seed.stack!)
+    let currentStack = $state(seed.stack)
     let ops = $state<OpFile[]>(seed.ops.map((o) => ({ ...o })))
     let method = $state<Method>(seed.method)
     let path = $state(seed.path)
@@ -65,11 +94,6 @@
     // Web-inlet port (data plane), fetched from the chassis — the curl
     // targets it, not the admin port this UI is served from.
     let webPort = $state('')
-    // True once all N step-stacks have been seeded (createDraft + put +
-    // activate + bindHostname). Tab switches that happen before this
-    // finishes auto-wait via `run({apply: false})` — but if a user clicks
-    // Run before seed completes, the explicit apply path covers it.
-    let seedReady = $state(false)
     onMount(async () => {
         // Best-effort: web-inlet port for copy-as-curl.
         try {
@@ -79,24 +103,23 @@
             // leave empty — curl falls back to the page origin
         }
 
-        // Seed every step's stack in parallel. Each step gets its own
-        // stack with its own hostname binding so tab switches are
-        // pure-navigation (no apply). ~15 stacks × 4 admin-API calls each,
-        // all parallel against localhost — usually <1s wall-clock.
-        try {
-            await Promise.all(
-                allSteps().map(({ stack, step }) =>
-                    ensureStack(stack, step.ops)
-                )
-            )
-            seedReady = true
-        } catch (e) {
-            error = e instanceof Error ? e.message : String(e)
-        }
+        // No mount-time seed: `txco demo` pre-seeded every step's
+        // stack via chassis/cli/demo → demo.Seed BEFORE the browser
+        // opened (single source of truth: chassis/demo/curriculum.go,
+        // also what we fetched in DemoView). The Runner only does
+        // admin writes via the apply:true path when the user edits
+        // an op's txcl/js and clicks Run — see ensureStack() below.
+        //
+        // We just opened a fresh demo session; admin-side caches that
+        // were loaded at SPA boot may not know about the chassis's
+        // pre-seeded stacks yet. Refresh the stack-list snapshot so a
+        // jump to #ops / #traces afterward sees current data.
+        // Fire-and-forget: a failure only affects admin rendering.
+        void store.refreshStacks()
 
-        // Auto-run the default first step (build-1) so the user sees
-        // output immediately. The stack was just seeded above, so this is
-        // a pure fire (no second apply).
+        // Auto-fire the default first step (build-1) so the user sees
+        // output immediately. The stack and hostname are already
+        // bound from the Go-side seed — pure fire, no apply path.
         void run({ apply: false })
     })
 
@@ -376,11 +399,15 @@
                 return { ...o, txcl: o.txcl.replace(opRefRe, `"${built.ref}"`) }
             })
         )
-        const files: StackFile[] = resolvedOps.map((o) => ({
+        const files = resolvedOps.map((o) => ({
             path: `${o.scope}/${o.name}.txcl`,
             content: o.txcl,
         }))
-        const draft = await createDraft(TENANT, stack, 'empty')
+        // `from: ''` creates an empty draft (admin.api wire form for
+        // "no clone"; the server's createDraftRequest treats '' as
+        // empty when there's no active version, which is exactly what
+        // the demo's per-step scratch stacks want).
+        const draft = await createDraft(TENANT, stack, '')
         await putDraftFiles(TENANT, stack, draft.version_number, files)
         // Validate before activate — the chassis activates invalid txcl
         // without complaint and then hangs the request, so catch parse /
@@ -395,7 +422,7 @@
                         : '  (no detail returned)')
             )
         }
-        await activate(TENANT, stack, draft.version_number)
+        await activateStack(TENANT, stack, draft.version_number)
         // Bind <stack>.local.thanks.computer → stack. Idempotent: 409 on
         // an already-bound hostname is treated as success in api.ts.
         await bindHostname(TENANT, hostnameFor(stack), stack)
@@ -416,6 +443,11 @@
         try {
             if (apply) {
                 await ensureStack(currentStack, ops)
+                // Same staleness fix as the mount-time seed: ensureStack
+                // just minted (and activated) a new version on this
+                // stack — bump admin's snapshot so its active_version
+                // pointer doesn't lag behind.
+                void store.refreshStacks()
             }
             const headers: Record<string, string> = {
                 Host: hostnameFor(currentStack),
@@ -445,7 +477,7 @@
             // settles. A missing trace doesn't blank the response.
             trace = null
             for (let i = 0; i < 12; i++) {
-                const t = await getTrace(TENANT, fired.rid).catch(() => null)
+                const t = await getTrace(fired.rid).catch(() => null)
                 if (t) trace = t
                 if (t?.finished_at) break
                 await new Promise((r) => setTimeout(r, 200))
@@ -458,21 +490,22 @@
     }
 
     // Load a walkthrough step into the demo and fire it. Called by the
-    // parent (App) on Prev/Next. Tab switches are pure navigation — the
-    // step's stack was seeded at mount, so we change `currentStack`,
+    // parent (DemoView) on Prev/Next. Tab switches are pure navigation —
+    // the step's stack was seeded at mount, so we change `currentStack`,
     // refresh the editor state from the step's authored ops, and just
     // fire (no re-apply). To pick up user edits, click Run.
     export function load(step: Step) {
-        currentStack = step.stack!
+        currentStack = step.stack
         ops = step.ops.map((o) => ({ ...o }))
         method = step.method
         path = step.path
         body = step.body ?? ''
         selectedName = ops[0]?.name ?? ''
-        // If the mount-time seed hasn't finished yet (race on a very fast
-        // Prev/Next click), apply on the way in so the stack exists before
-        // we fire. Otherwise tab switches stay apply-free.
-        void run({ apply: !seedReady })
+        // Tab switches are pure fires: the chassis pre-seeded every
+        // step's stack at boot (chassis/cli/demo → demo.Seed), so the
+        // hostname route is already live. apply:true is reserved for
+        // the explicit Run button — i.e. after the user edits ops.
+        void run({ apply: false })
     }
 </script>
 
@@ -542,6 +575,7 @@
                                 ops={d.ops}
                                 lastDurations={durations}
                                 stackTotalMs={d.total}
+                                showInlineNewOp={false}
                                 onSelectOp={d.stack === currentStack
                                     ? (op) => (selectedName = op.name)
                                     : undefined}
@@ -563,7 +597,12 @@
                         <span class="text-[11px] text-neutral-400">scope {selectedOp.scope}</span>
                     </div>
                     {#key selectedName}
-                        <CodeEditor value={selectedOp.txcl} onChange={updateSelected} />
+                        {#await CodeEditorPromise}
+                            <div class="text-sm italic text-neutral-400">loading editor…</div>
+                        {:then m}
+                            {@const CodeEditor = m.default}
+                            <CodeEditor value={selectedOp.txcl} onChange={updateSelected} />
+                        {/await}
                     {/key}
                     {#if selectedOp.js !== undefined}
                         <div class="mt-3">
@@ -587,7 +626,7 @@
                             txcl reference
                         </summary>
                         <div class="max-h-[40vh] overflow-auto border-t border-neutral-200 px-3 py-2">
-                            <TxclHelp />
+                            <TxclHelp alwaysOpen={true} />
                         </div>
                     </details>
                 </div>

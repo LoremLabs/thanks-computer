@@ -17,6 +17,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	devpkg "github.com/loremlabs/thanks-computer/chassis/cli/dev"
+	demopkg "github.com/loremlabs/thanks-computer/chassis/demo"
 )
 
 // runDemo boots a local chassis and opens the txcl demo in a
@@ -173,7 +174,61 @@ Flags:
 		return 1
 	}
 
-	demoURL := strings.TrimRight(adminURL, "/") + "/demo/"
+	// startChassis only waits for admin's /healthz. The chassis brings
+	// the web inlet up in its own goroutine (personality/web/web.go),
+	// so its listener can lag admin's by a few hundred ms on cold-boot.
+	// The demo SPA opens with a parallel-fire storm — Runner.onMount
+	// seeds ~15 stacks, each ending in a bindHostname, and then
+	// auto-fires the first step against <stack>.local.thanks.computer.
+	// If the web inlet's listener isn't ready when that fire lands, the
+	// browser sees a connection refused or 404 before the chassis has
+	// chance to register the hostname route. Probe both heads here so
+	// the URL we open is fully warm.
+	//
+	// Best-effort: a failed probe warns but still opens the browser —
+	// the URL is already printed and the user can reload if the chassis
+	// is genuinely stuck. 10s budget at 200ms intervals is generous on
+	// loopback (warm chassis answers within one tick).
+	if err := devpkg.WaitHealthy(ctx, webURL+"/healthz", 10*time.Second, 200*time.Millisecond); err != nil {
+		fmt.Fprintf(stderr, "[txco] warn: web inlet readiness: %v\n", err)
+	}
+	// /v1/demo/info exercises the protected subrouter's auth path
+	// (open in demo mode via openDevContext) — confirms the demo
+	// handlers are wired AND that auth lets the SPA's first call
+	// through. probeDemoMode in admin-ui hits this exact endpoint on
+	// first paint to decide whether to auto-route to #demo.
+	if err := devpkg.WaitHealthy(ctx, strings.TrimRight(adminURL, "/")+"/v1/demo/info", 10*time.Second, 200*time.Millisecond); err != nil {
+		fmt.Fprintf(stderr, "[txco] warn: demo endpoint readiness: %v\n", err)
+	}
+
+	// Pre-seed every walkthrough step's stack BEFORE opening the
+	// browser. Until this hop existed the SPA's onMount did the
+	// seeding itself — which meant the user could see a partial-seed
+	// error message on first load if any of the ~15 admin write
+	// chains hit transient SQLite contention. Moving the seed here
+	// (Go, serial, on loopback) eliminates that class of error: the
+	// SPA opens to a chassis that already has every demo stack
+	// active with its hostname bound. The SPA's listStacks filter
+	// then sees them all and does nothing on mount.
+	//
+	// Best-effort: a seed failure logs to stderr but still opens the
+	// browser. The SPA falls back to its own onMount seed for any
+	// missing stack — same self-healing path that handles a chassis
+	// restart with stale state.
+	fmt.Fprintf(stdout, "[txco] seeding walkthrough curriculum...\n")
+	seedStart := time.Now()
+	if err := demopkg.Seed(ctx, adminURL); err != nil {
+		fmt.Fprintf(stderr, "[txco] warn: curriculum seed had failures (SPA will retry):\n%v\n", err)
+	} else {
+		fmt.Fprintf(stdout, "[txco] curriculum seeded (%s)\n", time.Since(seedStart).Round(time.Millisecond))
+	}
+
+	// The demo SPA lives inside admin-ui as the #demo route. The chassis
+	// also serves a transitional /demo/ redirect (server.go) for older
+	// bookmarks and CLI shims, but new processes land users directly on
+	// the merged URL. probeDemoMode in the admin-ui store sees
+	// /v1/demo/info and auto-routes to #demo on first load.
+	demoURL := strings.TrimRight(adminURL, "/") + "/admin/#demo"
 	fmt.Fprintf(stdout, "[txco] demo running (Ctrl-C to stop).\n")
 	fmt.Fprintf(stdout, "[txco]   demo:      %s\n", demoURL)
 	fmt.Fprintf(stdout, "[txco]   web inlet:  %s   (where your ops serve)\n", webURL)

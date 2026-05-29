@@ -246,9 +246,12 @@ func Run(bi BuildInfo) int {
 
 	logger.Info("db setup") // feedback here proved helpful in debugging file locking for db
 
-	// Setup read-only db cache
+	// Setup read-only db cache. The cache dumps THROUGH the chassis's
+	// own runtime *sql.DB handle (not by re-opening the file) so its
+	// dump doesn't race against this same handle's WAL/shm state on
+	// reload — see chassis/dbcache.DbCache.Source.
 	var dbc *dbcache.DbCache
-	dbc, err = dbcache.New(conf, logger, ctx)
+	dbc, err = dbcache.New(conf, logger, ctx, runtimeDB)
 	if err != nil {
 		logger.Fatal("db cache new error", zap.String("err", err.Error()))
 	}
@@ -385,8 +388,42 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 // connection options. `kind` is a short label ("runtime" / "auth") used
 // in the fatal log message so an operator hitting a permissions error
 // knows which file is at fault.
+//
+// Connection options, why each:
+//
+//   - mode=rwc            — create the file on first run; standard.
+//   - _journal_mode=WAL   — concurrent readers alongside one writer.
+//                           Default rollback-journal serializes BOTH
+//                           behind an EXCLUSIVE lock; under any real
+//                           parallelism (demo Runner's per-step seed,
+//                           fleet apply, parallel CLI ops) that lock
+//                           is a bottleneck and a 500 source. WAL
+//                           creates `.db-wal` + `.db-shm` files next
+//                           to the main `.db`; cleaned on graceful
+//                           shutdown.
+//   - _busy_timeout=5000  — 5s patience on a busy file lock. In WAL
+//                           mode readers don't block writers and
+//                           writers serialize via the WAL's commit
+//                           lock, so realistic contention is short.
+//                           5s is a generous safety net for the worst
+//                           case (e.g. brief checkpoint stalls under
+//                           burst load).
+//
+// Why NOT cache=shared: shared-cache mode introduces a SECOND lock
+// class — TABLE-level (SQLITE_LOCKED, error code 6) — that exists on
+// top of the file-level lock and which busy_timeout does NOT retry.
+// Under any real concurrency, admin writes that map the same table
+// (e.g. parallel POSTs to /stacks/<name>/draft hitting `stacks`) hit
+// SQLITE_LOCKED with the error text "database table is locked:
+// stacks" and surface as 500s. SQLite's own docs say shared-cache is
+// "discouraged"; WAL replaces its concurrency story cleanly.
+//
+// The WAL move also requires chassis/dbcache.Reload to dump THROUGH
+// this same *sql.DB handle (via sqlite3dump.DumpDB), not to open the
+// file fresh — a second uncoordinated connection in WAL mode races
+// the .db-shm state and 500s on first boot. See dbcache.DbCache.Source.
 func openSQLiteOrDie(logger *zap.Logger, dsn, kind string) *sql.DB {
-	full := fmt.Sprintf("%s?cache=shared&mode=rwc&_busy_timeout=%d", dsn, 500)
+	full := fmt.Sprintf("%s?mode=rwc&_journal_mode=WAL&_busy_timeout=%d", dsn, 5000)
 	db, err := sql.Open("sqlite3", full)
 	if err != nil {
 		logger.Fatal("db open err",

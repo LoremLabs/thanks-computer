@@ -585,7 +585,7 @@ func newTestUnit(t *testing.T) (*Unit, *tracetest.SpanRecorder) {
 		Logger:     logger,
 		RuntimeDB:  db,
 		AuthDB:     db,
-		Dbc:        &dbcache.DbCache{Db: db, Logger: logger},
+		Dbc:        &dbcache.DbCache{Db: db, Source: db, Logger: logger},
 		Mc:         mc,
 		Reg:        reg,
 		Bus:        bus,

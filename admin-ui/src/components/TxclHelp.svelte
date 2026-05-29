@@ -2,7 +2,15 @@
     // Collapsible cheatsheet anchored to the bottom of the Resonator
     // tab. Default: collapsed. Click the header to expand; click
     // again to collapse. Open/closed state persists in localStorage
-    // so the user's preference survives reloads.
+    // so the user's preference survives reloads. Pass `alwaysOpen`
+    // (e.g. from the demo's Runner — already inside a `<details>`
+    // wrapper that handles the collapse) to render the content inline
+    // with no toggle of its own.
+    interface Props {
+        alwaysOpen?: boolean
+    }
+    let { alwaysOpen = false }: Props = $props()
+
     const KEY = 'admin-ui:txcl-help-open'
     let open = $state(readOpen())
 
@@ -27,18 +35,20 @@
 </script>
 
 <div class="rounded border border-neutral-200 bg-white">
-    <button
-        type="button"
-        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-neutral-600 hover:bg-neutral-50"
-        onclick={toggle}
-    >
-        <span class="inline-block w-3 text-neutral-400">{open ? '▾' : '▸'}</span>
-        <span class="font-medium">txcl syntax</span>
-        <span class="ml-auto text-[11px] text-neutral-400">quick reference</span>
-    </button>
+    {#if !alwaysOpen}
+        <button
+            type="button"
+            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-neutral-600 hover:bg-neutral-50"
+            onclick={toggle}
+        >
+            <span class="inline-block w-3 text-neutral-400">{open ? '▾' : '▸'}</span>
+            <span class="font-medium">txcl syntax</span>
+            <span class="ml-auto text-[11px] text-neutral-400">quick reference</span>
+        </button>
+    {/if}
 
-    {#if open}
-        <div class="max-h-[50vh] overflow-auto border-t border-neutral-200 px-4 py-3 text-xs leading-relaxed text-neutral-700">
+    {#if alwaysOpen || open}
+        <div class="max-h-[50vh] overflow-auto {alwaysOpen ? '' : 'border-t border-neutral-200'} px-4 py-3 text-xs leading-relaxed text-neutral-700">
             <section class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
                 <div class="col-span-2 mb-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">keywords</div>
                 <code class="text-sky-700">WHEN &lt;expr&gt;</code>

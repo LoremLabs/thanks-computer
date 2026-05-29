@@ -23,7 +23,17 @@
         // form whether to show the "creates a new draft" hint.
         version?: number
         isDraft?: boolean
-        onSelectOp: (op: Op) => void
+        // Optional click handler. When omitted (e.g. read-only diagrams
+        // in the demo's boot-stack view), canvas clicks no-op silently.
+        onSelectOp?: (op: Op) => void
+        // Gate the inline `+ Add op` button + form. Defaults to true so
+        // admin's normal ops view stays unchanged; the demo's Runner
+        // passes `false` to hide author-only affordances.
+        showInlineNewOp?: boolean
+        // Accepted for parity with the demo-ui port (visual selection
+        // indicator). Currently unused in this canvas renderer; click
+        // semantics drive selection via `onSelectOp` instead.
+        selected?: string
     }
 
     let {
@@ -34,6 +44,8 @@
         version,
         isDraft = false,
         onSelectOp,
+        showInlineNewOp = true,
+        selected: _selected,
     }: Props = $props()
 
     // Inline +Add op form toggle. Local component state — App.svelte
@@ -365,7 +377,7 @@
         const py = e.clientY - rect.top
         for (const h of hits) {
             if (px >= h.x && px <= h.x + h.w && py >= h.y && py <= h.y + h.h) {
-                onSelectOp(h.op)
+                if (onSelectOp) onSelectOp(h.op)
                 return
             }
         }
@@ -404,15 +416,17 @@
             <h2 class="font-mono text-sm font-semibold text-neutral-900 sm:text-base">
                 {stack}
             </h2>
-            <button
-                type="button"
-                class="rounded border border-brand-cyan/40 bg-brand-cyan/10 px-2 py-0.5 text-xs text-neutral-900 hover:bg-brand-cyan/20"
-                onclick={() => (adding = !adding)}
-            >
-                {adding ? 'Cancel' : '+ Add op'}
-            </button>
+            {#if showInlineNewOp}
+                <button
+                    type="button"
+                    class="rounded border border-brand-cyan/40 bg-brand-cyan/10 px-2 py-0.5 text-xs text-neutral-900 hover:bg-brand-cyan/20"
+                    onclick={() => (adding = !adding)}
+                >
+                    {adding ? 'Cancel' : '+ Add op'}
+                </button>
+            {/if}
         </header>
-        {#if adding}
+        {#if adding && showInlineNewOp}
             <div class="mb-2 px-1 sm:px-2">
                 <NewOpForm
                     {stack}

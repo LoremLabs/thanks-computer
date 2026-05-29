@@ -867,3 +867,250 @@ export async function revokeSecret(tenant: string, name: string): Promise<void> 
     if (resp.status === 204) return
     if (!resp.ok) await throwSecretError(`revoke secret ${name}`, resp)
 }
+
+// ===========================================================================
+// Demo-route endpoints (#demo). Migrated from demo-ui/src/lib/api.ts —
+// preserved verbatim shape so the Runner ports without code changes.
+// All five only have any effect when the chassis runs under `txco demo`
+// (which exposes /v1/demo/* and sets up open-dev auth + hostname binds).
+// ===========================================================================
+
+// bindHostname maps `hostname` → (tenant, stack) so a fired request routes
+// to the stack via the chassis's ingress Host-header lookup. Idempotent:
+// 409 (hostname already bound) is treated as success — the demo seeds
+// every step's hostname at mount and re-runs the same bind on every
+// Run({apply:true}).
+export async function bindHostname(
+    tenant: string,
+    hostname: string,
+    stack: string
+): Promise<void> {
+    const resp = await fetch(
+        `/v1/tenants/${encodeURIComponent(tenant)}/hostnames`,
+        {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hostname, stack }),
+        }
+    )
+    if (check401(resp)) {
+        throw new Error(`bind ${hostname}→${stack}: 401 unauthorized`)
+    }
+    if (!resp.ok && resp.status !== 409) {
+        throw new Error(
+            `bind ${hostname}→${stack}: ${resp.status} ${resp.statusText}`
+        )
+    }
+}
+
+// putDraftFiles replaces the draft's ENTIRE file set in one atomic PUT
+// (the server clears stack_files for the version and re-inserts — see
+// handlePutDraftFiles in chassis/server/admin/stacks.go). Right primitive
+// for the demo: each Run sets the draft to exactly the editor's current
+// files, with no per-file base_hash bookkeeping. (Admin's regular ops
+// view uses patchFile per file, which collides with file_already_exists
+// once a cloned draft already holds the file.)
+// Accepts a permissive `{path, content}` shape rather than the full
+// StackFile (which requires `content_hash` for GET responses). The wire
+// PUT only sends path + content; the server assigns the hash.
+export async function putDraftFiles(
+    tenant: string,
+    stack: string,
+    versionNumber: number,
+    files: { path: string; content?: string }[]
+): Promise<void> {
+    const url =
+        `/v1/tenants/${encodeURIComponent(tenant)}` +
+        `/stacks/${encodeURIComponent(stack)}` +
+        `/versions/${versionNumber}/files`
+    const resp = await fetch(url, {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            files: files.map((f) => ({ path: f.path, content: f.content ?? '' })),
+        }),
+    })
+    if (check401(resp)) {
+        throw new Error(`put files: 401 unauthorized`)
+    }
+    if (!resp.ok) {
+        throw new Error(`put files: ${resp.status} ${resp.statusText}`)
+    }
+}
+
+// FireResult is the contract for the /v1/demo/fire proxy. The proxy fires
+// `req` at the chassis web inlet and returns the response plus the
+// request id so the UI can fetch the trace.
+export interface FireResult {
+    status: number
+    headers: Record<string, string>
+    body: string
+    rid: string
+}
+
+export interface FireRequest {
+    method: string
+    path: string
+    headers?: Record<string, string>
+    body?: string
+}
+
+// fireRequest POSTs the sample request to /v1/demo/fire, which proxies
+// it to the chassis web inlet and returns the response + request id (rid)
+// for trace lookup. Demo-only endpoint; harmless 404 in non-demo
+// chassis (the demo route also won't be reachable from the nav).
+export async function fireRequest(req: FireRequest): Promise<FireResult> {
+    // Safety net: bound the request so a runtime-stuck op surfaces an
+    // error instead of leaving the UI on "running…" forever. (Validation
+    // before activate catches the common parse-error case earlier.)
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 20000)
+    try {
+        const resp = await fetch('/v1/demo/fire', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            signal: ctrl.signal,
+            body: JSON.stringify({
+                method: req.method,
+                path: req.path,
+                headers: req.headers ?? {},
+                body: req.body ?? '',
+            }),
+        })
+        if (check401(resp)) {
+            throw new Error(`fire: 401 unauthorized`)
+        }
+        if (!resp.ok) {
+            throw new Error(`fire: ${resp.status} ${resp.statusText}`)
+        }
+        return (await resp.json()) as FireResult
+    } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') {
+            throw new Error('fire: timed out — the op may be stuck or erroring at runtime')
+        }
+        throw e
+    } finally {
+        clearTimeout(timer)
+    }
+}
+
+export interface DemoInfo {
+    web_addr: string
+    web_port: string
+}
+
+// getDemoInfo reports the chassis web-inlet port (the data plane), which
+// differs from the admin port that serves this UI. Returns null when the
+// endpoint 404s — used by the store as the "is the chassis in demo mode?"
+// probe (presence ⇒ yes), and by the Runner to build copy-as-curl URLs.
+export async function getDemoInfo(): Promise<DemoInfo | null> {
+    const resp = await fetch('/v1/demo/info', { credentials: 'same-origin' })
+    if (!resp.ok) {
+        if (resp.status === 404) return null
+        throw new Error(`/v1/demo/info: ${resp.status} ${resp.statusText}`)
+    }
+    return (await resp.json()) as DemoInfo
+}
+
+// Curriculum shape — must match chassis/demo.Curriculum (single source
+// of truth lives in Go; this is the SPA's TypeScript view of the same
+// JSON). Any new field added server-side: declare it here too (or use
+// `unknown`) so the SPA can still render.
+export interface DemoOpFile {
+    name: string
+    scope: number
+    txcl: string
+    js?: string
+}
+export interface DemoStep {
+    title: string
+    prose: string
+    ops: DemoOpFile[]
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+    path: string
+    body?: string
+    stack: string
+}
+export interface DemoTrack {
+    id: string
+    title: string
+    steps: DemoStep[]
+}
+export interface Curriculum {
+    host_suffix: string
+    tracks: DemoTrack[]
+}
+
+// getCurriculum fetches the demo walkthrough curriculum from
+// /v1/demo/curriculum. The chassis owns the curriculum data
+// (chassis/demo/curriculum.go); this SPA fetches it on mount rather
+// than carrying its own copy so the two can't drift. The endpoint is
+// only mounted when the chassis is in demo mode, so a non-demo
+// chassis returns 404 here — same probe shape as getDemoInfo.
+export async function getCurriculum(): Promise<Curriculum> {
+    const resp = await fetch('/v1/demo/curriculum', {
+        credentials: 'same-origin',
+    })
+    if (!resp.ok) {
+        throw new Error(
+            `/v1/demo/curriculum: ${resp.status} ${resp.statusText}`
+        )
+    }
+    return (await resp.json()) as Curriculum
+}
+
+export interface BuildOpResult {
+    ref: string // "compute://sha256/<digest>"
+    digest: string
+    engine: string
+    bytes: number
+}
+
+// buildDemoOp ships a single compute-op source (JS/TS) to the demo build
+// endpoint, which bundles + compiles + uploads it as a content-addressed
+// wasm artifact and returns the `compute://sha256/…` ref to splice into
+// the op's txcl in place of `op://<name>`. Same toolchain `txco apply`
+// uses (esbuild + javy); identical source skips javy on repeat thanks to
+// the server-side wasm cache. javy must be on PATH — surfaces as a
+// structured "compile_unavailable" error.
+export async function buildDemoOp(
+    source: string,
+    lang: 'js' | 'ts' | 'mjs' = 'js'
+): Promise<BuildOpResult> {
+    const resp = await fetch('/v1/demo/op/build', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, lang }),
+    })
+    if (!resp.ok) {
+        // The server returns `{error: "<code>", detail: {...map...}}` (see
+        // chassis/server/admin/ops.go writeJSONError → errorResponse).
+        // Surface the code plus a human-readable message extracted from
+        // the detail map — common keys are `detail` (compile errors from
+        // CleanJSError / javy install hint) and `err` (Go error strings).
+        let bodyText = ''
+        try {
+            const j = (await resp.json()) as {
+                error?: string
+                detail?: Record<string, unknown>
+            }
+            const code = j.error ?? ''
+            let msg = ''
+            const d = j.detail
+            if (d && typeof d === 'object') {
+                if (typeof d.detail === 'string') msg = d.detail
+                else if (typeof d.err === 'string') msg = d.err
+                else msg = JSON.stringify(d)
+            }
+            bodyText = [code, msg].filter(Boolean).join(': ')
+        } catch {
+            bodyText = `${resp.status} ${resp.statusText}`
+        }
+        throw new Error(`build compute: ${bodyText}`)
+    }
+    return (await resp.json()) as BuildOpResult
+}

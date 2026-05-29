@@ -6,8 +6,15 @@
     import JsonEditor from './JsonEditor.svelte'
     import JsonPre from './JsonPre.svelte'
     import Tabs from './Tabs.svelte'
-    import TxclEditor from './TxclEditor.svelte'
     import TxclHelp from './TxclHelp.svelte'
+
+    // TxclEditor is the only place CodeMirror enters the admin bundle.
+    // Loading it dynamically pulls @codemirror/* (~150 KB) into its own
+    // chunk that only fetches when the user opens an op detail.
+    // Sessions that stay on traces / secrets / version-list views avoid
+    // it entirely. Vite reuses the same chunk for demo's CodeEditor
+    // (same imports) so the demo route doesn't double-fetch.
+    const TxclEditorPromise = import('./TxclEditor.svelte')
 
     interface Props {
         op: Op | null
@@ -142,21 +149,31 @@
                     </table>
                     <div class="mt-6">
                         {#if op.txcl && op.txcl.length > 0}
-                            <TxclEditor
-                                value={op.txcl}
-                                readonly={!isDraft}
-                                errors={errorsFor(txclPath)}
-                                onSave={saveTxcl}
-                                onReload={reload}
-                            />
+                            {#await TxclEditorPromise}
+                                <div class="text-sm italic text-neutral-400">loading editor…</div>
+                            {:then m}
+                                {@const TxclEditor = m.default}
+                                <TxclEditor
+                                    value={op.txcl}
+                                    readonly={!isDraft}
+                                    errors={errorsFor(txclPath)}
+                                    onSave={saveTxcl}
+                                    onReload={reload}
+                                />
+                            {/await}
                         {:else if isDraft}
-                            <TxclEditor
-                                value=""
-                                readonly={false}
-                                errors={errorsFor(txclPath)}
-                                onSave={saveTxcl}
-                                onReload={reload}
-                            />
+                            {#await TxclEditorPromise}
+                                <div class="text-sm italic text-neutral-400">loading editor…</div>
+                            {:then m}
+                                {@const TxclEditor = m.default}
+                                <TxclEditor
+                                    value=""
+                                    readonly={false}
+                                    errors={errorsFor(txclPath)}
+                                    onSave={saveTxcl}
+                                    onReload={reload}
+                                />
+                            {/await}
                         {:else}
                             <p class="text-sm italic text-neutral-400">no resonator recorded</p>
                         {/if}

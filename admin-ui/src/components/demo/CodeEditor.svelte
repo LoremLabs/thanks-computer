@@ -3,8 +3,8 @@
     import { EditorView, lineNumbers, keymap, drawSelection } from '@codemirror/view'
     import { EditorState } from '@codemirror/state'
     import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-    import { txcl } from '../lib/txcl/codemirror'
-    import { txclTheme, txclHighlighting } from '../lib/txcl/theme'
+    import { txcl } from '../../lib/txcl/codemirror'
+    import { txclTheme, txclHighlighting } from '../../lib/txcl/theme'
 
     interface Props {
         value: string

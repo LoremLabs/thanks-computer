@@ -91,7 +91,7 @@ func newChassis(t *testing.T, label, dbPath, feedDir, artDir string) *chassisEnd
 		ArtifactStore:     "file",
 		ArtifactStoreFileDir: artDir,
 	}
-	dbc, err := dbcache.New(conf, zap.NewNop(), context.Background())
+	dbc, err := dbcache.New(conf, zap.NewNop(), context.Background(), db)
 	if err != nil {
 		t.Fatalf("%s: dbcache: %v", label, err)
 	}

@@ -57,20 +57,9 @@ ui:
 		echo "==> pnpm run build (continuation-ui)..."; \
 		(cd continuation-ui && pnpm run build) || exit $$?; \
 	fi
-	@if [ -n "$$SKIP_UI" ]; then \
-		echo "==> skipping demo UI build (SKIP_UI set)"; \
-	elif [ ! -d demo-ui ]; then \
-		echo "==> demo-ui/ missing; skipping UI build"; \
-	elif ! command -v pnpm >/dev/null 2>&1; then \
-		echo "==> pnpm not on PATH; skipping demo UI build (install pnpm to embed an up-to-date bundle)"; \
-	else \
-		if [ ! -d demo-ui/node_modules ]; then \
-			echo "==> pnpm install (demo-ui, first run)..."; \
-			(cd demo-ui && pnpm install) || exit $$?; \
-		fi; \
-		echo "==> pnpm run build (demo-ui)..."; \
-		(cd demo-ui && pnpm run build) || exit $$?; \
-	fi
+	# demo-ui was merged into admin-ui as the #demo route (the
+	# standalone SPA + its embed at chassis/server/demo/ui/ are gone).
+	# Nothing more to build here.
 
 # Build the txco binary locally (chassis/bin/txco) after refreshing the
 # embedded UI bundle. `make build SKIP_UI=1` bypasses the UI step.

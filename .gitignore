@@ -34,8 +34,3 @@ chassis/server/admin/ui/dist/*
 # into dist/ on every build so go:embed works before the first build.
 chassis/server/continuation/ui/dist/*
 !chassis/server/continuation/ui/dist/.gitkeep
-
-# Demo UI build output — same pattern: only .gitkeep is tracked so
-# go:embed works before the first `pnpm run build`.
-chassis/server/demo/ui/dist/*
-!chassis/server/demo/ui/dist/.gitkeep

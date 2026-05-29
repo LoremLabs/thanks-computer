@@ -99,7 +99,7 @@ func TestCronSubscribers(t *testing.T) {
 	cc := NewController(context.Background(), &processor.Unit{
 		Conf:   config.Config{Personalities: "cron"},
 		Logger: zap.NewNop(),
-		Dbc:    &dbcache.DbCache{Db: db},
+		Dbc:    &dbcache.DbCache{Db: db, Source: db},
 	})
 
 	got := cc.subscribers()

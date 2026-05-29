@@ -13,7 +13,16 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/op"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
+	"github.com/loremlabs/thanks-computer/chassis/demo"
 )
+
+// handleDemoCurriculum returns the demo walkthrough curriculum
+// (tracks, steps, ops, request shape) the admin-ui's #demo route
+// uses to render the walkthrough. Single source of truth — the same
+// data feeds `txco demo`'s pre-seed (chassis/cli/demo → demo.Seed).
+func (c *Controller) handleDemoCurriculum(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, demo.Get())
+}
 
 // demoFireRequest is the wire shape the demo UI POSTs to
 // /v1/demo/fire: a synthetic HTTP request to replay against this
