@@ -64,6 +64,16 @@ func init() {
 func Run(bi BuildInfo) int {
 	semver := fmt.Sprintf("%s+%s", bi.Version, bi.CommitId) // set via ldflag at build time
 
+	// Surface the ldflag-injected build identity to the CLI surface BEFORE
+	// dispatch so `txco --version` / `txco help` (logo line) can read it.
+	// cli.BuildInfo is a structural mirror of this type — separate to avoid
+	// an import cycle (chassis/app imports chassis/cli).
+	cli.Build = cli.BuildInfo{
+		Version:        bi.Version,
+		CommitId:       bi.CommitId,
+		BuildTimestamp: bi.BuildTimestamp,
+	}
+
 	// CLI subcommand dispatch (txco init / apply / diff / help). Runs before
 	// config.Load so the server flag namespace doesn't collide with the
 	// subcommands. Falls through to server boot for `serve` or no subcommand.

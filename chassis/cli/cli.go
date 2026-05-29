@@ -8,16 +8,34 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	opcli "github.com/loremlabs/thanks-computer/chassis/cli/op"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 )
+
+// BuildInfo carries the ldflag-injected build identity (set in
+// cmd/txco/main.go, stamped at build time by chassis/Makefile or
+// .github/workflows/release.yml). app.Run assigns Build before calling
+// Dispatch so the help screen + the `version` subcommand can read it
+// without threading it through every signature.
+type BuildInfo struct {
+	Version        string
+	CommitId       string
+	BuildTimestamp string
+}
+
+// Build is the process-wide build identity. Zero values are tolerated —
+// the help line is suppressed and the version JSON simply contains empty
+// strings; for real binaries app.Run sets it before any CLI dispatch.
+var Build BuildInfo
 
 // Dispatch routes a `txco <subcommand> ...` invocation to the right command.
 // Returns ok=true if a subcommand was dispatched (caller should exit with the
@@ -79,6 +97,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0, true
+	case "version", "--version", "-v":
+		return runVersion(stdout), true
 	default:
 		// A bare word (not a flag) that isn't a known subcommand is
 		// almost certainly a typo — `txco whoami` instead of `txco
@@ -105,6 +125,12 @@ func printUsage(w io.Writer) {
 		dim = "\x1b[2m"
 		bold = "\x1b[1m"
 		reset = "\x1b[0m"
+	}
+	// Version line, just under the logo. Dim on TTY so it doesn't compete
+	// with the banner. Suppressed entirely when ldflags weren't set (so
+	// `go run ./cmd/txco --help` from a dev tree stays uncluttered).
+	if line := versionLine(); line != "" {
+		fmt.Fprintf(w, "%s%s%s\n", dim, line, reset)
 	}
 	// Helpers — concatenate ANSI around tokens. No-ops when not TTY.
 	heading := func(s string) string { return bold + cyan + s + reset }
@@ -149,6 +175,7 @@ The thanks-computer chassis: event router + rule authoring CLI.
   %s   Manage signing keys for the admin API
   %s   Talk to MCP-over-HTTP servers (use %s for discovery)
   %s   Alias namespace for profile / logout (gcloud/stripe-style)
+  %s   Print version info as JSON
 
 %s
   %s   Target name from txco.yaml (default: 'dev')
@@ -185,6 +212,7 @@ Use %s for per-command flags.
 		padCmd(cmd("auth")+" <command>"),
 		padCmd(cmd("mcp")+" <command>"), hint("`txco mcp doctor`"),
 		padCmd(cmd("config")+" <command>"),
+		padCmd(cmd("version")),
 		heading("Common flags for apply/diff/status/dev/trace:"),
 		padCmd(cmd("--target NAME")),
 		padCmd(cmd("--addr URL")),
@@ -205,6 +233,62 @@ func padCmd(s string) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-len(visible))
+}
+
+// runVersion emits the build identity as JSON (pretty-indented) on stdout.
+// Reachable via `txco version`, `txco --version`, and `txco -v`. JSON keeps
+// the output machine-parseable from a release-automation script while
+// still being readable at a terminal.
+func runVersion(w io.Writer) int {
+	info := struct {
+		Version        string `json:"version"`
+		Commit         string `json:"commit"`
+		BuildTimestamp string `json:"build_timestamp"`
+		GoVersion      string `json:"go_version"`
+		OS             string `json:"os"`
+		Arch           string `json:"arch"`
+	}{
+		Version:        Build.Version,
+		Commit:         Build.CommitId,
+		BuildTimestamp: Build.BuildTimestamp,
+		GoVersion:      runtime.Version(),
+		OS:             runtime.GOOS,
+		Arch:           runtime.GOARCH,
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(info); err != nil {
+		fmt.Fprintf(os.Stderr, "txco: version: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// versionLine renders the one-line version banner shown under the logo on
+// the help screen. Returns "" when no version info has been wired
+// (`Build.Version == ""`) so dev runs through `go run` stay quiet. Commit
+// is shortened to 7 chars (git's default short form). Build timestamp is
+// truncated to the date for compactness.
+func versionLine() string {
+	v := strings.TrimPrefix(Build.Version, "v")
+	if v == "" {
+		return ""
+	}
+	parts := []string{"v" + v}
+	if c := Build.CommitId; c != "" && c != "dev" {
+		if len(c) > 7 {
+			c = c[:7]
+		}
+		parts = append(parts, "commit "+c)
+	}
+	if ts := Build.BuildTimestamp; ts != "" {
+		// Trim to YYYY-MM-DD if it looks like an RFC3339 timestamp.
+		if len(ts) >= 10 && ts[4] == '-' && ts[7] == '-' {
+			ts = ts[:10]
+		}
+		parts = append(parts, "built "+ts)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // stripANSI removes CSI escape sequences from s. Cheap enough for the
