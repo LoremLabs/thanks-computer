@@ -5,11 +5,10 @@
 
     // Run lives in the header (primary CTA); it triggers the Runner's
     // exported run(). `running` is bound from the Runner so the button
-    // reflects in-flight state. `urlCopied` is bound the same way so the
-    // Copy URL button can show a 1.5s "copied!" pulse after click.
+    // reflects in-flight state. The URL-action button (Open + break-at)
+    // lives in the Runner itself, next to the path field.
     let runner = $state<Runner | undefined>()
     let running = $state(false)
-    let urlCopied = $state(false)
 
     // Guided walkthrough: App owns the track + step index and drives the
     // Runner (which loads + runs the step's ops). The Runner auto-runs
@@ -34,22 +33,29 @@
 <div class="flex h-full flex-col bg-neutral-50 text-neutral-900">
     <header class="flex items-center justify-between gap-4 border-b border-neutral-200 bg-white px-6 py-3">
         <div>
-            <h1 class="font-mono text-lg font-semibold text-neutral-900">
-                txco <span class="text-brand-cyan">demo</span>
+            <h1 class="flex items-baseline gap-2 text-sm text-neutral-900">
+                <span class="font-semibold tracking-tight">thanks, c<span class="text-brand-cyan">o</span><span class="text-brand-magenta">o</span><span class="text-brand-yellow">o</span>mputer.</span>
             </h1>
             <p class="text-xs text-neutral-500">
-                Write a txcl op, define a request, and run it against a scratch stack.
+            demo
             </p>
         </div>
-        <div class="flex shrink-0 items-center gap-2">
-            <button
-                type="button"
-                onclick={() => runner?.copyUrl()}
-                title="copy the test URL — paste into a browser, curl, or anything that speaks HTTP"
-                class="rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
+        <div class="flex shrink-0 items-center gap-3">
+            <!-- Same row vocabulary as admin-ui's SidebarNav (colored `o` +
+                 label). Yellow matches the admin's "secrets" row — the
+                 closest semantic neighbor for "admin surface". Click opens
+                 /admin/ in a new tab; demo mode runs with open auth so no
+                 login is required. -->
+            <a
+                href="/admin/"
+                target="_blank"
+                rel="noopener"
+                title="open the admin dashboard in a new tab — open auth in demo mode, no login needed"
+                class="flex items-center gap-2 rounded px-2 py-1 text-sm text-neutral-700 hover:bg-neutral-100"
             >
-                {urlCopied ? 'copied!' : 'copy URL'}
-            </button>
+                <span class="inline-block w-4 shrink-0 text-center font-semibold tracking-tight text-brand-yellow" aria-hidden="true">o</span>
+                admin ↗
+            </a>
             <button
                 type="button"
                 disabled={running}
@@ -73,6 +79,6 @@
     />
 
     <main class="flex-1 overflow-auto px-6 py-6">
-        <Runner bind:this={runner} bind:running bind:urlCopied />
+        <Runner bind:this={runner} bind:running />
     </main>
 </div>

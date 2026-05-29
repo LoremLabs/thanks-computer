@@ -79,7 +79,12 @@ Flags:
 	// is left untouched → stays "full", so the demo's trace view
 	// keeps complete in/out (trace capture is independent of these).
 	_ = os.Setenv("TXCO_DEBUG_PRIVATE", "false")
-	_ = os.Setenv("TXCO_DEBUG_BREAKPOINTS", "false")
+	// Breakpoints ON for the demo: the UI's "Open ↗" / "break at" select
+	// builds `?_txc.break=<stack>/<scope>` URLs that only have any effect
+	// when this flag is set. `txco demo` is local-loopback-only by
+	// definition; the production-safety warning on this config field
+	// ("NEVER enable in production") doesn't apply here.
+	_ = os.Setenv("TXCO_DEBUG_BREAKPOINTS", "true")
 	_ = os.Setenv("TXCO_WEB_DEBUG", "HIDE_PRIVATE_VARS")
 	// The demo talks to the admin API UNAUTHENTICATED — it's a
 	// local, single-user, loopback tool. Force open admin auth so it

@@ -32,6 +32,11 @@ export interface Step {
     method: Method
     path: string
     body?: string
+    // Per-step stack name. Always populated by `withStacks` at module-load
+    // time (defaulting to `<trackId>-<i+1>`). Optional on the interface so
+    // authors can omit it; non-null by the time anything outside this
+    // file sees a Step.
+    stack?: string
 }
 
 export interface Track {
@@ -368,10 +373,38 @@ const mcpSteps: Step[] = [
     },
 ]
 
+// Inject a `stack` name onto every step (default: `<trackId>-<i+1>`, e.g.
+// `build-1`, `api-3`). Each step gets its OWN stack on the chassis; the
+// Runner binds `<stack>.local.thanks.computer` to it at mount time. That
+// way tab switches don't rewrite a shared scratch stack — each step's
+// state is its own. Authors can override by setting `stack` explicitly.
+function withStacks(track: Track): Track {
+    return {
+        ...track,
+        steps: track.steps.map((s, i) => ({
+            ...s,
+            stack: s.stack ?? `${track.id}-${i + 1}`,
+        })),
+    }
+}
+
 export const tracks: Track[] = [
-    { id: 'build', title: 'Build a response', steps: buildSteps },
-    { id: 'compute', title: 'With nano-op', steps: computeSteps },
-    { id: 'api', title: 'Call an API', steps: apiSteps },
-    { id: 'continuations', title: 'Async + continuations', steps: continuationSteps },
-    { id: 'mcp', title: 'Call an MCP server', steps: mcpSteps },
+    withStacks({ id: 'build', title: 'Build a response', steps: buildSteps }),
+    withStacks({ id: 'compute', title: 'With nano-op', steps: computeSteps }),
+    withStacks({ id: 'api', title: 'Call an API', steps: apiSteps }),
+    withStacks({ id: 'continuations', title: 'Async + continuations', steps: continuationSteps }),
+    withStacks({ id: 'mcp', title: 'Call an MCP server', steps: mcpSteps }),
 ]
+
+// Hostname suffix every step's bound hostname ends in. The wildcard
+// `*.local.thanks.computer` resolves to 127.0.0.1 publicly, so we can
+// use real-looking subdomain routing without per-machine DNS setup.
+export const DEMO_HOST_SUFFIX = 'local.thanks.computer'
+
+// Helper for the Runner's mount-time seed loop: every step in every track
+// as a flat list, with its resolved stack name guaranteed present.
+export function allSteps(): { stack: string; step: Step }[] {
+    return tracks.flatMap((t) =>
+        t.steps.map((s) => ({ stack: s.stack!, step: s }))
+    )
+}

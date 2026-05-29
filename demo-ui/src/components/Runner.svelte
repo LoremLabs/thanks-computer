@@ -5,7 +5,14 @@
     import StackView from './StackView.svelte'
     import TxclHelp from './TxclHelp.svelte'
     import { opId, type Op } from '../lib/types'
-    import { tracks, type OpFile, type Method, type Step } from '../lib/tutorial'
+    import {
+        tracks,
+        allSteps,
+        DEMO_HOST_SUFFIX,
+        type OpFile,
+        type Method,
+        type Step,
+    } from '../lib/tutorial'
     import {
         createDraft,
         putDraftFiles,
@@ -24,22 +31,31 @@
     // `running` is owned by the parent (App) so the Run CTA can live in
     // the header; run() sets it. run() is exported so the header button
     // can trigger it via bind:this.
-    // `running` and `urlCopied` are owned by App so the header CTAs can
-    // reflect in-flight state without prop-drilling state back out.
     let {
         running = $bindable(false),
-        urlCopied = $bindable(false),
-    }: { running?: boolean; urlCopied?: boolean } = $props()
+    }: { running?: boolean } = $props()
+
+    // Optional scope to break at when "Open" is clicked. null = no break;
+    // a number = `?_txc.break=<currentStack>/<scope>` appended to the URL.
+    // The chassis only honors this if started with --debug-breakpoints
+    // (which `txco demo` enables); otherwise it's a benign no-op.
+    let breakScope = $state<number | null>(null)
 
     const TENANT = 'default'
-    const STACK = 'play'
-    // Hostname bound to the scratch stack so fired requests route to it.
-    const PLAY_HOST = 'localhost'
 
-    // Ops + request are seeded from the walkthrough's first step. The
-    // parent (App) drives the walkthrough by calling load() with later
-    // steps; the demo stays freely editable underneath.
+    // hostnameFor maps a stack name to the hostname bound to it. The
+    // wildcard *.local.thanks.computer resolves to 127.0.0.1 publicly, so
+    // these "look like real subdomains" but stay loopback.
+    function hostnameFor(stack: string): string {
+        return `${stack}.${DEMO_HOST_SUFFIX}`
+    }
+
+    // Ops + request + current stack are seeded from the walkthrough's
+    // first step. Each step has its OWN stack name (set by tutorial.ts
+    // withStacks); `currentStack` tracks which one is "live" — its
+    // hostname is what fired requests target.
     const seed = tracks[0].steps[0]
+    let currentStack = $state(seed.stack!)
     let ops = $state<OpFile[]>(seed.ops.map((o) => ({ ...o })))
     let method = $state<Method>(seed.method)
     let path = $state(seed.path)
@@ -49,19 +65,39 @@
     // Web-inlet port (data plane), fetched from the chassis — the curl
     // targets it, not the admin port this UI is served from.
     let webPort = $state('')
-    onMount(() => {
+    // True once all N step-stacks have been seeded (createDraft + put +
+    // activate + bindHostname). Tab switches that happen before this
+    // finishes auto-wait via `run({apply: false})` — but if a user clicks
+    // Run before seed completes, the explicit apply path covers it.
+    let seedReady = $state(false)
+    onMount(async () => {
         // Best-effort: web-inlet port for copy-as-curl.
-        getDemoInfo()
-            .then((info) => {
-                if (info) webPort = info.web_port
-            })
-            .catch(() => {
-                // leave empty — curl falls back to the page origin
-            })
-        // Auto-run the default hello/world example on first open so the
-        // user sees output (and the trace + op-stack timings) immediately
-        // without clicking Run. `run` is the exported action below.
-        void run()
+        try {
+            const info = await getDemoInfo()
+            if (info) webPort = info.web_port
+        } catch {
+            // leave empty — curl falls back to the page origin
+        }
+
+        // Seed every step's stack in parallel. Each step gets its own
+        // stack with its own hostname binding so tab switches are
+        // pure-navigation (no apply). ~15 stacks × 4 admin-API calls each,
+        // all parallel against localhost — usually <1s wall-clock.
+        try {
+            await Promise.all(
+                allSteps().map(({ stack, step }) =>
+                    ensureStack(stack, step.ops)
+                )
+            )
+            seedReady = true
+        } catch (e) {
+            error = e instanceof Error ? e.message : String(e)
+        }
+
+        // Auto-run the default first step (build-1) so the user sees
+        // output immediately. The stack was just seeded above, so this is
+        // a pure fire (no second apply).
+        void run({ apply: false })
     })
 
     let result = $state<FireResult | null>(null)
@@ -73,11 +109,11 @@
     const showBody = $derived(method === 'POST' || method === 'PUT')
 
     // A step belongs to the system boot pipeline (tenant detection +
-    // routing, stack "boot") rather than the user's op. In the
-    // demo the only authored stack is `play`, so anything else is
-    // system plumbing we hide by default.
+    // routing, etc.) rather than the user's op. With per-step stacks,
+    // "the user's op" means the currently-loaded step's stack — anything
+    // else is system plumbing we hide by default.
     function isBootStep(stack: string): boolean {
-        return stack !== STACK
+        return stack !== currentStack
     }
 
     // Trace steps to show: the user's op by default; boot steps too
@@ -172,7 +208,7 @@
     // The user's authored stack: one op at scope 0 of `play`. Shown
     // before a run (structure) and enriched with durations after.
     const playOps = $derived<Op[]>(
-        ops.map((o) => ({ stack: STACK, scope: o.scope, name: o.name, txcl: o.txcl }))
+        ops.map((o) => ({ stack: currentStack, scope: o.scope, name: o.name, txcl: o.txcl }))
     )
 
     // Which op's editor is shown: selected by clicking a box in the
@@ -181,7 +217,7 @@
     const selectedOp = $derived(ops.find((o) => o.name === selectedName) ?? ops[0])
     const selectedId = $derived(
         selectedOp
-            ? opId({ stack: STACK, scope: selectedOp.scope, name: selectedOp.name, txcl: '' })
+            ? opId({ stack: currentStack, scope: selectedOp.scope, name: selectedOp.name, txcl: '' })
             : ''
     )
     function updateSelected(v: string) {
@@ -290,85 +326,100 @@
                 out.push({ stack, ops, total: total(stack) })
             }
         }
-        out.push({ stack: STACK, ops: playOps, total: total(STACK) })
+        out.push({ stack: currentStack, ops: playOps, total: total(currentStack) })
         return out
     })
 
-    // A curl that reproduces the request against the chassis WEB inlet
-    // (this UI is served from the admin port, so we target the web port
-    // reported by /v1/demo/info). Host: localhost routes to the scratch
-    // `play` stack, same as the demo.
     // The URL the demo is firing — same shape as the iframe's `liveUrl`
     // but WITHOUT the cache-bust query, so a user pasting it into a browser
     // or `curl` gets the exact request shape (and can keep refreshing to
-    // re-hit it). webPort gets resolved by getDemoInfo(); fall back to the
-    // page's own origin if it hasn't come in yet.
+    // re-hit it). Hostname is the currentStack's bound subdomain
+    // (`<stack>.local.thanks.computer`) which routes to the right stack
+    // via the wildcard DNS + chassis ingress. Falls back to the page's
+    // own origin only if the web port hasn't loaded yet.
     const testUrl = $derived.by<string>(() => {
-        const base = webPort
-            ? `${location.protocol}//${location.hostname}:${webPort}`
-            : location.origin
-        return `${base}${path}`
+        if (!webPort) return `${location.origin}${path}`
+        return `${location.protocol}//${hostnameFor(currentStack)}:${webPort}${path}`
     })
-    // Exported so the header's Copy URL button (App.svelte) can drive it
-    // alongside Run. 1.5s "copied!" feedback via the bindable prop.
-    export async function copyUrl(): Promise<void> {
-        try {
-            await navigator.clipboard.writeText(testUrl)
-            urlCopied = true
-            setTimeout(() => (urlCopied = false), 1500)
-        } catch {
-            // clipboard unavailable — best effort
+    // openInWindow builds the test URL (testUrl + an optional
+    // ?_txc.break=<stack>/<scope> when breakScope is set) and opens it in
+    // a new tab. The break form is `<currentStack>/<scope>` so it only
+    // triggers inside the user's authored stack, not in boot routing.
+    function openInWindow(): void {
+        let url = testUrl
+        if (breakScope !== null) {
+            const sep = url.includes('?') ? '&' : '?'
+            url = `${url}${sep}_txc.break=${encodeURIComponent(currentStack)}/${breakScope}`
         }
+        window.open(url, '_blank', 'noopener,noreferrer')
     }
 
-    export async function run() {
+    // ensureStack: createDraft + put + validate + activate + bindHostname
+    // for one stack. Called once per step at mount-time (parallel seed),
+    // and again for the currentStack inside run({apply: true}) when the
+    // user re-runs after editing. Idempotent at the chassis level —
+    // bindHostname returns 409 if already bound, which the api.ts wrapper
+    // treats as success.
+    async function ensureStack(stack: string, opList: OpFile[]): Promise<void> {
+        // For each op that carries a JS compute, build it server-side
+        // first and splice the resulting `compute://sha256/…` ref into
+        // that op's txcl in place of `op://<name>`. Same regex the
+        // server-side resolver uses (`chassis/cli/oprefs/resolve.go`).
+        // One JS per op = one EXEC, so the substitution is unambiguous.
+        // The wasm cache on the server keys by bundled source, so
+        // repeated Runs of unchanged JS skip javy.
+        const opRefRe = /"op:\/\/[A-Za-z0-9_-]+"/g
+        const resolvedOps = await Promise.all(
+            opList.map(async (o) => {
+                if (!o.js || !o.js.trim()) return o
+                const built = await buildDemoOp(o.js, 'js')
+                return { ...o, txcl: o.txcl.replace(opRefRe, `"${built.ref}"`) }
+            })
+        )
+        const files: StackFile[] = resolvedOps.map((o) => ({
+            path: `${o.scope}/${o.name}.txcl`,
+            content: o.txcl,
+        }))
+        const draft = await createDraft(TENANT, stack, 'empty')
+        await putDraftFiles(TENANT, stack, draft.version_number, files)
+        // Validate before activate — the chassis activates invalid txcl
+        // without complaint and then hangs the request, so catch parse /
+        // ref errors here and surface them.
+        const valid = await validateVersion(TENANT, stack, draft.version_number)
+        if (!valid.ok) {
+            const errs = valid.errors ?? []
+            throw new Error(
+                `txcl validation failed for ${stack}:\n` +
+                    (errs.length
+                        ? errs.map((e) => `  ${e.path}: ${e.err}`).join('\n')
+                        : '  (no detail returned)')
+            )
+        }
+        await activate(TENANT, stack, draft.version_number)
+        // Bind <stack>.local.thanks.computer → stack. Idempotent: 409 on
+        // an already-bound hostname is treated as success in api.ts.
+        await bindHostname(TENANT, hostnameFor(stack), stack)
+    }
+
+    // run() does two things, in two flavors:
+    //   apply: true  — re-apply CURRENT step's ops to its stack, then fire.
+    //                  Used by the explicit Run button (after edits).
+    //   apply: false — just fire against the current step's hostname.
+    //                  Used by load() on tab switches — the step's stack
+    //                  was already seeded at mount, so re-applying is
+    //                  wasted work.
+    export async function run({ apply = true }: { apply?: boolean } = {}) {
         running = true
         error = ''
         result = null
         trace = null
         try {
-            // For each op that carries a JS compute, build it server-side
-            // first and splice the resulting `compute://sha256/…` ref into
-            // that op's txcl in place of `op://<name>`. Same regex the
-            // server-side resolver uses (`chassis/cli/oprefs/resolve.go`).
-            // One JS per op = one EXEC, so the substitution is unambiguous.
-            // The wasm cache on the server keys by bundled source, so
-            // repeated Runs of unchanged JS skip javy. Any build error
-            // (compile_error / compile_unavailable) throws here and lands
-            // in the existing error banner below.
-            const opRefRe = /"op:\/\/[A-Za-z0-9_-]+"/g
-            const resolvedOps = await Promise.all(
-                ops.map(async (o) => {
-                    if (!o.js || !o.js.trim()) return o
-                    const built = await buildDemoOp(o.js, 'js')
-                    return { ...o, txcl: o.txcl.replace(opRefRe, `"${built.ref}"`) }
-                })
-            )
-            const files: StackFile[] = resolvedOps.map((o) => ({
-                path: `${o.scope}/${o.name}.txcl`,
-                content: o.txcl,
-            }))
-            const draft = await createDraft(TENANT, STACK, 'empty')
-            await putDraftFiles(TENANT, STACK, draft.version_number, files)
-            // Validate before activate — the chassis activates invalid
-            // txcl without complaint and then hangs the request, so catch
-            // parse/ref errors here and show them instead.
-            const valid = await validateVersion(TENANT, STACK, draft.version_number)
-            if (!valid.ok) {
-                const errs = valid.errors ?? []
-                error =
-                    'txcl validation failed:\n' +
-                    (errs.length
-                        ? errs.map((e) => `  ${e.path}: ${e.err}`).join('\n')
-                        : '  (no detail returned)')
-                return
+            if (apply) {
+                await ensureStack(currentStack, ops)
             }
-            await activate(TENANT, STACK, draft.version_number)
-            // Route a fired request to the scratch stack: bind
-            // localhost → play (idempotent; 409 = already ours), then
-            // fire with Host: localhost so detect-tenant resolves it.
-            await bindHostname(TENANT, PLAY_HOST, STACK)
-            const headers: Record<string, string> = { Host: PLAY_HOST }
+            const headers: Record<string, string> = {
+                Host: hostnameFor(currentStack),
+            }
             if (showBody) headers['Content-Type'] = 'application/json'
             const fired = await fireRequest({
                 method,
@@ -381,7 +432,7 @@
             // keystroke). Cache-bust query forces a fresh fetch each Run.
             if (method === 'GET' && webPort) {
                 const sep = path.includes('?') ? '&' : '?'
-                liveUrl = `${location.protocol}//${location.hostname}:${webPort}${path}${sep}_t=${Date.now()}`
+                liveUrl = `${location.protocol}//${hostnameFor(currentStack)}:${webPort}${path}${sep}_t=${Date.now()}`
             } else {
                 liveUrl = ''
             }
@@ -406,16 +457,22 @@
         }
     }
 
-    // Load a walkthrough step into the demo and run it. Called by
-    // the parent (App) on Prev/Next. Overwrites any in-progress edits
-    // with the step's authored snapshot.
+    // Load a walkthrough step into the demo and fire it. Called by the
+    // parent (App) on Prev/Next. Tab switches are pure navigation — the
+    // step's stack was seeded at mount, so we change `currentStack`,
+    // refresh the editor state from the step's authored ops, and just
+    // fire (no re-apply). To pick up user edits, click Run.
     export function load(step: Step) {
+        currentStack = step.stack!
         ops = step.ops.map((o) => ({ ...o }))
         method = step.method
         path = step.path
         body = step.body ?? ''
         selectedName = ops[0]?.name ?? ''
-        void run()
+        // If the mount-time seed hasn't finished yet (race on a very fast
+        // Prev/Next click), apply on the way in so the stack exists before
+        // we fire. Otherwise tab switches stay apply-free.
+        void run({ apply: !seedReady })
     }
 </script>
 
@@ -438,6 +495,24 @@
                 class="flex-1 rounded border border-neutral-300 bg-white px-2 py-1.5 font-mono text-sm text-neutral-700"
                 placeholder="/"
             />
+            <select
+                bind:value={breakScope}
+                title="Optionally pause execution at a given scope (requires --debug-breakpoints on the chassis, which `txco demo` enables)."
+                class="rounded border border-neutral-300 bg-neutral-100 px-2 py-1.5 font-mono text-xs text-neutral-700"
+            >
+                <option value={null}>break at: none</option>
+                {#each ops as op}
+                    <option value={op.scope}>break at: {op.scope} · {op.name}</option>
+                {/each}
+            </select>
+            <button
+                type="button"
+                onclick={openInWindow}
+                title="open the test URL in a new tab"
+                class="rounded border border-neutral-300 bg-neutral-100 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-50"
+            >
+                Open ↗
+            </button>
         </div>
         {#if showBody}
             <textarea
@@ -449,7 +524,7 @@
             ></textarea>
         {/if}
         {#if error}
-            <div class="overflow-auto rounded border border-red-400 bg-red-50 p-2 font-mono text-xs whitespace-pre-wrap text-red-800">{error}</div>
+            <div class="overflow-auto rounded border border-red-400 bg-red-50 p-2 font-mono text-xs whitespace-pre-wrap text-red-800 max-w-sm">{error}</div>
         {/if}
     </div>
 
@@ -467,10 +542,10 @@
                                 ops={d.ops}
                                 lastDurations={durations}
                                 stackTotalMs={d.total}
-                                onSelectOp={d.stack === STACK
+                                onSelectOp={d.stack === currentStack
                                     ? (op) => (selectedName = op.name)
                                     : undefined}
-                                selected={d.stack === STACK ? selectedId : undefined}
+                                selected={d.stack === currentStack ? selectedId : undefined}
                             />
                         </div>
                     {/each}

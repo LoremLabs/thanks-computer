@@ -24,7 +24,7 @@
             <select
                 value={trackIndex}
                 onchange={(e) => onSelectTrack(Number(e.currentTarget.value))}
-                class="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-neutral-700"
+                class="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-neutral-700 ring-neutral-300 focus:ring focus:ring-neutral-200 focus:outline-none"
             >
                 {#each tracks as title, i (i)}
                     <option value={i}>{title}</option>
@@ -34,7 +34,9 @@
             <span class="text-neutral-300">·</span>
             <span class="font-mono normal-case text-neutral-700">{step.title}</span>
         </div>
-        <p class="text-sm text-neutral-600">{step.prose}</p>
+        {#if false}
+        <p class="text-xs text-neutral-600 max-w-sm">{step.prose}</p>
+        {/if}
     </div>
     <div class="flex shrink-0 items-center gap-2">
         <button
