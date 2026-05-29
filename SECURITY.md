@@ -6,9 +6,9 @@
 
 Report privately through one of:
 
-- **GitHub** — use *Security → Report a vulnerability* (Private Vulnerability
-  Reporting) on this repository. <!-- enable: Settings → Code security → Private vulnerability reporting -->
-- **Email** — security@loremlabs.dev <!-- TODO: confirm/replace this address before going public -->
+- **GitHub** — use _Security → Report a vulnerability_ (Private Vulnerability
+  Reporting) on this repository.
+- **Email** — hello+security@loremlabs.com
 
 Please include:
 
