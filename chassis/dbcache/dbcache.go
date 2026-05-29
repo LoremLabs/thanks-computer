@@ -107,7 +107,22 @@ func (dbc *DbCache) Snapshot() *sql.DB {
 // Reload a db file into Memory. Sources from the runtime DB only — the
 // auth DB (when present) is owned exclusively by the admin role and is
 // never mirrored into the read cache.
+//
+// Concurrency: the entire dump+rebuild+swap runs under the mutex. Two
+// concurrent writers each calling Reload after their commits would
+// otherwise dump in parallel (each capturing a snapshot before some of
+// the OTHER writer's commits land), then queue at the swap mutex; the
+// reload that finishes its dump LAST would publish a STALE snapshot,
+// silently clobbering durably-committed rows from the mirror. Symptom:
+// a row on disk but missing from the resolver until the next
+// (unrelated) reload happens to dump after every commit settled. Moving
+// the dump inside the lock costs serial reloads under write bursts, but
+// the dump was the dominant cost regardless — concurrent dumps were a
+// parallelism mirage.
 func (dbc *DbCache) Reload() error {
+	dbc.Mu.Lock()
+	defer dbc.Mu.Unlock()
+
 	var b bytes.Buffer
 	out := bufio.NewWriter(&b)
 
@@ -118,8 +133,6 @@ func (dbc *DbCache) Reload() error {
 	}
 	_ = out.Flush()
 
-	dbc.Mu.Lock()
-	defer dbc.Mu.Unlock()
 	dbNew, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		dbc.Logger.Warn("sql.Open err", zap.String("err", err.Error()))

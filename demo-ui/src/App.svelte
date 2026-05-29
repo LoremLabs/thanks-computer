@@ -31,31 +31,17 @@
 </script>
 
 <div class="flex h-full flex-col bg-neutral-50 text-neutral-900">
-    <header class="flex items-center justify-between gap-4 border-b border-neutral-200 bg-white px-6 py-3">
+    <!-- Header: brand + primary CTA. Admin / utility links live in the
+         sidebar below (so the sidebar can grow with more links over time
+         without crowding the header). -->
+    <header class="flex shrink-0 items-center justify-between gap-4 border-b border-neutral-200 bg-white px-6 py-3">
         <div>
             <h1 class="flex items-baseline gap-2 text-sm text-neutral-900">
                 <span class="font-semibold tracking-tight">thanks, c<span class="text-brand-cyan">o</span><span class="text-brand-magenta">o</span><span class="text-brand-yellow">o</span>mputer.</span>
             </h1>
-            <p class="text-xs text-neutral-500">
-            demo
-            </p>
+            <p class="text-xs text-neutral-500">demo</p>
         </div>
         <div class="flex shrink-0 items-center gap-3">
-            <!-- Same row vocabulary as admin-ui's SidebarNav (colored `o` +
-                 label). Yellow matches the admin's "secrets" row — the
-                 closest semantic neighbor for "admin surface". Click opens
-                 /admin/ in a new tab; demo mode runs with open auth so no
-                 login is required. -->
-            <a
-                href="/admin/"
-                target="_blank"
-                rel="noopener"
-                title="open the admin dashboard in a new tab — open auth in demo mode, no login needed"
-                class="flex items-center gap-2 rounded px-2 py-1 text-sm text-neutral-700 hover:bg-neutral-100"
-            >
-                <span class="inline-block w-4 shrink-0 text-center font-semibold tracking-tight text-brand-yellow" aria-hidden="true">o</span>
-                admin ↗
-            </a>
             <button
                 type="button"
                 disabled={running}
@@ -67,18 +53,47 @@
         </div>
     </header>
 
-    <Walkthrough
-        tracks={tracks.map((t) => t.title)}
-        trackIndex={trackIdx}
-        onSelectTrack={selectTrack}
-        step={steps[stepIdx]}
-        index={stepIdx}
-        total={steps.length}
-        onPrev={() => goTo(stepIdx - 1)}
-        onNext={() => goTo(stepIdx + 1)}
-    />
+    <!-- Body: sidebar (utility links + walkthrough) + main (Runner).
+         Mirrors admin-ui's App.svelte shell shape so the two surfaces
+         feel of-a-piece. w-56 is a touch narrower than admin's w-72
+         because the Runner panels eat horizontal space. -->
+    <div class="flex flex-1 overflow-hidden">
+        <aside class="flex w-56 shrink-0 flex-col overflow-y-auto border-r border-neutral-200 bg-white">
+            <!-- Top section: utility / external links. Grows over time —
+                 same row vocabulary as admin-ui's SidebarNav (colored `o`
+                 glyph + label). -->
+            <nav class="flex flex-col gap-0.5 px-2 pt-3 pb-2">
+                <a
+                    href="/admin/#traces"
+                    target="_blank"
+                    rel="noopener"
+                    title="open the admin's traces view in a new tab — open auth in demo mode, no login needed"
+                    class="flex items-center gap-2 rounded px-2 py-1 text-sm text-neutral-700 hover:bg-neutral-100"
+                >
+                    <span class="inline-block w-4 shrink-0 text-center font-semibold tracking-tight text-brand-magenta" aria-hidden="true">o</span>
+                    traces ↗
+                </a>
+            </nav>
 
-    <main class="flex-1 overflow-auto px-6 py-6">
-        <Runner bind:this={runner} bind:running />
-    </main>
+            <!-- Divider between utility links and the walkthrough. -->
+            <div class="mx-2 border-t border-neutral-200"></div>
+
+            <Walkthrough
+                tracks={tracks.map((t) => t.title)}
+                trackIndex={trackIdx}
+                onSelectTrack={selectTrack}
+                stepTitles={steps.map((s) => s.title)}
+                step={steps[stepIdx]}
+                index={stepIdx}
+                total={steps.length}
+                onSelectStep={goTo}
+                onPrev={() => goTo(stepIdx - 1)}
+                onNext={() => goTo(stepIdx + 1)}
+            />
+        </aside>
+
+        <main class="flex-1 overflow-auto px-6 py-6">
+            <Runner bind:this={runner} bind:running />
+        </main>
+    </div>
 </div>

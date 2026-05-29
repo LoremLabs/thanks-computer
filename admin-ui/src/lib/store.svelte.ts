@@ -240,7 +240,16 @@ function createStore() {
             }
             const saved = readSavedTenant()
             const found = saved && tenants.find((t) => t.slug === saved)
-            state.currentTenant = found ? saved : tenants[0].slug
+            // Fallback when no valid saved preference: prefer the first
+            // non-`_`-prefixed tenant. `_sys` (and any future system
+            // tenants) sort alphabetically first but are internal
+            // plumbing — humans almost always want their own tenant on
+            // landing. Only fall back to a system tenant if it's the
+            // only one available.
+            const firstUserTenant = tenants.find((t) => !t.slug.startsWith('_'))
+            state.currentTenant = found
+                ? saved
+                : firstUserTenant?.slug ?? tenants[0].slug
             persistTenant(state.currentTenant)
         } catch (e) {
             state.error = e instanceof Error ? e.message : String(e)
