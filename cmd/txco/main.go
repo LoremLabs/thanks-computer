@@ -11,7 +11,7 @@ import (
 // package main so the existing ldflag paths are unchanged; the values
 // are handed to app.Run.
 var (
-	Version        = "0.2.0"
+	Version        = "0.2.1"
 	CommitId       = "dev"
 	BuildTimestamp = ""
 )
