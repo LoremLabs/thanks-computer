@@ -1,4 +1,4 @@
-.PHONY: all lint test build clean install ui smoke
+.PHONY: all lint test build clean install ui smoke version bump-version
 
 include .env
 export
@@ -110,3 +110,46 @@ smoke:
 	else \
 		echo; echo "✅ all smokes passed"; \
 	fi
+
+# Print the current source-tree version (the dev fallback baked into the
+# binary when ldflags aren't set). Released binaries get their version
+# from the git tag — see .github/workflows/release.yml.
+version:
+	@awk -F'"' '/^VERSION/ {print $$2; exit}' chassis/Makefile
+
+# Bump the in-source version in both spots that hardcode it. Default is a
+# patch bump (0.2.0 -> 0.2.1); pass V= to set an exact version:
+#
+#   make bump-version              # patch bump
+#   make bump-version V=0.3.0      # explicit (use for minor/major/rc)
+#
+# An rc tag (e.g. v0.3.0-rc1) publishes a GitHub prerelease and does not
+# move the Homebrew tap formula.
+bump-version:
+	@cur=$$(make -s version); \
+		if [ -n "$(V)" ]; then \
+			new="$(V)"; \
+		else \
+			base=$$(echo "$$cur" | sed -E 's/-.*$$//'); \
+			major=$$(echo "$$base" | cut -d. -f1); \
+			minor=$$(echo "$$base" | cut -d. -f2); \
+			patch=$$(echo "$$base" | cut -d. -f3); \
+			new="$$major.$$minor.$$((patch+1))"; \
+		fi; \
+		echo "$$new" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$$' || { \
+			echo "bump-version: '$$new' doesn't look like semver (x.y.z or x.y.z-rcN)"; exit 2; \
+		}; \
+		if [ "$$cur" = "$$new" ]; then \
+			echo "bump-version: already at $$cur"; exit 0; \
+		fi; \
+		sed -i.bak -E "s/^VERSION = \"[^\"]*\"/VERSION = \"$$new\"/" chassis/Makefile && rm -f chassis/Makefile.bak; \
+		sed -i.bak -E "s/^(	Version[[:space:]]*= )\"[^\"]*\"/\1\"$$new\"/" cmd/txco/main.go && rm -f cmd/txco/main.go.bak; \
+		echo "bumped $$cur -> $$new"; \
+		echo; \
+		echo "to cut the release, run:"; \
+		echo; \
+		echo "  git commit -am 'release: v$$new'"; \
+		echo "  git tag v$$new"; \
+		echo "  git push origin main v$$new"; \
+		echo; \
+		echo "(an rc tag like v$$new-rc1 publishes a GitHub prerelease and skips the Homebrew tap update)"
