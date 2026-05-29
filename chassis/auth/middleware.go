@@ -128,7 +128,12 @@ func (cfg *Config) authenticate(r *http.Request) (*Context, error) {
 			return cfg.verifyBasic(r)
 		}
 		if cookie != "" {
-			return cfg.verifyCookie(r, cookie)
+			// Try the cookie, but DON'T hard-fail on a stale/invalid one:
+			// fall through so an open-dev chassis (empty basic creds)
+			// isn't locked out by a leftover cookie from a previous run.
+			if ctx, err := cfg.verifyCookie(r, cookie); err == nil {
+				return ctx, nil
+			}
 		}
 		if cfg.BasicUser == "" && cfg.BasicPass == "" {
 			return openDevContext(), nil
@@ -139,7 +144,11 @@ func (cfg *Config) authenticate(r *http.Request) (*Context, error) {
 			return cfg.verifySigned(r)
 		}
 		if cookie != "" {
-			return cfg.verifyCookie(r, cookie)
+			// Same passthrough as ModeBasic — a stale cookie shouldn't
+			// 401 a chassis whose other auth sources accept the request.
+			if ctx, err := cfg.verifyCookie(r, cookie); err == nil {
+				return ctx, nil
+			}
 		}
 		if hasBasic {
 			return cfg.verifyBasic(r)
