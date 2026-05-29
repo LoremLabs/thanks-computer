@@ -1,0 +1,31 @@
+# _sys/boot scope 25 — path-based router (default arm).
+#
+# The playground bundles three app stacks in one workspace and routes
+# between them by URL path, so you can `txco dev` once and poke all of
+# them with no per-stack hostname binding or re-apply. This is the
+# multi-stack generalization of the single-stack `auto-route@75` hook.
+#
+# Why scope 25 (not concurrent with static@50)? static@50 READS
+# `_txc.route.stack` to serve a routed stack's own OPS/<stack>/FILES/.
+# It's a consumer of the route decision, so the router must PRODUCE
+# that decision first — i.e. run before static. Scope 25 sits between
+# detect-tenant@0 and static@50.
+#
+# Why EMIT (not SET)? a boot hook has no EXEC, and SET on a no-EXEC
+# rule only shapes that op's own input view — it's discarded before
+# the merge. EMIT overlays onto the response, which persists across
+# scopes. (See the mcp-server parse.txcl note / feedback_set_is_op_scoped.)
+#
+# The `@route.to == ""` guard means a real hostname binding still wins:
+# detect-tenant@0 would have set route.to from the binding, and these
+# fallback rules skip. So this composes cleanly with production.
+#
+# This arm is the catch-all: anything that isn't /mcp*, /stripe*, or
+# /stream* goes to hello-world. The arms are mutually exclusive by path,
+# so even though they run concurrently at scope 25 only one ever fires.
+#
+# @ is sugar for ._txc.
+WHEN @route.to == "" && @src == "http" && @web.req.url.path !~ /^\/(mcp|stripe|stream)(\/.*)?$/
+  EMIT @route.tenant = "default",
+       @route.stack = "hello-world",
+       @route.to = "hello-world/0"

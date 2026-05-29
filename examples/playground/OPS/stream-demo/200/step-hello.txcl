@@ -1,0 +1,11 @@
+# stream-demo scope 200 — first backend step (slow on purpose).
+#
+# op://HELLO points at the api app's /words/hello route, which sleeps
+# ~700ms before responding (see APPS/api/server.js). We don't use its
+# result here — the point is the latency: the client is already holding
+# an open connection with "starting..." flushed, and this is the gap
+# before the next chunk arrives. Real pipelines would EXEC genuine work
+# here (a DB query, an LLM call, a downstream service).
+#
+# No `@web.res.body` is set in this scope, so nothing is flushed yet.
+EXEC "op://HELLO"

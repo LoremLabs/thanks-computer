@@ -1,0 +1,9 @@
+target: dev
+
+# This example has no `operations:` block — the workspace IS the
+# MCP server. Every HTTP request that lands here is JSON-RPC and
+# gets handled by the txcl rules in OPS/mcp-server/.
+#
+# Compare with examples/mcp-quickstart/, which is the inverse: a
+# txcl rule pack that CALLS an external MCP server. Both shapes
+# are valid txcl roles.

@@ -1,0 +1,32 @@
+# mcp-server scope 0 — reject non-POST methods with 405.
+#
+# The MCP Streamable-HTTP transport uses two channels at the same
+# endpoint:
+#   POST /mcp  — client→server JSON-RPC requests (what we handle)
+#   GET  /mcp  — client opens a long-lived SSE stream for
+#                server-INITIATED messages (notifications, sampling
+#                requests, etc.)
+#
+# We don't offer the server→client SSE stream. The spec says a
+# server that doesn't MUST return 405 Method Not Allowed for the
+# GET so the client knows not to keep reopening it. Without this,
+# Claude Code (and other Streamable-HTTP clients) loop: they
+# reopen GET /mcp continuously, each time getting a confusing
+# 200 + JSON-RPC error from the fall-through path instead of a
+# clean rejection.
+#
+# `@halt = true` stops the pipeline here so parse@0 / dispatch@100
+# / respond@200 never run for the GET. Body is explicit (not
+# envelope projection) for the same dev-mode-leak reason as
+# respond.txcl. The `Allow: POST` header is the conventional
+# companion to a 405.
+#
+# DELETE /mcp (session teardown in the spec) also lands here and
+# gets a 405 — fine, since we run stateless sessions with nothing
+# to tear down.
+WHEN @src == "http" && @web.req.method != "POST"
+  EMIT @web.res.status = 405,
+       @web.res.body = b64"Method Not Allowed: this MCP endpoint accepts POST only.\n",
+       @web.res.headers.allow.0 = "POST",
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @halt = true

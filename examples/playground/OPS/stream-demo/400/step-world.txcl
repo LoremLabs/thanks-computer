@@ -1,0 +1,7 @@
+# stream-demo scope 400 — second backend step (slow on purpose).
+#
+# op://WORLD points at the api app's /words/world route, which sleeps
+# ~800ms (see APPS/api/server.js). Same idea as scope 200: the client
+# is holding the connection with two lines already flushed; this is the
+# gap before the final chunk.
+EXEC "op://WORLD"

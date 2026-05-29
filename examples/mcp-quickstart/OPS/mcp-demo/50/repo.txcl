@@ -1,0 +1,4 @@
+# Resolve `.repoName` from `?repoName=…` or default.
+SELECT @web.req.url.query.repoName.0
+    AS .repoName
+    DEFAULT "facebook/react"

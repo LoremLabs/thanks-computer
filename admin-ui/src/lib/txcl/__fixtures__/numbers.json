@@ -1,0 +1,34 @@
+{
+  "name": "numbers",
+  "input": "1 12 -3 -45 1.5 -2.75",
+  "tokens": [
+    {
+      "type": "INT",
+      "literal": "1"
+    },
+    {
+      "type": "INT",
+      "literal": "12"
+    },
+    {
+      "type": "INT",
+      "literal": "-3"
+    },
+    {
+      "type": "INT",
+      "literal": "-45"
+    },
+    {
+      "type": "FLOAT",
+      "literal": "1.5"
+    },
+    {
+      "type": "FLOAT",
+      "literal": "-2.75"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

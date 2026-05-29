@@ -1,0 +1,24 @@
+# mcp-server scope 100 — `tools/call` for the `time` tool.
+#
+# Returns the server's current wall-clock time as RFC 3339. The
+# whole tool body is one EMIT clause — &now() does the time
+# lookup, &concat assembles the prose, &object / &array wrap it
+# in the JSON-RPC content shape.
+#
+# This shape (one rule per tool, building the response in nested
+# expressions) is what the design doc means by "the rule author
+# thinks about the tool, not the protocol." The completed response
+# object lands at `@mcp.res`; scope 200 serializes it.
+WHEN @rpc.method == "tools/call" && @rpc.params.name == "time"
+  EMIT @mcp.res = &object(
+    "jsonrpc", "2.0",
+    "id", &get(@rpc, "id"),
+    "result", &object(
+      "content", &array(
+        &object(
+          "type", "text",
+          "text", &concat("Server time is ", &now("rfc3339"))
+        )
+      )
+    )
+  )

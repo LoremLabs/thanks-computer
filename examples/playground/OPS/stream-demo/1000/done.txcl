@@ -1,0 +1,15 @@
+# stream-demo scope 1000 — final chunk, then end the stream.
+#
+# This is the TERMINAL scope: `@halt` ends the pipeline. A body written
+# together with `@halt` is the last chunk; once it's flushed the chassis
+# sends the stream terminator and the response is complete.
+#
+# (Contrast the non-streaming endpoints in this workspace, e.g. the
+# hello-world render or /healthz: they set `@web.res.body` + `@halt` in
+# a SINGLE terminal scope, so the body is buffered and sent once with a
+# Content-Length. Streaming here is opt-in purely by having written the
+# body across the earlier scopes 100/300/500.)
+#
+# @ is sugar for ._txc.
+EMIT @web.res.body = b64"done.\n",
+     @halt = true

@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Pragmatic exclusions for boilerplate Close/log/print calls — fixing
+      # them every site adds noise without catching real bugs.
+      exclude-functions:
+        - (io.Closer).Close
+        - "(*os.File).Close"
+        - "(*database/sql.DB).Close"
+        - "(*database/sql.Rows).Close"
+        - "(*database/sql.Stmt).Close"
+        - fmt.Fprintln
+        - fmt.Fprintf
+        - fmt.Fprint
+    staticcheck:
+      # Enable bug-finding (SA) checks; skip the advisory QF (quickfix) and ST
+      # (style) families which are opinionated rather than load-bearing.
+      checks:
+        - SA*
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck

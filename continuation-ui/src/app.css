@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+/* Brand tokens duplicated verbatim from admin-ui/src/app.css (kept in
+   sync by hand — stable values; no cross-project import to keep this a
+   self-contained unit). */
+@theme {
+    --color-brand-cyan: oklch(0.79 0.17 195);
+    --color-brand-magenta: oklch(0.65 0.27 330);
+    --color-brand-yellow: oklch(0.85 0.18 90);
+    --color-brand-red: oklch(0.62 0.22 25);
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+html, body, #app {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    font-family: var(--font-mono);
+}
+
+/* The three wordmark "o"s rotate through the CMY triad
+   (cyan → magenta → yellow → …). Each o is offset one third of the
+   cycle so at any instant the trio shows a rotation of the triad. */
+@keyframes cmy {
+    0%,
+    100% {
+        color: var(--color-brand-cyan);
+    }
+    33% {
+        color: var(--color-brand-magenta);
+    }
+    66% {
+        color: var(--color-brand-yellow);
+    }
+}
+
+.o {
+    animation: cmy 2.4s steps(1, end) infinite;
+}
+.o1 {
+    animation-delay: 0s;
+}
+.o2 {
+    animation-delay: -0.8s;
+}
+.o3 {
+    animation-delay: -1.6s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .o {
+        animation: none;
+    }
+    .o1 {
+        color: var(--color-brand-cyan);
+    }
+    .o2 {
+        color: var(--color-brand-magenta);
+    }
+    .o3 {
+        color: var(--color-brand-yellow);
+    }
+}

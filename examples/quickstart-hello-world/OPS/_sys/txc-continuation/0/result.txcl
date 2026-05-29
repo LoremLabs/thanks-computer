@@ -1,0 +1,14 @@
+# _sys/txc-continuation scope 0 — continuation poll / deferred response.
+#
+# Reached only via the detectTenantBody short-circuit: a request
+# carrying `?txc.continuation=<rcid>` (mapped to _txc.continuation by
+# the web inlet) is NOT hostname-routed — boot/0's detect-tenant sets
+# _txc.goto = "txc-continuation/0", jumping here pinned to _sys.
+#
+# txco://continuation-result reads the run by the opaque rcid and
+# returns an envelope for the normal web response path: the stored
+# result page once complete (or the JSON status doc with ?format=json),
+# 202 + Retry-After while running, 502 on failure, 404 if unknown.
+# Because this flows through the normal pipeline the poll appears in
+# the trace list.
+EXEC "txco://continuation-result"

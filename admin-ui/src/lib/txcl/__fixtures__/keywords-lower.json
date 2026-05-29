@@ -1,0 +1,78 @@
+{
+  "name": "keywords-lower",
+  "input": "select as default with when priority exec emit set return null fn let if else true false",
+  "tokens": [
+    {
+      "type": "SELECT",
+      "literal": "select"
+    },
+    {
+      "type": "AS",
+      "literal": "as"
+    },
+    {
+      "type": "DEFAULT",
+      "literal": "default"
+    },
+    {
+      "type": "WITH",
+      "literal": "with"
+    },
+    {
+      "type": "WHEN",
+      "literal": "when"
+    },
+    {
+      "type": "PRIORITY",
+      "literal": "priority"
+    },
+    {
+      "type": "EXEC",
+      "literal": "exec"
+    },
+    {
+      "type": "EMIT",
+      "literal": "emit"
+    },
+    {
+      "type": "SET",
+      "literal": "set"
+    },
+    {
+      "type": "RETURN",
+      "literal": "return"
+    },
+    {
+      "type": "NULL",
+      "literal": "null"
+    },
+    {
+      "type": "FUNCTION",
+      "literal": "fn"
+    },
+    {
+      "type": "LET",
+      "literal": "let"
+    },
+    {
+      "type": "IF",
+      "literal": "if"
+    },
+    {
+      "type": "ELSE",
+      "literal": "else"
+    },
+    {
+      "type": "TRUE",
+      "literal": "true"
+    },
+    {
+      "type": "FALSE",
+      "literal": "false"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

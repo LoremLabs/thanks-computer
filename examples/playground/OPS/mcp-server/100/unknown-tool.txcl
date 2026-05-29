@@ -1,0 +1,18 @@
+# mcp-server scope 100 — fallback for tools/call with an unknown
+# tool name.
+#
+# Code -32602 is the JSON-RPC standard for "invalid params."
+# PRIORITY -1 ensures the per-tool rules (echo, time) win on a tie
+# and this rule only fires as the fallback.
+WHEN @rpc.method == "tools/call"
+  && @rpc.params.name != "echo"
+  && @rpc.params.name != "time"
+  PRIORITY -1
+  EMIT @mcp.res = &object(
+    "jsonrpc", "2.0",
+    "id", &get(@rpc, "id"),
+    "error", &object(
+      "code", -32602,
+      "message", &concat("Unknown tool: ", &get(@rpc, "params.name"))
+    )
+  )

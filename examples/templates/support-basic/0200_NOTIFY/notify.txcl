@@ -1,0 +1,4 @@
+# Notify stage: forward the classified envelope to the NOTIFY operation.
+# The downstream service reads `urgency` from the envelope and decides
+# whether to page or just file a routine notification.
+EXEC "op://NOTIFY"

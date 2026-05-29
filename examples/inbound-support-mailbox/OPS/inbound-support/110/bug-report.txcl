@@ -1,0 +1,7 @@
+# Classify the message by subject — bug-report arm. Guarded on
+# `@ticket.category == ""` so a higher-priority match at scope 100
+# (account-access) wins. See 100/account-access.txcl for why this is
+# EMIT and why the arms are laddered across scopes.
+WHEN @ticket.category == "" && @lmtp.msg.subject =~ /(?i)bug|crash|broken|error/
+  EMIT @ticket.category = "bug_report",
+       @ticket.priority = "normal"

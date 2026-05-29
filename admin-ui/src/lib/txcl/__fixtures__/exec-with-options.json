@@ -1,0 +1,66 @@
+{
+  "name": "exec-with-options",
+  "input": "EXEC \"http://example.com/api\" WITH timeout = \"60s\", debug = true, retries = 3\n",
+  "tokens": [
+    {
+      "type": "EXEC",
+      "literal": "EXEC"
+    },
+    {
+      "type": "STRING",
+      "literal": "http://example.com/api"
+    },
+    {
+      "type": "WITH",
+      "literal": "WITH"
+    },
+    {
+      "type": "IDENT",
+      "literal": "timeout"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "STRING",
+      "literal": "60s"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "IDENT",
+      "literal": "debug"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "TRUE",
+      "literal": "true"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "IDENT",
+      "literal": "retries"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "INT",
+      "literal": "3"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

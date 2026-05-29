@@ -1,0 +1,27 @@
+# Caddy in front of the chassis. Local dev variant; for production, swap localhost
+# for your domain and Caddy will provision Let's Encrypt certs automatically.
+#
+# Run with: caddy run --config Caddyfile
+
+localhost:8443 {
+	tls internal
+
+	reverse_proxy localhost:8080
+}
+
+# Admin surface (placeholder). When an admin UI is reintroduced, serve static
+# files here and put basicauth in front. Today the chassis exposes nothing on
+# :8081, so this block is commented out.
+#
+# localhost:9443 {
+# 	tls internal
+#
+# 	basicauth {
+# 		# admin <bcrypt-hash>
+# 	}
+#
+# 	# file_server {
+# 	# 	root /path/to/admin-ui/build
+# 	# }
+# 	reverse_proxy localhost:8081
+# }

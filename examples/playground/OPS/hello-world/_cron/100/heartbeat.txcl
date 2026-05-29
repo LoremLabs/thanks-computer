@@ -1,0 +1,18 @@
+# hello-world/_cron scope 100 — scheduled "heartbeat".
+#
+# `_cron` is the reserved per-tenant cron stack. Authoring it opts this
+# tenant in: every --cron-period the chassis fans out one tick into
+# <tenant>/_cron/0, pinned to this tenant, carrying precomputed
+# wall-clock fields under _txc.cron.* (minute, hour, dom, dow, month,
+# year, tick, and mod5/mod10/mod15/mod30). No `_cron` stack → no ticks
+# (off by default).
+#
+# txcl has no arithmetic/time funcs, so the SCHEDULE is a visible WHEN
+# comparing those stamped fields — the decision lives here, not in Go.
+# This example wakes once every 10 minutes (minute % 10 == 1, i.e.
+# :01, :11, :21, :31, :41, :51). Gate on @src == "cron" so the rule
+# only fires for the tick, never another entry into this stack.
+#
+# @ is sugar for ._txc. ; swap EMIT for EXEC "op://…" to do real work.
+WHEN @src == "cron" && @cron.mod10 == 1
+  EMIT @cron.heartbeat = true

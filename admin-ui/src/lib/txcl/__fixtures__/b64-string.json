@@ -1,0 +1,26 @@
+{
+  "name": "b64-string",
+  "input": "SET .blob = b64\"hello world\"",
+  "tokens": [
+    {
+      "type": "SET",
+      "literal": "SET"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".blob"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "STRING",
+      "literal": "aGVsbG8gd29ybGQ="
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

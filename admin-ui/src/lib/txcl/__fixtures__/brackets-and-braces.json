@@ -1,0 +1,82 @@
+{
+  "name": "brackets-and-braces",
+  "input": "SET .arr = [1, 2, 3], .obj = {\"k\": \"v\"}",
+  "tokens": [
+    {
+      "type": "SET",
+      "literal": "SET"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".arr"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "[",
+      "literal": "["
+    },
+    {
+      "type": "INT",
+      "literal": "1"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "INT",
+      "literal": "2"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "INT",
+      "literal": "3"
+    },
+    {
+      "type": "]",
+      "literal": "]"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".obj"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "{",
+      "literal": "{"
+    },
+    {
+      "type": "STRING",
+      "literal": "k"
+    },
+    {
+      "type": ":",
+      "literal": ":"
+    },
+    {
+      "type": "STRING",
+      "literal": "v"
+    },
+    {
+      "type": "}",
+      "literal": "}"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

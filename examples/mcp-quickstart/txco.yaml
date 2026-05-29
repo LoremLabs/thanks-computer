@@ -1,0 +1,23 @@
+target: dev
+
+# A single MCP-over-HTTPS operation pointing at DeepWiki — a free,
+# no-authentication, public MCP server that exposes three tools for
+# asking AI-powered questions about any public GitHub repository.
+#
+# The url field is opaque to the CLI — the chassis sees the resolved
+# URL after `op://ASK_REPO` substitution at apply time, and the
+# `mcp+https://` scheme triggers the MCP session lifecycle
+# (initialize → notifications/initialized → tools/call) on every
+# EXEC.
+#
+# The URL fragment (`#ask_question`) carries the MCP tool name.
+# Fragments are RFC 3986 client-side only — they are NOT sent on
+# the wire — so the chassis uses the fragment to populate
+# params.name and strips it before dialing the endpoint.
+#
+# `txco mcp doctor op://ASK_REPO` will list every tool DeepWiki
+# exposes; swap the fragment to use a different one (e.g.
+# #read_wiki_structure).
+operations:
+  ASK_REPO:
+    url: mcp+https://mcp.deepwiki.com/mcp#ask_question

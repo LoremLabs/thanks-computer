@@ -1,0 +1,4 @@
+{
+  "note": "Full path needs STRIPE_WEBHOOK_SECRET + STRIPE_API_KEY set on the tenant and an HMAC-signed webhook body (see APPS/send-webhook.sh). Baseline (apply --dry-run) only here.",
+  "checks": []
+}

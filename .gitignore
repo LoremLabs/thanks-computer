@@ -1,0 +1,41 @@
+.env
+.env.local
+chassis/bin/
+chassis/data/db/
+chassis/data/kv/
+chassis/data/repo/
+chassis/data/generator*/
+chassis/data/tmp/
+chassis/data/logs/
+
+# Example workspaces spin up a local chassis on `txco dev`; its runtime
+# data (SQLite DBs, kv, logs) must never be committed. The rules above are
+# root-anchored and don't reach into examples/, so cover that path too.
+examples/**/chassis/data/
+*.test
+*.out
+*.log
+.DS_Store
+tmp/
+
+# admin-ui (Svelte source)
+admin-ui/node_modules/
+admin-ui/.svelte-kit/
+
+# admin UI build output — embedded into the chassis binary via go:embed.
+# Vite writes into here. Only .gitkeep is tracked so `go build` works
+# before the first `npm run build`; on every build Vite copies
+# admin-ui/public/.gitkeep back into dist/, keeping the directive happy.
+chassis/server/admin/ui/dist/*
+!chassis/server/admin/ui/dist/.gitkeep
+
+# Continuation "please wait" UI build output — same pattern: only
+# .gitkeep is tracked; continuation-ui/public/.gitkeep is copied back
+# into dist/ on every build so go:embed works before the first build.
+chassis/server/continuation/ui/dist/*
+!chassis/server/continuation/ui/dist/.gitkeep
+
+# Demo UI build output — same pattern: only .gitkeep is tracked so
+# go:embed works before the first `pnpm run build`.
+chassis/server/demo/ui/dist/*
+!chassis/server/demo/ui/dist/.gitkeep

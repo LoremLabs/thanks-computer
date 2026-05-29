@@ -1,0 +1,14 @@
+# OPS/stripe/200 — reject unverified webhooks (fail closed).
+#
+# Fires whenever scope 100 did NOT establish a valid signature: a bad
+# v1, OR no Stripe-Signature header at all (in which case scope 100's
+# WHEN was false and sig_valid was never set). Either way we 401 and
+# halt, so the enrichment scopes below never run for an unverified
+# request.
+#
+# @ is sugar for ._txc.
+WHEN @computed.sig_valid != true
+  EMIT @web.res.status = 401,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"401 invalid stripe signature\n",
+       @halt = true

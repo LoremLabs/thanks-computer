@@ -1,0 +1,34 @@
+{
+  "name": "when-star",
+  "input": "WHEN * SET .ok = true",
+  "tokens": [
+    {
+      "type": "WHEN",
+      "literal": "WHEN"
+    },
+    {
+      "type": "STAR",
+      "literal": "*"
+    },
+    {
+      "type": "SET",
+      "literal": "SET"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".ok"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "TRUE",
+      "literal": "true"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

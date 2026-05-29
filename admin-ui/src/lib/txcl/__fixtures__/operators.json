@@ -1,0 +1,122 @@
+{
+  "name": "operators",
+  "input": ".a == .b != .c \u003c .d \u003c= .e \u003e .f \u003e= .g \u0026\u0026 .h || !.i = .j + .k - .l * .m / .n",
+  "tokens": [
+    {
+      "type": "BRANCH",
+      "literal": ".a"
+    },
+    {
+      "type": "==",
+      "literal": "=="
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".b"
+    },
+    {
+      "type": "!=",
+      "literal": "!="
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".c"
+    },
+    {
+      "type": "\u003c",
+      "literal": "\u003c"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".d"
+    },
+    {
+      "type": "\u003c=",
+      "literal": "\u003c="
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".e"
+    },
+    {
+      "type": "\u003e",
+      "literal": "\u003e"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".f"
+    },
+    {
+      "type": "\u003e=",
+      "literal": "\u003e="
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".g"
+    },
+    {
+      "type": "\u0026\u0026",
+      "literal": "\u0026\u0026"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".h"
+    },
+    {
+      "type": "||",
+      "literal": "||"
+    },
+    {
+      "type": "!",
+      "literal": "!"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".i"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".j"
+    },
+    {
+      "type": "+",
+      "literal": "+"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".k"
+    },
+    {
+      "type": "-",
+      "literal": "-"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".l"
+    },
+    {
+      "type": "*",
+      "literal": "*"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".m"
+    },
+    {
+      "type": "/",
+      "literal": "/"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".n"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+# OPS/stripe/100 — verify the inbound Stripe webhook signature.
+#
+# Stripe signs the string `<timestamp>.<raw body>` with your webhook
+# signing secret and sends `Stripe-Signature: t=<ts>,v1=<hex>`. We
+# rebuild that signed string from the preserved raw body (base64 at
+# @web.req.body) and the timestamp parsed out of the header, then hand
+# it plus the expected v1 to txco://hmac-verify. That op does a
+# CONSTANT-TIME HMAC compare against the stored STRIPE_WEBHOOK_SECRET
+# and writes _txc.computed.sig_valid.
+#
+# The secret never appears in this rule or in the trace — only the
+# boolean result does.
+#
+# Note: this parse assumes Stripe's `t=…,v1=…` ordering and a single
+# v1. Real Stripe may send several v1 values during key rotation; a
+# production rule would scan them. (And the replay/tolerance window —
+# rejecting an old `t` — needs arithmetic txcl doesn't have yet, so
+# it's omitted here. See the README.)
+#
+# @ is sugar for ._txc.
+# Scratch lives under a _-prefixed key so the default web projection
+# (which drops _-prefixed top-level keys) keeps it out of the response.
+WHEN @web.req.headers.Stripe-Signature.0 != ""
+SET ._verify.v1 = &get(&split(&get(&split(@web.req.headers.Stripe-Signature.0, ","), "1"), "="), "1"),
+    ._verify.signed = &concat(&get(&split(&get(&split(@web.req.headers.Stripe-Signature.0, ","), "0"), "="), "1"), ".", &b64decode(@web.req.body))
+WITH secrets.key.secret = "STRIPE_WEBHOOK_SECRET",
+     input_path = "_verify.signed",
+     expected_path = "_verify.v1",
+     algorithm = "sha256",
+     encoding = "hex"
+  EXEC "txco://hmac-verify"

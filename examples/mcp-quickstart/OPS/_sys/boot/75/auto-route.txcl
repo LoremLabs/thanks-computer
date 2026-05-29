@@ -1,0 +1,25 @@
+# _sys/boot scope 75 — quickstart auto-route hook.
+#
+# This example is a single-stack local-dev workspace. Out of the
+# box the chassis has no hostname bindings, so detect-tenant@0
+# finds nothing, scope 100's gated route op skips, and the request
+# 404s at scope 1000. Sitting at scope 75 (inside the
+# operator-hook range 1..99, after static@50, before route@100),
+# this rule synthesizes a route proposal pointing at the only
+# application stack the workspace ships: mcp-demo. The chassis
+# then promotes the proposal via scope 100's txco://route exactly
+# as if a hostname binding had supplied it.
+#
+# Production note: delete this file (and use real bindings via
+# `txco auth tenant hostnames add ...`) once you have more than
+# one stack or non-localhost traffic. With this rule present,
+# EVERY unmatched HTTP request lands at mcp-demo regardless of
+# hostname — fine for a single-purpose demo, wrong for production.
+#
+# @ is sugar for ._txc.
+WHEN @route.to == "" && @src == "http"
+  EMIT @route.tenant = "default",
+       @route.stack = "mcp-demo",
+       @route.to = "mcp-demo/0",
+       @route.ingress = "auto-route",
+       @route.hostname_verified = true

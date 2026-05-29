@@ -1,0 +1,13 @@
+# stream-demo scope 300 — flush a progress line for step 1.
+#
+# The slow op://HELLO at scope 200 has now completed and merged its
+# result into the envelope. We flush a progress line as a chunk. Still
+# non-terminal (scopes 400…1000 follow), so this is another streamed
+# chunk, not the final body. The head is already locked from scope 100,
+# so we only set the body here.
+#
+# `b64"…"` is a base64 string literal — `@web.res.body` is always
+# base64 (the web outlet decodes it before writing the bytes).
+#
+# @ is sugar for ._txc.
+EMIT @web.res.body = b64"step 1 done (hello)\n"

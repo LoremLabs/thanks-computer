@@ -1,0 +1,34 @@
+{
+  "name": "trailing-comment",
+  "input": "SELECT .x AS .y # tail comment\nDEFAULT \"v\"\n",
+  "tokens": [
+    {
+      "type": "SELECT",
+      "literal": "SELECT"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".x"
+    },
+    {
+      "type": "AS",
+      "literal": "AS"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".y"
+    },
+    {
+      "type": "DEFAULT",
+      "literal": "DEFAULT"
+    },
+    {
+      "type": "STRING",
+      "literal": "v"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

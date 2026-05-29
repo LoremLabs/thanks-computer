@@ -1,0 +1,16 @@
+target: dev
+
+apps:
+  tickets:
+    path: ./APPS/tickets
+    start: node server.js
+    health: http://localhost:4200/health
+
+operations:
+  TICKET_CREATE:
+    url: http://localhost:4200/tickets
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow

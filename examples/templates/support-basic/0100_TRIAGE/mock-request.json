@@ -1,0 +1,12 @@
+{
+  "_txc": {
+    "src": "web",
+    "web": {
+      "req": {
+        "method": "POST",
+        "url": {"path": "/support"},
+        "body": "I can't log in!"
+      }
+    }
+  }
+}

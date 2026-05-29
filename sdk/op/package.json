@@ -1,0 +1,50 @@
+{
+  "name": "@txco/op",
+  "version": "0.1.0",
+  "description": "Author sandboxed txco nano-ops: import { op } from \"@txco/op\".",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "keywords": ["txco", "nano-op", "wasm", "wasi", "serverless", "sandbox"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LoremLabs/thanks-computer.git",
+    "directory": "sdk/op"
+  },
+  "homepage": "https://github.com/LoremLabs/thanks-computer/tree/master/sdk/op#readme",
+  "bugs": "https://github.com/LoremLabs/thanks-computer/issues",
+  "files": ["dist", "src", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./envelope": {
+      "types": "./dist/envelope.d.ts",
+      "default": "./dist/envelope.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "default": "./dist/schema.js"
+    },
+    "./crypto": {
+      "types": "./dist/crypto.d.ts",
+      "default": "./dist/crypto.js"
+    },
+    "./codec": {
+      "types": "./dist/codec.d.ts",
+      "default": "./dist/codec.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,8 @@
+# Catch-all default — runs after the classify arms (scopes 100/110/120)
+# have merged, so `@ticket.category == ""` is true only when none of
+# them matched. It lives at its own later scope (150) rather than
+# alongside the arms because a rule cannot see another rule's EMIT
+# within the same scope.
+WHEN @ticket.category == ""
+  EMIT @ticket.category = "uncategorized",
+       @ticket.priority = "low"

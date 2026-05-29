@@ -1,0 +1,4 @@
+# Return scope-100's `.text` as text/markdown.
+WHEN .text != ""
+  EXEC "txco://web-render" WITH source = ".text",
+                                content_type = "text/markdown; charset=utf-8"

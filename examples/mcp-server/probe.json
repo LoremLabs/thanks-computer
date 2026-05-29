@@ -1,0 +1,13 @@
+{
+  "note": "JSON-RPC MCP server written entirely in txcl. Self-routes /mcp via _sys/boot/75 auto-route, so no hostname binding is needed.",
+  "checks": [
+    {
+      "name": "initialize returns serverInfo",
+      "method": "POST",
+      "path": "/mcp",
+      "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"examples-smoke\",\"version\":\"0\"}}}",
+      "status": 200,
+      "contains": "txco-mcp-server-in-txcl"
+    }
+  ]
+}

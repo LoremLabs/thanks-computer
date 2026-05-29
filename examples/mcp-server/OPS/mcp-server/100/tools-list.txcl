@@ -1,0 +1,36 @@
+# mcp-server scope 100 — handle `tools/list`.
+#
+# Returns the catalog of tools this server exposes. In a real
+# server with many tools, this would be a registry built once at
+# boot and read here; for the demo it's just a hand-built inline
+# &array. Schemas are JSON Schema objects — the MCP client uses
+# them to render forms and to validate arguments before calling
+# tools/call.
+WHEN @rpc.method == "tools/list"
+  EMIT @mcp.res = &object(
+    "jsonrpc", "2.0",
+    "id", &get(@rpc, "id"),
+    "result", &object(
+      "tools", &array(
+        &object(
+          "name", "echo",
+          "description", "Echo the input text back as the tool result.",
+          "inputSchema", &object(
+            "type", "object",
+            "properties", &object(
+              "text", &object("type", "string", "description", "Text to echo")
+            ),
+            "required", &array("text")
+          )
+        ),
+        &object(
+          "name", "time",
+          "description", "Return the server's current time in RFC 3339 format.",
+          "inputSchema", &object(
+            "type", "object",
+            "properties", &object()
+          )
+        )
+      )
+    )
+  )

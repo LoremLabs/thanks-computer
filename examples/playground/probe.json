@@ -1,0 +1,27 @@
+{
+  "note": "Four stacks in one workspace, routed by URL path via _sys/boot/25 routers (no hostname binding). The /stripe path is exercised by stripe-customer-enrich's own example; here we cover the three that need no secrets.",
+  "checks": [
+    {
+      "name": "/ → hello-world renders HTML",
+      "method": "GET",
+      "path": "/",
+      "status": 200,
+      "contains": "hello world"
+    },
+    {
+      "name": "/mcp → mcp-server initialize",
+      "method": "POST",
+      "path": "/mcp",
+      "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"examples-smoke\",\"version\":\"0\"}}}",
+      "status": 200,
+      "contains": "txco-mcp-server-in-txcl"
+    },
+    {
+      "name": "/stream → stream-demo first chunk",
+      "method": "GET",
+      "path": "/stream",
+      "status": 200,
+      "contains": "starting..."
+    }
+  ]
+}

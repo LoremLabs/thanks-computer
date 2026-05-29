@@ -1,0 +1,56 @@
+{
+  "WHEN rule": {
+    "prefix": "when",
+    "body": [
+      "WHEN ${1:.path} =~ /${2:pattern}/",
+      "$0"
+    ],
+    "description": "Match a branch path against a regex"
+  },
+  "SET assignment": {
+    "prefix": "set",
+    "body": [
+      "SET ${1:.path} = ${2:value}",
+      "$0"
+    ],
+    "description": "Set a branch path in the envelope"
+  },
+  "EXEC op": {
+    "prefix": "exec",
+    "body": [
+      "EXEC \"op://${1:NAME}\"",
+      "$0"
+    ],
+    "description": "Forward the envelope to a named operation"
+  },
+  "EMIT event": {
+    "prefix": "emit",
+    "body": [
+      "EMIT \"${1:topic}\" ${2:.payload}",
+      "$0"
+    ],
+    "description": "Emit an event"
+  },
+  "Full rule (WHEN/SET/EXEC)": {
+    "prefix": "rule",
+    "body": [
+      "WHEN ${1:.path} =~ /${2:pattern}/",
+      "SET ${3:.field} = ${4:\"value\"}",
+      "EXEC \"op://${5:NAME}\"",
+      "$0"
+    ],
+    "description": "Common WHEN/SET/EXEC skeleton"
+  },
+  "LMTP rule (match incoming mail)": {
+    "prefix": "lmtp",
+    "body": [
+      "WHEN @lmtp.rcpt.0 =~ /${1:support@}/ && @lmtp.msg.subject =~ /${2:.}/",
+      "  SET @lmtp.res.code = 250",
+      "  EMIT @ticket.subject = @lmtp.msg.subject,",
+      "       @ticket.from   = @lmtp.mail.from,",
+      "       @ticket.text   = @lmtp.msg.text",
+      "$0"
+    ],
+    "description": "Match an inbound LMTP delivery (recipient + subject) and accept it"
+  }
+}

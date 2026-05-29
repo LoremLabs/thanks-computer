@@ -1,0 +1,4 @@
+{
+  "note": "Calls the public DeepWiki MCP server over the network at EXEC time, so a live HTTP probe is non-hermetic and slow. Baseline (apply --dry-run) only. Manual full path: GET /?repoName=facebook/react&question=What%20is%20JSX%3F",
+  "checks": []
+}

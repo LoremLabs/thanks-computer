@@ -1,0 +1,12 @@
+# _sys/boot scope 25 — path-based router (/stream → stream-demo).
+#
+# Routes /stream to the stream-demo stack, which streams its HTTP
+# response body incrementally instead of buffering it. See
+# route-default.txcl for why this is EMIT, at scope 25, and guarded on
+# `@route.to == ""`.
+#
+# @ is sugar for ._txc.
+WHEN @route.to == "" && @src == "http" && @web.req.url.path =~ /^\/stream(\/.*)?$/
+  EMIT @route.tenant = "default",
+       @route.stack = "stream-demo",
+       @route.to = "stream-demo/0"

@@ -1,0 +1,5 @@
+# Setup stage, parallel rule 2: enrich the envelope with received_at.
+# Sibling to audit.txcl. Both fire at scope 0; the chassis deep-merges
+# their responses before scope 100 runs.
+SET .received_at = "now"
+EXEC "txco://noop"

@@ -1,0 +1,7 @@
+# Classify the message by subject — billing arm. Guarded on
+# `@ticket.category == ""` so a higher-priority match (account-access at
+# 100, bug-report at 110) wins. See 100/account-access.txcl for the
+# EMIT + scope-ladder rationale.
+WHEN @ticket.category == "" && @lmtp.msg.subject =~ /(?i)billing|invoice|refund|charge/
+  EMIT @ticket.category = "billing",
+       @ticket.priority = "high"

@@ -1,0 +1,36 @@
+class Txco < Formula
+  desc "Programmable event chassis for composing operations with txcl"
+  homepage "https://github.com/loremlabs/thanks-computer"
+  version "@VERSION@"
+  license "MPL-2.0"
+
+  on_macos do
+    on_arm do
+      url "@BASE@/txco_@VERSION@_darwin_arm64.tar.gz"
+      sha256 "@SHA_DARWIN_ARM64@"
+    end
+    on_intel do
+      url "@BASE@/txco_@VERSION@_darwin_amd64.tar.gz"
+      sha256 "@SHA_DARWIN_AMD64@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@BASE@/txco_@VERSION@_linux_arm64.tar.gz"
+      sha256 "@SHA_LINUX_ARM64@"
+    end
+    on_intel do
+      url "@BASE@/txco_@VERSION@_linux_amd64.tar.gz"
+      sha256 "@SHA_LINUX_AMD64@"
+    end
+  end
+
+  def install
+    bin.install "txco"
+  end
+
+  test do
+    system "#{bin}/txco", "--help"
+  end
+end

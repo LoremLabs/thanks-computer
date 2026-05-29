@@ -1,0 +1,3 @@
+# Setup stage, parallel rule 1: audit-log the incoming request via the
+# AUDIT operation (defined in the workspace's txco.yaml).
+EXEC "op://AUDIT"

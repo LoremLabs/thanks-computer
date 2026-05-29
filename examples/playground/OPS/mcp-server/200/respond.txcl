@@ -1,0 +1,28 @@
+# mcp-server scope 200 — serialize the JSON-RPC response.
+#
+# Scope 100 built the complete response object at `@mcp.res`. This
+# rule turns it into the EXACT HTTP body bytes:
+#
+#   &to_json(@mcp.res)   → the JSON-RPC string
+#   &b64encode(...)      → base64 (what _txc.web.res.body expects;
+#                          the web outlet base64-decodes it)
+#
+# Why an explicit body instead of just writing top-level keys and
+# letting the outlet's envelope projection serialize them?
+#
+# Envelope projection only emits clean JSON in production. In dev
+# mode the chassis defaults to --web-debug=SHOW_PRIVATE_VARS, which
+# keeps `_txc` and `_ts` in the projected body so authors can debug
+# the merged envelope. Strict MCP clients run JSON-RPC schema
+# validation and REJECT those extra keys. Setting `@web.res.body`
+# directly bypasses projection entirely, so the wire bytes are an
+# exact JSON-RPC envelope regardless of the chassis debug flag.
+#
+# This is the right pattern for ANY strict-client protocol server,
+# not just MCP — control your output bytes, don't lean on the
+# debug-mode-sensitive projection.
+WHEN @mcp.res != null
+  EMIT @web.res.body = &b64encode(&to_json(@mcp.res)),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

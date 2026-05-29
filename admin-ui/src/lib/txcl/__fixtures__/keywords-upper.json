@@ -1,0 +1,54 @@
+{
+  "name": "keywords-upper",
+  "input": "SELECT AS DEFAULT WITH WHEN PRIORITY EXEC EMIT SET RETURN NULL",
+  "tokens": [
+    {
+      "type": "SELECT",
+      "literal": "SELECT"
+    },
+    {
+      "type": "AS",
+      "literal": "AS"
+    },
+    {
+      "type": "DEFAULT",
+      "literal": "DEFAULT"
+    },
+    {
+      "type": "WITH",
+      "literal": "WITH"
+    },
+    {
+      "type": "WHEN",
+      "literal": "WHEN"
+    },
+    {
+      "type": "PRIORITY",
+      "literal": "PRIORITY"
+    },
+    {
+      "type": "EXEC",
+      "literal": "EXEC"
+    },
+    {
+      "type": "EMIT",
+      "literal": "EMIT"
+    },
+    {
+      "type": "SET",
+      "literal": "SET"
+    },
+    {
+      "type": "RETURN",
+      "literal": "RETURN"
+    },
+    {
+      "type": "NULL",
+      "literal": "NULL"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

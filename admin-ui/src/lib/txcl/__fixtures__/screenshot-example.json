@@ -1,0 +1,98 @@
+{
+  "name": "screenshot-example",
+  "input": "# mcp-test\nSELECT @web.req.url.query.question.0\n    AS .question\n    DEFAULT \"What is react used for?\",\n    @web.req.url.query.repoName.0\n    AS .repoName\n    DEFAULT \"facebook/react\"\n\nEXEC \"mcp+https://mcp.deepwiki.com/mcp#ask_question\" WITH timeout = \"60s\", debug = true\n",
+  "tokens": [
+    {
+      "type": "SELECT",
+      "literal": "SELECT"
+    },
+    {
+      "type": "BRANCH",
+      "literal": "._txc.web.req.url.query.question.0"
+    },
+    {
+      "type": "AS",
+      "literal": "AS"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".question"
+    },
+    {
+      "type": "DEFAULT",
+      "literal": "DEFAULT"
+    },
+    {
+      "type": "STRING",
+      "literal": "What is react used for?"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "BRANCH",
+      "literal": "._txc.web.req.url.query.repoName.0"
+    },
+    {
+      "type": "AS",
+      "literal": "AS"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".repoName"
+    },
+    {
+      "type": "DEFAULT",
+      "literal": "DEFAULT"
+    },
+    {
+      "type": "STRING",
+      "literal": "facebook/react"
+    },
+    {
+      "type": "EXEC",
+      "literal": "EXEC"
+    },
+    {
+      "type": "STRING",
+      "literal": "mcp+https://mcp.deepwiki.com/mcp#ask_question"
+    },
+    {
+      "type": "WITH",
+      "literal": "WITH"
+    },
+    {
+      "type": "IDENT",
+      "literal": "timeout"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "STRING",
+      "literal": "60s"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "IDENT",
+      "literal": "debug"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "TRUE",
+      "literal": "true"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

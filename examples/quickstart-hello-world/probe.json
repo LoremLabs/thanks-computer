@@ -1,0 +1,14 @@
+{
+  "note": "Multi-stage pipeline (hello/world → sort → render) behind a Node app. No path router, so the smoke binds localhost → hello-world before probing.",
+  "bind": [{ "host": "localhost", "stack": "hello-world" }],
+  "checks": [
+    {
+      "name": "render sorted words as HTML",
+      "method": "GET",
+      "host": "localhost",
+      "path": "/",
+      "status": 200,
+      "contains": "hello world"
+    }
+  ]
+}

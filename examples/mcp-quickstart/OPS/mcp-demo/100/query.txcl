@@ -1,0 +1,4 @@
+EXEC "mcp+https://mcp.deepwiki.com/mcp#ask_question"
+  WITH mode = "async",
+       timeout = "60s",
+       debug = true

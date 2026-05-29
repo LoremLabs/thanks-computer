@@ -1,0 +1,23 @@
+# mcp-server scope 100 — fallback for unrecognized JSON-RPC methods.
+#
+# Code -32601 is the JSON-RPC standard for "method not found."
+# This rule fires when the method isn't one of the recognized
+# names AND no other scope-100 rule matched.
+#
+# PRIORITY -1 (lower than the implicit 0 of the per-method rules)
+# ensures this rule loses any tie when a more-specific rule also
+# matched, so it only fires as a fallback.
+WHEN @rpc.method != "initialize"
+  && @rpc.method != "notifications/initialized"
+  && @rpc.method != "tools/list"
+  && @rpc.method != "ping"
+  && @rpc.method != "tools/call"
+  PRIORITY -1
+  EMIT @mcp.res = &object(
+    "jsonrpc", "2.0",
+    "id", &get(@rpc, "id"),
+    "error", &object(
+      "code", -32601,
+      "message", &concat("Method not found: ", &get(@rpc, "method"))
+    )
+  )

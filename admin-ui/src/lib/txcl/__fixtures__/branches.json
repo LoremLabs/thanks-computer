@@ -1,0 +1,30 @@
+{
+  "name": "branches",
+  "input": ".foo .foo.bar .foo-bar.baz @web.req.url.query.q.0 @web.res.headers.\"content-type\".0",
+  "tokens": [
+    {
+      "type": "BRANCH",
+      "literal": ".foo"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".foo.bar"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".foo-bar.baz"
+    },
+    {
+      "type": "BRANCH",
+      "literal": "._txc.web.req.url.query.q.0"
+    },
+    {
+      "type": "BRANCH",
+      "literal": "._txc.web.res.headers.content-type.0"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

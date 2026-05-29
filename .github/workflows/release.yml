@@ -1,0 +1,171 @@
+name: release
+
+# Tag a version to cut a release:
+#   git tag v0.2.0 && git push origin v0.2.0
+# rc tags (v0.2.0-rc1) publish a GitHub prerelease and DON'T move the tap
+# formula (the "update Homebrew tap" job is gated on a non-prerelease tag).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Build a full binary (web UIs embedded, CGO sqlite) on each platform's
+  # NATIVE runner — mattn/go-sqlite3 needs CGO and can't be cross-compiled
+  # from a single host.
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Let every platform finish even if one fails, so "Re-run failed jobs"
+      # (gh run rerun <id> --failed) only re-runs the broken platform — the
+      # others keep their green status + uploaded artifacts.
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            runner: macos-15
+          - goos: darwin
+            goarch: amd64
+            runner: macos-15-intel
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.6.3
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: |
+            admin-ui/pnpm-lock.yaml
+            continuation-ui/pnpm-lock.yaml
+
+      # Vite writes both bundles straight into the //go:embed dirs
+      # (chassis/server/{admin,continuation}/ui/dist) — see each vite.config.ts.
+      - name: build admin UI
+        working-directory: admin-ui
+        run: pnpm install --frozen-lockfile && pnpm run build
+
+      - name: build continuation UI
+        working-directory: continuation-ui
+        run: pnpm install --frozen-lockfile && pnpm run build
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: build txco
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-X main.Version=${GITHUB_REF_NAME#v} -X main.CommitId=${GITHUB_SHA} -X main.BuildTimestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/txco ./cmd/txco
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: txco_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/txco
+          if-no-files-found: error
+
+  # Package the prebuilt binaries into per-platform tar.gz + checksums,
+  # publish the GitHub release, and (on a final tag) render Formula/txco.rb
+  # and push it to loremlabs/homebrew-txco. Plain OSS tooling — GoReleaser's
+  # prebuilt builder is Pro-only.
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      # download-artifact lays each binary down as artifacts/txco_<goos>_<goarch>/txco.
+      # tar.gz each (binary + README + LICENSE), then checksum the lot.
+      - name: package archives + checksums
+        id: pkg
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          mkdir -p dist
+          for d in artifacts/txco_*; do
+            platform="$(basename "$d" | sed 's/^txco_//')"   # <goos>_<goarch>
+            stage="dist/stage/${platform}"
+            mkdir -p "$stage"
+            cp "${d}/txco" "$stage/txco"
+            chmod +x "$stage/txco"
+            cp README.md LICENSE "$stage/"
+            tar -C "$stage" -czf "dist/txco_${VERSION}_${platform}.tar.gz" txco README.md LICENSE
+          done
+          ( cd dist && sha256sum txco_*.tar.gz > checksums.txt && cat checksums.txt )
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # A tag with a hyphen (v0.2.0-rc2) is a prerelease; it publishes a
+          # GitHub prerelease but does NOT move the Homebrew formula.
+          if [[ "$TAG" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # Idempotent so "Re-run failed jobs" works: upload --clobber if the
+          # release already exists, otherwise create it.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/txco_*.tar.gz dist/checksums.txt --clobber
+          else
+            pre=""
+            [[ "${{ steps.pkg.outputs.prerelease }}" == "true" ]] && pre="--prerelease"
+            gh release create "$TAG" dist/txco_*.tar.gz dist/checksums.txt \
+              --title "$TAG" --generate-notes $pre
+          fi
+
+      - name: update Homebrew tap
+        if: steps.pkg.outputs.prerelease == 'false'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.pkg.outputs.version }}"
+          BASE="https://github.com/loremlabs/thanks-computer/releases/download/${GITHUB_REF_NAME}"
+          sha() { awk -v f="txco_${VERSION}_$1.tar.gz" '$2==f{print $1}' dist/checksums.txt; }
+
+          sed -e "s|@VERSION@|${VERSION}|g" \
+              -e "s|@BASE@|${BASE}|g" \
+              -e "s|@SHA_DARWIN_ARM64@|$(sha darwin_arm64)|g" \
+              -e "s|@SHA_DARWIN_AMD64@|$(sha darwin_amd64)|g" \
+              -e "s|@SHA_LINUX_ARM64@|$(sha linux_arm64)|g" \
+              -e "s|@SHA_LINUX_AMD64@|$(sha linux_amd64)|g" \
+              .github/homebrew/txco.rb.tmpl > txco.rb
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/loremlabs/homebrew-txco.git" tap
+          mkdir -p tap/Formula
+          cp txco.rb tap/Formula/txco.rb
+          cd tap
+          git config user.name "txco-release-bot"
+          git config user.email "bot@loremlabs.dev"
+          git add Formula/txco.rb
+          git commit -m "txco ${VERSION}" || { echo "formula unchanged"; exit 0; }
+          git push

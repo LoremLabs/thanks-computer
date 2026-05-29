@@ -1,0 +1,10 @@
+{
+  "name": "comments-only",
+  "input": "# one\n# two\n  # indented\n",
+  "tokens": [
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

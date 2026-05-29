@@ -1,0 +1,49 @@
+# Inbound-support example: route mail addressed to support@ at this
+# tenant. Three routing styles are valid here — pick whichever fits
+# your deployment.
+#
+# This example uses style (A): operator hand-configures the routes.
+# The simplest case. Styles (B) and (C) below are commented out;
+# uncomment whichever you'd rather use. See docs/lmtp.md for the
+# full routing model.
+
+ingress:
+  lmtp:
+    # (A) Operator hand-configures specific addresses + domains.
+    # Most flexible; explicit. Use when you have a small set of
+    # known support addresses and want them visible in the YAML.
+    recipients:
+      "support@your.tenant":
+        tenant: default
+        stack: inbound-support
+      "@your.tenant":               # @domain wildcard for the rest
+        tenant: default
+        stack: inbound-support
+
+    # (B) Strategy B — verified_domains stand-in. Use when the
+    # tenant owns the domain and you want ALL addresses there to
+    # route to the tenant's `_mail` stack (or an explicit override).
+    # The DB-backed equivalent uses the chassis's tenant_hostnames
+    # table — no YAML needed there.
+    #
+    # verified_domains:
+    #   your.tenant:
+    #     tenant: default
+    #     stack: inbound-support    # optional; default is <tenant>/_mail
+
+    # Listener catch-all. Mail that didn't match any of the above
+    # lands here. Without this fallback, unrouted addresses just 550
+    # — which may or may not be what you want (typically you DO
+    # want them to 550; an explicit catch-all is for "archive
+    # everything" deployments).
+    listeners:
+      default:
+        tenant: system
+        stack: system/mail_drop
+
+    # (C) Strategy A — operator-host parsing. Enable by setting
+    # --lmtp-default-hosts=chassis.example on the chassis command
+    # line; no YAML needed for the rule itself. Then
+    # `default.inbound-support@chassis.example` routes to
+    # default/inbound-support automatically. Use when you host
+    # mail for many tenants under one operator-owned MX.

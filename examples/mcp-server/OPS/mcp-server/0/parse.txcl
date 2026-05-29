@@ -1,0 +1,27 @@
+# mcp-server scope 0 — parse the JSON-RPC request body.
+#
+# The web inlet stamps `@web.req.body` as base64. This rule decodes
+# it, parses the JSON-RPC envelope, and stores the parsed structure
+# at `@rpc` so subsequent rules can read `@rpc.method`,
+# `@rpc.params.name`, etc. as ordinary envelope paths.
+#
+# `@` is sugar for `_txc.` — both source (`@web.req.body`) and
+# destination (`@rpc`) live under the chassis-internal namespace,
+# which the web outlet strips on the way out so this plumbing
+# never leaks into the JSON-RPC response.
+#
+# EMIT (not SET) because we need @rpc to PERSIST across scopes —
+# SET PRE only shapes this op's own input view and is discarded if
+# there's no EXEC. See feedback_set_is_op_scoped in memory.
+#
+# This is the entire "request preprocessing" stage — two function
+# calls (one nested) replace what would have been ~12 lines of
+# explicit ops in the pre-PR-4 design (b64-decode op, json-parse
+# op, copy ops to extract fields).
+#
+# Gated to POST: the MCP Streamable-HTTP transport also issues
+# `GET /mcp` to open a server→client SSE stream. A GET has no body,
+# so decoding it would fail; method-guard.txcl (same scope) handles
+# non-POST methods with a 405 instead.
+WHEN @src == "http" && @web.req.method == "POST"
+  EMIT @rpc = &json(&b64decode(@web.req.body))

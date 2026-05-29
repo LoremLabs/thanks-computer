@@ -1,0 +1,23 @@
+# mcp-server scope 100 — handle JSON-RPC `initialize`.
+#
+# Returns the server's protocol version + capabilities + identity,
+# mints a stateless session id (here just a fresh UUID v7 — the
+# demo doesn't validate sids; production would HMAC-sign them).
+#
+# The entire JSON-RPC response object is built at `@mcp.res` via
+# &object / &array; scope 200's respond rule serializes it into the
+# HTTP body. We also stamp the session-id response header here.
+WHEN @rpc.method == "initialize"
+  EMIT @mcp.res = &object(
+    "jsonrpc", "2.0",
+    "id", &get(@rpc, "id"),
+    "result", &object(
+      "protocolVersion", "2025-06-18",
+      "capabilities", &object("tools", &object("listChanged", false)),
+      "serverInfo", &object(
+        "name", "txco-mcp-server-in-txcl",
+        "version", "0.1.0"
+      )
+    )
+  )
+  EMIT @web.res.headers.mcp-session-id.0 = &uuid()

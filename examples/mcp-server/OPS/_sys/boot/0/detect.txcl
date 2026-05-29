@@ -1,0 +1,20 @@
+# _sys/boot scope 0 — DECIDE (tenant detection).
+#
+# Runs for every request (the chassis dispatches all ingress to
+# _sys/boot/0 pinned to the _sys system tenant). txco://detect-tenant
+# is the hostname/listener/job -> tenant resolver, the same logic that
+# used to be hardcoded in Go's dispatchEnvelope, now an explicit,
+# trace-visible pipeline step.
+#
+# It writes an INERT proposal under _txc.route.* (tenant, stack, to,
+# ingress, hostname_verified) and deliberately does NOT set _txc.goto
+# or _txc.tenant — so nothing jumps or re-tenants yet. Scopes 1..99
+# then run for EVERY request and may read or rewrite _txc.route
+# (rate-limit, deny, override the tenant) before scope 100 executes it.
+# On a miss it writes nothing, so the gated route op at scope 100 is
+# skipped and scope 1000 serves the 404.
+#
+# Scopes are sparse (0, 100, 1000) by convention — wide gaps for
+# operator hooks. This stack ships embedded and is operator-editable
+# (overridable from OPS/_sys on disk).
+EXEC "txco://detect-tenant"

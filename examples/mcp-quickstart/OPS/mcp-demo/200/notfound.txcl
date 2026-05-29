@@ -1,0 +1,14 @@
+# scope 200 — NOT FOUND (when scope 100 produced no answer).
+#
+# Mirrors `render.txcl`: same scope, opposite WHEN. If
+# `.text` is empty/absent, DeepWiki returned no content (the
+# request had no body, the MCP call timed out at a lower
+# layer and was absorbed, etc.). Return a clean 404 with a
+# short plain-text body so the failure mode is obvious from
+# curl / browser. b64"..." encodes the body the web inlet
+# expects base64-encoded.
+WHEN .text == ""
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"not found\n",
+       @halt = true

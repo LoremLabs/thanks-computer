@@ -1,0 +1,44 @@
+target: dev
+
+# Four app stacks in one workspace, routed by URL path (see
+# OPS/_sys/boot/25/route-*.txcl):
+#   /          → hello-world   (multi-stage pipeline over the api/worker apps)
+#   /mcp       → mcp-server     (a JSON-RPC MCP server written in txcl; no apps)
+#   /stripe/*  → stripe         (verify a signed webhook, enrich via the API)
+#   /stream    → stream-demo    (streamed HTTP response, chunk per backend step)
+
+apps:
+  api:
+    path: ./APPS/api
+    start: node server.js
+    health: http://localhost:4100/health
+  worker:
+    path: ./APPS/worker
+    start: node server.js
+    health: http://localhost:9009/health
+  stripe-mock:
+    path: ./APPS/stripe-mock
+    start: node server.js
+    health: http://localhost:4242/health
+
+operations:
+  # hello-world
+  HELLO:
+    url: http://localhost:4100/words/hello
+  WORLD:
+    url: http://localhost:4100/words/world
+  SORT:
+    url: http://localhost:4100/sort
+  RENDER:
+    url: http://localhost:4100/render
+  RESEARCH:
+    url: http://localhost:9009/research
+  # stripe — the outbound "fetch the customer" call (local mock in dev;
+  # point at https://api.stripe.com/v1/customers in prod)
+  STRIPE_GET_CUSTOMER:
+    url: http://localhost:4242/v1/customers
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow

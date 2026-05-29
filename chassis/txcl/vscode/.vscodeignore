@@ -1,0 +1,7 @@
+.vscode/**
+.gitignore
+.vscodeignore
+*.vsix
+DEV.md
+node_modules/**
+.DS_Store

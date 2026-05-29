@@ -1,0 +1,38 @@
+{
+  "name": "match-and-regex",
+  "input": ".x =~ /foo\\/bar/ \u0026\u0026 .y !~ /^z+$/",
+  "tokens": [
+    {
+      "type": "BRANCH",
+      "literal": ".x"
+    },
+    {
+      "type": "=~",
+      "literal": "=~"
+    },
+    {
+      "type": "REGEX",
+      "literal": "foo/bar"
+    },
+    {
+      "type": "\u0026\u0026",
+      "literal": "\u0026\u0026"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".y"
+    },
+    {
+      "type": "!~",
+      "literal": "!~"
+    },
+    {
+      "type": "REGEX",
+      "literal": "^z+$"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

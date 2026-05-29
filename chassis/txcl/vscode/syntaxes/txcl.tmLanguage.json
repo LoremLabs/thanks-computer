@@ -1,0 +1,97 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "txcl",
+  "scopeName": "source.txcl",
+  "fileTypes": ["txcl"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#regex-after-binding" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#amp-ident" },
+    { "include": "#at-branch" },
+    { "include": "#dot-branch" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#operator-multi" },
+    { "include": "#operator-single" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.txcl",
+      "match": "#.*$"
+    },
+    "regex-after-binding": {
+      "name": "string.regexp.txcl",
+      "begin": "(=~|!~)\\s*(/)",
+      "beginCaptures": {
+        "1": { "name": "keyword.operator.match.txcl" },
+        "2": { "name": "punctuation.definition.string.regexp.begin.txcl" }
+      },
+      "end": "(/)|$",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.string.regexp.end.txcl" }
+      },
+      "patterns": [
+        { "name": "constant.character.escape.txcl", "match": "\\\\." },
+        { "match": "[^/\\\\]+" }
+      ]
+    },
+    "string": {
+      "name": "string.quoted.double.txcl",
+      "begin": "(?:(b64)\\s*)?(\")",
+      "beginCaptures": {
+        "1": { "name": "storage.type.string.txcl" },
+        "2": { "name": "punctuation.definition.string.begin.txcl" }
+      },
+      "end": "(\")|$",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.string.end.txcl" }
+      },
+      "patterns": [
+        { "name": "constant.character.escape.txcl", "match": "\\\\." },
+        {
+          "name": "keyword.other.uri-scheme.txcl",
+          "match": "\\b(op|txco|https?)://[^\"\\s]*"
+        }
+      ]
+    },
+    "number": {
+      "name": "constant.numeric.txcl",
+      "match": "(?<![A-Za-z0-9_.])-?(?:\\d+\\.\\d+|\\d+)\\b"
+    },
+    "amp-ident": {
+      "name": "entity.name.function.txcl",
+      "match": "&[A-Za-z_][A-Za-z0-9_]*"
+    },
+    "at-branch": {
+      "name": "variable.other.member.txcl",
+      "match": "@[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_\\-]+|\\.\"[^\"]*\")*"
+    },
+    "dot-branch": {
+      "name": "variable.other.member.txcl",
+      "match": "\\.[A-Za-z_][A-Za-z0-9_\\-]*(?:\\.[A-Za-z0-9_\\-]+|\\.\"[^\"]*\")*"
+    },
+    "keyword": {
+      "name": "keyword.control.txcl",
+      "match": "\\b(WHEN|when|SELECT|select|SET|set|WITH|with|PRIORITY|priority|EXEC|exec|EMIT|emit|AS|as|DEFAULT|default|IF|if|ELSE|else|RETURN|return|LET|let|fn)\\b"
+    },
+    "constant": {
+      "name": "constant.language.txcl",
+      "match": "\\b(TRUE|true|FALSE|false|NULL|null)\\b"
+    },
+    "operator-multi": {
+      "name": "keyword.operator.txcl",
+      "match": "=~|!~|==|!=|<=|>=|&&|\\|\\|"
+    },
+    "operator-single": {
+      "name": "keyword.operator.txcl",
+      "match": "[=+\\-*/.<>!]"
+    },
+    "punctuation": {
+      "name": "punctuation.txcl",
+      "match": "[,;:(){}\\[\\]]"
+    }
+  }
+}

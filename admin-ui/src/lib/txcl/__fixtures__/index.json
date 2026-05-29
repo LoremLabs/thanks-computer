@@ -1,0 +1,17 @@
+[
+  "screenshot-example.json",
+  "empty.json",
+  "comments-only.json",
+  "keywords-upper.json",
+  "keywords-lower.json",
+  "operators.json",
+  "match-and-regex.json",
+  "when-star.json",
+  "branches.json",
+  "b64-string.json",
+  "numbers.json",
+  "string-escapes.json",
+  "exec-with-options.json",
+  "trailing-comment.json",
+  "brackets-and-braces.json"
+]

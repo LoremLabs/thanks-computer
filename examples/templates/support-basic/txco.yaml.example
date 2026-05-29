@@ -1,0 +1,64 @@
+# Sample workspace-level txco.yaml that pairs with this template.
+#
+# After `txco init support --from github:loremlabs/txco-templates/support-basic`,
+# copy this file (or its contents) to your workspace root as `txco.yaml`,
+# then customize the URLs for your environments.
+#
+# The op:// references in the rule files (e.g. `EXEC "op://CLASSIFY"`)
+# resolve at apply time using the operations map below — overridden
+# per-target where needed.
+
+stack: support/default
+target: dev
+
+apps:
+  classify:
+    path: ./APPS/classify
+    start: npm run dev
+    health: http://localhost:4101/health
+  notify:
+    path: ./APPS/notify
+    start: npm run dev
+    health: http://localhost:4102/health
+  audit:
+    path: ./APPS/audit
+    start: npm run dev
+    health: http://localhost:4103/health
+
+# Default operation map — used when a target doesn't override.
+operations:
+  CLASSIFY:
+    url: http://localhost:4101/op
+  NOTIFY:
+    url: http://localhost:4102/op
+  AUDIT:
+    url: http://localhost:4103/op
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow
+
+  staging:
+    chassis: https://staging.example.com:8081
+    user: alice
+    mock: deny
+    operations:
+      CLASSIFY:
+        url: https://classify.staging.example.com/op
+      NOTIFY:
+        url: https://notify.staging.example.com/op
+      AUDIT:
+        url: https://audit.staging.example.com/op
+
+  prod:
+    chassis: https://prod.example.com:8081
+    user: alice
+    mock: deny
+    operations:
+      CLASSIFY:
+        url: https://classify.example.com/op
+      NOTIFY:
+        url: https://notify.example.com/op
+      AUDIT:
+        url: https://audit.example.com/op

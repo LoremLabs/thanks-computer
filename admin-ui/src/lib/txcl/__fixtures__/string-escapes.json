@@ -1,0 +1,34 @@
+{
+  "name": "string-escapes",
+  "input": "\"plain\" \"with \\\"quote\\\"\" \"newline:\\n\" \"tab:\\t\" \"backslash:\\\\\" \"unknown:\\z\"",
+  "tokens": [
+    {
+      "type": "STRING",
+      "literal": "plain"
+    },
+    {
+      "type": "STRING",
+      "literal": "with \"quote\""
+    },
+    {
+      "type": "STRING",
+      "literal": "newline:\n"
+    },
+    {
+      "type": "STRING",
+      "literal": "tab:\t"
+    },
+    {
+      "type": "STRING",
+      "literal": "backslash:\\"
+    },
+    {
+      "type": "STRING",
+      "literal": "unknown:\\z"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

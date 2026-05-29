@@ -1,0 +1,4 @@
+{
+  "note": "LMTP-only (inbound mail on :2424); no HTTP surface to probe. Baseline (apply --dry-run) only.",
+  "checks": []
+}

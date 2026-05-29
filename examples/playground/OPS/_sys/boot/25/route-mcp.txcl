@@ -1,0 +1,11 @@
+# _sys/boot scope 25 — path-based router (/mcp → mcp-server).
+#
+# Routes /mcp and /mcp/* to the mcp-server stack (a JSON-RPC MCP server
+# written entirely in txcl). See route-default.txcl for why this is
+# EMIT, at scope 25, and guarded on `@route.to == ""`.
+#
+# @ is sugar for ._txc.
+WHEN @route.to == "" && @src == "http" && @web.req.url.path =~ /^\/mcp(\/.*)?$/
+  EMIT @route.tenant = "default",
+       @route.stack = "mcp-server",
+       @route.to = "mcp-server/0"

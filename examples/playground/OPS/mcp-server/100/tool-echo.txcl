@@ -1,0 +1,30 @@
+# mcp-server scope 100 — `tools/call` for the `echo` tool.
+#
+# Production servers would split per-tool dispatch behind a
+# routing rule (so each tool lives in its own scope), but for the
+# demo each tool is one matching-WHEN rule. The two arms of the
+# AND condition (method + tool name) keep this rule from firing on
+# any other call.
+#
+# `&get(@rpc, "params.arguments.text")` pulls the user-supplied
+# input out of the parsed JSON-RPC params.
+#
+# The complete JSON-RPC response is built at `@mcp.res` (under the
+# chassis-internal `_txc.` namespace). Scope 200's respond rule
+# serializes it into the exact HTTP body — see respond.txcl for why
+# we don't just write top-level keys and lean on envelope
+# projection (strict MCP clients reject the `_txc` / `_ts` keys that
+# projection leaks in dev mode).
+WHEN @rpc.method == "tools/call" && @rpc.params.name == "echo"
+  EMIT @mcp.res = &object(
+    "jsonrpc", "2.0",
+    "id", &get(@rpc, "id"),
+    "result", &object(
+      "content", &array(
+        &object(
+          "type", "text",
+          "text", &get(@rpc, "params.arguments.text")
+        )
+      )
+    )
+  )

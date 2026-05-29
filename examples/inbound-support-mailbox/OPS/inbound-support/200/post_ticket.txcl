@@ -1,0 +1,9 @@
+# Hand the classified delivery off to the ticketing service.
+# The op's HTTP request body is the full envelope; the service
+# reads `_txc.lmtp.*` + `_txc.ticket.*` to mint a row.
+#
+# The accept verdict was already written at scope 0 — Postfix gets
+# 250 regardless of whether the downstream HTTP call succeeds.
+# Failing here would log + emit metrics; it would NOT undo the
+# accept (we already committed to handling the mail).
+EXEC "op://TICKET_CREATE"

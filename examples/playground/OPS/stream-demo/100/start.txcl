@@ -1,0 +1,25 @@
+# stream-demo scope 100 — open the streamed response.
+#
+# This stack demonstrates HTTP response STREAMING: instead of buffering
+# the whole body and writing it once at the end, each `@web.res.body`
+# written in a NON-terminal scope is flushed to the client immediately
+# and then cleared. Because later scopes still run (200…1000), this
+# write is a chunk, not the final body.
+#
+# This FIRST flush locks the head: it sets the status + content-type now,
+# and those can no longer change once bytes are on the wire (plain HTTP
+# semantics). It also gives the client an immediate first byte, before
+# the slow backend steps below run.
+#
+# Watch it live (note `-N` disables curl's buffering, `-v` shows the
+# chunked transfer encoding the chassis selects automatically):
+#
+#   curl -N -v http://localhost:8080/stream
+#
+# You'll see "starting..." instantly, then a line after each backend
+# step completes (~700ms, then ~800ms), then "done.".
+#
+# @ is sugar for ._txc.
+EMIT @web.res.status = 200,
+     @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+     @web.res.body = b64"starting...\n"

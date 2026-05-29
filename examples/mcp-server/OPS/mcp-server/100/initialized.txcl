@@ -1,0 +1,21 @@
+# mcp-server scope 100 — handle `notifications/initialized`.
+#
+# JSON-RPC notifications have no `id` and the server MUST NOT
+# respond with a JSON-RPC payload. HTTP-wise the canonical answer
+# is 202 Accepted with a minimal body.
+#
+# We set an EXPLICIT `b64"{}"` body so the outlet writes those two
+# bytes verbatim and skips envelope projection — same reasoning as
+# respond.txcl (projection would leak `_txc`/`_ts` in dev mode and
+# strict clients reject that). We do NOT set `@mcp.res`, so scope
+# 200's respond rule stays inert for this request and the 202 here
+# stands.
+#
+# (Setting `@web.res.body = b64""` would NOT work — the outlet
+# treats an empty body string as "project the envelope," the very
+# path we're avoiding. `b64"{}"` is the smallest explicit body.)
+WHEN @rpc.method == "notifications/initialized"
+  EMIT @web.res.status = 202,
+       @web.res.body = b64"{}",
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

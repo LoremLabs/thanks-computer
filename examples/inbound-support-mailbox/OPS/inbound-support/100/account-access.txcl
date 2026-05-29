@@ -1,0 +1,19 @@
+# Classify the message by subject — account-access arm (highest
+# priority). The category lands in `_txc.ticket.category` for the
+# downstream ticket-creation op to read.
+#
+# One rule per file: a .txcl resonator holds a single WHEN. Priority
+# ("first matching wins") is expressed by scope order, not file order —
+# this arm runs first (scope 100); the bug-report/billing arms below it
+# (110/120) are guarded on `@ticket.category == ""` so an earlier match
+# wins. A later scope sees earlier scopes' EMITs (a sibling rule at the
+# SAME scope would not), which is what makes the ladder work.
+#
+# EMIT (not SET): no EXEC here, so SET would be dropped before the merge;
+# EMIT persists the classification across scopes.
+#
+# Subjects arrive RFC 2047 decoded — `=?UTF-8?B?…?=` is already
+# unescaped by enmime before the rule sees it.
+WHEN @lmtp.msg.subject =~ /(?i)password|reset|locked out/
+  EMIT @ticket.category = "account_access",
+       @ticket.priority = "high"

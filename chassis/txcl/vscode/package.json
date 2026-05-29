@@ -1,0 +1,54 @@
+{
+  "name": "txcl",
+  "displayName": "txcl",
+  "description": "Syntax highlighting for thanks, computer. txcl rule files.",
+  "version": "0.1.2",
+  "publisher": "loremlabs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/loremlabs/thanks-computer"
+  },
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "icon": "icons/icon.png",
+  "keywords": [
+    "txcl",
+    "thanks-computer",
+    "txco",
+    "dsl",
+    "event routing"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "txcl",
+        "aliases": ["txcl", "TXCL"],
+        "extensions": [".txcl"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/txcl.svg",
+          "dark": "./icons/txcl.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "txcl",
+        "scopeName": "source.txcl",
+        "path": "./syntaxes/txcl.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "txcl",
+        "path": "./snippets/txcl.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+# _sys/boot scope 25 — path-based router (/stripe → stripe).
+#
+# Routes /stripe and /stripe/* to the stripe stack (verify a signed
+# webhook, then call the Stripe API back to enrich it). See
+# route-default.txcl for why this is EMIT, at scope 25, and guarded on
+# `@route.to == ""`.
+#
+# @ is sugar for ._txc.
+WHEN @route.to == "" && @src == "http" && @web.req.url.path =~ /^\/stripe(\/.*)?$/
+  EMIT @route.tenant = "default",
+       @route.stack = "stripe",
+       @route.to = "stripe/0"

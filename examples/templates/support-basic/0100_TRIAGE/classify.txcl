@@ -1,0 +1,5 @@
+# Triage stage: forward the message to the CLASSIFY operation.
+# The classifier returns `category` + `urgency`, deep-merged into the
+# envelope before scope 200 runs.
+WHEN ._txc.web.req.url.path =~ /^\/support(\/|$)/
+EXEC "op://CLASSIFY"

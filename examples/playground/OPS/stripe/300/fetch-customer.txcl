@@ -1,0 +1,23 @@
+# OPS/stripe/300 — enrich: call the Stripe API for the full customer.
+#
+# Reached only for verified webhooks (scope 200 halts the rest). Stripe
+# webhooks ship IDs, not objects, so we call back to fetch the
+# customer. STRIPE_API_KEY is substituted into the outbound
+# Authorization header at dispatch — it appears in this rule only as a
+# NAME, never as a value, and never in the trace.
+#
+# We pre-SET customer_id from the raw (decoded) event body so the op
+# target can read it from the forwarded envelope. The op target is the
+# local stripe-mock in dev (see txco.yaml's `operations:` map); point
+# STRIPE_GET_CUSTOMER at https://api.stripe.com/v1/customers in prod.
+#
+# The mock's response ({"customer": {...}}) deep-merges into the
+# envelope; with no further scope the web inlet returns the enriched
+# envelope as the 200 response (Stripe ignores the body — any 2xx acks
+# the webhook).
+#
+# @ is sugar for ._txc.
+SET .customer_id = &get(&json(&b64decode(@web.req.body)), "data.object.customer")
+WITH secrets.headers.authorization.secret = "STRIPE_API_KEY",
+     secrets.headers.authorization.format = "Bearer {}"
+  EXEC "op://STRIPE_GET_CUSTOMER"

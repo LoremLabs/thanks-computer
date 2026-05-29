@@ -1,0 +1,540 @@
+package cli
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
+	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
+	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
+	"github.com/loremlabs/thanks-computer/chassis/cli/client"
+	"github.com/loremlabs/thanks-computer/chassis/cli/state"
+)
+
+// reorderArgs moves all non-flag tokens to the end of the arg list so
+// Go's flag.Parse — which stops at the first positional — accepts
+// `txco activate <stack> --version N` the same as
+// `txco activate --version N <stack>`.
+//
+// Heuristic: a token is a flag if it starts with "-" (covers both
+// "--version" and short forms). A flag value that follows a flag without
+// `=` is also detected via the `flagsTakingValue` set so we don't pull
+// it forward as a positional.
+func reorderArgs(args []string, flagsTakingValue map[string]bool) []string {
+	out := make([]string, 0, len(args))
+	tail := make([]string, 0, len(args))
+	skipValue := false
+	for _, a := range args {
+		if skipValue {
+			out = append(out, a)
+			skipValue = false
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			out = append(out, a)
+			// `--flag=value` carries its own value; `--flag value` needs the
+			// next token to follow it.
+			if !strings.Contains(a, "=") {
+				key := strings.TrimLeft(a, "-")
+				if flagsTakingValue[key] {
+					skipValue = true
+				}
+			}
+			continue
+		}
+		tail = append(tail, a)
+	}
+	return append(out, tail...)
+}
+
+// stackVerbFlagsWithValues is the value-taking flag set shared by
+// pull / push / versions. Used by reorderArgs to allow flags after
+// positional <stack> / [<dir>].
+var stackVerbFlagsWithValues = map[string]bool{
+	"target": true, "addr": true, "user": true, "pass": true,
+	"profile": true, "tenant": true, "version": true,
+}
+
+// runPull: `txco pull <stack> [--version N] [--force] [<dir>]`
+//
+// Materialises the active (or specified) version's files under
+// <dir>/OPS/<stack>/... and writes <dir>/.txco/<stack>.state.json so
+// subsequent pushes know which version to parent off.
+func runPull(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "target name from txco.yaml")
+	addr := fs.String("addr", "", "chassis admin endpoint")
+	user := fs.String("user", "", "basic auth user")
+	pass := fs.String("pass", "", "basic auth password")
+	profile := fs.String("profile", "", fmt.Sprintf("signing profile (defaults to TXCO_PROFILE, then %s/active)", auth.HomePathPretty()))
+	tenant := fs.String("tenant", "", "tenant slug")
+	versionFlag := fs.Int64("version", 0, "version_number to pull (default: active)")
+	force := fs.Bool("force", false, "overwrite local files even if a dirty workspace is detected")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco pull [flags] <stack> [<dir>]
+
+Pull a stack's active (or specified) version into the local workspace.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(reorderArgs(args, stackVerbFlagsWithValues)); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "pull: missing <stack> argument")
+		return 2
+	}
+	stack := fs.Arg(0)
+	dir, err := resolveDir(fs.Arg(1))
+	if err != nil {
+		fmt.Fprintf(stderr, "pull: resolve dir: %v\n", err)
+		return 1
+	}
+
+	clientTarget := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
+	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	c := client.New(clientTarget)
+
+	ctx := context.Background()
+	versionNumber := *versionFlag
+	if versionNumber == 0 {
+		st, err := c.GetStack(ctx, stack)
+		if err != nil {
+			fmt.Fprintf(stderr, "pull: lookup stack %q: %v\n", stack, err)
+			return 1
+		}
+		if st.ActiveVersion == nil {
+			fmt.Fprintf(stderr, "pull: stack %q has no active version; specify --version N\n", stack)
+			return 1
+		}
+		versionNumber = *st.ActiveVersion
+	}
+
+	vd, err := c.GetVersion(ctx, stack, versionNumber, true)
+	if err != nil {
+		fmt.Fprintf(stderr, "pull: get version %d: %v\n", versionNumber, err)
+		return 1
+	}
+
+	stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(stack))
+	if !*force {
+		// Manifest-aware dirty check: if local content matches the
+		// state file's recorded manifest_hash, the workspace is clean
+		// relative to the last pull (or push) and a pull is safe.
+		// When state is missing or local diverges, fall back to the
+		// "any local file is dirty" behavior — protects in-flight
+		// edits the user hasn't committed back to the chassis yet.
+		saved, _ := state.Load(dir, stack)
+		clean, err := localStackClean(stackDir, saved)
+		if err != nil {
+			fmt.Fprintf(stderr, "pull: check workspace %s: %v\n", stackDir, err)
+			return 1
+		}
+		if !clean {
+			if saved != nil && saved.ManifestHash != "" {
+				fmt.Fprintf(stderr,
+					"pull: workspace %s has uncommitted changes since v%d pull (manifest mismatch); rerun with --force or run `txco diff` to inspect\n",
+					stackDir, saved.VersionNumber)
+			} else if dirty, why := stackDirty(stackDir); dirty {
+				fmt.Fprintf(stderr,
+					"pull: workspace %s has %s and no prior pull recorded; rerun with --force to overwrite\n",
+					stackDir, why)
+			} else {
+				fmt.Fprintf(stderr,
+					"pull: workspace %s flagged dirty unexpectedly; rerun with --force\n",
+					stackDir)
+			}
+			return 1
+		}
+	}
+	// Wipe existing on-disk files for this stack and re-materialise.
+	if err := os.RemoveAll(stackDir); err != nil {
+		fmt.Fprintf(stderr, "pull: clear %s: %v\n", stackDir, err)
+		return 1
+	}
+	for _, f := range vd.Files {
+		full := filepath.Join(stackDir, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			fmt.Fprintf(stderr, "pull: mkdir %s: %v\n", filepath.Dir(full), err)
+			return 1
+		}
+		if err := os.WriteFile(full, []byte(f.Content), 0o644); err != nil {
+			fmt.Fprintf(stderr, "pull: write %s: %v\n", full, err)
+			return 1
+		}
+	}
+	if err := state.Save(dir, stack, state.State{
+		VersionNumber:       versionNumber,
+		ParentVersionNumber: versionNumber,
+		ManifestHash:        vd.ManifestHash,
+	}); err != nil {
+		fmt.Fprintf(stderr, "pull: save state: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "pulled %s v%d → %s (%d files)\n", stack, versionNumber, stackDir, len(vd.Files))
+	return 0
+}
+
+// stackDirty reports whether the local stack directory has files not
+// recorded in state. v1 heuristic: any file under stackDir without a
+// fresh state.json is considered dirty. Returns ("there are files", true)
+// or ("", false).
+func stackDirty(stackDir string) (bool, string) {
+	if _, err := os.Stat(stackDir); err != nil {
+		return false, ""
+	}
+	count := 0
+	_ = filepath.WalkDir(stackDir, func(_ string, _ os.DirEntry, _ error) error {
+		count++
+		return nil
+	})
+	if count > 1 { // 1 = the stackDir entry itself
+		return true, fmt.Sprintf("%d existing entries", count-1)
+	}
+	return false, ""
+}
+
+// localStackClean reports whether the local stack directory's content
+// matches the saved state's manifest_hash. Empty dirs and missing state
+// both count as "clean" — the caller decides whether to refuse based
+// on whether the user has indicated a fresh-start with --force.
+//
+// Pre-condition rules:
+//   - stackDir missing → clean (nothing to overwrite).
+//   - saved == nil OR saved.ManifestHash == "" → fall back to stackDirty:
+//     if any files exist locally we can't prove they match the chassis,
+//     so refuse.
+//   - saved set → compute local manifest_hash; clean iff hashes match.
+func localStackClean(stackDir string, saved *state.State) (bool, error) {
+	if _, err := os.Stat(stackDir); os.IsNotExist(err) {
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+	if saved == nil || saved.ManifestHash == "" {
+		// No baseline → can't compute relative cleanliness.
+		dirty, _ := stackDirty(stackDir)
+		return !dirty, nil
+	}
+	files, err := loadLocalStackFiles(stackDir)
+	if err != nil {
+		return false, err
+	}
+	return localManifestHash(files) == saved.ManifestHash, nil
+}
+
+// loadLocalStackFiles walks stackDir and returns the file set in the
+// same shape opsToFiles emits: <scope>/<name>.txcl and the two
+// well-known mock-*.json filenames. Anything else is skipped, matching
+// the chassis-side path whitelist (validateStackFilePath). Paths are
+// stackDir-relative with forward slashes so they round-trip through
+// the same manifest-hashing logic the server uses.
+func loadLocalStackFiles(stackDir string) ([]client.StackFile, error) {
+	var out []client.StackFile
+	err := filepath.WalkDir(stackDir, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(stackDir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		base := filepath.Base(rel)
+		switch {
+		case strings.HasSuffix(base, ".txcl"):
+		case base == "mock-request.json" || base == "mock-response.json":
+		default:
+			return nil
+		}
+		content, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out = append(out, client.StackFile{Path: rel, Content: string(content)})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// runPush: `txco push <stack> [--activate] [<dir>]`
+//
+// Walks <dir>/OPS/<stack>/..., creates a draft (cloning from the
+// active version), uploads the file set, and optionally activates.
+func runPush(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("push", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "target name from txco.yaml")
+	addr := fs.String("addr", "", "chassis admin endpoint")
+	user := fs.String("user", "", "basic auth user")
+	pass := fs.String("pass", "", "basic auth password")
+	profile := fs.String("profile", "", "signing profile")
+	tenant := fs.String("tenant", "", "tenant slug")
+	activate := fs.Bool("activate", false, "activate the new draft immediately (push --activate is what `txco apply` does internally)")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco push [flags] <stack> [<dir>]
+
+Create a draft version of <stack> from local OPS/<stack>/... and upload
+its files. Without --activate the draft is held back for review.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(reorderArgs(args, stackVerbFlagsWithValues)); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "push: missing <stack> argument")
+		return 2
+	}
+	stack := fs.Arg(0)
+	dir, err := resolveDir(fs.Arg(1))
+	if err != nil {
+		fmt.Fprintf(stderr, "push: resolve dir: %v\n", err)
+		return 1
+	}
+
+	stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(stack))
+	files, err := collectStackFiles(stackDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "push: walk %s: %v\n", stackDir, err)
+		return 1
+	}
+	if len(files) == 0 {
+		fmt.Fprintf(stderr, "push: no files under %s\n", stackDir)
+		return 1
+	}
+
+	clientTarget := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
+	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	c := client.New(clientTarget)
+
+	ctx := context.Background()
+	versionNumber, err := c.CreateDraft(ctx, stack, "active")
+	if err != nil {
+		fmt.Fprintf(stderr, "push: create draft: %v\n", err)
+		return 1
+	}
+	if _, err := c.PutDraftFiles(ctx, stack, versionNumber, files); err != nil {
+		fmt.Fprintf(stderr, "push: upload files for v%d: %v\n", versionNumber, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "pushed %s draft v%d (%d files)\n", stack, versionNumber, len(files))
+
+	if *activate {
+		act, err := c.Activate(ctx, stack, versionNumber)
+		if err != nil {
+			fmt.Fprintf(stderr, "push: activate v%d: %v\n", versionNumber, err)
+			return 1
+		}
+		if act.PriorVersionNumber != nil {
+			fmt.Fprintf(stdout, "activated %s v%d (was v%d)\n", stack, act.VersionNumber, *act.PriorVersionNumber)
+		} else {
+			fmt.Fprintf(stdout, "activated %s v%d\n", stack, act.VersionNumber)
+		}
+	}
+	return 0
+}
+
+// collectStackFiles walks stackDir and returns one StackFile per file.
+// Path is stored relative to stackDir, slash-separated regardless of
+// host OS. Symlinks and dotfiles are skipped.
+func collectStackFiles(stackDir string) ([]client.StackFile, error) {
+	var out []client.StackFile
+	err := filepath.WalkDir(stackDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if strings.HasPrefix(filepath.Base(p), ".") && p != stackDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(filepath.Base(p), ".") {
+			return nil
+		}
+		rel, err := filepath.Rel(stackDir, p)
+		if err != nil {
+			return err
+		}
+		content, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out = append(out, client.StackFile{
+			Path:    filepath.ToSlash(rel),
+			Content: string(content),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// activateFlagsWithValues lists flags that take a value, so the
+// reorderArgs helper doesn't accidentally pull a flag value forward
+// as the positional <stack>.
+var activateFlagsWithValues = map[string]bool{
+	"target": true, "addr": true, "user": true, "pass": true,
+	"profile": true, "tenant": true, "version": true,
+}
+
+// runActivate: `txco activate <stack> [--version N]`
+//
+// Without --version, picks the most recent draft (or refuses if none).
+// With --version, activates that exact version_number. Flags may
+// appear before or after <stack> — see reorderArgs.
+func runActivate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("activate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "target name from txco.yaml")
+	addr := fs.String("addr", "", "chassis admin endpoint")
+	user := fs.String("user", "", "basic auth user")
+	pass := fs.String("pass", "", "basic auth password")
+	profile := fs.String("profile", "", "signing profile")
+	tenant := fs.String("tenant", "", "tenant slug")
+	versionFlag := fs.Int64("version", 0, "version_number to activate (default: most recent draft)")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco activate [flags] <stack>
+
+Flip the active version of <stack>. Without --version, activates the
+most recent draft (errors if none exists).
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(reorderArgs(args, activateFlagsWithValues)); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "activate: missing <stack> argument")
+		return 2
+	}
+	stack := fs.Arg(0)
+
+	clientTarget := resolveTarget("", *target, *addr, *user, *pass, *profile)
+	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	c := client.New(clientTarget)
+
+	ctx := context.Background()
+	versionNumber := *versionFlag
+	if versionNumber == 0 {
+		versions, err := c.ListVersions(ctx, stack)
+		if err != nil {
+			fmt.Fprintf(stderr, "activate: list versions: %v\n", err)
+			return 1
+		}
+		for _, v := range versions {
+			if v.Status == "draft" {
+				versionNumber = v.VersionNumber
+				break
+			}
+		}
+		if versionNumber == 0 {
+			fmt.Fprintf(stderr, "activate: no draft to activate; pass --version N\n")
+			return 1
+		}
+	}
+
+	act, err := c.Activate(ctx, stack, versionNumber)
+	if err != nil {
+		fmt.Fprintf(stderr, "activate: %v\n", err)
+		return 1
+	}
+	if act.PriorVersionNumber != nil {
+		fmt.Fprintf(stdout, "activated %s v%d (was v%d)\n", stack, act.VersionNumber, *act.PriorVersionNumber)
+	} else {
+		fmt.Fprintf(stdout, "activated %s v%d\n", stack, act.VersionNumber)
+	}
+	return 0
+}
+
+// runVersions: `txco versions <stack>` — list versions reverse chronologically.
+func runVersions(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("versions", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "target name from txco.yaml")
+	addr := fs.String("addr", "", "chassis admin endpoint")
+	user := fs.String("user", "", "basic auth user")
+	pass := fs.String("pass", "", "basic auth password")
+	profile := fs.String("profile", "", "signing profile")
+	tenant := fs.String("tenant", "", "tenant slug")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco versions [flags] <stack>
+
+List versions for a stack, newest first. `+"`★`"+` marks the active version.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(reorderArgs(args, stackVerbFlagsWithValues)); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "versions: missing <stack> argument")
+		return 2
+	}
+	stack := fs.Arg(0)
+
+	clientTarget := resolveTarget("", *target, *addr, *user, *pass, *profile)
+	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	c := client.New(clientTarget)
+
+	versions, err := c.ListVersions(context.Background(), stack)
+	if err != nil {
+		fmt.Fprintf(stderr, "versions: %v\n", err)
+		return 1
+	}
+	for _, v := range versions {
+		marker := "  "
+		if v.IsActive {
+			marker = "★ "
+		}
+		fmt.Fprintf(stdout, "%sv%-4d %-12s %s by %s\n", marker, v.VersionNumber, v.Status, v.CreatedAt, v.CreatedBy)
+	}
+	return 0
+}
+
+// quietWalkBundle exists so `txco diff` and `txco push` can share the
+// "walk OPS/" parser without duplicating the bundle.Walk import-path
+// dance. Returns the parsed Op list or an error.
+//
+// (Currently unused — push reads files directly so the chassis can
+// drive the path-to-(scope,name) mapping. Kept here because it'll be
+// needed when push grows op:// substitution.)
+//
+//nolint:unused
+func quietWalkBundle(dir string) ([]bundle.Op, error) {
+	return bundle.Walk(dir)
+}

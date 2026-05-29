@@ -1,0 +1,16 @@
+# Accept any RCPT TO that starts with `support@` for this tenant.
+# Everything else falls through and default-denies with 550 at the
+# inlet — the chassis's no-rule-accepted-this-recipient behavior.
+#
+# Per-recipient verdicts are written under `_txc.lmtp.res.recipients[i]`
+# in the same order the RCPT TO commands arrived. The Phase 0 broadcast
+# form (`@lmtp.res.code = 250`) would accept ALL recipients, including
+# any extras the sender CC'd or BCC'd — usually not what you want.
+#
+# EMIT (not SET): this rule has no EXEC, so a SET would only shape a
+# (nonexistent) op's input view and be dropped before the merge. EMIT
+# overlays the verdict onto the envelope so the inlet — and later
+# scopes — actually see it.
+WHEN @lmtp.rcpt.0 =~ /^support@/
+  EMIT @lmtp.res.recipients.0.code = 250,
+       @lmtp.res.recipients.0.msg  = "queued for triage"

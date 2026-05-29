@@ -1,0 +1,31 @@
+# _sys/boot scope 75 — path-gated auto-route hook.
+#
+# Path-gated: only HTTP requests under `/mcp` route to the
+# mcp-server stack. Everything else (favicon, health probes,
+# accidental hits to `/`) falls through to scope 1000's 404.
+# Keeps the surface area small and makes the server's "home"
+# obvious to MCP clients — they configure
+# `http://host/mcp` as their endpoint URL.
+#
+# `=~` is the txcl regex operator. The pattern matches:
+#   /mcp        — base
+#   /mcp/       — base with trailing slash
+#   /mcp/foo    — any sub-path
+# but NOT `/mcpfoo`, which keeps the namespace clean.
+#
+# This example is a single-stack local-dev workspace, so
+# detect-tenant@0 doesn't find a hostname binding for us. Scope
+# 100's txco://route promotes whatever proposal we leave at
+# `_txc.route.*`.
+#
+# Production note: delete this file once you have real hostname
+# bindings; the path-prefix gating belongs in the per-tenant
+# routing, not the system bootstrap.
+WHEN @route.to == ""
+  && @src == "http"
+  && @web.req.url.path =~ /^\/mcp(\/.*)?$/
+  EMIT @route.tenant = "default",
+       @route.stack = "mcp-server",
+       @route.to = "mcp-server/0",
+       @route.ingress = "auto-route",
+       @route.hostname_verified = true

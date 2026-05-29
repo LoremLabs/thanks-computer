@@ -1,0 +1,29 @@
+target: dev
+
+apps:
+  stripe-mock:
+    path: ./APPS/stripe-mock
+    start: node server.js
+    health: http://localhost:4242/health
+
+operations:
+  # The outbound "fetch the customer" call. In dev it points at the
+  # local stripe-mock; the rule's WITH clause substitutes STRIPE_API_KEY
+  # into the Authorization header at dispatch.
+  STRIPE_GET_CUSTOMER:
+    url: http://localhost:4242/v1/customers
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow
+
+  # Sketch of a prod target — point the op at the real Stripe API and
+  # store real secrets on the chassis. Uncomment + adapt when deploying.
+  #
+  # prod:
+  #   chassis: https://your-chassis.example.com:8081
+  #   mock: deny
+  #   operations:
+  #     STRIPE_GET_CUSTOMER:
+  #       url: https://api.stripe.com/v1/customers

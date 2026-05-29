@@ -1,0 +1,7 @@
+# stream-demo scope 500 — flush a progress line for step 2.
+#
+# op://WORLD has completed. Flush another chunk. Still non-terminal
+# (scope 1000 follows), so this streams too.
+#
+# @ is sugar for ._txc.
+EMIT @web.res.body = b64"step 2 done (world)\n"
