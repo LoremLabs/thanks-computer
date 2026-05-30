@@ -1,4 +1,4 @@
-package template
+package source
 
 import (
 	"archive/tar"
@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -28,7 +27,7 @@ func SetCodeloadBaseURL(u string) string {
 }
 
 // maxFileBytes guards against runaway tar entries. 10 MB per file is plenty
-// for resonator.txcl + mock JSON; templates that need more belong in their
+// for resonator.txcl + mock JSON; sources that need more belong in their
 // own repo with custom tooling.
 const maxFileBytes = 10 * 1024 * 1024
 
@@ -169,7 +168,7 @@ func (g *githubSource) fetchRef(ctx context.Context, ref, destDir string) (int, 
 // destDir. Returns the count of files written.
 //
 // Safety:
-//   - rejects entries with `..` segments (zip-slip)
+//   - rejects entries with `..` segments (zip-slip) via safeRelPath
 //   - skips symlinks, device files, hardlinks
 //   - caps individual file size at maxFileBytes
 //   - caps cumulative size at maxTotalBytes
@@ -194,12 +193,9 @@ func extractTar(tr *tar.Reader, subpath, destDir string) (int, error) {
 			continue
 		}
 
-		clean := path.Clean(hdr.Name)
-		if clean == "." || clean == "/" {
-			continue
-		}
-		if strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") || clean == ".." {
-			// hostile path; skip
+		clean, ok := safeRelPath(hdr.Name)
+		if !ok {
+			// "."/"/"/".." or hostile path; skip
 			continue
 		}
 
@@ -228,7 +224,7 @@ func extractTar(tr *tar.Reader, subpath, destDir string) (int, error) {
 
 		// Only touch regular files and dirs. Symlinks would be the obvious
 		// extension but they raise their own zip-slip-style concerns;
-		// templates that need them can wait.
+		// sources that need them can wait.
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			out := filepath.Join(destDir, filepath.FromSlash(rel))
@@ -237,7 +233,7 @@ func extractTar(tr *tar.Reader, subpath, destDir string) (int, error) {
 			}
 		case tar.TypeReg:
 			if hdr.Size > maxFileBytes {
-				return written, fmt.Errorf("template file %s exceeds %d-byte limit", rel, maxFileBytes)
+				return written, fmt.Errorf("source file %s exceeds %d-byte limit", rel, maxFileBytes)
 			}
 			out := filepath.Join(destDir, filepath.FromSlash(rel))
 			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
@@ -257,7 +253,7 @@ func extractTar(tr *tar.Reader, subpath, destDir string) (int, error) {
 			}
 			totalBytes += n
 			if totalBytes > maxTotalBytes {
-				return written, fmt.Errorf("template archive exceeds %d-byte total limit", maxTotalBytes)
+				return written, fmt.Errorf("source archive exceeds %d-byte total limit", maxTotalBytes)
 			}
 			written++
 		default:

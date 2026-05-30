@@ -1,0 +1,5 @@
+# Notify stage: forward the classified envelope to the NOTIFY operation.
+# NOTIFY is an EXTERNAL requirement (no colocated compute). The downstream
+# service reads `urgency` and decides whether to page or file a routine
+# notification.
+EXEC "op://NOTIFY"

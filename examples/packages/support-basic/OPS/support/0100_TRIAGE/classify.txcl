@@ -1,0 +1,6 @@
+# Triage stage: classify the message. op://classify is a BUNDLED compute —
+# the colocated classify.js ships with this package and is built to wasm at
+# `txco apply` time. The classifier merges `category` + `urgency` into the
+# envelope before scope 200 runs.
+WHEN ._txc.web.req.url.path =~ /^\/support(\/|$)/
+EXEC "op://classify"

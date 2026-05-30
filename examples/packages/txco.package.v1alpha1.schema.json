@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thanks.computer/schemas/txco.package.v1alpha1.schema.json",
+  "title": "TxCo Package Manifest (v1alpha1)",
+  "description": "Schema for txco.package.yaml. EDITOR TOOLING / DOCUMENTATION ONLY — this schema is NOT loaded by the txco binary. The Go struct + code validation in the Package System is authoritative (it performs semantic checks this schema cannot express, e.g. that every operations.required name appears as an op:// ref with no colocated compute). See docs/txco-oci-packages.md §8.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "name", "version"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "thanks.computer/v1alpha1",
+      "description": "Manifest API version group (thanks.computer is the project domain)."
+    },
+    "kind": {
+      "type": "string",
+      "const": "Package"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(/[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$",
+      "description": "Package IDENTITY (name + version only). The publisher namespace, registry, and any 'publisher' attribution are PROVENANCE derived from the resolved ref and recorded in the lockfile — never self-asserted here, so a copied package cannot lie about its origin. The name may be hierarchical (e.g. customer-support/email) but does NOT include the publisher namespace."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "description": "Semver. Maps to an OCI :tag."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-line human description."
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["department", "stack-template", "op-pack"],
+          "description": "v1 package kinds. extension/policy-pack/inlet-pack are deferred."
+        },
+        "install": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "defaultMode": {
+              "type": "string",
+              "enum": ["as-stack", "into-stack", "vendor-only"]
+            },
+            "suggestedStack": {
+              "type": "string",
+              "description": "Default name for --as. The CLI still requires an explicit --as when the target is ambiguous."
+            }
+          }
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "txco": {
+          "type": "string",
+          "description": "Semver constraint checked against the running txco build version. Advisory when the build version is empty."
+        }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "description": "The op:// resolution contract. See docs/txco-oci-packages.md §4.",
+      "additionalProperties": false,
+      "properties": {
+        "bundled": {
+          "type": "array",
+          "description": "Computes that travel WITH the package as colocated <name>.js/.ts. Built at apply time. Listed here for validate/inspect only.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "path"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Matches op://NAME and a colocated source file."
+              },
+              "path": {
+                "type": "string",
+                "pattern": "\\.(js|ts)$",
+                "description": "Path within the package tree to the colocated compute source."
+              },
+              "lang": {
+                "type": "string",
+                "enum": ["js", "ts"]
+              }
+            }
+          }
+        },
+        "required": {
+          "type": "array",
+          "description": "External op endpoints the installer must wire into txco.yaml operations:. Have no colocated compute.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Matches op://NAME used by a rule with no colocated compute."
+              },
+              "kind": {
+                "type": "string",
+                "enum": ["http", "mcp"],
+                "description": "How the op is invoked. Advisory."
+              },
+              "description": {
+                "type": "string"
+              },
+              "example": {
+                "type": "string",
+                "description": "Example URL used ONLY as a commented stub in txco.yaml; never wired as a live default."
+              }
+            }
+          }
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "description": "Advisory toolchain requirements for building bundled computes at apply time. Checked + warned, not enforced. Moot once prebuilt-wasm packaging lands.",
+      "additionalProperties": false,
+      "properties": {
+        "requires": {
+          "type": "array",
+          "description": "Toolchain constraints, e.g. 'javy >= 1.0'.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "description": "ADVISORY ONLY in v1 — nothing in the chassis grants or enforces these. Shown at install for human review.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "inlets": {
+      "type": "array",
+      "description": "Suggested ingress. Surfaced at install; NOT auto-bound in v1.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Ingress channel type, e.g. email."
+          },
+          "suggestedLocalPart": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "description": "Reserved for Phase 4 — designed now, NOT resolved in v1.",
+      "additionalProperties": false,
+      "properties": {
+        "packages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref"],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "description": "A package ref, e.g. moderation/basic@^1."
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["as-stack", "into-stack", "vendor-only"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "homepage": { "type": "string" },
+        "source": { "type": "string" },
+        "license": { "type": "string" }
+      }
+    }
+  }
+}

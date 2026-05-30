@@ -1,0 +1,50 @@
+apiVersion: thanks.computer/v1alpha1
+kind: Package
+
+name: support-basic
+version: 0.1.0
+summary: Minimal customer-support triage pipeline (classify → notify), with audit.
+
+package:
+  kind: department
+  install:
+    defaultMode: as-stack
+    suggestedStack: support
+
+compatibility:
+  txco: ">=0.3.0"
+
+# How this package's op:// references resolve (see docs/txco-oci-packages.md §4):
+operations:
+  # Bundled: a colocated compute that travels WITH the package. The rule
+  # OPS/support/0100_TRIAGE/classify.txcl references op://classify, and the
+  # sibling classify.js is built to wasm at `txco apply` time.
+  bundled:
+    - name: classify
+      path: OPS/support/0100_TRIAGE/classify.js
+      lang: js
+  # Required: external endpoints the installer must wire into txco.yaml.
+  # `txco install` prints these as a stub for you to paste.
+  required:
+    - name: AUDIT
+      kind: http
+      description: Audit-log the inbound request (POST JSON).
+      example: https://audit.example.com/op
+    - name: NOTIFY
+      kind: http
+      description: Notify downstream of the classified ticket (POST JSON).
+      example: https://notify.example.com/op
+
+# Advisory only in v1 — nothing enforces these.
+capabilities:
+  - http.fetch
+
+inlets:
+  - type: email
+    suggestedLocalPart: support
+    description: Inbound support email mapped into a TxCo request.
+
+metadata:
+  homepage: https://thanks.computer/packages/support-basic
+  source: https://github.com/loremlabs/txco-packages
+  license: Apache-2.0

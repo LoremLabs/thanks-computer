@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
-	"github.com/loremlabs/thanks-computer/chassis/cli/template"
+	"github.com/loremlabs/thanks-computer/chassis/cli/source"
 )
 
 // stubTxcl is the resonator.txcl scaffold written by `txco init` when no
@@ -85,7 +85,7 @@ Flags:
 
 	if *from != "" {
 		fmt.Fprintf(stdout, "fetching %s ...\n", *from)
-		n, err := template.Fetch(context.Background(), *from, stackDir)
+		n, err := source.Fetch(context.Background(), *from, stackDir)
 		if err != nil {
 			fmt.Fprintf(stderr, "init: fetch %s: %v\n", *from, err)
 			return 1

@@ -1,0 +1,211 @@
+package cli
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/pflag"
+
+	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
+	"github.com/loremlabs/thanks-computer/chassis/cli/manifest"
+	"github.com/loremlabs/thanks-computer/chassis/opname"
+)
+
+// runPackage routes `txco package <subcommand> …`. In-package switch
+// (snapshot-style) because `package` is a Go keyword and cannot name a Go
+// package.
+func runPackage(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printPackageUsage(stdout)
+		return 0
+	}
+	switch args[0] {
+	case "init":
+		return runPackageInit(args[1:], stdout, stderr)
+	case "validate":
+		return runPackageValidate(args[1:], stdout, stderr)
+	case "help", "-h", "--help":
+		printPackageUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "package: unknown subcommand %q\n\n", args[0])
+		printPackageUsage(stderr)
+		return 2
+	}
+}
+
+func printPackageUsage(w io.Writer) {
+	banner.PrintLogo(w)
+	fmt.Fprint(w, `
+Usage: txco package <command> [args]
+
+Author and check TxCo packages (a txco.package.yaml + an OPS/-shaped tree).
+
+Commands:
+  init <name> [<dir>]    Scaffold txco.package.yaml + an OPS/<name>/ skeleton
+  validate [<dir>]       Validate a package's manifest + tree (dir defaults to ".")
+`)
+}
+
+// runPackageValidate parses + semantically validates a local package.
+func runPackageValidate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("package validate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, "\nUsage: txco package validate [<dir>]\n\nValidate the package rooted at <dir> (default \".\").\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	dir := fs.Arg(0)
+	if dir == "" {
+		dir = "."
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "package validate: %v\n", err)
+		return 1
+	}
+	m, err := manifest.ParseFile(filepath.Join(abs, manifest.FileName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "package validate: no %s at %s\n", manifest.FileName, abs)
+		} else {
+			fmt.Fprintf(stderr, "package validate: %v\n", err)
+		}
+		return 1
+	}
+	probs := manifest.Validate(m, os.DirFS(abs), ".")
+	if len(probs) > 0 {
+		fmt.Fprintf(stderr, "%s: %d problem%s\n", nameOr(m.Name, "package"), len(probs), pluralS(len(probs)))
+		for _, p := range probs {
+			fmt.Fprintf(stderr, "  %v\n", p)
+		}
+		return 1
+	}
+	fmt.Fprintf(stdout, "ok: %s %s validates\n", m.Name, m.Version)
+	return 0
+}
+
+// runPackageInit scaffolds a minimal package skeleton.
+//
+//	txco package init <name> [<dir>]
+func runPackageInit(args []string, stdout, stderr io.Writer) int {
+	fs := pflag.NewFlagSet("package init", pflag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco package init <name> [<dir>]
+
+Scaffold a txco.package.yaml plus an OPS/<name>/ skeleton under <dir>
+(default "."). <name> is the package name and the default exported stack.
+`)
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fs.Usage()
+		return 2
+	}
+	name := strings.Trim(fs.Arg(0), "/")
+	if err := opname.ValidStack(name); err != nil {
+		fmt.Fprintf(stderr, "package init: invalid name %q: %v\n", name, err)
+		return 1
+	}
+	dir := fs.Arg(1)
+	if dir == "" {
+		dir = "."
+	}
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "package init: %v\n", err)
+		return 1
+	}
+
+	manifestPath := filepath.Join(root, manifest.FileName)
+	if _, err := os.Stat(manifestPath); err == nil {
+		fmt.Fprintf(stderr, "package init: %s already exists; not overwriting\n", manifestPath)
+		return 1
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		fmt.Fprintf(stderr, "package init: %v\n", err)
+		return 1
+	}
+
+	// Stub rule under OPS/<name>/0100/.
+	scopeDir := filepath.Join(root, "OPS", name, "0100")
+	if err := ensureEmptyOrCreate(scopeDir); err != nil {
+		fmt.Fprintf(stderr, "package init: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, "resonator.txcl"), []byte(packageStubTxcl), 0o644); err != nil {
+		fmt.Fprintf(stderr, "package init: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(manifestPath, []byte(scaffoldManifest(name)), 0o644); err != nil {
+		fmt.Fprintf(stderr, "package init: %v\n", err)
+		return 1
+	}
+	readme := filepath.Join(root, "README.md")
+	if _, err := os.Stat(readme); os.IsNotExist(err) {
+		_ = os.WriteFile(readme, []byte(fmt.Sprintf("# %s\n\nA TxCo package.\n", name)), 0o644)
+	}
+
+	fmt.Fprintf(stdout, "scaffolded package %q in %s\n", name, root)
+	fmt.Fprintf(stdout, "  %s\n  OPS/%s/0100/resonator.txcl\n", manifest.FileName, name)
+	fmt.Fprintln(stdout, "edit the files, then `txco package validate` and `txco publish` (or share the dir).")
+	return 0
+}
+
+const packageStubTxcl = `# generated by txco package init — replace this with your rule logic.
+EMIT .hi = "hello"
+`
+
+func scaffoldManifest(name string) string {
+	return fmt.Sprintf(`apiVersion: %s
+kind: %s
+
+name: %s
+version: 0.1.0
+summary: TODO describe this package.
+
+package:
+  kind: department
+  install:
+    defaultMode: as-stack
+    suggestedStack: %s
+
+# operations: declares this package's op:// resolution contract.
+#   bundled:  computes that ship with the package (a colocated <name>.js next
+#             to the .txcl that references op://<name>)
+#   required: external endpoints the installer must wire into txco.yaml
+# operations:
+#   bundled:
+#     - name: classify
+#       path: OPS/%s/0100/classify.js
+#   required:
+#     - name: AUDIT
+#       kind: http
+#       example: https://audit.example.com/op
+
+# capabilities:        # advisory only — not enforced
+#   - http.fetch
+
+metadata:
+  license: Apache-2.0
+`, manifest.APIVersion, manifest.Kind, name, name, name)
+}
+
+func nameOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}

@@ -1,0 +1,30 @@
+# Sample workspace txco.yaml to pair with the support-basic package.
+#
+# After `txco install dir:.../support-basic --as support`, install prints a
+# stub for the package's REQUIRED operations (AUDIT, NOTIFY). Add them to your
+# workspace txco.yaml `operations:` block and point them at real services.
+# The BUNDLED `classify` compute ships with the package — no wiring needed; it
+# builds to wasm at `txco apply` time (requires `javy` on PATH).
+
+target: dev
+
+# Required operations declared by the package. Fill in real URLs.
+operations:
+  AUDIT:
+    url: https://audit.example.com/op
+  NOTIFY:
+    url: https://notify.example.com/op
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow
+
+  prod:
+    chassis: https://prod.example.com:8081
+    mock: deny
+    operations:
+      AUDIT:
+        url: https://audit.example.com/op
+      NOTIFY:
+        url: https://notify.example.com/op

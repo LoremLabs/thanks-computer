@@ -35,11 +35,25 @@ type workspaceConfig struct {
 	Operations map[string]operationConfig `yaml:"operations" json:"operations,omitempty"`
 	Targets    map[string]targetConfig    `yaml:"targets" json:"targets,omitempty"`
 
+	// Registry configures package-ref resolution (default registry + namespace
+	// for bare `name@ver` refs). PARSED in Phase 1 so a `registry:` block is
+	// valid; the resolver that consumes it (bare/namespaced ref → concrete OCI
+	// ref) lands with the oci:// source in Phase 2. See
+	// docs/txco-oci-packages.md §6 — config-driven default, no hardwired host.
+	Registry registryConfig `yaml:"registry" json:"registry,omitempty"`
+
 	// Legacy flat fields. When neither `target` nor any `targets:` block
 	// exists, these populate a synthesized "dev" target.
 	Addr string `yaml:"addr" json:"addr,omitempty"`
 	User string `yaml:"user" json:"user,omitempty"`
 	Pass string `yaml:"pass" json:"pass,omitempty"`
+}
+
+// registryConfig is the txco.yaml `registry:` block. Phase 1 only parses it.
+type registryConfig struct {
+	Default          string            `yaml:"default" json:"default,omitempty"`                   // e.g. registry.thanks.computer
+	DefaultNamespace string            `yaml:"defaultNamespace" json:"defaultNamespace,omitempty"` // e.g. txco
+	Aliases          map[string]string `yaml:"aliases" json:"aliases,omitempty"`
 }
 
 type appConfig struct {

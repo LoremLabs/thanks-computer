@@ -1,0 +1,4 @@
+# Setup stage, parallel rule 1: audit-log the incoming request via the
+# AUDIT operation. AUDIT is an EXTERNAL requirement — it has no colocated
+# compute, so the installer surfaces it as an op to wire into txco.yaml.
+EXEC "op://AUDIT"

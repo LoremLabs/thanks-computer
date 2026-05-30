@@ -1,4 +1,4 @@
-package template
+package source
 
 import (
 	"archive/tar"
@@ -161,9 +161,9 @@ func TestFetchSubpath(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"100/resonator.txcl":           `EXEC "http://stub/100"`,
-		"200/resonator.txcl":           `EXEC "http://stub/200"`,
-		"triage/100/resonator.txcl":    `EXEC "http://triage/100"`,
+		"100/resonator.txcl":        `EXEC "http://stub/100"`,
+		"200/resonator.txcl":        `EXEC "http://stub/200"`,
+		"triage/100/resonator.txcl": `EXEC "http://triage/100"`,
 	}
 	for rel, body := range want {
 		got, err := os.ReadFile(filepath.Join(dest, rel))

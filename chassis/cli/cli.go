@@ -90,6 +90,12 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return auth.Dispatch(rest, stdout, stderr), true
 	case "op":
 		return opcli.Dispatch(rest, stdout, stderr), true
+	case "install":
+		return runInstall(rest, stdout, stderr), true
+	case "inspect":
+		return runInspect(rest, stdout, stderr), true
+	case "package":
+		return runPackage(rest, stdout, stderr), true
 	case "mcp":
 		return runMcp(rest, stdout, stderr), true
 	case "config":
@@ -171,6 +177,9 @@ The thanks-computer chassis: event router + rule authoring CLI.
   %s   Spawn apps + chassis, watch for changes (add --apply for startup push)
   %s   Boot a chassis and open the txcl demo in your browser
   %s   Author + build sandboxed op:// nano-ops (init/build/run/test)
+  %s   Install a package into OPS/, then run apply (dir:/github:)
+  %s   Inspect a package without installing (dir:/github:)
+  %s   Author + validate TxCo packages (init/validate)
   %s   Render the execution trace for a request (use %s for the most recent)
   %s   Manage signing keys for the admin API
   %s   Talk to MCP-over-HTTP servers (use %s for discovery)
@@ -208,6 +217,9 @@ Use %s for per-command flags.
 		padCmd(cmd("dev")),
 		padCmd(cmd("demo")),
 		padCmd(cmd("op")+" <command>"),
+		padCmd(cmd("install")+" <source> --as <stack>"),
+		padCmd(cmd("inspect")+" <source>"),
+		padCmd(cmd("package")+" <command>"),
 		padCmd(cmd("trace")+" [<rid>]"), hint("`txco trace last`"),
 		padCmd(cmd("auth")+" <command>"),
 		padCmd(cmd("mcp")+" <command>"), hint("`txco mcp doctor`"),
