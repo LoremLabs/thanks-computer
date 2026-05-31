@@ -44,6 +44,7 @@ type Entry struct {
 	InstalledAs   string `yaml:"installedAs,omitempty"`   // where it was materialized
 	Mode          string `yaml:"mode"`                    // as-stack | vendor-only
 	ManifestHash  string `yaml:"manifestHash,omitempty"`  // localManifestHash of materialized files
+	SignedBy      string `yaml:"signedBy,omitempty"`      // trusted signer key id, when verified (Phase 5)
 	InstalledAt   string `yaml:"installedAt"`
 }
 

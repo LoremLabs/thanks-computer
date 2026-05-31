@@ -42,6 +42,11 @@ type workspaceConfig struct {
 	// docs/txco-oci-packages.md §6 — config-driven default, no hardwired host.
 	Registry registryConfig `yaml:"registry" json:"registry,omitempty"`
 
+	// Trust lists the public keys this workspace trusts for package signature
+	// verification (`txco install --require-signature`). No key is trusted by
+	// default — the blessed namespace is metadata, never runtime-special.
+	Trust trustConfig `yaml:"trust" json:"trust,omitempty"`
+
 	// Legacy flat fields. When neither `target` nor any `targets:` block
 	// exists, these populate a synthesized "dev" target.
 	Addr string `yaml:"addr" json:"addr,omitempty"`
@@ -54,6 +59,18 @@ type registryConfig struct {
 	Default          string            `yaml:"default" json:"default,omitempty"`                   // e.g. registry.thanks.computer
 	DefaultNamespace string            `yaml:"defaultNamespace" json:"defaultNamespace,omitempty"` // e.g. txco
 	Aliases          map[string]string `yaml:"aliases" json:"aliases,omitempty"`
+}
+
+// trustConfig is the txco.yaml `trust:` block — public keys trusted to sign
+// packages, optionally scoped to a registry host.
+type trustConfig struct {
+	Keys []trustKey `yaml:"keys" json:"keys,omitempty"`
+}
+
+type trustKey struct {
+	Name     string `yaml:"name" json:"name,omitempty"`
+	Pubkey   string `yaml:"pubkey" json:"pubkey,omitempty"`     // ssh-ed25519 line, .pub path, or base64 raw
+	Registry string `yaml:"registry" json:"registry,omitempty"` // optional host scope
 }
 
 type appConfig struct {

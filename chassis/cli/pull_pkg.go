@@ -21,10 +21,12 @@ import (
 func runPackagePull(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("package pull", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
+	requireSig := fs.Bool("require-signature", false, "fail unless the package is signed by a trusted key")
+	keyFlags := fs.StringArray("key", nil, "trusted public key (ssh-ed25519 line, .pub path, or base64); repeatable")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco package pull <ref>
+Usage: txco package pull <ref> [--require-signature] [--key <pubkey>]
 
 Fetch a package into .txco/vendor/<name>/<version>/ without installing it into
 OPS/. Use `+"`txco install`"+` to materialize a package into a stack.
@@ -64,6 +66,24 @@ OPS/. Use `+"`txco install`"+` to materialize a package into a stack.
 			fmt.Fprintf(stderr, "package pull: %v\n", err)
 		}
 		return 1
+	}
+
+	// Verify before writing to the vendor cache (OCI sources only; --require-
+	// signature forces a check that a non-OCI source fails).
+	if prov.Digest != "" || *requireSig {
+		trusted, err := loadTrustedKeys(root, *keyFlags, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "package pull: %v\n", err)
+			return 1
+		}
+		verdict, err := verifyPackageSignature(prov, trusted)
+		if err != nil {
+			fmt.Fprintf(stderr, "package pull: signature check: %v\n", err)
+			return 1
+		}
+		if !enforceSignaturePosture(verdict, *requireSig, stdout, stderr) {
+			return 1
+		}
 	}
 
 	dest := filepath.Join(root, ".txco", "vendor", m.Name, m.Version)

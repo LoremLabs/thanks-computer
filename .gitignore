@@ -7,6 +7,7 @@ chassis/data/repo/
 chassis/data/generator*/
 chassis/data/tmp/
 chassis/data/logs/
+chassis/data/secrets/
 
 # Example workspaces spin up a local chassis on `txco dev`; its runtime
 # data (SQLite DBs, kv, logs) must never be committed. The rules above are

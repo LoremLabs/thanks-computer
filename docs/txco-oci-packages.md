@@ -26,9 +26,10 @@ Consuming a package is part of the everyday workflow; authoring/publishing lives
 | `txco apply` | local `OPS/` → chassis (active) |
 | `txco package init <name>` | scaffold a new package |
 | `txco package validate [<dir>]` | validate a package's manifest + tree |
-| `txco package inspect <ref>` | show identity + exports, no install |
+| `txco package inspect <ref>` | show identity + exports (`--provenance` to check the signature) |
 | `txco package pull <ref>` | fetch into `.txco/vendor/`, no install |
-| `txco package publish --to <oci-ref>` | build + push to a registry |
+| `txco package publish --to <oci-ref>` | build + push to a registry (`--sign` to sign) |
+| `txco package key generate` | make an ed25519 package-signing keypair |
 | `txco package list` | list installed packages (alias: `txco packages`) |
 | `txco package upgrade <stack>… \| --all` | re-resolve + re-materialize when a ref's content changed |
 | `txco package remove <stack>` | delete `OPS/<stack>/` + drop its lockfile entry |
@@ -203,7 +204,51 @@ txco package publish --to oci://ghcr.io/you/sales:3.0.0 ./packages/sales
 Publish validates, packs the tree into a single-layer OCI artifact, pushes it, and prints
 the resolved digest. Tags are convenience; the digest is truth.
 
-## 11. OCI artifact format
+## 11. Signing and trust
+
+Signing lets a consumer prove **who** built a package, not just that the bytes are pinned.
+TxCo uses a self-contained **ed25519** scheme — no external tools, no sigstore/cosign
+dependency.
+
+```sh
+# Author: make a keypair once, then sign on publish.
+txco package key generate                       # → ~/.config/txco/keys/signing.ed25519 (+ .pub)
+txco package publish --to oci://ghcr.io/you/sales:3.0.0 --sign ./packages/sales
+# → published oci://ghcr.io/you/sales@sha256:…
+#   signed by SHA256:… (sha256-…​.sig)
+
+# Consumer: trust the author's public key, then require a signature.
+# txco.yaml:
+#   trust:
+#     keys:
+#       - name: acme
+#         pubkey: "ssh-ed25519 AAAA…"          # the line key generate printed
+txco install sales@3.0.0 --as sales --require-signature
+# → verified: signed by SHA256:…
+txco package inspect sales@3.0.0 --provenance   # show the signature without installing
+```
+
+How it works:
+
+- The signature is a small OCI artifact in the **same repository**, found by the cosign tag
+  convention `sha256:<hex>` → `sha256-<hex>.sig`. Its layer is the exact signed JSON payload;
+  the ed25519 signature, key id (`ssh-keygen` SHA256 fingerprint), and public key are
+  annotations. (Tag-based, so it works on any registry — the Referrers API isn't required.)
+- Verification checks the signature over the stored payload bytes, then binds the payload to
+  the **pulled digest** and **repository** — a signature can't be transplanted onto different
+  content or copied under another name.
+- **Posture:** without `--require-signature`, an unsigned or untrusted package installs but
+  prints a warning; `--require-signature` fails closed (nothing is written to `OPS/`) unless
+  the package is signed by a key in `trust:` (or passed via `--key`). A verified install
+  records the signer key id in the lockfile (`signedBy:`).
+- **No key is trusted by default** — the default registry/namespace is a convenience, not a
+  trust boundary. Trust is whatever you list in `trust:`.
+
+> The signature format is txco-native (ed25519), **not** cosign-compatible — it's verified by
+> `txco`, not by `cosign verify`. Trust keys are ed25519 public keys (an `ssh-ed25519` line,
+> a `.pub` path, or base64); the key id is the `ssh-keygen -lf` fingerprint.
+
+## 12. OCI artifact format
 
 A package is a standard OCI artifact:
 
@@ -214,4 +259,5 @@ A package is a standard OCI artifact:
 - **artifactType** = `application/vnd.thanks.computer.package.v1alpha1`.
 
 Any OCI registry (GHCR, Docker Hub, ECR, Harbor, self-hosted) can store it; standard tools
-(`oras`, `cosign`) can inspect and, later, sign it.
+(`oras`) can inspect it. The optional signature (§11) is a second artifact in the same repo
+with artifactType `application/vnd.thanks.computer.signature.v1alpha1`.

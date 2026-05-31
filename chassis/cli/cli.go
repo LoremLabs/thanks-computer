@@ -104,6 +104,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runMcp(rest, stdout, stderr), true
 	case "config":
 		return runConfig(rest, stdout, stderr), true
+	case "dns":
+		return runDNS(rest, stdout, stderr), true
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0, true

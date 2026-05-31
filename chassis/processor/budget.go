@@ -45,6 +45,11 @@ const (
 	fuelCostRepeatTransition  int64 = 50
 	fuelCostExec              int64 = 25
 	fuelCostSecretMaterialize int64 = 100
+	// fuelCostComputePerMs charges nano-op wall-clock on top of the flat
+	// 25-fuel dispatch in Exec. A 1 ms classifier pays 35 total; a 1 s
+	// LLM-wrapping op pays ~10K. Anchors to the §2 calibration in the
+	// fuel doc (1 unit ≈ 100 µs of typical chassis work).
+	fuelCostComputePerMs int64 = 10
 )
 
 // ctxKeyBudget carries the per-request budget state. Idempotent across recursive

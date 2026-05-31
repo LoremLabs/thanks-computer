@@ -102,7 +102,7 @@ type Config struct {
 	DeferredJoinSlack            string   `id:"deferred-join-slack" default:"60s" desc:"Flat pad added to a deferred-join op's runtime budget when computing the run's reap deadline, covering downstream synchronous scopes. (60s)"`
 	ComputeMaxMemoryMB           int      `id:"compute-max-memory-mb" default:"32" desc:"Per-invocation memory cap for a sandboxed compute (op://) in MB. (32)"`
 	ComputeMaxWall               string   `id:"compute-max-wall" default:"250ms" desc:"Per-invocation wall-clock cap for a sandboxed compute (op://); the guest is killed if it exceeds this. (250ms)"`
-	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep} (cron,tcp,web,admin). lmtp and sweep are opt-in."`
+	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns} (cron,tcp,web,admin). lmtp, sweep and dns are opt-in."`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
 	PromNamespace                string   `id:"prom-namespace" default:"txco" desc:"Set the Prometheus namespace (txco)"`
 	PromPeriod                   int      `id:"prom-period" default:"5" desc:"Set the Prometheus reporting period (5)"`
@@ -145,6 +145,8 @@ type Config struct {
 	TCPConnectRespTimeout        string   `id:"tcp-connect-resp-timeout" default:"3s" desc:"Time that backends must accept a new connection before dropping it. (3s)"`
 	TCPMaxIdleTimeout            string   `id:"tcp-max-idle-timeout" default:"5s" desc:"Max idle time between commands. May be set lower at runtime. (5s)"`
 	TCPRespTimeout               string   `id:"tcp-resp-timeout" default:"10s" desc:"Max time for us to respond to command. (10s)"`
+	DNSListenAddrs               []string `id:"dns-listen-addrs" default:":5353" desc:"Authoritative-DNS listen addresses (UDP+TCP bound on each). Comma list of ':port' or 'host:port'. Default :5353 (chassis high-port convention; the well-known DNS port 53 needs root/CAP_NET_BIND_SERVICE or a front LB). Set empty to disable the head even when 'dns' is in --personalities. (:5353)"`
+	DNSRRLPerSec                 int      `id:"dns-rrl-per-sec" default:"0" desc:"Per-source-IP DNS response-rate-limit (queries/sec); over-limit queries are dropped (anti-amplification). 0 (default) disables. (0)"`
 	WebAddr                      string   `id:"web-addr" default:":8080" desc:"The port to listen on for the web server (:8080)"`
 	WebPass                      string   `id:"web-pass" default:"" desc:"Basic Auth password ()"`
 	WebUser                      string   `id:"web-user" default:"" desc:"User for basic auth ()"`

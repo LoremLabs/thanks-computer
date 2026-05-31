@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/memory"
+	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/credentials"
@@ -290,4 +292,70 @@ func Publish(ctx context.Context, dir string, ref ParsedRef) (string, error) {
 		return "", fmt.Errorf("oci: push %s: %w", ref.Reference(), err)
 	}
 	return manDesc.Digest.String(), nil
+}
+
+// --- signature transport (used by `txco package publish --sign` + verify) ----
+//
+// These move bytes only: the crypto + artifact shape live in chassis/cli/sign,
+// the trust policy in the CLI layer. Both reuse the same repo factories as
+// package push/pull, so the in-process test seam covers signing end-to-end.
+
+// PushSignature uploads a signature artifact to ref's repository. `build` packs
+// the artifact into an in-memory store and returns the tag it was given
+// (sha256-<hex>.sig); that exact tag is copied to the remote.
+func PushSignature(ctx context.Context, ref ParsedRef, build func(dst oras.Target) (string, error)) error {
+	local := memory.New()
+	tag, err := build(local)
+	if err != nil {
+		return err
+	}
+	repo, err := newPushRepository(ref.Repository())
+	if err != nil {
+		return fmt.Errorf("oci: open %s: %w", ref.Repository(), err)
+	}
+	if _, err := oras.Copy(ctx, local, tag, repo, tag, oras.DefaultCopyOptions); err != nil {
+		return fmt.Errorf("oci: push signature %s: %w", tag, err)
+	}
+	return nil
+}
+
+// FetchSignature pulls the signature artifact at sigTag from ref's repository. A
+// missing tag yields found=false with nil error (the package is simply
+// unsigned); a transport failure yields a non-nil error. Returns the manifest
+// bytes, the single payload layer's bytes, and the merged manifest+layer
+// annotations (manifest wins on conflict).
+func FetchSignature(ctx context.Context, ref ParsedRef, sigTag string) (manifestBytes, layerBytes []byte, ann map[string]string, found bool, err error) {
+	repo, err := newRepository(ref.Repository())
+	if err != nil {
+		return nil, nil, nil, false, fmt.Errorf("oci: open %s: %w", ref.Repository(), err)
+	}
+	store := memory.New()
+	manifestDesc, err := oras.Copy(ctx, repo, sigTag, store, sigTag, oras.DefaultCopyOptions)
+	if err != nil {
+		if errors.Is(err, errdef.ErrNotFound) {
+			return nil, nil, nil, false, nil
+		}
+		return nil, nil, nil, false, fmt.Errorf("oci: fetch signature %s: %w", sigTag, err)
+	}
+	manifestBytes, err = content.FetchAll(ctx, store, manifestDesc)
+	if err != nil {
+		return nil, nil, nil, false, fmt.Errorf("oci: fetch signature manifest: %w", err)
+	}
+	var man ocispec.Manifest
+	if err := json.Unmarshal(manifestBytes, &man); err != nil {
+		return nil, nil, nil, false, fmt.Errorf("oci: parse signature manifest: %w", err)
+	}
+	ann = map[string]string{}
+	if len(man.Layers) == 1 {
+		if layerBytes, err = content.FetchAll(ctx, store, man.Layers[0]); err != nil {
+			return nil, nil, nil, false, fmt.Errorf("oci: fetch signature payload: %w", err)
+		}
+		for k, v := range man.Layers[0].Annotations {
+			ann[k] = v
+		}
+	}
+	for k, v := range man.Annotations {
+		ann[k] = v
+	}
+	return manifestBytes, layerBytes, ann, true, nil
 }

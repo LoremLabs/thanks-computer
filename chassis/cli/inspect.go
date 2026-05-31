@@ -13,6 +13,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/manifest"
+	"github.com/loremlabs/thanks-computer/chassis/cli/sign"
 )
 
 // runInspect shows a package's identity and exports without installing it.
@@ -23,6 +24,8 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("inspect", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
 	asJSON := fs.Bool("json", false, "emit machine-readable JSON")
+	provenance := fs.Bool("provenance", false, "fetch + check the package's signature")
+	keyFlags := fs.StringArray("key", nil, "trusted public key for --provenance (repeatable)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -70,12 +73,24 @@ Flags:
 	ops, _ := bundle.WalkFS(os.DirFS(dir), ".")
 	stacks := summarizeStacks(ops)
 
+	// Signature check is display-only here — never fail inspect.
+	var verdict *sign.Verdict
+	if *provenance {
+		trusted, _ := loadTrustedKeys(".", *keyFlags, stderr)
+		v, verr := verifyPackageSignature(prov, trusted)
+		if verr != nil {
+			v = sign.Verdict{Reason: "signature check error: " + verr.Error()}
+		}
+		verdict = &v
+	}
+
 	if *asJSON {
 		out := struct {
-			Manifest *manifest.Manifest `json:"manifest"`
-			Resolved string             `json:"resolved,omitempty"`
-			Stacks   []stackSummary     `json:"stacks"`
-		}{m, prov.Reference, stacks}
+			Manifest   *manifest.Manifest `json:"manifest"`
+			Resolved   string             `json:"resolved,omitempty"`
+			Stacks     []stackSummary     `json:"stacks"`
+			Provenance *sign.Verdict      `json:"provenance,omitempty"`
+		}{m, prov.Reference, stacks, verdict}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(out); err != nil {
@@ -97,6 +112,9 @@ Flags:
 	}
 	if prov.Reference != "" {
 		fmt.Fprintf(stdout, "  resolved:      %s\n", prov.Reference)
+	}
+	if verdict != nil {
+		fmt.Fprintf(stdout, "  signature:     %s\n", verdict.String())
 	}
 	for _, s := range stacks {
 		fmt.Fprintf(stdout, "  stack:         %s (%d scope%s, %d rule%s)\n",

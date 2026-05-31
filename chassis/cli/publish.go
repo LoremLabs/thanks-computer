@@ -6,11 +6,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/pflag"
+	"oras.land/oras-go/v2"
 
+	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/manifest"
+	"github.com/loremlabs/thanks-computer/chassis/cli/sign"
 	"github.com/loremlabs/thanks-computer/chassis/cli/source"
 )
 
@@ -23,6 +27,8 @@ func runPackagePublish(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	to := fs.String("to", "", "destination OCI reference (oci://host/ns/name:tag)")
 	dryRun := fs.Bool("dry-run", false, "validate + build the artifact; do not push")
+	doSign := fs.Bool("sign", false, "sign the artifact with an ed25519 key after pushing")
+	keyPath := fs.String("key", "", "signing key path (default: $TXCO_HOME/keys/signing.ed25519)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -90,5 +96,42 @@ Flags:
 		return 1
 	}
 	fmt.Fprintf(stdout, "published %s\n", "oci://"+ref.WithDigest(digest))
+
+	if *doSign {
+		if code := signPublished(ref, digest, *keyPath, stdout, stderr); code != 0 {
+			return code
+		}
+	}
+	return 0
+}
+
+// signPublished signs an already-pushed package artifact and uploads the
+// signature to the same repository (tag sha256-<hex>.sig). The package is
+// already published, so a signing failure returns non-zero with a re-run hint
+// rather than unwinding the push.
+func signPublished(ref source.ParsedRef, digest, keyPath string, stdout, stderr io.Writer) int {
+	if keyPath == "" {
+		p, err := auth.KeyPath("signing")
+		if err != nil {
+			fmt.Fprintf(stderr, "package publish: %v\n", err)
+			return 1
+		}
+		keyPath = p
+	}
+	priv, err := auth.LoadPrivateKey(keyPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "package publish: load signing key: %v\n  (generate one with `txco package key generate`)\n", err)
+		return 1
+	}
+	s := sign.NewSigner(priv)
+	signedAt := time.Now().UTC().Format(time.RFC3339)
+	err = source.PushSignature(context.Background(), ref, func(dst oras.Target) (string, error) {
+		return sign.SignArtifact(context.Background(), dst, digest, ref.Repository(), "oci://"+ref.Reference(), signedAt, s)
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "package publish: published, but signing failed: %v\n  (re-run `txco package publish … --sign` to sign)\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "signed by %s (%s)\n", s.KeyID, sign.DigestToSigTag(digest))
 	return 0
 }

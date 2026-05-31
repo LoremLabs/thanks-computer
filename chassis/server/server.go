@@ -42,6 +42,7 @@ import (
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
+	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
@@ -934,6 +935,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		adminCtrl,
 		sweep.NewController(ctx, pu),
 		lmtp.NewController(ctx, pu, mailResolver),
+		dnsp.NewController(ctx, pu),
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
 	}

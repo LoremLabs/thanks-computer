@@ -33,6 +33,8 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	vendorOnly := fs.Bool("vendor-only", false, "fetch + validate into .txco/vendor/, do not touch OPS/")
 	dryRun := fs.Bool("dry-run", false, "show what would change; mutate nothing")
 	force := fs.Bool("force", false, "overwrite a tracked stack even if it has local edits")
+	requireSig := fs.Bool("require-signature", false, "fail unless the package is signed by a trusted key")
+	keyFlags := fs.StringArray("key", nil, "trusted public key (ssh-ed25519 line, .pub path, or base64); repeatable")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -101,8 +103,31 @@ Flags:
 		return 1
 	}
 
+	// Signature verification — runs before any OPS/ write so a fail-closed
+	// --require-signature aborts cleanly. Skipped silently for non-OCI sources
+	// (dir:/github:) unless --require-signature forces a check (which they fail).
+	signedBy := ""
+	if prov.Digest != "" || *requireSig {
+		trusted, err := loadTrustedKeys(root, *keyFlags, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "install: %v\n", err)
+			return 1
+		}
+		verdict, err := verifyPackageSignature(prov, trusted)
+		if err != nil {
+			fmt.Fprintf(stderr, "install: signature check: %v\n", err)
+			return 1
+		}
+		if !enforceSignaturePosture(verdict, *requireSig, stdout, stderr) {
+			return 1
+		}
+		if verdict.Signed && verdict.Trusted {
+			signedBy = verdict.KeyID
+		}
+	}
+
 	if *vendorOnly {
-		return installVendorOnly(spec, prov, m, staging, root, *dryRun, stdout, stderr)
+		return installVendorOnly(spec, prov, m, staging, root, signedBy, *dryRun, stdout, stderr)
 	}
 
 	ops, err := bundle.WalkFS(os.DirFS(staging), ".")
@@ -207,6 +232,7 @@ Flags:
 		InstalledAs:   installedAs,
 		Mode:          "as-stack",
 		ManifestHash:  newHash,
+		SignedBy:      signedBy,
 		InstalledAt:   lockfile.Now(),
 	})
 	if err := lockfile.Write(root, lf); err != nil {
@@ -231,7 +257,7 @@ Flags:
 
 // installVendorOnly fetches + validates a package into .txco/vendor/ without
 // touching OPS/. For offline inspection / reusable op-packs.
-func installVendorOnly(spec string, prov source.Provenance, m *manifest.Manifest, staging, root string, dryRun bool, stdout, stderr io.Writer) int {
+func installVendorOnly(spec string, prov source.Provenance, m *manifest.Manifest, staging, root, signedBy string, dryRun bool, stdout, stderr io.Writer) int {
 	dest := filepath.Join(root, ".txco", "vendor", m.Name, m.Version)
 	if dryRun {
 		fmt.Fprintf(stdout, "install --vendor-only (dry-run): would vendor %s %s into %s (no OPS/ change)\n",
@@ -261,6 +287,7 @@ func installVendorOnly(spec string, prov source.Provenance, m *manifest.Manifest
 		Version:     m.Version,
 		Resolved:    prov.Reference,
 		Mode:        "vendor-only",
+		SignedBy:    signedBy,
 		InstalledAt: lockfile.Now(),
 	})
 	if err := lockfile.Write(root, lf); err != nil {

@@ -2477,6 +2477,15 @@ func (pu *Unit) ExecCompute(ctx context.Context, op operation.Operation) (event.
 			MemBytes:   int(cm.MemoryBytes),
 		})
 	}
+	// Fuel charge for compute wall-clock, on top of the flat 25-fuel EXEC
+	// dispatch in Exec. A 1 ms classifier registers as ~10 fuel; a slow
+	// LLM-wrapping op pays proportionally. Charged regardless of err so
+	// a long-running failed compute still bills its CPU. Err ignored —
+	// same pattern as the other in-Run charges; next Run-entry catches
+	// overshoot.
+	if cm.WallMS > 0 {
+		_ = addFuel(ctx, cm.WallMS*fuelCostComputePerMs, opID)
+	}
 	if err != nil {
 		return event.Payload{Raw: `{}`, Type: event.JSON}, err
 	}

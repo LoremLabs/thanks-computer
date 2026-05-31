@@ -289,6 +289,28 @@ func TestStripBudgetFromOutboundIdempotent(t *testing.T) {
 	}
 }
 
+// TestComputeWallClockFuelCharge verifies the per-ms fuel cost
+// applied to compute (`compute://`) ops. The integration path is:
+// ExecCompute reads cm.WallMS from its metrics-sink closure and calls
+// addFuel(ctx, ms * fuelCostComputePerMs, opID). This test bypasses
+// the runner and exercises the math directly — the compute package's
+// metrics sink is unexported, so a stub runner can't easily emit it,
+// and end-to-end coverage comes from integration tests with a real
+// wazero engine in chassis/compute/wazero/.
+func TestComputeWallClockFuelCharge(t *testing.T) {
+	pu := withBudget(t, 0, 0, 0)
+	ctx, _, _ := loadBudget(context.Background(), `{}`, pu.Conf)
+
+	const wallMS int64 = 100
+	_ = addFuel(ctx, wallMS*fuelCostComputePerMs, "site/100/c")
+
+	fuel := budgetFromCtx(ctx).fuel.Load()
+	want := wallMS * fuelCostComputePerMs // 100 × 10 = 1000
+	if fuel != want {
+		t.Errorf("100ms × fuelCostComputePerMs = %d, want %d", fuel, want)
+	}
+}
+
 // TestFuelUsedFromEnvelopeMissing — returns 0 when the field is absent.
 func TestFuelUsedFromEnvelopeMissing(t *testing.T) {
 	if v := FuelUsedFromEnvelope(`{"x":1}`); v != 0 {

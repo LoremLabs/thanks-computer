@@ -305,6 +305,12 @@ func (c *Controller) Start() {
 	// way to "see" the token was `challenge`, which rotated it.
 	tenantR.HandleFunc("/hostnames/{hostname}/status", c.handleHostnameStatus).Methods(http.MethodGet)
 
+	// Authoritative-DNS zone preview (read-only). Renders the zone(s)
+	// this tenant would be served, in zone-file form — the same
+	// snapshot the dns head answers from. `?zone=<origin>` filters to
+	// one zone. See internal docs/todo-dns-authority.md §6.7.
+	tenantR.HandleFunc("/dns/render", c.handleDNSRender).Methods(http.MethodGet)
+
 	// Per-tenant secret store CRUD. Reveal-never is enforced by
 	// response shape: only POST /generate and POST /{name}/rotate-
 	// generated emit a `value` field. See internal docs/todo-secret-store.md

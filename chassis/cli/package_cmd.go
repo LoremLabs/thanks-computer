@@ -40,6 +40,8 @@ func runPackage(args []string, stdout, stderr io.Writer) int {
 		return runUpgrade(args[1:], stdout, stderr)
 	case "remove":
 		return runRemove(args[1:], stdout, stderr)
+	case "key":
+		return runPackageKey(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printPackageUsage(stdout)
 		return 0
@@ -60,9 +62,10 @@ Author and check TxCo packages (a txco.package.yaml + an OPS/-shaped tree).
 Authoring + registry:
   init <name> [<dir>]        Scaffold txco.package.yaml + an OPS/<name>/ skeleton
   validate [<dir>]           Validate a package's manifest + tree (dir defaults to ".")
-  inspect <ref>              Show a package's identity + exports (dir:/github:/oci:)
+  inspect <ref>              Show a package's identity + exports (--provenance for signature)
   pull <ref>                 Fetch a package into .txco/vendor/ (no install)
-  publish --to <oci-ref>     Build + push a package to an OCI registry
+  publish --to <oci-ref>     Build + push a package to an OCI registry (--sign to sign)
+  key generate               Generate an ed25519 package-signing keypair
 
 Lifecycle (operate on this workspace; install with `+"`txco install`"+`):
   list [--json]              List installed packages (alias: `+"`txco packages`"+`)
