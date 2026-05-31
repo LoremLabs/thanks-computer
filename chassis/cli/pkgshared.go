@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
+	"github.com/loremlabs/thanks-computer/chassis/cli/lockfile"
 	"github.com/loremlabs/thanks-computer/chassis/cli/manifest"
 	"github.com/loremlabs/thanks-computer/chassis/cli/source"
 )
@@ -171,6 +172,64 @@ func listTreeRel(dir string) ([]string, error) {
 	})
 	sort.Strings(out)
 	return out, err
+}
+
+// installedStackHash recomputes the install-time manifest hash for the stack
+// materialized at OPS/<installedAs>/, using the SAME pipeline install used:
+// bundle.WalkFS over the workspace OPS/ tree, filtered to this stack, then
+// opsToFiles + localManifestHash. install stored exactly this value (over the
+// package's exported stack — opsToFiles drops the stack name, so an `--as`
+// rename re-hashes identically; copyTree is a byte copy, so an unedited stack
+// reproduces the hash exactly).
+//
+// This is intentionally NOT loadLocalStackFiles/localStackClean (stacks_cmd.go):
+// those hash literal on-disk scope dirs (`0100_TRIAGE/`) and raw mock bytes for
+// the chassis-state hash — a different hash universe that would never match the
+// lockfile. exists is false when OPS/<installedAs>/ is absent.
+func installedStackHash(root, installedAs string) (hash string, exists bool, err error) {
+	fi, statErr := os.Stat(filepath.Join(root, "OPS", installedAs))
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return "", false, nil
+		}
+		return "", false, statErr
+	}
+	if !fi.IsDir() {
+		return "", false, nil
+	}
+	ops, err := bundle.WalkFS(os.DirFS(root), ".")
+	if err != nil {
+		return "", true, err
+	}
+	var filtered []bundle.Op
+	for _, op := range ops {
+		if op.Stack == installedAs {
+			filtered = append(filtered, op)
+		}
+	}
+	return localManifestHash(opsToFiles(filtered)), true, nil
+}
+
+// stackEditState reports whether the on-disk stack for an as-stack entry still
+// matches what install materialized: "clean" (hash matches the lockfile),
+// "edited" (differs — hand-edited since install), or "missing"
+// (OPS/<installedAs>/ is gone). Vendor-only entries (no InstalledAs) own no
+// OPS/ stack and always report "clean".
+func stackEditState(root string, e lockfile.Entry) (string, error) {
+	if e.InstalledAs == "" {
+		return "clean", nil
+	}
+	h, exists, err := installedStackHash(root, e.InstalledAs)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "missing", nil
+	}
+	if h == e.ManifestHash {
+		return "clean", nil
+	}
+	return "edited", nil
 }
 
 // displayPath renders p relative to root when possible, for friendly output.

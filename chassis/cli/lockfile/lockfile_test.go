@@ -83,3 +83,28 @@ func TestVendorKeyDistinctFromStack(t *testing.T) {
 		t.Fatalf("vendor + stack should be 2 distinct entries, got %d", len(f.Packages))
 	}
 }
+
+func TestRemove(t *testing.T) {
+	f := &File{}
+	f.Upsert(Entry{Name: "a", Version: "1.0.0", InstalledAs: "support", Mode: "as-stack"})
+	f.Upsert(Entry{Name: "b", Version: "1.0.0", InstalledAs: "billing", Mode: "as-stack"})
+	f.Upsert(Entry{Name: "a", Version: "1.0.0", Mode: "vendor-only"})
+
+	if f.Remove("nope") {
+		t.Error("Remove of an absent stack should report false")
+	}
+	if !f.Remove("support") {
+		t.Error("Remove of an existing stack should report true")
+	}
+	if f.FindStack("support") != nil {
+		t.Error("support should be gone after Remove")
+	}
+	if len(f.Packages) != 2 {
+		t.Fatalf("expected 2 entries left (billing + vendor a), got %d", len(f.Packages))
+	}
+	// A vendor-only entry shares the name but has no InstalledAs — Remove must
+	// not match it.
+	if f.Remove("a") {
+		t.Error("Remove must not match a vendor-only entry by name")
+	}
+}

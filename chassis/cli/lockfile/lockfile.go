@@ -110,6 +110,20 @@ func (f *File) FindStack(stack string) *Entry {
 	return nil
 }
 
+// Remove deletes the as-stack entry installed as `stack`, re-sorts, and reports
+// whether an entry was removed. Symmetric with FindStack: vendor-only entries
+// (no InstalledAs) are never matched. Used by `txco package remove`.
+func (f *File) Remove(stack string) bool {
+	for i := range f.Packages {
+		if f.Packages[i].InstalledAs == stack {
+			f.Packages = append(f.Packages[:i], f.Packages[i+1:]...)
+			f.sortEntries()
+			return true
+		}
+	}
+	return false
+}
+
 func (f *File) sortEntries() {
 	sort.Slice(f.Packages, func(i, j int) bool {
 		if f.Packages[i].Name != f.Packages[j].Name {
