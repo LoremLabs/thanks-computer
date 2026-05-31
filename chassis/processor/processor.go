@@ -391,14 +391,63 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	ctx, secretsCacheCleanup = secrets.EnsureRequestCache(ctx)
 	defer secretsCacheCleanup()
 
+	// Loop / cost guards: TTL (hop counter) + fuel (work meter). State rides
+	// the envelope (_txc.ttl, _txc.fuel_used, _txc._seen) and is hydrated
+	// into ctx once per request. Idempotent — recursive Run calls reuse the
+	// state already in ctx. See chassis/processor/budget.go.
+	ctx, _, _ = loadBudget(ctx, raw, pu.Conf)
+	if err := decrementTTL(ctx, stage); err != nil {
+		if emitBudgetExhausted(err, resCh) {
+			return nil
+		}
+		return err
+	}
+	if err := addFuel(ctx, fuelCostScopeEnter, stage); err != nil {
+		if emitBudgetExhausted(err, resCh) {
+			return nil
+		}
+		return err
+	}
+	// Repeat-transition charge + per-repeat penalty sleep. The seen-set is
+	// shared between fuel's +50 charge and the penalty's sleep (one map);
+	// only previously-seen (from -> to) pairs pay.
+	if parent, ok := ctx.Value(ctxKeyParentStage).(string); ok && parent != "" {
+		penalty, err := chargeTransition(ctx, parent, stage)
+		if err != nil {
+			if emitBudgetExhausted(err, resCh) {
+				return nil
+			}
+			return err
+		}
+		if penalty > 0 {
+			select {
+			case <-time.After(penalty):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			trace.FromContext(ctx).Event(trace.TimelineEvent{
+				Ts:    time.Now(),
+				Event: "stage.penalty",
+				Fields: map[string]any{
+					"from": parent,
+					"to":   stage,
+					"ms":   penalty.Milliseconds(),
+				},
+			})
+		}
+	}
+
 	// Emit a stage.enter event so the trace timeline reflects every
 	// recursive Run call. Goto and natural advancement both end up
-	// here.
+	// here. The fuel/ttl fields make budget decay visible at a glance.
+	postBudget := budgetFromCtx(ctx)
 	trace.FromContext(ctx).Event(trace.TimelineEvent{
 		Ts:    time.Now(),
 		Event: "stage.enter",
 		Fields: map[string]any{
-			"stage": stage,
+			"stage":     stage,
+			"fuel_used": postBudget.fuel.Load(),
+			"ttl":       postBudget.ttl.Load(),
 		},
 	})
 
@@ -619,6 +668,11 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					// of times per second, and for per-tenant audit/
 					// quota signals. NEVER includes the cleartext.
 					pu.Mc.RecordSecretMaterialize(ctx, tenantSlug, name)
+					// Fuel charge for the materialization. Err ignored;
+					// next Run-entry catches overshoot (same pattern as
+					// Exec). Audit happens before fuel so the audit
+					// invariant holds even if fuel exhausts mid-loop.
+					_ = addFuel(ctx, fuelCostSecretMaterialize, op.Stack+"/"+strconv.Itoa(op.Scope))
 				}
 				// Wipe cleartext on every exit path. Cache cleanup
 				// (installed at Run head) zeros the cache's own copies;
@@ -1108,6 +1162,14 @@ func (pu *Unit) advanceAfterScope(
 				Fields: map[string]any{"from": stage, "to": gotoStage},
 			})
 		}
+		// Sync the live budget counters into resp so the successor Run
+		// hydrates the up-to-date fuel/TTL/seen-set via the envelope
+		// (in-process this is redundant — context state is canonical —
+		// but it keeps the envelope correct for continuation suspend
+		// and for cross-process EXEC). And set the parent stage on
+		// runCtx so the next Run's repeat-transition check has both
+		// endpoints.
+		resp = syncBudgetToEnvelope(ctx, resp)
 		// One-way _sys -> concrete-tenant handoff. No-op unless
 		// this request is in the boot/_sys context and a boot
 		// rule re-tenanted it; from a concrete tenant the pin is
@@ -1115,10 +1177,16 @@ func (pu *Unit) advanceAfterScope(
 		// EXEC-ing into the target tenant's stack — the pin
 		// rebind only changes which tenant's ops resolve.
 		runCtx := pu.maybeRetenant(ctx, string(resp))
+		runCtx = context.WithValue(runCtx, ctxKeyParentStage, stage)
 		endSpan()
 		return true, pu.Run(runCtx, string(resp), nextStage, resCh)
 	default:
 		if !*opsDone {
+			// Sync the live budget into the response before emitting so
+			// downstream consumers (server.go's UsageEvent capture) can
+			// read _txc.fuel_used from the merged envelope. The server
+			// strips the field before forwarding to the inlet client.
+			resp = syncBudgetToEnvelope(ctx, resp)
 			response := event.Payload{
 				Raw:  string(resp),
 				Type: event.JSON,
@@ -2154,6 +2222,15 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 	opName := op.Resonator.Exec
 	pu.Logger.Debug("Exec", zap.String("opname", opName))
 
+	// Charge fuel for the dispatch. Skip noop rules (no EXEC clause —
+	// they pay only the scope-enter floor). Errors are intentionally
+	// ignored at this site: ops fire in parallel goroutines whose error
+	// returns are swallowed; the next Run entry catches the overshoot
+	// and emits a structured exhaustion error there.
+	if opName != "" {
+		_ = addFuel(ctx, fuelCostExec, op.Stack+"/"+strconv.Itoa(op.Scope))
+	}
+
 	ctx, span := pu.Mc.Tracer.Start(ctx, `exec-`+opName)
 	defer span.End()
 
@@ -2811,6 +2888,32 @@ func (pu *Unit) OverlayResponse(env, output string, overrides []resonator.Branch
 		val, rerr := runtime.Resolve(override.Value, envForResolve)
 		if rerr != nil {
 			return output, fmt.Errorf("overlay %s: %w", override.Path, rerr)
+		}
+		// Chassis-internal budget fields: rule writes to fuel/seen are
+		// silently dropped (fuel only goes up; seen is chassis state).
+		// _txc.ttl follows the IP-TTL idiom: rules may lower their
+		// sub-budget (handy for guarded sub-flows) but never raise it.
+		switch {
+		case branch == "_txc.fuel_used", strings.HasPrefix(branch, "_txc._seen"):
+			continue
+		case branch == "_txc.ttl":
+			var requested int64
+			switch v := val.(type) {
+			case int64:
+				requested = v
+			case int:
+				requested = int64(v)
+			case float64:
+				requested = int64(v)
+			default:
+				continue
+			}
+			clamped := clampTTL(env, requested)
+			altered, err := sjson.Set(output, branch, clamped)
+			if err == nil {
+				output = altered
+			}
+			continue
 		}
 		altered, err := sjson.Set(output, branch, val)
 		if err != nil {

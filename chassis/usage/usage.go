@@ -37,6 +37,14 @@ type UsageEvent struct {
 	// Zero for request-level usage (http/tcp/cron have no wasm memory) and
 	// omitted from the log line in that case.
 	MemBytes int
+	// Fuel is the total per-request fuel consumed across accounted actions
+	// (scope-enter, repeat-transition, EXEC, secret-materialize in v1;
+	// finer-grained costs follow in v2). Zero on requests that did no
+	// accounted work (empty / unrouted), in which case it is omitted from
+	// the log line — mirrors the MemBytes conditional pattern. This is the
+	// metering primitive; per-request enforcement happens upstream via the
+	// chassis budget guards and is invisible to the sink.
+	Fuel int64
 }
 
 // Sink consumes usage events. WriteEvent must be safe for concurrent
@@ -76,6 +84,12 @@ func (s *ZapSink) WriteEvent(ev UsageEvent) {
 	// Only computes carry memory; keep request-level usage lines unchanged.
 	if ev.MemBytes > 0 {
 		fields = append(fields, zap.Int("mem_bytes", ev.MemBytes))
+	}
+	// Fuel is conditional too: empty/unrouted requests do no accounted
+	// work and have nothing to meter. Open-core deployments see this
+	// field for any real request; SaaS aggregates it for billing.
+	if ev.Fuel > 0 {
+		fields = append(fields, zap.Int64("fuel", ev.Fuel))
 	}
 	// The "_sys" tenant is chassis infrastructure (the _sys/boot
 	// pipeline: health probe, unrouted 404s, routing) — not a customer

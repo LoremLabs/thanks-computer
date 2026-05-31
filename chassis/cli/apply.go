@@ -118,6 +118,14 @@ Flags:
 		}
 	}
 
+	// Apply-time lint for unconditional loop shapes (self-loops and
+	// 2-stack ping-pongs). Warnings only — design-time complement to the
+	// runtime budget guards in chassis/processor/budget.go. See
+	// chassis/cli/loop_lint.go for the detection logic.
+	for _, w := range lintStackLoops(ops) {
+		fmt.Fprintf(stderr, "apply: %s\n", w)
+	}
+
 	// Mock policy: when the target denies mocks, drop mock_res only.
 	// mock_req is documentation/test-fixture metadata, never consulted by
 	// the chassis runtime, so it's harmless to preserve.

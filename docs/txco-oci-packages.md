@@ -29,6 +29,9 @@ Consuming a package is part of the everyday workflow; authoring/publishing lives
 | `txco package inspect <ref>` | show identity + exports, no install |
 | `txco package pull <ref>` | fetch into `.txco/vendor/`, no install |
 | `txco package publish --to <oci-ref>` | build + push to a registry |
+| `txco package list` | list installed packages (alias: `txco packages`) |
+| `txco package upgrade <stack>… \| --all` | re-resolve + re-materialize when a ref's content changed |
+| `txco package remove <stack>` | delete `OPS/<stack>/` + drop its lockfile entry |
 
 Install **materializes then stops** — it writes reviewable files into `OPS/` and prints
 the next step. You review, wire any external ops (below), then `txco apply` to deploy.
@@ -94,7 +97,9 @@ txco install dir:./examples/packages/support-basic --as support --dry-run
 
 Modes: `--as <stack>` (materialize into `OPS/<stack>/`), `--vendor-only` (fetch into
 `.txco/vendor/`, no `OPS/` change), `--dry-run` (preview, mutate nothing). Re-installing the
-same package to the same stack is idempotent (a content hash gates "no change").
+same package to the same stack is idempotent (a content hash gates "no change"), and a
+re-install refuses to overwrite a stack you've edited since install — see §8 for the
+lifecycle verbs and the local-edit guard.
 
 ## 6. Package refs and registry config
 
@@ -144,7 +149,42 @@ This is workspace **provenance** ("where these files came from") — deliberatel
 from the chassis's server-side version lineage ("what's deployed"). The committed
 `OPS/` files are authoritative; the lockfile drives reproducibility and future upgrades.
 
-## 8. Validation
+## 8. Managing installed packages
+
+The lockfile (§7) tracks what's installed, so TxCo can show, update, and remove packages:
+
+```sh
+txco package list                          # what's installed (alias: txco packages)
+txco package list --json                   # machine-readable
+txco package upgrade support               # re-resolve support's ref, re-materialize if changed
+txco package upgrade --all
+txco package remove support                # delete OPS/support/ and drop the lockfile entry
+txco package remove support --keep-files   # drop the entry only; leave the files
+```
+
+`list` flags an **edited** stack — one whose `OPS/<stack>/` files no longer match what was
+installed (compared by the same `.txcl` + mock content hash the lockfile pins; edits to a
+colocated `.js` or to docs aren't tracked):
+
+```
+NAME           VERSION  INSTALLED-AS  MODE      DIGEST        EDITED?
+support-basic  0.1.0    support       as-stack  b2e046bde6e5  yes
+```
+
+**Upgrade re-pulls whatever the recorded ref points to now.** A ref pinned to a fixed
+version (`sales@3.0.0`) stays put — `upgrade` reports "up to date"; a moving ref (`sales`,
+`sales@latest`) or a `dir:`/`github:` source picks up new content, re-materializes
+`OPS/<stack>/`, and re-pins the lockfile digest + version. To jump to a *different* version,
+re-install over the stack: `txco install sales@4.0.0 --as sales`. `--all` upgrades every
+installed stack and continues past any that fail, reporting a summary.
+
+**Local edits are protected.** `upgrade`, `remove`, and re-`install` all refuse to overwrite
+a stack you've edited since install — run `txco diff` to inspect, or pass `--force` to
+discard the edits (for `remove`, `--keep-files` drops only the lockfile entry and leaves the
+files untouched). `--dry-run` previews any of these; `--force --dry-run` previews past the
+guard.
+
+## 9. Validation
 
 `txco package validate` (and install/publish) run **Go-code validation** that is
 authoritative: it checks the header, semver, that every rule parses, that bundled compute
@@ -152,7 +192,7 @@ files exist, and the §4 bundled-vs-required contract. A JSON Schema
 (`examples/packages/txco.package.v1alpha1.schema.json`) ships for editor autocompletion
 only — it is **not** loaded by the binary.
 
-## 9. Publishing
+## 10. Publishing
 
 ```sh
 txco package validate ./packages/sales
@@ -163,7 +203,7 @@ txco package publish --to oci://ghcr.io/you/sales:3.0.0 ./packages/sales
 Publish validates, packs the tree into a single-layer OCI artifact, pushes it, and prints
 the resolved digest. Tags are convenience; the digest is truth.
 
-## 10. OCI artifact format
+## 11. OCI artifact format
 
 A package is a standard OCI artifact:
 

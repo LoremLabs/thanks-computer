@@ -32,6 +32,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	as := fs.String("as", "", "materialize the package's single stack as <stack>")
 	vendorOnly := fs.Bool("vendor-only", false, "fetch + validate into .txco/vendor/, do not touch OPS/")
 	dryRun := fs.Bool("dry-run", false, "show what would change; mutate nothing")
+	force := fs.Bool("force", false, "overwrite a tracked stack even if it has local edits")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -137,7 +138,30 @@ Flags:
 	}
 	owned := lf.FindStack(installedAs)
 
-	if owned != nil && owned.ManifestHash == newHash && !*dryRun {
+	// Inspect the on-disk state of a stack we already own so we can (a) refuse to
+	// clobber hand-edits without --force, and (b) decide whether the "no change"
+	// short-circuit is safe.
+	var ownedState string
+	if owned != nil {
+		st, err := stackEditState(root, *owned)
+		if err != nil {
+			fmt.Fprintf(stderr, "install: %v\n", err)
+			return 1
+		}
+		ownedState = st
+		// Refuse to overwrite hand-edits made since install unless --force —
+		// same guard as `txco package upgrade`. Applies in --dry-run too (it
+		// reflects what a real run would do); `--force --dry-run` previews.
+		if st == "edited" && !*force {
+			fmt.Fprintf(stderr, "install: OPS/%s/ has local edits since install; review with `txco diff` or re-run with --force\n", installedAs)
+			return 1
+		}
+	}
+
+	// "No change" only when the on-disk stack is clean AND the package hash is
+	// unchanged. An edited (with --force) or missing stack must re-materialize,
+	// so the short-circuit must not swallow it.
+	if owned != nil && ownedState == "clean" && owned.ManifestHash == newHash && !*dryRun {
 		fmt.Fprintf(stdout, "%s %s already installed as %q (no change)\n", m.Name, m.Version, installedAs)
 		return 0
 	}

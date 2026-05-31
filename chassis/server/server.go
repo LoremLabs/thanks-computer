@@ -479,9 +479,9 @@ func runPipeline(
 	envelope *event.Envelope,
 	raw, stage string,
 	capture bool,
-) (finalPayload []byte, err error) {
+) (finalPayload []byte, fuelUsed int64, err error) {
 	if !capture {
-		return nil, pu.Run(ctx, raw, stage, envelope.ResCh)
+		return nil, 0, pu.Run(ctx, raw, stage, envelope.ResCh)
 	}
 
 	teeCh := make(chan event.Payload, 1)
@@ -503,6 +503,13 @@ func runPipeline(
 					return
 				}
 				if p.Type != event.StreamChunk {
+					// Read fuel BEFORE strip so the meter survives the
+					// cleanup, then strip the chassis-internal budget
+					// fields so the client never sees them. finalPayload
+					// captures the post-strip bytes so BytesOut on the
+					// usage line reflects what the inlet actually wrote.
+					fuelUsed = processor.FuelUsedFromEnvelope(p.Raw)
+					p.Raw = processor.StripBudgetFromOutbound(p.Raw)
 					finalPayload = []byte(p.Raw)
 				}
 				select {
@@ -519,7 +526,7 @@ func runPipeline(
 	err = pu.Run(ctx, raw, stage, teeCh)
 	close(teeCh)
 	<-teeDone
-	return finalPayload, err
+	return finalPayload, fuelUsed, err
 }
 
 // runWithTrace dispatches the processor through runPipeline and, when
@@ -536,7 +543,7 @@ func runWithTrace(
 	envelope *event.Envelope,
 	raw, stage string,
 	usageEnabled bool,
-) (finalPayload []byte, err error) {
+) (finalPayload []byte, fuelUsed int64, err error) {
 	_, isNoop := sink.(trace.NoopSink)
 	capture := !isNoop || usageEnabled
 
@@ -554,14 +561,14 @@ func runWithTrace(
 	})
 	ctx = trace.WithContext(ctx, tracer)
 
-	finalPayload, err = runPipeline(ctx, pu, envelope, raw, stage, capture)
+	finalPayload, fuelUsed, err = runPipeline(ctx, pu, envelope, raw, stage, capture)
 
 	status := "ok"
 	if err != nil {
 		status = "error"
 	}
 	tracer.End(status, finalPayload)
-	return finalPayload, err
+	return finalPayload, fuelUsed, err
 }
 
 type controller interface {
@@ -981,7 +988,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						// tracer when tracing is enabled (mode != off); when
 						// off, it's a direct call into pu.Run.
 						reqStart := time.Now()
-						finalPayload, runErr := runWithTrace(envelope.Ctx, pu, traceSink, envelope, raw, stage, usageSink != nil)
+						finalPayload, fuelUsed, runErr := runWithTrace(envelope.Ctx, pu, traceSink, envelope, raw, stage, usageSink != nil)
 						if runErr != nil {
 							logger.Warn("error adding event", zap.String("err", runErr.Error()))
 						}
@@ -1016,6 +1023,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 								Status:     status,
 								BytesIn:    len(eventRaw),
 								BytesOut:   len(finalPayload),
+								Fuel:       fuelUsed,
 							})
 						}
 						if conf.LogOps != "" {

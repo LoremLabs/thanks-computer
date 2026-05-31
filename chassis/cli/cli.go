@@ -97,6 +97,9 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runInstall(rest, stdout, stderr), true
 	case "package":
 		return runPackage(rest, stdout, stderr), true
+	case "packages":
+		// Top-level convenience alias for `package list`.
+		return runList(rest, stdout, stderr), true
 	case "mcp":
 		return runMcp(rest, stdout, stderr), true
 	case "config":
@@ -179,7 +182,7 @@ The thanks-computer chassis: event router + rule authoring CLI.
   %s   Boot a chassis and open the txcl demo in your browser
   %s   Author + build sandboxed op:// nano-ops (init/build/run/test)
   %s   Install a package into OPS/ (sales@v3, oci:, dir:, github:), then apply
-  %s   Author/publish packages (init/validate/inspect/pull/publish)
+  %s   Author + manage packages (init/validate/publish · list/upgrade/remove)
   %s   Render the execution trace for a request (use %s for the most recent)
   %s   Manage signing keys for the admin API
   %s   Talk to MCP-over-HTTP servers (use %s for discovery)

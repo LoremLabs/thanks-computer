@@ -34,6 +34,12 @@ func runPackage(args []string, stdout, stderr io.Writer) int {
 		return runPackagePull(args[1:], stdout, stderr)
 	case "publish":
 		return runPackagePublish(args[1:], stdout, stderr)
+	case "list":
+		return runList(args[1:], stdout, stderr)
+	case "upgrade":
+		return runUpgrade(args[1:], stdout, stderr)
+	case "remove":
+		return runRemove(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printPackageUsage(stdout)
 		return 0
@@ -51,12 +57,17 @@ Usage: txco package <command> [args]
 
 Author and check TxCo packages (a txco.package.yaml + an OPS/-shaped tree).
 
-Commands:
+Authoring + registry:
   init <name> [<dir>]        Scaffold txco.package.yaml + an OPS/<name>/ skeleton
   validate [<dir>]           Validate a package's manifest + tree (dir defaults to ".")
   inspect <ref>              Show a package's identity + exports (dir:/github:/oci:)
   pull <ref>                 Fetch a package into .txco/vendor/ (no install)
   publish --to <oci-ref>     Build + push a package to an OCI registry
+
+Lifecycle (operate on this workspace; install with `+"`txco install`"+`):
+  list [--json]              List installed packages (alias: `+"`txco packages`"+`)
+  upgrade <stack>… | --all   Re-resolve + re-materialize when a package's ref changed
+  remove <stack>             Delete OPS/<stack>/ and drop its lockfile entry
 `)
 }
 
