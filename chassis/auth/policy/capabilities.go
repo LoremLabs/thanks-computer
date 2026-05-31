@@ -67,6 +67,14 @@ var KnownCapabilities = map[string]bool{
 	"secret:*:read":  true,
 	"secret:*:write": true,
 	"secret:*:*":     true,
+
+	// Authoritative-DNS zones + records (delegated zones, override
+	// records, and the zone-render preview — all "manipulate this
+	// tenant's DNS authority"). `read` lists/renders; `write` creates
+	// and revokes zones + override records.
+	"dns:*:read":  true,
+	"dns:*:write": true,
+	"dns:*:*":     true,
 }
 
 // ErrUnknownCapability is returned by ValidateCapabilities and
@@ -80,10 +88,10 @@ var ErrUnknownCapability = errors.New("unknown_capability")
 // database stays consistent and `txco auth whoami` doesn't render
 // the same role two different ways depending on history.
 //
-//   "admin:all"      → "*:*:*"
-//   "*"              → "*:*:*"
-//   "opstack:read"   → "opstack:*:read"   (2-seg legacy normalisation)
-//   "opstack:*:read" → unchanged
+//	"admin:all"      → "*:*:*"
+//	"*"              → "*:*:*"
+//	"opstack:read"   → "opstack:*:read"   (2-seg legacy normalisation)
+//	"opstack:*:read" → unchanged
 //
 // Returns "" for empty input. Returns the original (unchanged) for
 // anything with 4+ colons — those fail validation downstream.

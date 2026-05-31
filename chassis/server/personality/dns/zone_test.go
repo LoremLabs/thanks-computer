@@ -2,6 +2,7 @@ package dns
 
 import (
 	"database/sql"
+	"sort"
 	"strings"
 	"testing"
 
@@ -36,12 +37,28 @@ func newTestDB(t *testing.T) *sql.DB {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 
-	schema, err := dbpkg.FS.ReadFile("schema/sqlite/runtime/0011_dns_zones.sql")
+	// Apply ALL runtime migrations in order (not just 0011) so
+	// cross-table reads — e.g. the active-stacks query feeding
+	// synthesis — work against a realistic schema.
+	entries, err := dbpkg.FS.ReadDir("schema/sqlite/runtime")
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("read migrations dir: %v", err)
 	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply schema: %v", err)
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		b, rerr := dbpkg.FS.ReadFile("schema/sqlite/runtime/" + n)
+		if rerr != nil {
+			t.Fatalf("read migration %s: %v", n, rerr)
+		}
+		if _, eerr := db.Exec(string(b)); eerr != nil {
+			t.Fatalf("apply %s: %v", n, eerr)
+		}
 	}
 	return db
 }
@@ -73,9 +90,9 @@ func seedZone(t *testing.T, db *sql.DB, ts string) {
 	}
 }
 
-func buildOrDie(t *testing.T, db *sql.DB) *ZoneSnapshot {
+func buildOrDie(t *testing.T, db *sql.DB, cfg SynthConfig) *ZoneSnapshot {
 	t.Helper()
-	snap, err := BuildSnapshot(db, zap.NewNop())
+	snap, err := BuildSnapshot(db, cfg, zap.NewNop())
 	if err != nil {
 		t.Fatalf("BuildSnapshot: %v", err)
 	}
@@ -89,7 +106,7 @@ func q(name string, qtype uint16) dns.Question {
 func TestLookupMatrix(t *testing.T) {
 	db := newTestDB(t)
 	seedZone(t, db, fixedTS)
-	snap := buildOrDie(t, db)
+	snap := buildOrDie(t, db, SynthConfig{})
 
 	t.Run("SOA at apex", func(t *testing.T) {
 		ans, ns, rcode := snap.Lookup(q("ops.example.com.", dns.TypeSOA))
@@ -178,9 +195,9 @@ func TestSerialIsContentDerived(t *testing.T) {
 	db := newTestDB(t)
 	seedZone(t, db, fixedTS)
 
-	s1 := buildOrDie(t, db).zoneSerial(t)
+	s1 := buildOrDie(t, db, SynthConfig{}).zoneSerial(t)
 	// Rebuild with no change → identical serial (no churn).
-	s2 := buildOrDie(t, db).zoneSerial(t)
+	s2 := buildOrDie(t, db, SynthConfig{}).zoneSerial(t)
 	if s1 != s2 {
 		t.Fatalf("no-op rebuild changed serial: %d -> %d", s1, s2)
 	}
@@ -192,7 +209,7 @@ func TestSerialIsContentDerived(t *testing.T) {
 	if _, err := db.Exec(`UPDATE dns_records SET rdata='192.0.2.99', updated_at='2026-06-01T00:00:00Z' WHERE id='dr_a'`); err != nil {
 		t.Fatalf("update record: %v", err)
 	}
-	s3 := buildOrDie(t, db).zoneSerial(t)
+	s3 := buildOrDie(t, db, SynthConfig{}).zoneSerial(t)
 	if s3 <= s1 {
 		t.Fatalf("serial did not advance after change: %d -> %d", s1, s3)
 	}
@@ -211,7 +228,7 @@ func (s *ZoneSnapshot) zoneSerial(t *testing.T) uint32 {
 func TestRenderGolden(t *testing.T) {
 	db := newTestDB(t)
 	seedZone(t, db, fixedTS)
-	snap := buildOrDie(t, db)
+	snap := buildOrDie(t, db, SynthConfig{})
 
 	got, ok := snap.Render(testOrigin)
 	if !ok {
@@ -264,7 +281,7 @@ func TestMalformedRecordSkipped(t *testing.T) {
 		VALUES ('dr_bad', 'dz_1', 'bad', 'A', NULL, 'not-an-ip', ?, 'actor_x', ?)`, fixedTS, fixedTS); err != nil {
 		t.Fatalf("insert bad record: %v", err)
 	}
-	snap := buildOrDie(t, db) // must not error
+	snap := buildOrDie(t, db, SynthConfig{}) // must not error
 	// The bad name resolves to NXDOMAIN (it never made it into the zone).
 	if _, _, rcode := snap.Lookup(q("bad.ops.example.com.", dns.TypeA)); rcode != dns.RcodeNameError {
 		t.Fatalf("bad record leaked: rcode=%d", rcode)
@@ -285,7 +302,7 @@ func TestTenantScoping(t *testing.T) {
 		otherTenantID, fixedTS, fixedTS); err != nil {
 		t.Fatalf("insert other zone: %v", err)
 	}
-	snap := buildOrDie(t, db)
+	snap := buildOrDie(t, db, SynthConfig{})
 
 	if got := snap.OriginsForTenant(testTenantID); len(got) != 1 || got[0] != testOrigin {
 		t.Fatalf("OriginsForTenant(test) = %v", got)

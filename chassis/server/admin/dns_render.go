@@ -21,12 +21,9 @@ import (
 // `?zone=<origin>` filters to a single one (404 if it isn't one of the
 // tenant's zones — no cross-tenant peek).
 //
-// Capability: reuses `hostname:*:read` — DNS zone content is the same
-// class of deployment-surface information as the hostname listing, and
-// admins who can read one can read the other. A dedicated `dns:*:read`
-// capability is a Phase 2 refinement that lands with zone CRUD.
+// Capability: `dns:*:read`.
 func (c *Controller) handleDNSRender(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "hostname:*:read"); err != nil {
+	if err := policy.RequireCapability(r.Context(), "dns:*:read"); err != nil {
 		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
 		return
 	}
@@ -41,7 +38,7 @@ func (c *Controller) handleDNSRender(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "mirror_unavailable", nil)
 		return
 	}
-	snap, err := dnsp.BuildSnapshot(db, c.pu.Logger)
+	snap, err := dnsp.BuildSnapshot(db, dnsp.SynthConfigFrom(c.pu.Conf), c.pu.Logger)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "dns_snapshot",
 			map[string]any{"err": err.Error()})

@@ -1034,18 +1034,33 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "update_active_version", map[string]any{"err": err.Error()}}
 	}
 
-	// Auto-mint a structured hostname so the stack is reachable with no
-	// manual binding (internal docs/todo-structured-stack-hostnames.md). One site
-	// here covers both the admin handler and the fleet ApplyStackVersion
-	// path. Rides this same tx so the row is atomic with the version
-	// flip. Gated on the suffix (empty ⇒ off, open-core unchanged) and
-	// skips system stacks. A mint failure must NEVER fail an activation
-	// — log and continue; the convenience URL is secondary to the deploy.
-	if suffix := c.pu.Conf.StructuredHostSuffix; suffix != "" && isMintableStack(stackName) {
-		if _, merr := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, suffix, now); merr != nil {
-			c.pu.Logger.Warn("structured hostname mint skipped (activation unaffected)",
+	// Auto-mint a routing hostname so the stack is reachable with no
+	// manual binding. If the tenant has delegated a DNS zone to us, the
+	// stack is wired under that zone (`stack-name.<origin>`, resolved by
+	// our dns head — internal docs/todo-dns-authority.md); otherwise it
+	// falls back to the global structured-host suffix
+	// (internal docs/todo-structured-stack-hostnames.md). One site here
+	// covers both the admin handler and the fleet ApplyStackVersion path,
+	// and rides this same tx so the row is atomic with the version flip.
+	// Skips system stacks. A mint failure must NEVER fail an activation —
+	// log and continue; the convenience hostname is secondary to the deploy.
+	if isMintableStack(stackName) {
+		if origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID); zerr != nil {
+			c.pu.Logger.Warn("delegated-zone lookup failed (activation unaffected)",
 				zap.String("tenant", tenantID), zap.String("stack", stackName),
-				zap.String("err", merr.Error()))
+				zap.String("err", zerr.Error()))
+		} else if ok {
+			if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, stackName, origin, now); merr != nil {
+				c.pu.Logger.Warn("zone hostname mint skipped (activation unaffected)",
+					zap.String("tenant", tenantID), zap.String("stack", stackName),
+					zap.String("origin", origin), zap.String("err", merr.Error()))
+			}
+		} else if suffix := c.pu.Conf.StructuredHostSuffix; suffix != "" {
+			if _, merr := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, suffix, now); merr != nil {
+				c.pu.Logger.Warn("structured hostname mint skipped (activation unaffected)",
+					zap.String("tenant", tenantID), zap.String("stack", stackName),
+					zap.String("err", merr.Error()))
+			}
 		}
 	}
 

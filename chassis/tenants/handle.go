@@ -74,6 +74,17 @@ func sanitizeHint(stack string) string {
 	return s
 }
 
+// StackLabel is the deterministic leftmost DNS label for a stack within
+// a per-tenant delegated DNS zone — the sanitized stack name with NO
+// random suffix (the zone is tenant-scoped, so the label is already
+// unique). Shared by the synthesized DNS pattern
+// (chassis/server/personality/dns) and the activation-path routing-host
+// mint so the resolved name and the routing hostname never diverge.
+// Returns "" for an all-punctuation stack name; callers skip those.
+func StackLabel(stack string) string {
+	return sanitizeHint(stack)
+}
+
 // randLabel is the identity-bearing part: crypto/rand → lowercased
 // base32, always alphanumeric so it's a valid label start/end on its
 // own.

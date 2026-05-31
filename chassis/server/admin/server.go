@@ -311,6 +311,16 @@ func (c *Controller) Start() {
 	// one zone. See internal docs/todo-dns-authority.md §6.7.
 	tenantR.HandleFunc("/dns/render", c.handleDNSRender).Methods(http.MethodGet)
 
+	// Delegated-zone + override-record CRUD (no SQL). A pattern zone is
+	// synthesized by the dns head; manual zones / override records are
+	// the materialized layer. See internal docs/todo-dns-authority.md.
+	tenantR.HandleFunc("/dns/zones", c.handleListZones).Methods(http.MethodGet)
+	tenantR.HandleFunc("/dns/zones", c.handleCreateZone).Methods(http.MethodPost)
+	tenantR.HandleFunc("/dns/zones/{origin}", c.handleRevokeZone).Methods(http.MethodDelete)
+	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleListRecords).Methods(http.MethodGet)
+	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleCreateRecord).Methods(http.MethodPost)
+	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleRevokeRecord).Methods(http.MethodDelete)
+
 	// Per-tenant secret store CRUD. Reveal-never is enforced by
 	// response shape: only POST /generate and POST /{name}/rotate-
 	// generated emit a `value` field. See internal docs/todo-secret-store.md

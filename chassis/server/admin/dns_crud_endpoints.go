@@ -1,0 +1,429 @@
+package admin
+
+// Delegated-zone + override-record CRUD. A tenant registers a zone it
+// has delegated to us (NS -> our chassis); the dns head then serves the
+// synthesized pattern for it (chassis/server/personality/dns). Override
+// records are the less-common manual layer. All mutations write
+// runtime.db inside one tx and synchronously reload the dbcache mirror
+// so the dns head's next snapshot rebuild sees them.
+//
+// Fleet note: unlike hostname CRUD, these do NOT yet emit control
+// events — multi-region DNS (≥2 authoritative nodes sharing zone state)
+// is a later phase; single-node uses the local Reload. See
+// internal docs/todo-dns-authority.md §9.
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/gorilla/mux"
+	"go.uber.org/zap"
+
+	"github.com/loremlabs/thanks-computer/chassis/auth"
+	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
+	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
+	"github.com/loremlabs/thanks-computer/chassis/tenants"
+)
+
+type dnsZoneDTO struct {
+	Origin     string `json:"origin"`
+	Mode       string `json:"mode"`
+	MName      string `json:"mname"`
+	RName      string `json:"rname"`
+	DefaultTTL int    `json:"default_ttl"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	RevokedAt  string `json:"revoked_at,omitempty"`
+}
+
+func zoneToDTO(z tenants.DNSZone) dnsZoneDTO {
+	return dnsZoneDTO{
+		Origin: z.Origin, Mode: z.Mode, MName: z.MName, RName: z.RName,
+		DefaultTTL: z.DefaultTTL, CreatedAt: z.CreatedAt, RevokedAt: z.RevokedAt,
+	}
+}
+
+type createZoneRequest struct {
+	Origin string `json:"origin"`
+	Mode   string `json:"mode,omitempty"` // "pattern" (default) | "manual"
+}
+
+type createZoneResponse struct {
+	Zone        dnsZoneDTO `json:"zone"`
+	Nameservers []string   `json:"nameservers"`
+	Delegation  string     `json:"delegation"` // human-facing "set these NS records" hint
+}
+
+// handleCreateZone registers a delegated zone for the URL's tenant.
+// SOA mname/rname + timers are filled from config defaults so the
+// caller only supplies the origin. Requires --dns-nameservers to be
+// configured (you're delegating to us; we must know our own NS names).
+func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+
+	var req createZoneRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body", map[string]any{"err": err.Error()})
+		return
+	}
+	canon, ok := tenants.CanonicalizeHost(req.Origin)
+	if !ok || !tenants.IsValidHostname(canon) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_origin", map[string]any{"origin": req.Origin})
+		return
+	}
+	nameservers := nonBlank(c.pu.Conf.DNSNameservers)
+	if len(nameservers) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "dns_not_configured",
+			map[string]any{"hint": "set --dns-nameservers so delegated zones can advertise their NS set"})
+		return
+	}
+
+	z := tenants.DNSZone{
+		ID:        tenants.NewZoneID(),
+		TenantID:  ac.TenantID,
+		Origin:    canon,
+		MName:     nameservers[0], // stored bare; synthesis Fqdn's it
+		RName:     "hostmaster." + canon,
+		Mode:      strings.TrimSpace(req.Mode),
+		CreatedBy: ac.ActorID,
+	}
+
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := c.tenants.CreateZoneTx(r.Context(), tx, z); err != nil {
+		switch {
+		case errors.Is(err, tenants.ErrZoneExists):
+			writeJSONError(w, http.StatusConflict, "zone_exists", map[string]any{"origin": canon})
+		default:
+			writeJSONError(w, http.StatusBadRequest, "create_zone", map[string]any{"err": err.Error()})
+		}
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+	if err := c.pu.Dbc.Reload(); err != nil {
+		c.pu.Logger.Warn("dbcache reload after dns zone create failed; FS watcher will retry",
+			zap.String("err", err.Error()))
+	}
+
+	zoneSOADefaultsForDTO(&z)
+	writeJSON(w, http.StatusCreated, createZoneResponse{
+		Zone:        zoneToDTO(z),
+		Nameservers: nameservers,
+		Delegation:  delegationHint(canon, nameservers),
+	})
+}
+
+// handleListZones lists the tenant's zones (?history=true includes revoked).
+func (c *Controller) handleListZones(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "dns:*:read"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	zones, err := c.tenants.ListZones(r.Context(), ac.TenantID, r.URL.Query().Get("history") == "true")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "list_zones", map[string]any{"err": err.Error()})
+		return
+	}
+	out := make([]dnsZoneDTO, 0, len(zones))
+	for _, z := range zones {
+		out = append(out, zoneToDTO(z))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zones": out})
+}
+
+// handleRevokeZone soft-revokes a tenant's zone by origin (idempotent).
+func (c *Controller) handleRevokeZone(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	origin := mux.Vars(r)["origin"]
+
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	canon, rerr := c.tenants.RevokeZoneTx(r.Context(), tx, ac.TenantID, origin)
+	if rerr != nil && !errors.Is(rerr, tenants.ErrNotFound) {
+		writeJSONError(w, http.StatusInternalServerError, "revoke_zone", map[string]any{"err": rerr.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+	if err := c.pu.Dbc.Reload(); err != nil {
+		c.pu.Logger.Warn("dbcache reload after dns zone revoke failed; FS watcher will retry", zap.String("err", err.Error()))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "origin": canon})
+}
+
+type dnsRecordDTO struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	TTL   *int64 `json:"ttl,omitempty"`
+	Rdata string `json:"rdata"`
+}
+
+type createRecordRequest struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	TTL   *int64 `json:"ttl,omitempty"`
+	Rdata string `json:"rdata"`
+}
+
+// handleCreateRecord adds an override/extra record under a tenant zone.
+func (c *Controller) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	zone, ok := c.lookupTenantZone(w, r, ac.TenantID)
+	if !ok {
+		return
+	}
+
+	var req createRecordRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body", map[string]any{"err": err.Error()})
+		return
+	}
+	if !tenants.ValidDNSRecordType(req.Type) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_type", map[string]any{"type": req.Type})
+		return
+	}
+	rec := tenants.DNSRecord{
+		ID:        tenants.NewRecordID(),
+		ZoneID:    zone.ID,
+		Name:      req.Name,
+		Type:      req.Type,
+		Rdata:     req.Rdata,
+		CreatedBy: ac.ActorID,
+	}
+	if req.TTL != nil {
+		rec.TTL = sql.NullInt64{Int64: *req.TTL, Valid: true}
+	}
+
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := c.tenants.CreateRecordTx(r.Context(), tx, rec); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "create_record", map[string]any{"err": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+	if err := c.pu.Dbc.Reload(); err != nil {
+		c.pu.Logger.Warn("dbcache reload after dns record create failed; FS watcher will retry", zap.String("err", err.Error()))
+	}
+	writeJSON(w, http.StatusCreated, recordToDTO(rec))
+}
+
+// handleListRecords lists active override records for a tenant zone.
+func (c *Controller) handleListRecords(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "dns:*:read"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	zone, ok := c.lookupTenantZone(w, r, ac.TenantID)
+	if !ok {
+		return
+	}
+	recs, err := c.tenants.ListRecords(r.Context(), zone.ID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "list_records", map[string]any{"err": err.Error()})
+		return
+	}
+	out := make([]dnsRecordDTO, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, recordToDTO(rec))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": out})
+}
+
+// handleRevokeRecord soft-revokes records matching (?name, ?type) under
+// a tenant zone.
+func (c *Controller) handleRevokeRecord(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	zone, ok := c.lookupTenantZone(w, r, ac.TenantID)
+	if !ok {
+		return
+	}
+	name := r.URL.Query().Get("name")
+	rtype := r.URL.Query().Get("type")
+	if !tenants.ValidDNSRecordType(rtype) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_type", map[string]any{"type": rtype})
+		return
+	}
+
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	rerr := c.tenants.RevokeRecordTx(r.Context(), tx, zone.ID, name, rtype)
+	if rerr != nil && !errors.Is(rerr, tenants.ErrNotFound) {
+		writeJSONError(w, http.StatusInternalServerError, "revoke_record", map[string]any{"err": rerr.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+	if err := c.pu.Dbc.Reload(); err != nil {
+		c.pu.Logger.Warn("dbcache reload after dns record revoke failed; FS watcher will retry", zap.String("err", err.Error()))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "name": name, "type": strings.ToUpper(rtype)})
+}
+
+// lookupTenantZone resolves the {origin} path var to one of the
+// caller's active zones, writing a 404 and returning ok=false on miss
+// (no cross-tenant peek).
+func (c *Controller) lookupTenantZone(w http.ResponseWriter, r *http.Request, tenantID string) (tenants.DNSZone, bool) {
+	origin := mux.Vars(r)["origin"]
+	z, err := c.tenants.LookupActiveZone(r.Context(), tenantID, origin)
+	if errors.Is(err, tenants.ErrNotFound) {
+		writeJSONError(w, http.StatusNotFound, "zone_not_found", map[string]any{"origin": origin})
+		return tenants.DNSZone{}, false
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "lookup_zone", map[string]any{"err": err.Error()})
+		return tenants.DNSZone{}, false
+	}
+	return z, true
+}
+
+func recordToDTO(r tenants.DNSRecord) dnsRecordDTO {
+	d := dnsRecordDTO{Name: r.Name, Type: strings.ToUpper(r.Type), Rdata: r.Rdata}
+	if r.TTL.Valid {
+		v := r.TTL.Int64
+		d.TTL = &v
+	}
+	return d
+}
+
+// nonBlank drops empty/whitespace entries from a config []string.
+func nonBlank(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// delegationHint renders the customer-facing "point your NS at us" line.
+func delegationHint(origin string, nameservers []string) string {
+	var b strings.Builder
+	b.WriteString("Delegate ")
+	b.WriteString(origin)
+	b.WriteString(" by setting NS records at your registrar:")
+	for _, ns := range nameservers {
+		b.WriteString("\n  ")
+		b.WriteString(origin)
+		b.WriteString(". NS ")
+		b.WriteString(withTrailingDot(ns))
+	}
+	return b.String()
+}
+
+func withTrailingDot(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasSuffix(s, ".") {
+		return s
+	}
+	return s + "."
+}
+
+// zoneSOADefaultsForDTO mirrors the service-layer defaults so the
+// create response reflects what was actually stored.
+func zoneSOADefaultsForDTO(z *tenants.DNSZone) {
+	if z.Mode == "" {
+		z.Mode = "pattern"
+	}
+	if z.DefaultTTL == 0 {
+		z.DefaultTTL = 300
+	}
+}

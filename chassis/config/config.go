@@ -147,6 +147,11 @@ type Config struct {
 	TCPRespTimeout               string   `id:"tcp-resp-timeout" default:"10s" desc:"Max time for us to respond to command. (10s)"`
 	DNSListenAddrs               []string `id:"dns-listen-addrs" default:":5353" desc:"Authoritative-DNS listen addresses (UDP+TCP bound on each). Comma list of ':port' or 'host:port'. Default :5353 (chassis high-port convention; the well-known DNS port 53 needs root/CAP_NET_BIND_SERVICE or a front LB). Set empty to disable the head even when 'dns' is in --personalities. (:5353)"`
 	DNSRRLPerSec                 int      `id:"dns-rrl-per-sec" default:"0" desc:"Per-source-IP DNS response-rate-limit (queries/sec); over-limit queries are dropped (anti-amplification). 0 (default) disables. (0)"`
+	DNSNameservers               []string `id:"dns-nameservers" default:"" desc:"Authoritative nameserver hostnames advertised in synthesized zone NS records (and printed as delegation instructions on 'txco dns zone create'). Comma list, e.g. 'ns1.txco.io,ns2.txco.io'. Empty disables NS synthesis. ()"`
+	DNSEdgeIPs                   []string `id:"dns-edge-ips" default:"" desc:"Edge IPv4/IPv6 addresses synthesized as the A/AAAA target for a delegated zone's apex and per-stack hosts. Comma list, e.g. '203.0.113.10'. Empty disables A/AAAA synthesis. ()"`
+	DNSMXHost                    string   `id:"dns-mx-host" default:"" desc:"Mail exchanger hostname synthesized as the MX target for delegated-zone hosts (the chassis LMTP head's public name). Empty disables MX synthesis. ()"`
+	DNSMXPriority                int      `id:"dns-mx-priority" default:"10" desc:"Preference value for synthesized MX records. (10)"`
+	DNSSynthTTL                  int      `id:"dns-synth-ttl" default:"300" desc:"TTL (seconds) applied to synthesized pattern records. (300)"`
 	WebAddr                      string   `id:"web-addr" default:":8080" desc:"The port to listen on for the web server (:8080)"`
 	WebPass                      string   `id:"web-pass" default:"" desc:"Basic Auth password ()"`
 	WebUser                      string   `id:"web-user" default:"" desc:"User for basic auth ()"`

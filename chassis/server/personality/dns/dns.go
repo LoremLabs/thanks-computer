@@ -30,12 +30,13 @@ import (
 //   - `dns` must appear in `--personalities`
 //   - `--dns-listen-addrs` must be non-empty
 type DNSController struct {
-	ctx     context.Context
-	pu      *processor.Unit
-	servers []*dns.Server
-	snap    atomic.Pointer[ZoneSnapshot]
-	rrl     *throttle.Throttle
-	wg      sync.WaitGroup
+	ctx      context.Context
+	pu       *processor.Unit
+	synthCfg SynthConfig
+	servers  []*dns.Server
+	snap     atomic.Pointer[ZoneSnapshot]
+	rrl      *throttle.Throttle
+	wg       sync.WaitGroup
 
 	queries  metric.Int64Counter
 	rrlDrops metric.Int64Counter
@@ -46,6 +47,9 @@ type DNSController struct {
 // treat them uniformly.
 func NewController(ctx context.Context, pu *processor.Unit) *DNSController {
 	c := &DNSController{ctx: ctx, pu: pu}
+	if pu != nil {
+		c.synthCfg = SynthConfigFrom(pu.Conf)
+	}
 	if pu != nil && pu.Mc != nil && pu.Mc.Meter != nil {
 		c.queries, _ = pu.Mc.Meter.Int64Counter("chassis.dns.queries",
 			metric.WithDescription("DNS queries answered, by qtype + rcode"),
@@ -163,7 +167,7 @@ func (c *DNSController) rebuild() {
 		}
 		return
 	}
-	snap, err := BuildSnapshot(c.pu.Dbc.Snapshot(), c.pu.Logger)
+	snap, err := BuildSnapshot(c.pu.Dbc.Snapshot(), c.synthCfg, c.pu.Logger)
 	if err != nil {
 		c.pu.Logger.Error("dns zone snapshot rebuild failed; keeping previous",
 			zap.String("err", err.Error()))

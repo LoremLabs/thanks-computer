@@ -12,7 +12,7 @@ import (
 func TestBuildReply(t *testing.T) {
 	db := newTestDB(t)
 	seedZone(t, db, fixedTS)
-	snap := buildOrDie(t, db)
+	snap := buildOrDie(t, db, SynthConfig{})
 
 	soaReq := new(dns.Msg)
 	soaReq.SetQuestion("ops.example.com.", dns.TypeSOA)
@@ -95,7 +95,7 @@ func startServer(t *testing.T, snap *ZoneSnapshot, network string) (addr string,
 func TestLiveServerRoundTrip(t *testing.T) {
 	db := newTestDB(t)
 	seedZone(t, db, fixedTS)
-	snap := buildOrDie(t, db)
+	snap := buildOrDie(t, db, SynthConfig{})
 
 	for _, network := range []string{"udp", "tcp"} {
 		t.Run(network, func(t *testing.T) {

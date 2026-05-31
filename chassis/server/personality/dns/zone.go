@@ -63,13 +63,13 @@ type ZoneSnapshot struct {
 // logged and skipped (best-effort, like the LMTP MIME parse) rather
 // than darkening the whole zone; only a DB-level failure returns an
 // error. Pass dbc.Snapshot() — never a captured dbc.Db handle.
-func BuildSnapshot(db *sql.DB, logger *zap.Logger) (*ZoneSnapshot, error) {
+func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapshot, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	zrows, err := db.Query(`SELECT id, tenant_id, origin, mname, rname,
 	                               refresh, retry, expire, minimum,
-	                               default_ttl, updated_at
+	                               default_ttl, mode, updated_at
 	                          FROM dns_zones
 	                         WHERE revoked_at IS NULL`)
 	if err != nil {
@@ -79,13 +79,13 @@ func BuildSnapshot(db *sql.DB, logger *zap.Logger) (*ZoneSnapshot, error) {
 		id, tenantID, origin, mname, rname string
 		refresh, retry, expire, minimum    uint32
 		defaultTTL                         uint32
-		updatedAt                          string
+		mode, updatedAt                    string
 	}
 	var zoneRows []zoneRow
 	for zrows.Next() {
 		var z zoneRow
 		if err := zrows.Scan(&z.id, &z.tenantID, &z.origin, &z.mname, &z.rname,
-			&z.refresh, &z.retry, &z.expire, &z.minimum, &z.defaultTTL, &z.updatedAt); err != nil {
+			&z.refresh, &z.retry, &z.expire, &z.minimum, &z.defaultTTL, &z.mode, &z.updatedAt); err != nil {
 			zrows.Close()
 			return nil, fmt.Errorf("dns: scan zone: %w", err)
 		}
@@ -96,6 +96,14 @@ func BuildSnapshot(db *sql.DB, logger *zap.Logger) (*ZoneSnapshot, error) {
 		return nil, fmt.Errorf("dns: iterate zones: %w", err)
 	}
 	zrows.Close()
+
+	// Active stacks per tenant, loaded once (fully read + closed before
+	// the per-zone record queries — required under the mirror's single
+	// pinned connection). Feeds per-stack synthesis + the serial.
+	stacksByTenant, serr := loadActiveStacks(db)
+	if serr != nil {
+		return nil, serr
+	}
 
 	snap := &ZoneSnapshot{}
 	for _, zr := range zoneRows {
@@ -111,10 +119,17 @@ func BuildSnapshot(db *sql.DB, logger *zap.Logger) (*ZoneSnapshot, error) {
 		// The apex always exists (it carries SOA + NS).
 		z.names[z.originFQDN] = true
 
-		// max(updated_at) over the zone row + its records drives the
-		// serial. Start from the zone's own updated_at.
+		// max(updated_at) over the zone row + its records (+ active-stack
+		// activations, for pattern zones) drives the serial.
 		maxT, _ := parseTS(zr.updatedAt)
 
+		// Read materialized records fully into a slice, then close — so
+		// no record cursor is open during synthesis or the next zone.
+		type recRow struct {
+			name, rtype, rdata, updatedAt string
+			ttl                           sql.NullInt64
+		}
+		var matRecs []recRow
 		rrows, rerr := db.Query(`SELECT name, type, ttl, rdata, updated_at
 		                           FROM dns_records
 		                          WHERE zone_id = ? AND revoked_at IS NULL`, zr.id)
@@ -122,36 +137,68 @@ func BuildSnapshot(db *sql.DB, logger *zap.Logger) (*ZoneSnapshot, error) {
 			return nil, fmt.Errorf("dns: query records for %s: %w", origin, rerr)
 		}
 		for rrows.Next() {
-			var name, rtype, rdata, updatedAt string
-			var ttl sql.NullInt64
-			if err := rrows.Scan(&name, &rtype, &ttl, &rdata, &updatedAt); err != nil {
+			var rec recRow
+			if err := rrows.Scan(&rec.name, &rec.rtype, &rec.ttl, &rec.rdata, &rec.updatedAt); err != nil {
 				rrows.Close()
 				return nil, fmt.Errorf("dns: scan record for %s: %w", origin, err)
 			}
-			if t, ok := parseTS(updatedAt); ok && t.After(maxT) {
+			if t, ok := parseTS(rec.updatedAt); ok && t.After(maxT) {
 				maxT = t
 			}
-			effTTL := z.defaultTTL
-			if ttl.Valid && ttl.Int64 >= 0 {
-				effTTL = uint32(ttl.Int64)
-			}
-			rr, perr := buildRR(z, name, rtype, effTTL, rdata)
-			if perr != nil {
-				logger.Warn("dns: skipping malformed record",
-					zap.String("origin", origin),
-					zap.String("name", name),
-					zap.String("type", rtype),
-					zap.String("rdata", rdata),
-					zap.String("err", perr.Error()))
-				continue
-			}
-			z.add(rr)
+			matRecs = append(matRecs, rec)
 		}
 		if err := rrows.Err(); err != nil {
 			rrows.Close()
 			return nil, fmt.Errorf("dns: iterate records for %s: %w", origin, err)
 		}
 		rrows.Close()
+
+		// 'pattern' (default/empty) synthesizes the fixed shape, then lets
+		// materialized records override; 'manual' is materialized-only.
+		pattern := zr.mode != "manual"
+		if pattern {
+			stacks := stacksByTenant[zr.tenantID]
+			for _, s := range stacks {
+				if t, ok := parseTS(s.activatedAt); ok && t.After(maxT) {
+					maxT = t
+				}
+			}
+			for _, rr := range synthesize(z, cfg, stacks) {
+				z.add(rr)
+			}
+		}
+
+		// Materialized records: in pattern mode the FIRST record for a
+		// given (owner,type) clears the synthesized set for that
+		// (owner,type) (override); subsequent ones of the same key add
+		// to it. In manual mode there is nothing synthesized to clear.
+		cleared := map[string]bool{}
+		for _, rec := range matRecs {
+			effTTL := z.defaultTTL
+			if rec.ttl.Valid && rec.ttl.Int64 >= 0 {
+				effTTL = uint32(rec.ttl.Int64)
+			}
+			rr, perr := buildRR(z, rec.name, rec.rtype, effTTL, rec.rdata)
+			if perr != nil {
+				logger.Warn("dns: skipping malformed record",
+					zap.String("origin", origin),
+					zap.String("name", rec.name),
+					zap.String("type", rec.rtype),
+					zap.String("rdata", rec.rdata),
+					zap.String("err", perr.Error()))
+				continue
+			}
+			owner := strings.ToLower(rr.Header().Name)
+			rtype := rr.Header().Rrtype
+			if pattern {
+				key := fmt.Sprintf("%s|%d", owner, rtype)
+				if !cleared[key] {
+					z.clearOwnerType(owner, rtype)
+					cleared[key] = true
+				}
+			}
+			z.add(rr)
+		}
 
 		// Serial = uint32 epoch-seconds (UTC) of the latest change to
 		// this zone's content; clamp to >=1 (RFC 1912 advises serial!=0).
@@ -185,6 +232,45 @@ func BuildSnapshot(db *sql.DB, logger *zap.Logger) (*ZoneSnapshot, error) {
 		return len(snap.zones[i].originFQDN) > len(snap.zones[j].originFQDN)
 	})
 	return snap, nil
+}
+
+// loadActiveStacks returns the active, non-revoked stacks per tenant
+// (keyed by tenant_id) with each one's activation timestamp. One query,
+// fully drained before any per-zone work. Used to synthesize per-stack
+// records and to feed the per-zone serial.
+func loadActiveStacks(db *sql.DB) (map[string][]stackInfo, error) {
+	rows, err := db.Query(`SELECT s.tenant_id, s.name, COALESCE(sv.activated_at, '')
+	                          FROM stacks s
+	                          JOIN stack_versions sv
+	                            ON sv.stack_id = s.stack_id
+	                           AND sv.version_number = s.active_version
+	                         WHERE s.active_version IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("dns: query active stacks: %w", err)
+	}
+	defer rows.Close()
+	out := map[string][]stackInfo{}
+	for rows.Next() {
+		var tid, name, act string
+		if err := rows.Scan(&tid, &name, &act); err != nil {
+			return nil, fmt.Errorf("dns: scan active stack: %w", err)
+		}
+		out[tid] = append(out[tid], stackInfo{name: name, activatedAt: act})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("dns: iterate active stacks: %w", err)
+	}
+	return out, nil
+}
+
+// clearOwnerType drops the synthesized RRset for one (owner, type) so a
+// materialized record can replace it. Leaves z.names intact — the owner
+// still exists (the materialized record is added immediately after).
+func (z *zone) clearOwnerType(ownerFQDN string, t uint16) {
+	owner := strings.ToLower(ownerFQDN)
+	if byType := z.rr[owner]; byType != nil {
+		delete(byType, t)
+	}
 }
 
 // add inserts an already-built RR into the zone's index + name set.
