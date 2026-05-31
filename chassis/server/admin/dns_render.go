@@ -12,8 +12,6 @@ import (
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth"
-	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
-	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 )
 
@@ -21,10 +19,11 @@ import (
 // `?zone=<origin>` filters to a single one (404 if it isn't one of the
 // tenant's zones — no cross-tenant peek).
 //
-// Capability: `dns:*:read`.
+// Access: same gate as the rest of the tenant DNS surface — operator-only
+// by default, or the tenant's dns:*:read under --dns-tenant-zone-management
+// (see requireDNSZoneAccess).
 func (c *Controller) handleDNSRender(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "dns:*:read"); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+	if !c.requireDNSZoneAccess(w, r, false) {
 		return
 	}
 	ac := auth.FromContext(r.Context())

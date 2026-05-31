@@ -105,6 +105,11 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 		return nil, serr
 	}
 
+	// Effective synthesis config: the operator-set dns_settings row if
+	// present, else the boot-flag defaults passed in `cfg`. (Per-zone
+	// overrides will overlay this per zone in a later phase.)
+	eff := EffectiveSynthConfig(db, cfg)
+
 	snap := &ZoneSnapshot{}
 	for _, zr := range zoneRows {
 		origin := strings.ToLower(strings.TrimSuffix(zr.origin, "."))
@@ -163,7 +168,7 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 					maxT = t
 				}
 			}
-			for _, rr := range synthesize(z, cfg, stacks) {
+			for _, rr := range synthesize(z, eff, stacks) {
 				z.add(rr)
 			}
 		}

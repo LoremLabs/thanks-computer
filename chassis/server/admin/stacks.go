@@ -1045,18 +1045,25 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// Skips system stacks. A mint failure must NEVER fail an activation —
 	// log and continue; the convenience hostname is secondary to the deploy.
 	if isMintableStack(stackName) {
-		if origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID); zerr != nil {
-			c.pu.Logger.Warn("delegated-zone lookup failed (activation unaffected)",
+		origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID)
+		if zerr != nil {
+			// A zone-lookup failure must never skip the structured-host
+			// fallback (or fail activation): log and treat it as "no
+			// delegated zone", preserving the pre-delegated-zone behavior.
+			c.pu.Logger.Warn("delegated-zone lookup failed; using structured-host suffix",
 				zap.String("tenant", tenantID), zap.String("stack", stackName),
 				zap.String("err", zerr.Error()))
-		} else if ok {
+			ok = false
+		}
+		switch {
+		case ok:
 			if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, stackName, origin, now); merr != nil {
 				c.pu.Logger.Warn("zone hostname mint skipped (activation unaffected)",
 					zap.String("tenant", tenantID), zap.String("stack", stackName),
 					zap.String("origin", origin), zap.String("err", merr.Error()))
 			}
-		} else if suffix := c.pu.Conf.StructuredHostSuffix; suffix != "" {
-			if _, merr := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, suffix, now); merr != nil {
+		case c.pu.Conf.StructuredHostSuffix != "":
+			if _, merr := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, c.pu.Conf.StructuredHostSuffix, now); merr != nil {
 				c.pu.Logger.Warn("structured hostname mint skipped (activation unaffected)",
 					zap.String("tenant", tenantID), zap.String("stack", stackName),
 					zap.String("err", merr.Error()))

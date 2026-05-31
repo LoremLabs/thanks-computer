@@ -243,6 +243,14 @@ func (c *Controller) Start() {
 	// substitutes into the op's txcl.
 	protected.HandleFunc("/v1/demo/op/build", c.handleDemoBuildOp).Methods(http.MethodPost)
 
+	// Chassis-global DNS synthesis config (nameservers / edge IPs / MX
+	// host that parameterize every delegated zone's synthesized
+	// pattern). Deployment infrastructure, not per-tenant data, so it
+	// lives here rather than under /v1/tenants/{t}. See
+	// internal docs/todo-dns-authority.md.
+	protected.HandleFunc("/v1/dns/config", c.handleGetDNSConfig).Methods(http.MethodGet)
+	protected.HandleFunc("/v1/dns/config", c.handlePutDNSConfig).Methods(http.MethodPut)
+
 	// Tenant-scoped subrouter. The resolveTenantMiddleware extracts
 	// {tenant}, looks up the row, and stamps slug + id onto
 	// auth.Context. Handlers are the same Go funcs as the flat

@@ -126,6 +126,105 @@ type DNSRecord struct {
 func NewZoneID() string   { return "dnz_" + hxid.New().String() }
 func NewRecordID() string { return "dnr_" + hxid.New().String() }
 
+// DNSSettings is the chassis-global synthesis infrastructure config —
+// the nameservers customers delegate to, the edge A/AAAA target, and
+// the mail exchanger. Singleton per chassis. List fields are stored
+// comma-separated (matching the --dns-* flag convention).
+type DNSSettings struct {
+	Nameservers []string
+	EdgeIPs     []string
+	MXHost      string
+	MXPriority  int
+	SynthTTL    int
+	UpdatedAt   string
+	UpdatedBy   string
+}
+
+// rowQueryer is satisfied by both *sql.DB and *sql.Tx, so the settings
+// read works on the live mirror (synthesis) or inside a tx (admin RMW).
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// LoadDNSSettings reads the singleton dns_settings row. found=false when
+// no row exists yet (first run) — callers then fall back to the boot
+// `--dns-*` flag defaults.
+func LoadDNSSettings(ctx context.Context, q rowQueryer) (DNSSettings, bool, error) {
+	var s DNSSettings
+	var ns, edge string
+	err := q.QueryRowContext(ctx,
+		`SELECT nameservers, edge_ips, mx_host, mx_priority, synth_ttl,
+		        updated_at, COALESCE(updated_by, '')
+		   FROM dns_settings WHERE singleton = 1`).
+		Scan(&ns, &edge, &s.MXHost, &s.MXPriority, &s.SynthTTL, &s.UpdatedAt, &s.UpdatedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DNSSettings{}, false, nil
+	}
+	if err != nil {
+		return DNSSettings{}, false, err
+	}
+	s.Nameservers = splitCSV(ns)
+	s.EdgeIPs = splitCSV(edge)
+	return s, true, nil
+}
+
+// PutDNSSettingsTx upserts the singleton dns_settings row.
+func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings) error {
+	now := s.UpdatedAt
+	if now == "" {
+		now = time.Now().UTC().Format(time.RFC3339)
+	}
+	var updatedByArg any
+	if s.UpdatedBy != "" {
+		updatedByArg = s.UpdatedBy
+	}
+	ttl := s.SynthTTL
+	if ttl <= 0 {
+		ttl = 300
+	}
+	pri := s.MXPriority
+	if pri < 0 {
+		pri = 10
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO dns_settings
+		     (singleton, nameservers, edge_ips, mx_host, mx_priority, synth_ttl, updated_at, updated_by)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(singleton) DO UPDATE SET
+		     nameservers = excluded.nameservers,
+		     edge_ips    = excluded.edge_ips,
+		     mx_host     = excluded.mx_host,
+		     mx_priority = excluded.mx_priority,
+		     synth_ttl   = excluded.synth_ttl,
+		     updated_at  = excluded.updated_at,
+		     updated_by  = excluded.updated_by`,
+		joinCSV(s.Nameservers), joinCSV(s.EdgeIPs), strings.TrimSpace(s.MXHost),
+		pri, ttl, now, updatedByArg)
+	return err
+}
+
+// splitCSV / joinCSV (de)serialize the comma-list settings columns,
+// trimming blanks.
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func joinCSV(in []string) string {
+	out := make([]string, 0, len(in))
+	for _, p := range in {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
 // ValidDNSRecordType reports whether t is a Phase-1/2 supported type.
 func ValidDNSRecordType(t string) bool {
 	switch strings.ToUpper(strings.TrimSpace(t)) {

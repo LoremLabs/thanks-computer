@@ -26,6 +26,8 @@ func runDNS(args []string, stdout, stderr io.Writer) int {
 		return runDNSZone(args[1:], stdout, stderr)
 	case "record":
 		return runDNSRecord(args[1:], stdout, stderr)
+	case "config":
+		return runDNSConfig(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printDNSUsage(stdout)
 		return 0
@@ -48,10 +50,23 @@ Subcommands:
   record add <origin>    Add an override/extra record to a zone
   record list <origin>   List a zone's override records
   record rm <origin>     Revoke a zone's override record
+  config show            Show the chassis DNS synthesis config (NS/edge/MX/TTL)
+  config set [flags]     Set the chassis DNS synthesis config (no restart)
   render [<zone>]        Print the zone(s) the chassis would serve
 
 Run 'txco dns <subcommand> --help' for flags.
 `)
+}
+
+// splitComma splits a comma list, trimming blanks.
+func splitComma(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // dnsFlags bundles the common target/auth flags every dns subcommand
@@ -224,6 +239,107 @@ func runDNSZoneDelete(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "revoked zone %s\n", origin)
+	return 0
+}
+
+// --- config -----------------------------------------------------------
+
+func runDNSConfig(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "dns config: expected show|set")
+		return 2
+	}
+	switch args[0] {
+	case "show", "get":
+		return runDNSConfigShow(args[1:], stdout, stderr)
+	case "set":
+		return runDNSConfigSet(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "dns config: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func printDNSConfig(w io.Writer, cfg *client.DNSConfig) {
+	src := "boot --dns-* flags (no settings row yet)"
+	if cfg.Configured {
+		src = "operator-set (dns config set)"
+	}
+	fmt.Fprintf(w, "nameservers: %s\n", strings.Join(cfg.Nameservers, ", "))
+	fmt.Fprintf(w, "edge-ips:    %s\n", strings.Join(cfg.EdgeIPs, ", "))
+	fmt.Fprintf(w, "mx-host:     %s\n", cfg.MXHost)
+	fmt.Fprintf(w, "mx-priority: %d\n", cfg.MXPriority)
+	fmt.Fprintf(w, "ttl:         %d\n", cfg.TTL)
+	fmt.Fprintf(w, "source:      %s\n", src)
+}
+
+func runDNSConfigShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("dns config show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	f := registerDNSFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg, err := f.client().GetDNSConfig(context.Background())
+	if err != nil {
+		fmt.Fprintf(stderr, "dns config show: %v\n", err)
+		return 1
+	}
+	printDNSConfig(stdout, cfg)
+	return 0
+}
+
+func runDNSConfigSet(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("dns config set", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	f := registerDNSFlags(fs)
+	ns := fs.String("nameservers", "", "comma-separated authoritative nameserver FQDNs customers delegate to")
+	edge := fs.String("edge-ips", "", "comma-separated A/AAAA target IP(s) for apex + per-stack hosts")
+	mx := fs.String("mx", "", "mail exchanger hostname (the LMTP head's public name)")
+	mxpri := fs.Int("mx-priority", 10, "MX preference value")
+	ttl := fs.Int("ttl", 300, "synthesized record TTL in seconds")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, "\nUsage: txco dns config set [flags]\n\nOnly the flags you pass are changed. Flags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	set := map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+	if !set["nameservers"] && !set["edge-ips"] && !set["mx"] && !set["mx-priority"] && !set["ttl"] {
+		fmt.Fprintln(stderr, "dns config set: provide at least one of --nameservers/--edge-ips/--mx/--mx-priority/--ttl")
+		return 2
+	}
+	var patch client.DNSConfigPatch
+	if set["nameservers"] {
+		v := splitComma(*ns)
+		patch.Nameservers = &v
+	}
+	if set["edge-ips"] {
+		v := splitComma(*edge)
+		patch.EdgeIPs = &v
+	}
+	if set["mx"] {
+		v := strings.TrimSpace(*mx)
+		patch.MXHost = &v
+	}
+	if set["mx-priority"] {
+		v := *mxpri
+		patch.MXPriority = &v
+	}
+	if set["ttl"] {
+		v := *ttl
+		patch.TTL = &v
+	}
+	cfg, err := f.client().PutDNSConfig(context.Background(), patch)
+	if err != nil {
+		fmt.Fprintf(stderr, "dns config set: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "updated DNS synthesis config:")
+	printDNSConfig(stdout, cfg)
 	return 0
 }
 

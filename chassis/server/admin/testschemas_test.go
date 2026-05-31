@@ -150,6 +150,7 @@ CREATE TABLE browser_bootstrap (
 	actor_id           TEXT NOT NULL,
 	tenant_id          TEXT NOT NULL,
 	capabilities_json  TEXT NOT NULL,
+	super_admin        INTEGER NOT NULL DEFAULT 0,
 	label              TEXT,
 	created_at         TEXT NOT NULL,
 	expires_at         TEXT NOT NULL,
@@ -161,6 +162,7 @@ CREATE TABLE browser_sessions (
 	actor_id           TEXT NOT NULL,
 	tenant_id          TEXT NOT NULL,
 	capabilities_json  TEXT NOT NULL,
+	super_admin        INTEGER NOT NULL DEFAULT 0,
 	ua                 TEXT,
 	ip                 TEXT,
 	created_at         TEXT NOT NULL,
@@ -168,5 +170,22 @@ CREATE TABLE browser_sessions (
 	revoked_at         TEXT,
 	revoked_by         TEXT,
 	last_seen_at       TEXT NOT NULL
+);
+CREATE TABLE dns_zones (
+	id          TEXT PRIMARY KEY,
+	tenant_id   TEXT NOT NULL,
+	origin      TEXT NOT NULL,
+	mname       TEXT NOT NULL,
+	rname       TEXT NOT NULL,
+	refresh     INTEGER NOT NULL DEFAULT 7200,
+	retry       INTEGER NOT NULL DEFAULT 3600,
+	expire      INTEGER NOT NULL DEFAULT 1209600,
+	minimum     INTEGER NOT NULL DEFAULT 300,
+	default_ttl INTEGER NOT NULL DEFAULT 300,
+	mode        TEXT NOT NULL DEFAULT 'pattern',
+	created_at  TEXT NOT NULL,
+	created_by  TEXT,
+	updated_at  TEXT NOT NULL,
+	revoked_at  TEXT
 );
 `

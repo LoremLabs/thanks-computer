@@ -36,6 +36,7 @@ func newBrowserTestDB(t *testing.T) *sql.DB {
 			actor_id           TEXT NOT NULL,
 			tenant_id          TEXT NOT NULL,
 			capabilities_json  TEXT NOT NULL,
+			super_admin        INTEGER NOT NULL DEFAULT 0,
 			label              TEXT,
 			created_at         TEXT NOT NULL,
 			expires_at         TEXT NOT NULL,
@@ -47,6 +48,7 @@ func newBrowserTestDB(t *testing.T) *sql.DB {
 			actor_id           TEXT NOT NULL,
 			tenant_id          TEXT NOT NULL,
 			capabilities_json  TEXT NOT NULL,
+			super_admin        INTEGER NOT NULL DEFAULT 0,
 			ua                 TEXT,
 			ip                 TEXT,
 			created_at         TEXT NOT NULL,
@@ -90,7 +92,7 @@ func TestCreateAndConsumeBootstrap(t *testing.T) {
 	ctx := context.Background()
 	caps := []string{"opstack:*:read", "opstack:*:update"}
 	plaintext, expiresAt, err := r.CreateBootstrap(ctx,
-		"actor_test", "tnt_default", caps, "test-label", 60*time.Second)
+		"actor_test", "tnt_default", caps, false, "test-label", 60*time.Second)
 	if err != nil {
 		t.Fatalf("CreateBootstrap: %v", err)
 	}
@@ -131,7 +133,7 @@ func TestConsumeBootstrapInvalid(t *testing.T) {
 	}
 	// Minted but consumed.
 	plaintext, _, _ := r.CreateBootstrap(ctx,
-		"actor_test", "tnt_default", []string{"opstack:*:read"}, "", time.Minute)
+		"actor_test", "tnt_default", []string{"opstack:*:read"}, false, "", time.Minute)
 	if _, err := r.ConsumeBootstrap(ctx, plaintext, ""); err != nil {
 		t.Fatalf("first consume: %v", err)
 	}
@@ -144,7 +146,7 @@ func TestConsumeBootstrapExpired(t *testing.T) {
 	r := New(newBrowserTestDB(t), nil)
 	ctx := context.Background()
 	plaintext, _, err := r.CreateBootstrap(ctx,
-		"actor_test", "tnt_default", []string{"opstack:*:read"}, "", -1*time.Second)
+		"actor_test", "tnt_default", []string{"opstack:*:read"}, false, "", -1*time.Second)
 	if err != nil {
 		t.Fatalf("CreateBootstrap: %v", err)
 	}
@@ -160,7 +162,7 @@ func TestConsumeBootstrapRace(t *testing.T) {
 	r := New(newBrowserTestDB(t), nil)
 	ctx := context.Background()
 	plaintext, _, _ := r.CreateBootstrap(ctx,
-		"actor_test", "tnt_default", []string{"opstack:*:read"}, "", time.Minute)
+		"actor_test", "tnt_default", []string{"opstack:*:read"}, false, "", time.Minute)
 
 	var (
 		wg      sync.WaitGroup
@@ -197,7 +199,7 @@ func TestSessionLifecycle(t *testing.T) {
 	r := New(newBrowserTestDB(t), nil)
 	ctx := context.Background()
 	plaintext, _, _ := r.CreateBootstrap(ctx,
-		"actor_test", "tnt_default", []string{"opstack:*:read"}, "", time.Minute)
+		"actor_test", "tnt_default", []string{"opstack:*:read"}, false, "", time.Minute)
 	b, _ := r.ConsumeBootstrap(ctx, plaintext, "10.0.0.1")
 
 	sess, err := r.CreateSession(ctx, b, "ua/test", "10.0.0.1", time.Hour)
@@ -247,7 +249,7 @@ func TestRevokeActorSessions(t *testing.T) {
 	mkSess := func(actor string) {
 		t.Helper()
 		plaintext, _, _ := r.CreateBootstrap(ctx,
-			actor, "tnt_default", []string{"opstack:*:read"}, "", time.Minute)
+			actor, "tnt_default", []string{"opstack:*:read"}, false, "", time.Minute)
 		b, _ := r.ConsumeBootstrap(ctx, plaintext, "")
 		if _, err := r.CreateSession(ctx, b, "ua", "", time.Hour); err != nil {
 			t.Fatalf("CreateSession: %v", err)
@@ -286,7 +288,7 @@ func TestTouchSession(t *testing.T) {
 	r := New(newBrowserTestDB(t), nil)
 	ctx := context.Background()
 	plaintext, _, _ := r.CreateBootstrap(ctx,
-		"actor_test", "tnt_default", []string{"opstack:*:read"}, "", time.Minute)
+		"actor_test", "tnt_default", []string{"opstack:*:read"}, false, "", time.Minute)
 	b, _ := r.ConsumeBootstrap(ctx, plaintext, "")
 	sess, _ := r.CreateSession(ctx, b, "ua", "", time.Hour)
 	initial := sess.LastSeenAt
@@ -301,5 +303,50 @@ func TestTouchSession(t *testing.T) {
 	if !got.LastSeenAt.After(initial) {
 		t.Errorf("LastSeenAt did not advance after Touch: before=%v after=%v",
 			initial, got.LastSeenAt)
+	}
+}
+
+// TestBootstrapCarriesSuperAdmin — the super_admin flag must round-trip
+// bootstrap → session → reload, so verifyCookie can set
+// auth.Context.SuperAdmin and RequireSuperAdmin gates on the real flag
+// rather than treating every browser session as an operator.
+func TestBootstrapCarriesSuperAdmin(t *testing.T) {
+	r := New(newBrowserTestDB(t), nil)
+	ctx := context.Background()
+
+	// super_admin = true propagates all the way through.
+	pt, _, err := r.CreateBootstrap(ctx,
+		"actor_test", "tnt_default", []string{"admin:all"}, true, "", time.Minute)
+	if err != nil {
+		t.Fatalf("CreateBootstrap: %v", err)
+	}
+	b, err := r.ConsumeBootstrap(ctx, pt, "10.0.0.1")
+	if err != nil {
+		t.Fatalf("ConsumeBootstrap: %v", err)
+	}
+	if !b.SuperAdmin {
+		t.Fatalf("bootstrap should carry super_admin")
+	}
+	sess, err := r.CreateSession(ctx, b, "ua", "10.0.0.1", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if !sess.SuperAdmin {
+		t.Fatalf("created session should carry super_admin")
+	}
+	if got, err := r.GetSession(ctx, sess.SessionID); err != nil || !got.SuperAdmin {
+		t.Fatalf("reloaded session lost super_admin: err=%v", err)
+	}
+
+	// Default (false) round-trips false — a tenant member's session.
+	pt2, _, _ := r.CreateBootstrap(ctx,
+		"actor_test", "tnt_default", []string{"opstack:*:read"}, false, "", time.Minute)
+	b2, _ := r.ConsumeBootstrap(ctx, pt2, "10.0.0.1")
+	if b2.SuperAdmin {
+		t.Fatalf("non-super bootstrap must be false")
+	}
+	s2, _ := r.CreateSession(ctx, b2, "ua", "", time.Hour)
+	if g2, _ := r.GetSession(ctx, s2.SessionID); g2.SuperAdmin {
+		t.Fatalf("non-super session must be false")
 	}
 }

@@ -25,8 +25,34 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
+	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
+
+// requireDNSZoneAccess gates the tenant-scoped DNS surface (zones,
+// records, render). Default: operator-only (RequireSuperAdmin), because
+// delegating zone control to tenants is a sharp edge we don't encourage.
+// Escape hatch: with --dns-tenant-zone-management, a tenant holding the
+// dns:* capability manages its own zones (read vs write per `write`).
+// Writes the 403 itself; returns false when the caller should stop.
+func (c *Controller) requireDNSZoneAccess(w http.ResponseWriter, r *http.Request, write bool) bool {
+	if c.pu.Conf.DNSTenantZoneManagement {
+		capName := "dns:*:read"
+		if write {
+			capName = "dns:*:write"
+		}
+		if err := policy.RequireCapability(r.Context(), capName); err != nil {
+			auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+			return false
+		}
+		return true
+	}
+	if err := policy.RequireSuperAdmin(r.Context()); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return false
+	}
+	return true
+}
 
 type dnsZoneDTO struct {
 	Origin     string `json:"origin"`
@@ -61,8 +87,7 @@ type createZoneResponse struct {
 // caller only supplies the origin. Requires --dns-nameservers to be
 // configured (you're delegating to us; we must know our own NS names).
 func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+	if !c.requireDNSZoneAccess(w, r, true) {
 		return
 	}
 	ac := auth.FromContext(r.Context())
@@ -83,10 +108,15 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_origin", map[string]any{"origin": req.Origin})
 		return
 	}
-	nameservers := nonBlank(c.pu.Conf.DNSNameservers)
+	// Effective synthesis config = operator-set dns_settings overlaid on
+	// the boot --dns-* flags. A zone can't advertise an NS set if no
+	// nameservers are configured either way — refuse instead of minting
+	// a zone that resolves to nothing.
+	eff := dnsp.EffectiveSynthConfig(c.pu.Dbc.Snapshot(), dnsp.SynthConfigFrom(c.pu.Conf))
+	nameservers := nonBlank(eff.Nameservers)
 	if len(nameservers) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "dns_not_configured",
-			map[string]any{"hint": "set --dns-nameservers so delegated zones can advertise their NS set"})
+			map[string]any{"hint": "configure nameservers first: `txco dns config set --nameservers ns1.example.com,ns2.example.com` (or the --dns-nameservers boot flag)"})
 		return
 	}
 
@@ -140,8 +170,7 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 
 // handleListZones lists the tenant's zones (?history=true includes revoked).
 func (c *Controller) handleListZones(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "dns:*:read"); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+	if !c.requireDNSZoneAccess(w, r, false) {
 		return
 	}
 	ac := auth.FromContext(r.Context())
@@ -163,8 +192,7 @@ func (c *Controller) handleListZones(w http.ResponseWriter, r *http.Request) {
 
 // handleRevokeZone soft-revokes a tenant's zone by origin (idempotent).
 func (c *Controller) handleRevokeZone(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+	if !c.requireDNSZoneAccess(w, r, true) {
 		return
 	}
 	ac := auth.FromContext(r.Context())
@@ -217,8 +245,7 @@ type createRecordRequest struct {
 
 // handleCreateRecord adds an override/extra record under a tenant zone.
 func (c *Controller) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+	if !c.requireDNSZoneAccess(w, r, true) {
 		return
 	}
 	ac := auth.FromContext(r.Context())
@@ -282,8 +309,7 @@ func (c *Controller) handleCreateRecord(w http.ResponseWriter, r *http.Request) 
 
 // handleListRecords lists active override records for a tenant zone.
 func (c *Controller) handleListRecords(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "dns:*:read"); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+	if !c.requireDNSZoneAccess(w, r, false) {
 		return
 	}
 	ac := auth.FromContext(r.Context())
@@ -310,8 +336,7 @@ func (c *Controller) handleListRecords(w http.ResponseWriter, r *http.Request) {
 // handleRevokeRecord soft-revokes records matching (?name, ?type) under
 // a tenant zone.
 func (c *Controller) handleRevokeRecord(w http.ResponseWriter, r *http.Request) {
-	if err := policy.RequireCapability(r.Context(), "dns:*:write"); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+	if !c.requireDNSZoneAccess(w, r, true) {
 		return
 	}
 	ac := auth.FromContext(r.Context())

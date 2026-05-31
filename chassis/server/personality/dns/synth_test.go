@@ -141,6 +141,55 @@ func TestManualModeNoSynthesis(t *testing.T) {
 	}
 }
 
+// seedSettings inserts the singleton dns_settings row.
+func seedSettings(t *testing.T, db *sql.DB, ns, edge, mx string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO dns_settings
+		(singleton,nameservers,edge_ips,mx_host,mx_priority,synth_ttl,updated_at)
+		VALUES (1,?,?,?,10,300,?)`, ns, edge, mx, fixedTS); err != nil {
+		t.Fatalf("insert dns_settings: %v", err)
+	}
+}
+
+func TestEffectiveSynthConfig(t *testing.T) {
+	db := newTestDB(t)
+	flags := SynthConfig{Nameservers: []string{"flag-ns.example."}, EdgeIPs: []string{"192.0.2.1"}, MXHost: "flag-mx."}
+
+	// No settings row → flag defaults.
+	if got := EffectiveSynthConfig(db, flags); len(got.Nameservers) != 1 || got.Nameservers[0] != "flag-ns.example." {
+		t.Fatalf("no row should use flags: %+v", got)
+	}
+
+	// Row present → row wins entirely.
+	seedSettings(t, db, "ns1.txco.io,ns2.txco.io", "203.0.113.10", "mx.txco.io")
+	got := EffectiveSynthConfig(db, flags)
+	if len(got.Nameservers) != 2 || got.EdgeIPs[0] != "203.0.113.10" || got.MXHost != "mx.txco.io" {
+		t.Fatalf("settings row should win: %+v", got)
+	}
+}
+
+// TestSettingsDriveSynthesis proves the operator-set settings (not boot
+// flags) parameterize synthesis: flag defaults are EMPTY here, yet the
+// pattern is fully populated from the dns_settings row.
+func TestSettingsDriveSynthesis(t *testing.T) {
+	db := newTestDB(t)
+	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+	seedActiveStack(t, db, patTenant, "web-api", fixedTS)
+	seedSettings(t, db, "ns1.txco.io", "203.0.113.10", "mx.txco.io")
+
+	snap := buildOrDie(t, db, SynthConfig{}) // empty flag defaults
+
+	if a, _, _ := snap.Lookup(q("web-api.pat.example.com.", dns.TypeA)); len(a) != 1 || a[0].(*dns.A).A.String() != "203.0.113.10" {
+		t.Fatalf("settings did not drive per-stack A: %v", a)
+	}
+	if mx, _, _ := snap.Lookup(q("web-api.pat.example.com.", dns.TypeMX)); len(mx) != 1 || mx[0].(*dns.MX).Mx != "mx.txco.io." {
+		t.Fatalf("settings did not drive per-stack MX: %v", mx)
+	}
+	if ns, _, _ := snap.Lookup(q("pat.example.com.", dns.TypeNS)); len(ns) != 1 {
+		t.Fatalf("settings did not drive apex NS: %d", len(ns))
+	}
+}
+
 func TestSerialReflectsStackActivation(t *testing.T) {
 	db := newTestDB(t)
 	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)

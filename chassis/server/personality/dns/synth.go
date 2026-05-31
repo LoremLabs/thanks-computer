@@ -1,6 +1,8 @@
 package dns
 
 import (
+	"context"
+	"database/sql"
 	"net"
 	"strings"
 
@@ -38,6 +40,37 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 		Nameservers: conf.DNSNameservers,
 		EdgeIPs:     conf.DNSEdgeIPs,
 		MXHost:      conf.DNSMXHost,
+		MXPriority:  uint16(pri),
+		TTL:         uint32(ttl),
+	}
+}
+
+// EffectiveSynthConfig is the synthesis config the chassis actually
+// uses: the operator-set dns_settings row when present, otherwise the
+// boot `--dns-*` flag defaults (flagDefaults). Read at snapshot build
+// and by the admin config/zone-create endpoints — never on the query
+// hot path. A read failure or a missing row falls back to the flags, so
+// existing flag-only deployments are unchanged.
+func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
+	if db == nil {
+		return flagDefaults
+	}
+	s, found, err := tenants.LoadDNSSettings(context.Background(), db)
+	if err != nil || !found {
+		return flagDefaults
+	}
+	pri := s.MXPriority
+	if pri < 0 {
+		pri = 0
+	}
+	ttl := s.SynthTTL
+	if ttl < 0 {
+		ttl = 0
+	}
+	return SynthConfig{
+		Nameservers: s.Nameservers,
+		EdgeIPs:     s.EdgeIPs,
+		MXHost:      s.MXHost,
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
 	}

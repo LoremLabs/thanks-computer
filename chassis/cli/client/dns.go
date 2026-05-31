@@ -206,6 +206,85 @@ func (c *Client) ListRecords(ctx context.Context, origin string) ([]DNSRecordInf
 	return out.Records, nil
 }
 
+// --- chassis-global synthesis config -----------------------------------
+
+// DNSConfig mirrors the admin effective-config DTO.
+type DNSConfig struct {
+	Nameservers []string `json:"nameservers"`
+	EdgeIPs     []string `json:"edge_ips"`
+	MXHost      string   `json:"mx_host"`
+	MXPriority  int      `json:"mx_priority"`
+	TTL         int      `json:"ttl"`
+	Configured  bool     `json:"configured"`
+}
+
+// DNSConfigPatch is the partial-update body; only non-nil fields change.
+type DNSConfigPatch struct {
+	Nameservers *[]string `json:"nameservers,omitempty"`
+	EdgeIPs     *[]string `json:"edge_ips,omitempty"`
+	MXHost      *string   `json:"mx_host,omitempty"`
+	MXPriority  *int      `json:"mx_priority,omitempty"`
+	TTL         *int      `json:"ttl,omitempty"`
+}
+
+// globalURL builds a chassis-global (non-tenant-scoped) admin URL.
+func (c *Client) globalURL(suffix string) string {
+	return strings.TrimRight(c.Addr(), "/") + suffix
+}
+
+// GetDNSConfig returns the chassis's effective synthesis config.
+func (c *Client) GetDNSConfig(ctx context.Context) (*DNSConfig, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.globalURL("/v1/dns/config"), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out DNSConfig
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode dns config: %w", err)
+	}
+	return &out, nil
+}
+
+// PutDNSConfig applies a partial update and returns the new effective config.
+func (c *Client) PutDNSConfig(ctx context.Context, patch DNSConfigPatch) (*DNSConfig, error) {
+	body, err := json.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.globalURL("/v1/dns/config"), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(req, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out DNSConfig
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode dns config: %w", err)
+	}
+	return &out, nil
+}
+
 // RevokeRecord soft-revokes records matching (name, type) under a zone.
 func (c *Client) RevokeRecord(ctx context.Context, origin, name, rtype string) error {
 	suffix := "/dns/zones/" + url.PathEscape(origin) + "/records" +

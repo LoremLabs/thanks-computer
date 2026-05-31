@@ -136,6 +136,27 @@ func TestRequireSuperAdminSignedOnly(t *testing.T) {
 		t.Errorf("open-mode should pass RequireSuperAdmin; got %v", err)
 	}
 
+	// Browser session WITHOUT the super_admin flag (a tenant member's
+	// session, even one snapshotting admin:all) → DENY. Regression guard:
+	// before the fix, any browser session passed RequireSuperAdmin,
+	// letting a tenant member reach operator-only endpoints (tenant
+	// create, global DNS config).
+	ctx = auth.WithContext(context.Background(), &auth.Context{
+		Source: "browser", Capabilities: []string{"admin:all"},
+	})
+	if err := RequireSuperAdmin(ctx); !errors.Is(err, ErrCapabilityDenied) {
+		t.Errorf("browser member session must NOT pass RequireSuperAdmin; got %v", err)
+	}
+
+	// Browser session carrying the real super_admin flag (snapshotted at
+	// bootstrap) → pass.
+	ctx = auth.WithContext(context.Background(), &auth.Context{
+		Source: "browser", SuperAdmin: true,
+	})
+	if err := RequireSuperAdmin(ctx); err != nil {
+		t.Errorf("super_admin browser session should pass; got %v", err)
+	}
+
 	// No context → deny
 	if err := RequireSuperAdmin(context.Background()); !errors.Is(err, ErrCapabilityDenied) {
 		t.Errorf("missing context should deny; got %v", err)

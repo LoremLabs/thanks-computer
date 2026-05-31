@@ -47,6 +47,16 @@ func newDNSStore(t *testing.T) (*Store, *sql.DB) {
 		);
 		CREATE INDEX dns_records_active_zone_idx
 		    ON dns_records(zone_id) WHERE revoked_at IS NULL;
+		CREATE TABLE dns_settings (
+			singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+			nameservers TEXT NOT NULL DEFAULT '',
+			edge_ips    TEXT NOT NULL DEFAULT '',
+			mx_host     TEXT NOT NULL DEFAULT '',
+			mx_priority INTEGER NOT NULL DEFAULT 10,
+			synth_ttl   INTEGER NOT NULL DEFAULT 300,
+			updated_at  TEXT NOT NULL,
+			updated_by  TEXT
+		);
 	`); err != nil {
 		t.Fatalf("create dns schema: %v", err)
 	}
@@ -148,6 +158,52 @@ func TestRecordCRUD(t *testing.T) {
 	_ = rtx.Commit()
 	if rs, _ := s.ListRecords(ctx, zid); len(rs) != 0 {
 		t.Fatalf("record still active: %d", len(rs))
+	}
+}
+
+func TestDNSSettingsRoundTrip(t *testing.T) {
+	_, db := newDNSStore(t)
+	ctx := context.Background()
+
+	// No row yet → found=false (callers fall back to flag defaults).
+	if _, found, err := LoadDNSSettings(ctx, db); err != nil || found {
+		t.Fatalf("want not-found, got found=%v err=%v", found, err)
+	}
+
+	tx, _ := db.BeginTx(ctx, nil)
+	if err := PutDNSSettingsTx(ctx, tx, DNSSettings{
+		Nameservers: []string{"ns1.txco.io", "ns2.txco.io"},
+		EdgeIPs:     []string{"203.0.113.10"},
+		MXHost:      "mx.txco.io", MXPriority: 10, SynthTTL: 300, UpdatedBy: "op",
+	}); err != nil {
+		t.Fatalf("PutDNSSettingsTx: %v", err)
+	}
+	_ = tx.Commit()
+
+	got, found, err := LoadDNSSettings(ctx, db)
+	if err != nil || !found {
+		t.Fatalf("load after put: found=%v err=%v", found, err)
+	}
+	if len(got.Nameservers) != 2 || got.EdgeIPs[0] != "203.0.113.10" || got.MXHost != "mx.txco.io" || got.SynthTTL != 300 {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+
+	// Upsert (singleton) — change MX; must replace, not duplicate.
+	tx2, _ := db.BeginTx(ctx, nil)
+	if err := PutDNSSettingsTx(ctx, tx2, DNSSettings{
+		Nameservers: got.Nameservers, EdgeIPs: got.EdgeIPs,
+		MXHost: "mx2.txco.io", MXPriority: 20, SynthTTL: 600,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	_ = tx2.Commit()
+	got2, _, _ := LoadDNSSettings(ctx, db)
+	if got2.MXHost != "mx2.txco.io" || got2.MXPriority != 20 || got2.SynthTTL != 600 {
+		t.Fatalf("upsert not applied: %+v", got2)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM dns_settings`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("singleton broken: n=%d err=%v", n, err)
 	}
 }
 

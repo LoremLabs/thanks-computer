@@ -146,7 +146,7 @@ func (c *Controller) handleBrowserBootstrap(w http.ResponseWriter, r *http.Reque
 	}
 
 	plaintext, _, err := c.registry.CreateBootstrap(
-		r.Context(), ac.ActorID, ac.TenantID, caps, req.Label, ttl)
+		r.Context(), ac.ActorID, ac.TenantID, caps, ac.SuperAdmin, req.Label, ttl)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create_bootstrap", map[string]any{"err": err.Error()})
 		return

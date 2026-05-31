@@ -152,6 +152,7 @@ type Config struct {
 	DNSMXHost                    string   `id:"dns-mx-host" default:"" desc:"Mail exchanger hostname synthesized as the MX target for delegated-zone hosts (the chassis LMTP head's public name). Empty disables MX synthesis. ()"`
 	DNSMXPriority                int      `id:"dns-mx-priority" default:"10" desc:"Preference value for synthesized MX records. (10)"`
 	DNSSynthTTL                  int      `id:"dns-synth-ttl" default:"300" desc:"TTL (seconds) applied to synthesized pattern records. (300)"`
+	DNSTenantZoneManagement      bool     `id:"dns-tenant-zone-management" default:"false" desc:"Escape hatch: allow tenants holding the dns:* capability to manage their OWN delegated zones + override records (and render). Default false — DNS zone management is operator-only (super-admin), since delegating zone control to tenants is a sharp edge we don't encourage. The chassis-global synthesis config (--dns-* / 'dns config set') is always super-admin regardless."`
 	WebAddr                      string   `id:"web-addr" default:":8080" desc:"The port to listen on for the web server (:8080)"`
 	WebPass                      string   `id:"web-pass" default:"" desc:"Basic Auth password ()"`
 	WebUser                      string   `id:"web-user" default:"" desc:"User for basic auth ()"`

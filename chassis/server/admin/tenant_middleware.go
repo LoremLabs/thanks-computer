@@ -12,11 +12,14 @@ import (
 )
 
 // resolveTenantMiddleware is the resolver for `/v1/tenants/{tenant}/…`
-// routes. It pulls the slug out of the URL, looks the tenant up, and
-// attaches both slug and id to the request's auth.Context. Phase 3
-// will gate RequireCapability on these; phase 2's job is just to
-// thread the values onto the request so handlers and policy checks
-// can find them in one consistent place.
+// routes. It pulls the slug out of the URL, looks the tenant up,
+// attaches slug + id to the request's auth.Context, AND — for signed,
+// non-super-admin callers — REPLACES Capabilities with the caller's
+// membership caps for THIS tenant (no membership → empty → denied).
+// That re-resolution per request from actor_memberships is what
+// confines a signed actor to the tenant in the URL; capabilities are
+// never carried across tenants. (super_admin and basic-auth/open keep
+// their synthetic admin:all for operator/emergency access.)
 //
 // On unknown / revoked tenants it short-circuits to 404 — the route
 // never reaches the handler. We don't 403 here because revealing
@@ -58,6 +61,23 @@ func (c *Controller) resolveTenantMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+
+		// Browser sessions are pinned to the tenant they were minted
+		// for: a cookie issued under tenant A must NOT act on tenant B.
+		// Unlike signed callers (whose caps are re-resolved per tenant
+		// from membership below), a browser session carries a
+		// bootstrap-time capability snapshot, so without this pin a
+		// member of A could replay their cookie against /v1/tenants/B/…
+		// and apply A's caps to B. The incoming ac.TenantID is the
+		// session's tenant (set by verifyCookie); signed callers arrive
+		// with it empty. Uniform 404 so a session can't enumerate or
+		// probe other tenants.
+		if ac.Source == "browser" && ac.TenantID != tenant.TenantID {
+			writeJSONError(w, http.StatusNotFound, "tenant_not_found",
+				map[string]any{"slug": slug})
+			return
+		}
+
 		ac.TenantSlug = tenant.Slug
 		ac.TenantID = tenant.TenantID
 
@@ -83,4 +103,3 @@ func (c *Controller) resolveTenantMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-

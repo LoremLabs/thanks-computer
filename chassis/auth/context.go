@@ -29,7 +29,11 @@ type Context struct {
 	// TenantSlug and TenantID are set by the admin server's tenant
 	// resolver middleware when the request path is `/v1/tenants/{t}/…`.
 	// Empty on chassis-wide endpoints (/auth/whoami, /healthz, etc.).
-	// Phase 3 makes RequireCapability gate on these.
+	// On those tenant-scoped routes the resolver also REPLACES
+	// Capabilities with the signed caller's membership caps for THIS
+	// tenant (no membership → empty → denied), so a signed actor is
+	// confined to the tenant in the URL. See
+	// server/admin/tenant_middleware.go.
 	TenantSlug string
 	TenantID   string
 	// SuperAdmin mirrors `actors.super_admin`. When true,

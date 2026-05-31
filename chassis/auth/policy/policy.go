@@ -2,14 +2,15 @@
 // follow Apache Shiro's `domain:instance:action` shape with `*`
 // wildcards at any segment:
 //
-//   opstack:*:read     — read any opstack
-//   opstack:abc:read   — read specifically opstack "abc" (future)
-//   opstack:*:*        — any action on any opstack
-//   *:*:*              — chassis-wide admin
+//	opstack:*:read     — read any opstack
+//	opstack:abc:read   — read specifically opstack "abc" (future)
+//	opstack:*:*        — any action on any opstack
+//	*:*:*              — chassis-wide admin
 //
 // Two aliases stay valid for muscle memory and back-compat:
-//   "admin:all" ⇄ "*:*:*"
-//   "*"         ⇄ "*:*:*"
+//
+//	"admin:all" ⇄ "*:*:*"
+//	"*"         ⇄ "*:*:*"
 //
 // v1 doesn't issue per-instance checks — every want/grant uses `*`
 // in the instance slot — but the matcher already supports them so
@@ -25,10 +26,11 @@
 // Two short-circuits live here:
 //   - SuperAdmin (signed actor with actors.super_admin = 1): allow
 //     every RequireCapability call regardless of memberships.
-//   - basic-auth / open callers (Source != "signed"): the auth
-//     middleware already synthesized admin:all for them, so they pass
-//     the list match. Treating them as super-admin too in
-//     RequireSuperAdmin keeps operator-emergency access intact.
+//   - basic-auth / open-dev callers: the auth middleware already
+//     synthesized admin:all for them, so they pass the list match.
+//     RequireSuperAdmin also treats these two sources as operators
+//     (chassis credentials). Browser/signed sources are NOT — they
+//     need the real super_admin flag.
 package policy
 
 import (
@@ -73,10 +75,11 @@ func RequireCapability(ctx context.Context, want string) error {
 }
 
 // RequireSuperAdmin gates a chassis-wide endpoint behind the
-// super_admin flag (or a non-signed caller, which is treated as an
-// operator with chassis access). Used for tenant CRUD — creating /
-// destroying tenants is a chassis-wide action that no per-tenant
-// membership should be able to perform.
+// super_admin flag (or a basic-auth/open-dev operator). Used for
+// chassis-wide actions — tenant CRUD, global DNS config — that no
+// per-tenant membership should be able to perform. A browser session
+// passes only if it carries the real super_admin flag it snapshotted
+// at bootstrap; a plain tenant-member session does not.
 func RequireSuperAdmin(ctx context.Context) error {
 	c := auth.FromContext(ctx)
 	if c == nil {
@@ -85,9 +88,14 @@ func RequireSuperAdmin(ctx context.Context) error {
 	if c.SuperAdmin {
 		return nil
 	}
-	// basic-auth / open: the operator already has chassis credentials,
-	// so this is the same trust level as super_admin in practice.
-	if c.Source != "" && c.Source != "signed" {
+	// basic-auth / open-dev: the operator already holds chassis
+	// credentials, so they're operator-equivalent. Browser and signed
+	// sources do NOT get a free pass here — they must carry the real
+	// super_admin flag (a browser session snapshots it at bootstrap;
+	// see verifyCookie). Previously this matched any non-"signed"
+	// source, which let every browser session pass operator-only gates.
+	switch c.Source {
+	case "basic", "open":
 		return nil
 	}
 	return ErrCapabilityDenied

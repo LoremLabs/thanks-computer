@@ -45,6 +45,7 @@ type Bootstrap struct {
 	ActorID      string
 	TenantID     string
 	Capabilities []string
+	SuperAdmin   bool
 	Label        string
 	CreatedAt    time.Time
 	ExpiresAt    time.Time
@@ -58,13 +59,27 @@ type Session struct {
 	ActorID      string
 	TenantID     string
 	Capabilities []string
-	UA           string
-	IP           string
-	CreatedAt    time.Time
-	ExpiresAt    time.Time
-	RevokedAt    *time.Time
-	RevokedBy    string
-	LastSeenAt   time.Time
+	// SuperAdmin snapshots actors.super_admin at bootstrap time so a
+	// cookie-authed request can be recognised as a real operator
+	// (verifyCookie → auth.Context.SuperAdmin → RequireSuperAdmin)
+	// rather than every browser session being treated as one.
+	SuperAdmin bool
+	UA         string
+	IP         string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	RevokedAt  *time.Time
+	RevokedBy  string
+	LastSeenAt time.Time
+}
+
+// b2i maps a bool to the INTEGER 0/1 the super_admin columns store
+// (dialect-safe: postgres rejects a Go bool bound to an INTEGER column).
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // IsValid reports whether the session is currently usable: not revoked
@@ -114,7 +129,7 @@ func newBootstrapToken() (plaintext, hash string, err error) {
 // Multiple outstanding bootstraps for the same actor are allowed —
 // the short TTL bounds the blast radius and forbidding it would break
 // retry flows.
-func (r *Registry) CreateBootstrap(ctx context.Context, actorID, tenantID string, caps []string, label string, ttl time.Duration) (plaintext string, expiresAt time.Time, err error) {
+func (r *Registry) CreateBootstrap(ctx context.Context, actorID, tenantID string, caps []string, superAdmin bool, label string, ttl time.Duration) (plaintext string, expiresAt time.Time, err error) {
 	plaintext, hash, err := newBootstrapToken()
 	if err != nil {
 		return "", time.Time{}, err
@@ -127,9 +142,9 @@ func (r *Registry) CreateBootstrap(ctx context.Context, actorID, tenantID string
 	expiresAt = now.Add(ttl)
 	if _, err := r.ex(ctx, r.DB,
 		`INSERT INTO browser_bootstrap
-		     (token_hash, actor_id, tenant_id, capabilities_json, label, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		hash, actorID, tenantID, string(capsJSON), nullable(label),
+		     (token_hash, actor_id, tenant_id, capabilities_json, super_admin, label, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		hash, actorID, tenantID, string(capsJSON), b2i(superAdmin), nullable(label),
 		formatTime(now), formatTime(expiresAt)); err != nil {
 		return "", time.Time{}, fmt.Errorf("insert bootstrap: %w", err)
 	}
@@ -184,7 +199,7 @@ func (r *Registry) ConsumeBootstrap(ctx context.Context, plaintext, consumerIP s
 
 	// Load the row we just consumed so the caller can build a session.
 	b, err := scanBootstrap(r.qr(ctx, tx,
-		`SELECT token_hash, actor_id, tenant_id, capabilities_json,
+		`SELECT token_hash, actor_id, tenant_id, capabilities_json, super_admin,
 		        COALESCE(label, ''), created_at, expires_at,
 		        consumed_at, COALESCE(consumed_ip, '')
 		   FROM browser_bootstrap WHERE token_hash = ?`, hash))
@@ -213,10 +228,10 @@ func (r *Registry) CreateSession(ctx context.Context, b *Bootstrap, ua, ip strin
 	}
 	if _, err := r.ex(ctx, r.DB,
 		`INSERT INTO browser_sessions
-		     (session_id, actor_id, tenant_id, capabilities_json,
+		     (session_id, actor_id, tenant_id, capabilities_json, super_admin,
 		      ua, ip, created_at, expires_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, b.ActorID, b.TenantID, string(capsJSON),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, b.ActorID, b.TenantID, string(capsJSON), b2i(b.SuperAdmin),
 		nullable(ua), nullable(ip),
 		formatTime(now), formatTime(expiresAt), formatTime(now)); err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
@@ -226,6 +241,7 @@ func (r *Registry) CreateSession(ctx context.Context, b *Bootstrap, ua, ip strin
 		ActorID:      b.ActorID,
 		TenantID:     b.TenantID,
 		Capabilities: append([]string(nil), b.Capabilities...),
+		SuperAdmin:   b.SuperAdmin,
 		UA:           ua,
 		IP:           ip,
 		CreatedAt:    now,
@@ -243,7 +259,7 @@ func (r *Registry) GetSession(ctx context.Context, sessionID string) (*Session, 
 		return nil, ErrNotFound
 	}
 	row := r.qr(ctx, r.DB,
-		`SELECT session_id, actor_id, tenant_id, capabilities_json,
+		`SELECT session_id, actor_id, tenant_id, capabilities_json, super_admin,
 		        COALESCE(ua, ''), COALESCE(ip, ''),
 		        created_at, expires_at, revoked_at,
 		        COALESCE(revoked_by, ''), last_seen_at
@@ -269,7 +285,7 @@ func (r *Registry) RevokeSession(ctx context.Context, sessionID, by string) erro
 // "manage sessions" view; the CLI uses it for `txco auth sessions list`.
 func (r *Registry) ListSessions(ctx context.Context, tenantID string) ([]Session, error) {
 	rows, err := r.qy(ctx, r.DB,
-		`SELECT session_id, actor_id, tenant_id, capabilities_json,
+		`SELECT session_id, actor_id, tenant_id, capabilities_json, super_admin,
 		        COALESCE(ua, ''), COALESCE(ip, ''),
 		        created_at, expires_at, revoked_at,
 		        COALESCE(revoked_by, ''), last_seen_at
@@ -330,14 +346,16 @@ func scanBootstrap(s rowScanner) (*Bootstrap, error) {
 		consumedAt sql.NullString
 		consumedIP string
 		capsJSON   string
+		superAdmin int
 	)
-	if err := s.Scan(&b.TokenHash, &b.ActorID, &b.TenantID, &capsJSON,
+	if err := s.Scan(&b.TokenHash, &b.ActorID, &b.TenantID, &capsJSON, &superAdmin,
 		&b.Label, &createdAt, &expiresAt, &consumedAt, &consumedIP); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	b.SuperAdmin = superAdmin != 0
 	if err := json.Unmarshal([]byte(capsJSON), &b.Capabilities); err != nil {
 		return nil, fmt.Errorf("unmarshal capabilities: %w", err)
 	}
@@ -359,8 +377,9 @@ func scanSession(s rowScanner) (*Session, error) {
 		expiresAt  string
 		revokedAt  sql.NullString
 		lastSeenAt string
+		superAdmin int
 	)
-	if err := s.Scan(&sess.SessionID, &sess.ActorID, &sess.TenantID, &capsJSON,
+	if err := s.Scan(&sess.SessionID, &sess.ActorID, &sess.TenantID, &capsJSON, &superAdmin,
 		&sess.UA, &sess.IP,
 		&createdAt, &expiresAt, &revokedAt, &sess.RevokedBy, &lastSeenAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -368,6 +387,7 @@ func scanSession(s rowScanner) (*Session, error) {
 		}
 		return nil, err
 	}
+	sess.SuperAdmin = superAdmin != 0
 	if err := json.Unmarshal([]byte(capsJSON), &sess.Capabilities); err != nil {
 		return nil, fmt.Errorf("unmarshal capabilities: %w", err)
 	}

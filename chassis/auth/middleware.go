@@ -211,6 +211,7 @@ func (cfg *Config) verifyCookie(r *http.Request, sessionID string) (*Context, er
 		ActorID:      sess.ActorID,
 		TenantID:     sess.TenantID,
 		Capabilities: append([]string(nil), sess.Capabilities...),
+		SuperAdmin:   sess.SuperAdmin,
 	}, nil
 }
 
