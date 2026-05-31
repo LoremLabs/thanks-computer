@@ -8,6 +8,15 @@
 
 target: dev
 
+# Optional: override where bare package refs resolve. The defaults
+# (registry.thanks.computer / namespace txco) are baked in, so this whole block
+# is only needed to point `txco install sales@v3` at a different registry.
+# registry:
+#   default: ghcr.io
+#   defaultNamespace: your-org
+#   aliases:
+#     txco: registry.thanks.computer/txco
+
 # Required operations declared by the package. Fill in real URLs.
 operations:
   AUDIT:

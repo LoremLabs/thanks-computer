@@ -26,13 +26,15 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco inspect <source> [--json]
+Usage: txco package inspect <source> [--json]
 
 Show a package's identity and exports without installing it.
 
 Sources:
-  dir:./path                       a local package directory
+  sales@v3                         registry ref (default: registry.thanks.computer/txco)
+  oci://ghcr.io/you/sales:v3       explicit OCI ref
   github:owner/repo[@ref][/sub]    a package in a public GitHub repo
+  dir:./path                       a local package directory
 
 Flags:
 `)
@@ -47,7 +49,9 @@ Flags:
 	}
 	spec := fs.Arg(0)
 
-	dir, cleanup, err := fetchPackage(spec)
+	// Resolve a bare/namespaced registry ref against the workspace registry
+	// config + baked defaults; explicit schemes/local paths pass through.
+	dir, prov, cleanup, err := fetchPackage(resolvePackageRef(spec, workspaceRegistry(".")))
 	if err != nil {
 		fmt.Fprintf(stderr, "inspect: %v\n", err)
 		return 1
@@ -69,8 +73,9 @@ Flags:
 	if *asJSON {
 		out := struct {
 			Manifest *manifest.Manifest `json:"manifest"`
+			Resolved string             `json:"resolved,omitempty"`
 			Stacks   []stackSummary     `json:"stacks"`
-		}{m, stacks}
+		}{m, prov.Reference, stacks}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(out); err != nil {
@@ -89,6 +94,9 @@ Flags:
 	}
 	if m.Compatibility.Txco != "" {
 		fmt.Fprintf(stdout, "  compat:        txco %s\n", m.Compatibility.Txco)
+	}
+	if prov.Reference != "" {
+		fmt.Fprintf(stdout, "  resolved:      %s\n", prov.Reference)
 	}
 	for _, s := range stacks {
 		fmt.Fprintf(stdout, "  stack:         %s (%d scope%s, %d rule%s)\n",

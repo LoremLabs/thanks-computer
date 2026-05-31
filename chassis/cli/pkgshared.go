@@ -16,18 +16,26 @@ import (
 )
 
 // fetchPackage fetches a package source into a fresh temp dir and returns the
-// dir plus a cleanup func. Works uniformly for dir:/file:/github: sources, so
+// dir, its provenance (blank unless the source is a Resolver, i.e. oci:), and a
+// cleanup func. Works uniformly for dir:/file:/github:/oci: sources, so
 // inspect/install share one fetch path.
-func fetchPackage(spec string) (dir string, cleanup func(), err error) {
+func fetchPackage(spec string) (dir string, prov source.Provenance, cleanup func(), err error) {
+	src, err := source.Parse(spec)
+	if err != nil {
+		return "", source.Provenance{}, func() {}, err
+	}
 	tmp, err := os.MkdirTemp("", "txco-pkg-*")
 	if err != nil {
-		return "", func() {}, err
+		return "", source.Provenance{}, func() {}, err
 	}
-	if _, err := source.Fetch(context.Background(), spec, tmp); err != nil {
+	if _, err := src.Fetch(context.Background(), tmp); err != nil {
 		_ = os.RemoveAll(tmp)
-		return "", func() {}, err
+		return "", source.Provenance{}, func() {}, err
 	}
-	return tmp, func() { _ = os.RemoveAll(tmp) }, nil
+	if r, ok := src.(source.Resolver); ok {
+		prov = r.Resolved()
+	}
+	return tmp, prov, func() { _ = os.RemoveAll(tmp) }, nil
 }
 
 // stackSummary describes one exported stack for inspect / dry-run output.

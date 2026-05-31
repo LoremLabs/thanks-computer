@@ -63,8 +63,10 @@ func Parse(spec string) (Source, error) {
 		return parseDir(strings.TrimPrefix(spec, "dir:"), spec)
 	case strings.HasPrefix(spec, "file:"):
 		return parseDir(strings.TrimPrefix(spec, "file:"), spec)
+	case strings.HasPrefix(spec, "oci:"):
+		return newOCISource(spec)
 	default:
-		return nil, fmt.Errorf("unsupported source %q (try dir:./path, file:./path, or github:owner/repo[@ref][/subpath])", spec)
+		return nil, fmt.Errorf("unsupported source %q (try dir:./path, file:./path, github:owner/repo[@ref][/subpath], or oci://host/ns/name:tag)", spec)
 	}
 }
 

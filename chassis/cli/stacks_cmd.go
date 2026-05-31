@@ -275,12 +275,13 @@ func loadLocalStackFiles(stackDir string) ([]client.StackFile, error) {
 	return out, nil
 }
 
-// runPush: `txco push <stack> [--activate] [<dir>]`
+// runDraft: `txco draft <stack> [--activate] [<dir>]` (formerly `push`,
+// still accepted as a hidden alias).
 //
 // Walks <dir>/OPS/<stack>/..., creates a draft (cloning from the
 // active version), uploads the file set, and optionally activates.
-func runPush(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("push", flag.ContinueOnError)
+func runDraft(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("draft", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	target := fs.String("target", "", "target name from txco.yaml")
 	addr := fs.String("addr", "", "chassis admin endpoint")
@@ -288,11 +289,11 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	pass := fs.String("pass", "", "basic auth password")
 	profile := fs.String("profile", "", "signing profile")
 	tenant := fs.String("tenant", "", "tenant slug")
-	activate := fs.Bool("activate", false, "activate the new draft immediately (push --activate is what `txco apply` does internally)")
+	activate := fs.Bool("activate", false, "activate the new draft immediately (same as `txco apply`)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco push [flags] <stack> [<dir>]
+Usage: txco draft [flags] <stack> [<dir>]
 
 Create a draft version of <stack> from local OPS/<stack>/... and upload
 its files. Without --activate the draft is held back for review.
@@ -305,24 +306,24 @@ Flags:
 		return 2
 	}
 	if fs.NArg() < 1 {
-		fmt.Fprintln(stderr, "push: missing <stack> argument")
+		fmt.Fprintln(stderr, "draft: missing <stack> argument")
 		return 2
 	}
 	stack := fs.Arg(0)
 	dir, err := resolveDir(fs.Arg(1))
 	if err != nil {
-		fmt.Fprintf(stderr, "push: resolve dir: %v\n", err)
+		fmt.Fprintf(stderr, "draft: resolve dir: %v\n", err)
 		return 1
 	}
 
 	stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(stack))
 	files, err := collectStackFiles(stackDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "push: walk %s: %v\n", stackDir, err)
+		fmt.Fprintf(stderr, "draft: walk %s: %v\n", stackDir, err)
 		return 1
 	}
 	if len(files) == 0 {
-		fmt.Fprintf(stderr, "push: no files under %s\n", stackDir)
+		fmt.Fprintf(stderr, "draft: no files under %s\n", stackDir)
 		return 1
 	}
 
@@ -333,19 +334,19 @@ Flags:
 	ctx := context.Background()
 	versionNumber, err := c.CreateDraft(ctx, stack, "active")
 	if err != nil {
-		fmt.Fprintf(stderr, "push: create draft: %v\n", err)
+		fmt.Fprintf(stderr, "draft: create draft: %v\n", err)
 		return 1
 	}
 	if _, err := c.PutDraftFiles(ctx, stack, versionNumber, files); err != nil {
-		fmt.Fprintf(stderr, "push: upload files for v%d: %v\n", versionNumber, err)
+		fmt.Fprintf(stderr, "draft: upload files for v%d: %v\n", versionNumber, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "pushed %s draft v%d (%d files)\n", stack, versionNumber, len(files))
+	fmt.Fprintf(stdout, "drafted %s v%d (%d files)\n", stack, versionNumber, len(files))
 
 	if *activate {
 		act, err := c.Activate(ctx, stack, versionNumber)
 		if err != nil {
-			fmt.Fprintf(stderr, "push: activate v%d: %v\n", versionNumber, err)
+			fmt.Fprintf(stderr, "draft: activate v%d: %v\n", versionNumber, err)
 			return 1
 		}
 		if act.PriorVersionNumber != nil {

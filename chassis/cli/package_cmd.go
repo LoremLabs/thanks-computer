@@ -28,6 +28,12 @@ func runPackage(args []string, stdout, stderr io.Writer) int {
 		return runPackageInit(args[1:], stdout, stderr)
 	case "validate":
 		return runPackageValidate(args[1:], stdout, stderr)
+	case "inspect":
+		return runInspect(args[1:], stdout, stderr)
+	case "pull":
+		return runPackagePull(args[1:], stdout, stderr)
+	case "publish":
+		return runPackagePublish(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printPackageUsage(stdout)
 		return 0
@@ -46,8 +52,11 @@ Usage: txco package <command> [args]
 Author and check TxCo packages (a txco.package.yaml + an OPS/-shaped tree).
 
 Commands:
-  init <name> [<dir>]    Scaffold txco.package.yaml + an OPS/<name>/ skeleton
-  validate [<dir>]       Validate a package's manifest + tree (dir defaults to ".")
+  init <name> [<dir>]        Scaffold txco.package.yaml + an OPS/<name>/ skeleton
+  validate [<dir>]           Validate a package's manifest + tree (dir defaults to ".")
+  inspect <ref>              Show a package's identity + exports (dir:/github:/oci:)
+  pull <ref>                 Fetch a package into .txco/vendor/ (no install)
+  publish --to <oci-ref>     Build + push a package to an OCI registry
 `)
 }
 

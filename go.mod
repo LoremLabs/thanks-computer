@@ -17,6 +17,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.10.0
 	github.com/mr-tron/base58 v1.1.2
 	github.com/oklog/ulid/v2 v2.1.1
+	github.com/opencontainers/image-spec v1.1.1
 	github.com/radovskyb/watcher v1.0.7
 	github.com/rivo/tview v0.42.0
 	github.com/schollz/sqlite3dump v1.2.4
@@ -41,6 +42,7 @@ require (
 	golang.org/x/crypto v0.50.0
 	golang.org/x/term v0.42.0
 	gotest.tools v2.2.0+incompatible
+	oras.land/oras-go/v2 v2.6.0
 )
 
 require (
@@ -77,6 +79,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
@@ -96,6 +99,7 @@ require (
 	go.uber.org/atomic v1.4.0 // indirect
 	go.uber.org/multierr v1.1.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260504160031-60b97b32f348 // indirect

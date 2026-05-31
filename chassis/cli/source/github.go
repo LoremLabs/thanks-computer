@@ -160,19 +160,27 @@ func (g *githubSource) fetchRef(ctx context.Context, ref, destDir string) (int, 
 	}
 	defer func() { _ = gz.Close() }()
 
-	return extractTar(tar.NewReader(gz), g.subpath, destDir)
+	// stripTopDir=true: codeload prepends a synthetic `<repo>-<sha>/` top dir
+	// to every entry; detect and strip it.
+	return extractTar(tar.NewReader(gz), true, g.subpath, destDir)
 }
 
-// extractTar walks a GitHub-style tarball (top-level entry is `<repo>-<sha>/...`),
-// strips that prefix and the requested subpath, and writes regular files into
-// destDir. Returns the count of files written.
+// extractTar writes regular files from a tar stream into destDir. It is the
+// shared, transport-agnostic extractor used by BOTH the GitHub source and the
+// OCI source (the package layer is a tar.gz unpacked the same way).
 //
-// Safety:
+// stripTopDir handles the GitHub codeload convention where every entry is
+// prefixed with a synthetic `<repo>-<sha>/` top directory: when true, the first
+// real entry's top segment is detected and stripped from all entries. OCI
+// layers carry no such prefix, so they pass false. subpath (relative to the
+// post-strip root), when non-empty, selects a subtree and re-roots it.
+//
+// Safety (identical for both callers):
 //   - rejects entries with `..` segments (zip-slip) via safeRelPath
 //   - skips symlinks, device files, hardlinks
 //   - caps individual file size at maxFileBytes
 //   - caps cumulative size at maxTotalBytes
-func extractTar(tr *tar.Reader, subpath, destDir string) (int, error) {
+func extractTar(tr *tar.Reader, stripTopDir bool, subpath, destDir string) (int, error) {
 	var prefix string
 	var written int
 	var totalBytes int64
@@ -199,17 +207,20 @@ func extractTar(tr *tar.Reader, subpath, destDir string) (int, error) {
 			continue
 		}
 
-		// First real entry establishes the `<repo>-<sha>` prefix that
-		// codeload prepends to every entry.
-		if prefix == "" {
-			parts := strings.SplitN(clean, "/", 2)
-			prefix = parts[0]
-		}
-		rel := strings.TrimPrefix(clean, prefix+"/")
-		if rel == "" || rel == clean {
-			// either the bare prefix dir entry, or the entry didn't start
-			// with the expected prefix — skip
-			continue
+		rel := clean
+		if stripTopDir {
+			// First real entry establishes the `<repo>-<sha>` prefix that
+			// codeload prepends to every entry.
+			if prefix == "" {
+				parts := strings.SplitN(clean, "/", 2)
+				prefix = parts[0]
+			}
+			rel = strings.TrimPrefix(clean, prefix+"/")
+			if rel == "" || rel == clean {
+				// either the bare prefix dir entry, or the entry didn't start
+				// with the expected prefix — skip
+				continue
+			}
 		}
 
 		if subpath != "" {

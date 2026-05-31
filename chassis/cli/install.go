@@ -14,6 +14,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/lockfile"
 	"github.com/loremlabs/thanks-computer/chassis/cli/manifest"
+	"github.com/loremlabs/thanks-computer/chassis/cli/source"
 	"github.com/loremlabs/thanks-computer/chassis/opname"
 )
 
@@ -40,8 +41,11 @@ Materialize a package into OPS/, then review and run `+"`txco apply`"+` to deplo
 Install never contacts a chassis.
 
 Sources:
-  dir:./path                       a local package directory
+  sales@v3                         registry ref (default: registry.thanks.computer/txco)
+  acme/sales@v3                    namespaced registry ref
+  oci://ghcr.io/you/sales:v3       explicit OCI ref (or @sha256:... to pin)
   github:owner/repo[@ref][/sub]    a package in a public GitHub repo
+  dir:./path                       a local package directory
 
 Flags:
 `)
@@ -66,8 +70,13 @@ Flags:
 		root = cwd // bootstrap a fresh workspace at cwd
 	}
 
+	// Resolve a bare/namespaced registry ref (sales@v3) to a concrete oci://
+	// spec using the workspace registry config + baked defaults; explicit
+	// schemes and local paths pass through.
+	srcSpec := resolvePackageRef(spec, workspaceRegistry(root))
+
 	// Fetch into a temp staging dir so a failed fetch never half-writes OPS/.
-	staging, cleanup, err := fetchPackage(spec)
+	staging, prov, cleanup, err := fetchPackage(srcSpec)
 	if err != nil {
 		fmt.Fprintf(stderr, "install: %v\n", err)
 		return 1
@@ -92,7 +101,7 @@ Flags:
 	}
 
 	if *vendorOnly {
-		return installVendorOnly(spec, m, staging, root, *dryRun, stdout, stderr)
+		return installVendorOnly(spec, prov, m, staging, root, *dryRun, stdout, stderr)
 	}
 
 	ops, err := bundle.WalkFS(os.DirFS(staging), ".")
@@ -164,9 +173,12 @@ Flags:
 	}
 
 	lf.Upsert(lockfile.Entry{
-		Ref:           spec,
+		Ref:           spec, // exactly what the user typed
+		Registry:      prov.Registry,
+		Namespace:     prov.Namespace,
 		Name:          m.Name,
 		Version:       m.Version,
+		Resolved:      prov.Reference, // oci://…@sha256: (blank for dir:/github:)
 		ExportedStack: exportedStack,
 		InstalledAs:   installedAs,
 		Mode:          "as-stack",
@@ -195,7 +207,7 @@ Flags:
 
 // installVendorOnly fetches + validates a package into .txco/vendor/ without
 // touching OPS/. For offline inspection / reusable op-packs.
-func installVendorOnly(spec string, m *manifest.Manifest, staging, root string, dryRun bool, stdout, stderr io.Writer) int {
+func installVendorOnly(spec string, prov source.Provenance, m *manifest.Manifest, staging, root string, dryRun bool, stdout, stderr io.Writer) int {
 	dest := filepath.Join(root, ".txco", "vendor", m.Name, m.Version)
 	if dryRun {
 		fmt.Fprintf(stdout, "install --vendor-only (dry-run): would vendor %s %s into %s (no OPS/ change)\n",
@@ -219,8 +231,11 @@ func installVendorOnly(spec string, m *manifest.Manifest, staging, root string, 
 	}
 	lf.Upsert(lockfile.Entry{
 		Ref:         spec,
+		Registry:    prov.Registry,
+		Namespace:   prov.Namespace,
 		Name:        m.Name,
 		Version:     m.Version,
+		Resolved:    prov.Reference,
 		Mode:        "vendor-only",
 		InstalledAt: lockfile.Now(),
 	})
