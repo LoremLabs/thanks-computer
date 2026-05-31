@@ -75,22 +75,7 @@ func (c *DNSController) Start() {
 		return
 	}
 
-	// Build the initial snapshot, then chain dbcache OnReload so a
-	// `txco apply` / hostname change / fs-watch rebuilds + swaps it with
-	// no restart. Same chaining shape as the static-asset index. The
-	// rebuild reads dbc.Snapshot() each time — never a captured handle.
-	c.rebuild()
-	if c.pu.Dbc != nil {
-		prev := c.pu.Dbc.OnReload
-		c.pu.Dbc.OnReload = func(db *sql.DB) error {
-			var err error
-			if prev != nil {
-				err = prev(db)
-			}
-			c.rebuild()
-			return err
-		}
-	}
+	c.installReload()
 
 	// Per-source-IP response-rate-limiter (anti-amplification). 0 (the
 	// default) disables it.
@@ -160,14 +145,42 @@ func (c *DNSController) Stop() {
 // in. A build failure keeps the previous snapshot live (never go dark);
 // the first failure ensures the pointer is at least a non-nil empty
 // snapshot so the handler can serve REFUSED instead of SERVFAIL.
-func (c *DNSController) rebuild() {
+// installReload builds the initial zone snapshot and chains
+// dbc.OnReload so a `txco apply` / hostname change / fs-watch / admin
+// mutation rebuilds + swaps it with no restart (same chaining shape as
+// the static-asset index).
+//
+// CRITICAL: the OnReload hook runs INSIDE Reload while dbc.Mu is held,
+// and is handed the freshly-built mirror as `db`. It MUST rebuild from
+// that `db`, never from dbc.Snapshot() — Snapshot() locks dbc.Mu, which
+// Reload already holds, so calling it there deadlocks the whole chassis
+// (every later Snapshot blocks forever). The initial build runs outside
+// Reload, so Snapshot() is safe there.
+func (c *DNSController) installReload() {
 	if c.pu.Dbc == nil {
+		c.rebuild(nil)
+		return
+	}
+	c.rebuild(c.pu.Dbc.Snapshot())
+	prev := c.pu.Dbc.OnReload
+	c.pu.Dbc.OnReload = func(db *sql.DB) error {
+		var err error
+		if prev != nil {
+			err = prev(db)
+		}
+		c.rebuild(db)
+		return err
+	}
+}
+
+func (c *DNSController) rebuild(db *sql.DB) {
+	if db == nil {
 		if c.snap.Load() == nil {
 			c.snap.Store(&ZoneSnapshot{})
 		}
 		return
 	}
-	snap, err := BuildSnapshot(c.pu.Dbc.Snapshot(), c.synthCfg, c.pu.Logger)
+	snap, err := BuildSnapshot(db, c.synthCfg, c.pu.Logger)
 	if err != nil {
 		c.pu.Logger.Error("dns zone snapshot rebuild failed; keeping previous",
 			zap.String("err", err.Error()))
