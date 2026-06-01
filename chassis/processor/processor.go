@@ -596,8 +596,17 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// from the rule's WITH clause). Read per-op timeout from there.
 			// Number → milliseconds (matches "WITH timeout = 1000"). String →
 			// time.ParseDuration ("500ms", "2s"). Anything else falls back to
-			// the global OpTimeout default.
+			// the global OpTimeout default — except for ai://* ops, which
+			// fall back to AIDefaultTimeout (60s) since LLM round-trips
+			// routinely exceed the 5s general-op default. WITH timeout still
+			// wins per-op; OpTimeoutMax still caps. Scheme-aware default,
+			// not scheme-specific behavior — boring extension.
 			timeout, _ := time.ParseDuration(pu.Conf.OpTimeout)
+			if op.Resonator != nil && strings.HasPrefix(op.Resonator.Exec, "ai://") {
+				if aiTimeout, err := time.ParseDuration(pu.Conf.AIDefaultTimeout); err == nil {
+					timeout = aiTimeout
+				}
+			}
 			if val := gjson.Get(op.Meta, "timeout"); val.Exists() {
 				switch val.Type {
 				case gjson.Number:
@@ -696,6 +705,24 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					pu.Logger.Debug("outerr", zap.String("err", err.Error()))
 				} else {
 					pu.Logger.Debug("out", zap.String("out", output.String()))
+				}
+
+				// Chassis-wide op-debug strip. Any handler that stamps
+				// `_txc_op_debug` on its response gets the field
+				// captured by the pre-strip step-output trace (the
+				// `payload.Raw` trace.Step.Output recorded inside
+				// pu.Exec at processor.go:2417-2425 fires BEFORE this
+				// line). We then strip the field from `output.Raw` so
+				// it never reaches the envelope merge — rules cannot
+				// read debug content and cannot accidentally come to
+				// depend on it. No separate timeline event needed:
+				// debug content lives in the per-step `out.json`
+				// trace file, grep-friendly across step files. Same
+				// shape as `_txc.goto` / `_txc.halt` extraction in
+				// advanceAfterScope: handler-stamped fields the chassis
+				// owns and consumes before propagation.
+				if stripped, present := extractOpDebug(output.Raw); present {
+					output.Raw = stripped
 				}
 
 				// Outbound op control flow (halt, goto, ...) lives in `_txc.*`
@@ -2305,6 +2332,17 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 		// performed every call in v0 (correct, not optimized).
 		payload, err = pu.ExecMCPHTTP(ctx, op)
 		transport = "mcp+http"
+	case strings.HasPrefix(opName, "ai://"):
+		// ai:// is a chassis-owned namespace for AI integrations:
+		// chat, embed, transcribe, image. v1 dispatches "chat" via a
+		// pluggable backend registry (OpenRouter ships; OpenAI-direct,
+		// Anthropic-direct, local-vllm are follow-up PRs). The chassis
+		// owns secret materialization (per-tenant store → env fallback),
+		// leak prevention, fuel accounting, and tracing — raw HTTP
+		// wouldn't enforce any of that. See chassis/chat and chassis/
+		// processor/aichat.go.
+		payload, err = pu.ExecAI(ctx, op)
+		transport = "ai"
 	case strings.HasPrefix(opName, "goto://"): // TODO
 	case StagePartsRE.MatchString(opName):
 		// Unschemed `EXEC "<stack>/<scope>"` is a stage jump. We
@@ -2891,7 +2929,22 @@ func (pu *Unit) OverlayResponse(env, output string, overrides []resonator.Branch
 	if output == "" {
 		output = "{}"
 	}
-	envForResolve := runtime.JSONEnv(env)
+	// Compose the EMIT resolution context. EMIT runs after EXEC, before
+	// the per-scope merge, and writes onto `output`. A rule's value
+	// expressions need to see BOTH the freshly-produced EXEC output
+	// (so `EMIT @reply = .text` projects the handler's reply — the
+	// canonical "pair with EXEC for enrich the response" pattern from
+	// the godoc above) AND the scope input envelope (so
+	// `EMIT @copy = @web.req.body` still reaches the input).
+	//
+	// Precedence: output FIRST. The EXEC just produced this data; if a
+	// path matches both, the fresh output is what the rule meant by
+	// "now". Input is the fallback for scope-context fields the EXEC
+	// didn't (or wouldn't) produce.
+	envForResolve := runtime.MultiEnv{
+		runtime.JSONEnv(output),
+		runtime.JSONEnv(env),
+	}
 	for _, override := range overrides {
 		branch := strings.TrimPrefix(override.Path, ".")
 		val, rerr := runtime.Resolve(override.Value, envForResolve)

@@ -109,6 +109,11 @@ Flags:
 	// wait" — any extra time is real CPU). 500 ms gives some headroom on
 	// slower machines without inviting abuse on a local single-user tool.
 	_ = os.Setenv("TXCO_COMPUTE_MAX_WALL", "500ms")
+	// Register the demo execution-hop endpoints (/v1/demo/*). Their
+	// presence is the signal the admin-ui's probeDemoMode uses to
+	// auto-route to #demo; a plain chassis / `txco dev` leaves this
+	// unset so it lands on the normal admin interface instead.
+	_ = os.Setenv("TXCO_DEMO_MODE", "true")
 
 	// Pick free ports unless overridden, so `txco demo` coexists with a
 	// running `txco dev` (which owns :8081/:8080).

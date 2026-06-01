@@ -198,7 +198,7 @@ Flags:
 		for _, rel := range rels {
 			fmt.Fprintf(stdout, "    OPS/%s/%s\n", installedAs, rel)
 		}
-		warnBundledComputes(m, stdout)
+		warnBundledComputes(m, staging, stdout)
 		printRequiredOpStubs(stdout, m.Operations.Required)
 		fmt.Fprintf(stdout, "\n  would update %s\n(dry-run; nothing written)\n", lockfile.FileName)
 		return 0
@@ -249,7 +249,7 @@ Flags:
 	if len(m.Capabilities) > 0 {
 		fmt.Fprintf(stdout, "  requests (advisory, not enforced): %s\n", strings.Join(m.Capabilities, ", "))
 	}
-	warnBundledComputes(m, stdout)
+	warnBundledComputes(m, staging, stdout)
 	printRequiredOpStubs(stdout, m.Operations.Required)
 	fmt.Fprintf(stdout, "\nReview OPS/%s/, then run `txco apply` to deploy.\n", installedAs)
 	return 0
@@ -299,13 +299,22 @@ func installVendorOnly(spec string, prov source.Provenance, m *manifest.Manifest
 }
 
 // warnBundledComputes notes the javy-on-PATH requirement for the user's later
-// `txco apply` when a package ships bundled computes. Install itself never
-// builds — it only materializes the .js source.
-func warnBundledComputes(m *manifest.Manifest, w io.Writer) {
-	if len(m.Operations.Bundled) == 0 {
+// `txco apply` — but only for bundled computes shipped as .js source WITHOUT a
+// prebuilt <name>.wasm sibling (in stagingDir). A package published with
+// prebuilt wasm applies with no toolchain, so it draws no warning. Install
+// itself never builds — it only materializes what was shipped.
+func warnBundledComputes(m *manifest.Manifest, stagingDir string, w io.Writer) {
+	needBuild := 0
+	for _, b := range m.Operations.Bundled {
+		wasmRel := strings.TrimSuffix(b.Path, filepath.Ext(b.Path)) + ".wasm"
+		if _, err := os.Stat(filepath.Join(stagingDir, wasmRel)); err != nil {
+			needBuild++
+		}
+	}
+	if needBuild == 0 {
 		return
 	}
 	if _, err := exec.LookPath("javy"); err != nil {
-		fmt.Fprintf(w, "  note: ships %d bundled compute(s); `txco apply` needs `javy` on PATH to build them.\n", len(m.Operations.Bundled))
+		fmt.Fprintf(w, "  note: ships %d bundled compute(s) without prebuilt wasm; `txco apply` needs `javy` on PATH to build them.\n", needBuild)
 	}
 }

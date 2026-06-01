@@ -339,7 +339,26 @@ func resolveOpRefsColocated(ops []bundle.Op, urlMap map[string]oprefs.Operation,
 		perResonator := urlMap // shared until a colocated ref forces a copy
 		copied := false
 		for _, name := range oprefs.References(op.Txcl) {
-			// Colocated sibling, preferring .js then .ts.
+			// A prebuilt <name>.wasm sibling (shipped in the package) wins: no
+			// toolchain needed, and the digest is identical for every consumer.
+			if wp := filepath.Join(resonatorDir, name+".wasm"); fileExists(wp) {
+				wb, rerr := os.ReadFile(wp)
+				if rerr != nil {
+					return nil, nil, fmt.Errorf("op://%s: read %s: %w", name, wp, rerr)
+				}
+				b := computeapi.BuiltFromWasm(wb)
+				if !copied {
+					perResonator = cloneOpRefMap(urlMap)
+					copied = true
+				}
+				perResonator[name] = oprefs.Operation{URL: b.Ref}
+				if !seen[b.Digest] {
+					seen[b.Digest] = true
+					built = append(built, b)
+				}
+				continue
+			}
+			// Colocated source sibling, preferring .js then .ts — built at apply.
 			src := ""
 			for _, ext := range []string{".js", ".ts"} {
 				p := filepath.Join(resonatorDir, name+ext)
@@ -372,6 +391,12 @@ func resolveOpRefsColocated(ops []bundle.Op, urlMap map[string]oprefs.Operation,
 		out[i].Txcl = sub
 	}
 	return out, built, nil
+}
+
+// fileExists reports whether path names an existing file (or dir).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func cloneOpRefMap(m map[string]oprefs.Operation) map[string]oprefs.Operation {

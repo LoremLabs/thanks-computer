@@ -16,6 +16,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
+	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter"   // registers the "openrouter" ai://chat backend
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
 	_ "github.com/loremlabs/thanks-computer/chassis/compute/wazero" // registers the "wazero" engine

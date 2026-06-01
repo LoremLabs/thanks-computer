@@ -127,6 +127,13 @@ func runSecretsSet(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := fs.Arg(0)
+	// Re-parse trailing flags placed after the positional NAME. Go's
+	// stdlib flag pkg stops at the first non-flag arg, so `set FOO
+	// --tenant default --url ...` would otherwise silently drop the
+	// flags. Mirrors the pattern in tenant_cmd.go (e.g. runHostnamesAdd).
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return 2
+	}
 
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
@@ -193,6 +200,9 @@ func runSecretsGenerate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return 2
+	}
 
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
@@ -247,6 +257,9 @@ func runSecretsRotate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return 2
+	}
 
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
@@ -351,6 +364,9 @@ func runSecretsShow(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return 2
+	}
 
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
@@ -401,6 +417,11 @@ func runSecretsDescribe(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := fs.Arg(0)
+	// Re-parse trailing flags BEFORE the --set Visit below — otherwise
+	// `describe FOO --set "new desc"` silently drops --set.
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return 2
+	}
 	// `--set` not provided → reject. Updating description-to-empty is
 	// allowed if the operator explicitly passes --set="".
 	wasSet := false
@@ -454,6 +475,9 @@ func runSecretsRevoke(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return 2
+	}
 
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {

@@ -78,8 +78,11 @@ Package content lives under `OPS/<stack>/<scope>/<name>.txcl`, exactly the shape
 Rules reference operations as `op://NAME`. Each ref resolves one of two ways:
 
 - **bundled** — a colocated `<name>.js`/`.ts` sibling next to the `.txcl`. It ships *with*
-  the package and is built to wasm at `txco apply` time (needs `javy` on PATH). List it
-  under `operations.bundled`. Install lays the source down; nothing to wire.
+  the package. List it under `operations.bundled`. Install lays it down; nothing to wire.
+  At `txco apply`, the ref becomes `compute://sha256/<digest>`:
+  - if the package shipped a prebuilt `<name>.wasm` (see §10), apply uses it directly — **no
+    `javy` needed**, and the digest is identical for every consumer (fixed at publish);
+  - otherwise apply builds `<name>.js` → wasm locally (**needs `javy` on PATH**).
 - **required** — an external endpoint with no colocated compute. List it under
   `operations.required`. On install, TxCo **prints** a `txco.yaml` `operations:` stub for
   you to paste and fill in (it never edits `txco.yaml`, to avoid clobbering your comments).
@@ -198,11 +201,26 @@ only — it is **not** loaded by the binary.
 ```sh
 txco package validate ./packages/sales
 txco package publish --to oci://ghcr.io/you/sales:3.0.0 ./packages/sales
-# → published oci://ghcr.io/you/sales@sha256:…
+# → prebuilt 1 compute(s) (javy plugin 8.1.1)
+#   published oci://ghcr.io/you/sales@sha256:…
 ```
 
 Publish validates, packs the tree into a single-layer OCI artifact, pushes it, and prints
 the resolved digest. Tags are convenience; the digest is truth.
+
+**Prebuilt wasm.** If `javy` is on your PATH, publish auto-builds each bundled compute
+(`<name>.js` → `<name>.wasm`) into the published artifact — your source tree stays `.js`-only
+(the build happens in a staging copy; nothing to commit). Consumers then `apply` with **no
+toolchain**, and every consumer gets the identical `compute://sha256/<digest>` (the digest is
+fixed at publish, not recomputed per machine). The `.js` source still ships alongside, for
+transparency and as a build-from-source fallback (§4).
+
+- `--no-prebuild` ships source-only (consumers build at apply, needing `javy`).
+- If `javy` is absent at publish, it's a heads-up, not a failure — the package ships
+  source-only.
+- The wasm is dynamically linked against the chassis's vendored javy plugin; publish names the
+  plugin version it built against. A chassis with an incompatible plugin reports it at apply.
+- The wasm rides inside the package layer, so an ed25519 signature (§11) covers it too.
 
 ## 11. Signing and trust
 

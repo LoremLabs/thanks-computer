@@ -104,6 +104,105 @@ func TestOverlayResponseOverwriteSemantics(t *testing.T) {
 	}
 }
 
+// TestOverlayResponseEMITReadsFromExecOutput is the regression that
+// pins what `EMIT @reply = .text` is supposed to do: project a value
+// from the EXEC's fresh response (`output`) into the response payload.
+// Before the MultiEnv fix, OverlayResponse used only `env` (op.Input)
+// for resolution, so any `.text` against an op whose handler put `text`
+// in its output (e.g. ai://chat) resolved to nil — the documented
+// "pair with EXEC for enrich the response" pattern silently broke.
+//
+// Composition: a function-call value (`&b64encode(.text)`) tightens
+// the regression: the inner path must resolve to a real string for
+// the function to succeed. nil → error from &b64encode.
+func TestOverlayResponseEMITReadsFromExecOutput(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	// op.Input — scope-entry envelope. Has @web.req fields (under _txc)
+	// but no `text` at root.
+	envIn := `{"_txc":{"web":{"req":{"body":"aGVsbG8="}}}}`
+
+	// op.Output — what the EXEC produced (a chat handler's response).
+	output := `{"text":"Soup dumplings are joy."}`
+
+	// EMIT @reply = .text  — should project the EXEC's text to the
+	// response. With the fix, .text resolves against output and the
+	// overlay writes _txc.reply = "Soup dumplings are joy.".
+	// (Parser strips leading dot from PathRef.Path — see parser.go:237.)
+	overrides := []resonator.BranchValue{
+		{Path: "._txc.reply", Value: ast.PathRef{Path: "text"}},
+	}
+
+	got, err := pu.OverlayResponse(envIn, output, overrides)
+	if err != nil {
+		t.Fatalf("OverlayResponse: %v", err)
+	}
+	if g := gjson.Get(got, "_txc.reply").String(); g != "Soup dumplings are joy." {
+		t.Errorf("_txc.reply = %q, want %q (raw=%s)", g, "Soup dumplings are joy.", got)
+	}
+
+	// Tighter: wrap .text in &b64encode. The inner path must still
+	// resolve to the real string for the function to succeed.
+	overrides2 := []resonator.BranchValue{
+		{Path: "._txc.web.res.body", Value: ast.FunctionCall{
+			Name: "b64encode",
+			Args: []ast.Value{ast.PathRef{Path: "text"}},
+		}},
+	}
+	got2, err := pu.OverlayResponse(envIn, output, overrides2)
+	if err != nil {
+		t.Fatalf("OverlayResponse with b64encode: %v", err)
+	}
+	// base64 of "Soup dumplings are joy." is U291cCBkdW1wbGluZ3MgYXJlIGpveS4=
+	if g := gjson.Get(got2, "_txc.web.res.body").String(); g != "U291cCBkdW1wbGluZ3MgYXJlIGpveS4=" {
+		t.Errorf("_txc.web.res.body = %q, want b64 of the text (raw=%s)", g, got2)
+	}
+}
+
+// TestOverlayResponseEMITStillReadsFromInput pins the other half of
+// the composition: input-envelope reads (`@web.req.body` → `_txc.web.
+// req.body`) still work when the EXEC output doesn't have that path.
+// Composition matters — the MultiEnv fix puts output FIRST but must
+// fall through to input.
+func TestOverlayResponseEMITStillReadsFromInput(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	envIn := `{"_txc":{"web":{"req":{"body":"aGVsbG8="}}}}`
+	output := `{"text":"unrelated"}`
+
+	overrides := []resonator.BranchValue{
+		{Path: "._txc.copy", Value: ast.PathRef{Path: "_txc.web.req.body"}},
+	}
+	got, err := pu.OverlayResponse(envIn, output, overrides)
+	if err != nil {
+		t.Fatalf("OverlayResponse: %v", err)
+	}
+	if g := gjson.Get(got, "_txc.copy").String(); g != "aGVsbG8=" {
+		t.Errorf("_txc.copy = %q, want %q (raw=%s)", g, "aGVsbG8=", got)
+	}
+}
+
+// TestOverlayResponseEMITOutputPrecedence pins the precedence rule
+// when the SAME path exists in both envs: the EXEC output wins. This
+// is the "fresh data is what the rule means by now" semantic.
+func TestOverlayResponseEMITOutputPrecedence(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	envIn := `{"text":"old-from-input"}`
+	output := `{"text":"new-from-output"}`
+
+	overrides := []resonator.BranchValue{
+		{Path: "._txc.chosen", Value: ast.PathRef{Path: "text"}},
+	}
+	got, err := pu.OverlayResponse(envIn, output, overrides)
+	if err != nil {
+		t.Fatalf("OverlayResponse: %v", err)
+	}
+	if g := gjson.Get(got, "_txc.chosen").String(); g != "new-from-output" {
+		t.Errorf("expected output to win precedence; got %q (raw=%s)", g, got)
+	}
+}
+
 // TestOverlayResponse_ResolveError exercises the strict-halt path
 // that fires when runtime.Resolve returns an error. Easiest trigger
 // is a FunctionCall to an unregistered name, which surfaces from

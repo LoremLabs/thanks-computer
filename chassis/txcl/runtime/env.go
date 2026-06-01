@@ -40,3 +40,27 @@ func (m MapEnv) Get(path string) (any, bool) {
 	v, ok := m[path]
 	return v, ok
 }
+
+// MultiEnv tries each Env in order; first match wins. Used to expose
+// multiple envelope sources at the same resolution boundary.
+//
+// Concrete use: the processor's EMIT overlay needs to see both the
+// EXEC's fresh output (so `EMIT @reply = .text` projects the handler's
+// reply) AND the scope input envelope (so `EMIT @reply = @web.req.body`
+// can still reach the input). Composing them as a MultiEnv lets either
+// path-shape work without the caller pre-merging two large JSON docs.
+//
+// A nil or empty MultiEnv returns (nil, false) for every Get.
+type MultiEnv []Env
+
+func (m MultiEnv) Get(path string) (any, bool) {
+	for _, e := range m {
+		if e == nil {
+			continue
+		}
+		if v, ok := e.Get(path); ok {
+			return v, ok
+		}
+	}
+	return nil, false
+}

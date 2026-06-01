@@ -21,6 +21,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/radovskyb/watcher v1.0.7
 	github.com/rivo/tview v0.42.0
+	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	github.com/schollz/sqlite3dump v1.2.4
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0

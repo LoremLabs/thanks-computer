@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -14,8 +16,10 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/manifest"
+	computeapi "github.com/loremlabs/thanks-computer/chassis/cli/op"
 	"github.com/loremlabs/thanks-computer/chassis/cli/sign"
 	"github.com/loremlabs/thanks-computer/chassis/cli/source"
+	"github.com/loremlabs/thanks-computer/chassis/compute/javyplugin"
 )
 
 // runPackagePublish validates a local package, builds a single-layer OCI
@@ -29,6 +33,7 @@ func runPackagePublish(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false, "validate + build the artifact; do not push")
 	doSign := fs.Bool("sign", false, "sign the artifact with an ed25519 key after pushing")
 	keyPath := fs.String("key", "", "signing key path (default: $TXCO_HOME/keys/signing.ed25519)")
+	noPrebuild := fs.Bool("no-prebuild", false, "publish .js source only (do not build bundled computes to wasm)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -90,7 +95,39 @@ Flags:
 		return 0
 	}
 
-	digest, err := source.Publish(context.Background(), abs, ref)
+	// Auto-prebuild bundled computes to wasm so consumers need no javy and the
+	// compute digest is fixed at publish. Built into a staging copy — the
+	// author's tree stays .js-only. javy absent → ship source-only (a warning,
+	// not a failure); --no-prebuild skips it entirely.
+	publishDir := abs
+	if !*noPrebuild && len(m.Operations.Bundled) > 0 {
+		staging, err := os.MkdirTemp("", "txco-pkg-prebuild-*")
+		if err != nil {
+			fmt.Fprintf(stderr, "package publish: %v\n", err)
+			return 1
+		}
+		defer os.RemoveAll(staging)
+		if _, err := copyTree(abs, staging); err != nil {
+			fmt.Fprintf(stderr, "package publish: stage: %v\n", err)
+			return 1
+		}
+		for _, d := range []string{".txco", ".git"} {
+			_ = os.RemoveAll(filepath.Join(staging, d)) // don't ship the build cache / VCS dir
+		}
+		n, javyMissing, err := prebuildComputes(staging, abs, m.Operations.Bundled)
+		if err != nil {
+			fmt.Fprintf(stderr, "package publish: %v\n", err)
+			return 1
+		}
+		if javyMissing {
+			fmt.Fprintf(stderr, "package publish: javy not on PATH — publishing source-only; consumers will need javy to `txco apply` (use --no-prebuild to silence)\n")
+		} else {
+			fmt.Fprintf(stdout, "prebuilt %d compute%s (javy plugin %s)\n", n, pluralS(n), javyplugin.JavyVersion)
+		}
+		publishDir = staging
+	}
+
+	digest, err := source.Publish(context.Background(), publishDir, ref)
 	if err != nil {
 		fmt.Fprintf(stderr, "package publish: %v\n", err)
 		return 1
@@ -134,4 +171,37 @@ func signPublished(ref source.ParsedRef, digest, keyPath string, stdout, stderr 
 	}
 	fmt.Fprintf(stdout, "signed by %s (%s)\n", s.KeyID, sign.DigestToSigTag(digest))
 	return 0
+}
+
+// prebuildComputes builds each bundled op's source (read from srcDir) to wasm
+// and writes <name>.wasm into stagingDir next to where the .js sits, so the
+// published artifact ships runnable wasm. The build cache lives in a separate
+// temp dir (never tarred into the artifact). Reports how many were built and
+// whether javy was missing (→ caller ships source-only). Overridable in tests so
+// the publish→install round-trip stays hermetic without a real toolchain.
+var prebuildComputes = func(stagingDir, srcDir string, bundled []manifest.BundledOp) (n int, javyMissing bool, err error) {
+	if _, lerr := exec.LookPath("javy"); lerr != nil {
+		return 0, true, nil
+	}
+	cacheRoot, err := os.MkdirTemp("", "txco-prebuild-cache-*")
+	if err != nil {
+		return 0, false, err
+	}
+	defer os.RemoveAll(cacheRoot)
+	for _, b := range bundled {
+		bt, berr := computeapi.BuildFile(filepath.Join(srcDir, b.Path), cacheRoot)
+		if berr != nil {
+			return n, false, fmt.Errorf("prebuild %s: %w", b.Name, berr)
+		}
+		wasmRel := strings.TrimSuffix(b.Path, filepath.Ext(b.Path)) + ".wasm"
+		dst := filepath.Join(stagingDir, wasmRel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return n, false, err
+		}
+		if err := os.WriteFile(dst, bt.Wasm, 0o644); err != nil {
+			return n, false, err
+		}
+		n++
+	}
+	return n, false, nil
 }

@@ -323,7 +323,7 @@ func upgradeOne(root string, reg registryConfig, lf *lockfile.File, e lockfile.E
 	*dirty = true
 	fmt.Fprintf(stdout, "upgraded %s: %s → %s\n", e.InstalledAs,
 		verDigest(e.Version, e.Resolved), verDigest(m.Version, prov.Reference))
-	warnBundledComputes(m, stdout)
+	warnBundledComputes(m, staging, stdout)
 	return "upgraded"
 }
 

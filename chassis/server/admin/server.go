@@ -134,9 +134,15 @@ func (c *Controller) Start() {
 	// that strip it land on /admin/ and the SPA's probeDemoMode +
 	// syncFromHash route them to #demo. The execution hop endpoints
 	// (/v1/demo/fire, /v1/demo/info, /v1/demo/op/build) live on the
-	// protected subrouter below — unchanged.
-	r.Handle("/demo", http.RedirectHandler("/admin/#demo", http.StatusMovedPermanently))
-	r.Handle("/demo/", http.RedirectHandler("/admin/#demo", http.StatusMovedPermanently))
+	// protected subrouter below — registered under the same demo gate.
+	//
+	// Gated on --demo-mode (set by `txco demo`): a plain chassis /
+	// `txco dev` exposes no demo surface at all, so there is nothing to
+	// redirect stale bookmarks to.
+	if c.pu.Conf.DemoMode {
+		r.Handle("/demo", http.RedirectHandler("/admin/#demo", http.StatusMovedPermanently))
+		r.Handle("/demo/", http.RedirectHandler("/admin/#demo", http.StatusMovedPermanently))
+	}
 	// Bare root is a convenience entry point: send it to the admin UI.
 	// 302 (not 301) — this is a UX entry redirect, not a canonical
 	// resource move, so it stays uncached if the landing target changes.
@@ -221,27 +227,34 @@ func (c *Controller) Start() {
 	// tenant" in the way ops or invitations are.
 	protected.HandleFunc("/v1/tenants", c.handleListTenants).Methods(http.MethodGet)
 	protected.HandleFunc("/v1/tenants", c.handleCreateTenant).Methods(http.MethodPost)
-	// Demo execution hop: proxy a synthetic request to this chassis's
-	// own (loopback) web inlet and return the result + rid. Not
-	// tenant-scoped — it's a dev/local convenience for the /demo/ UI.
-	// Goes through the auth middleware like the rest of /v1 (open in
-	// dev).
-	protected.HandleFunc("/v1/demo/fire", c.handleDemoFire).Methods(http.MethodPost)
-	protected.HandleFunc("/v1/demo/info", c.handleDemoInfo).Methods(http.MethodGet)
-	// Demo walkthrough curriculum: the source of truth for the
-	// tracks/steps/ops the admin-ui's #demo route renders. Single
-	// data structure lives in chassis/demo (Go); the SPA fetches it
-	// here on mount rather than embedding a duplicate copy. The
-	// same data is used by `txco demo`'s pre-seed (chassis/cli/demo
-	// → demo.Seed), so what the SPA shows always matches what was
-	// actually seeded into this chassis.
-	protected.HandleFunc("/v1/demo/curriculum", c.handleDemoCurriculum).Methods(http.MethodGet)
-	// Demo compute-op build hop: bundle + compile a single JS/TS source
-	// via the same toolchain `txco apply` uses, then store the wasm
-	// artifact in this chassis's astore so the runtime resolver finds it
-	// on EXEC. Returns the `compute://sha256/…` ref the client
-	// substitutes into the op's txcl.
-	protected.HandleFunc("/v1/demo/op/build", c.handleDemoBuildOp).Methods(http.MethodPost)
+	// Demo execution-hop endpoints — registered only under --demo-mode
+	// (set by `txco demo`). Their presence is the signal the admin-ui's
+	// probeDemoMode uses to auto-route to #demo, so a plain chassis /
+	// `txco dev` must NOT register them: probeDemoMode then 404s and the
+	// UI lands on the normal admin interface.
+	if c.pu.Conf.DemoMode {
+		// Demo execution hop: proxy a synthetic request to this chassis's
+		// own (loopback) web inlet and return the result + rid. Not
+		// tenant-scoped — it's a dev/local convenience for the /demo/ UI.
+		// Goes through the auth middleware like the rest of /v1 (open in
+		// dev).
+		protected.HandleFunc("/v1/demo/fire", c.handleDemoFire).Methods(http.MethodPost)
+		protected.HandleFunc("/v1/demo/info", c.handleDemoInfo).Methods(http.MethodGet)
+		// Demo walkthrough curriculum: the source of truth for the
+		// tracks/steps/ops the admin-ui's #demo route renders. Single
+		// data structure lives in chassis/demo (Go); the SPA fetches it
+		// here on mount rather than embedding a duplicate copy. The
+		// same data is used by `txco demo`'s pre-seed (chassis/cli/demo
+		// → demo.Seed), so what the SPA shows always matches what was
+		// actually seeded into this chassis.
+		protected.HandleFunc("/v1/demo/curriculum", c.handleDemoCurriculum).Methods(http.MethodGet)
+		// Demo compute-op build hop: bundle + compile a single JS/TS source
+		// via the same toolchain `txco apply` uses, then store the wasm
+		// artifact in this chassis's astore so the runtime resolver finds it
+		// on EXEC. Returns the `compute://sha256/…` ref the client
+		// substitutes into the op's txcl.
+		protected.HandleFunc("/v1/demo/op/build", c.handleDemoBuildOp).Methods(http.MethodPost)
+	}
 
 	// Chassis-global DNS synthesis config (nameservers / edge IPs / MX
 	// host that parameterize every delegated zone's synthesized
