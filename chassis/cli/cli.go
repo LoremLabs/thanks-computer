@@ -106,6 +106,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runConfig(rest, stdout, stderr), true
 	case "dns":
 		return runDNS(rest, stdout, stderr), true
+	case "completion":
+		// Emit a shell completion script. Boring v1: command + flag
+		// names only; see chassis/cli/completion.go.
+		return runCompletion(rest, stdout, stderr), true
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0, true
@@ -189,6 +193,7 @@ The thanks-computer chassis: event router + rule authoring CLI.
   %s   Manage signing keys for the admin API
   %s   Talk to MCP-over-HTTP servers (use %s for discovery)
   %s   Alias namespace for profile / logout (gcloud/stripe-style)
+  %s   Emit a shell completion script (use %s for install steps)
   %s   Print version info as JSON
 
 %s
@@ -228,6 +233,7 @@ Use %s for per-command flags.
 		padCmd(cmd("auth")+" <command>"),
 		padCmd(cmd("mcp")+" <command>"), hint("`txco mcp doctor`"),
 		padCmd(cmd("config")+" <command>"),
+		padCmd(cmd("completion")+" <shell>"), hint("`txco completion bash|zsh|fish`"),
 		padCmd(cmd("version")),
 		heading("Common flags for apply/diff/status/dev/trace:"),
 		padCmd(cmd("--target NAME")),
