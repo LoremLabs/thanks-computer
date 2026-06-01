@@ -55,8 +55,8 @@ type createHostnameRequest struct {
 
 // handleListHostnames returns the active hostnames bound to the URL's
 // tenant. Capability `actor:*:read` because hostname listings can
-// reveal SaaS deployment surface; granting "see who routes through
-// this tenant" is the read-tier permission.
+// reveal a deployment's routing surface; granting "see who routes
+// through this tenant" is the read-tier permission.
 //
 // `?history=true` flips to all-rows mode (including revoked) for
 // "who used to own X" debugging — same capability gate, since the
@@ -149,6 +149,19 @@ func (c *Controller) handleCreateHostname(w http.ResponseWriter, r *http.Request
 		Stack:     req.Stack,
 		CreatedAt: time.Now().UTC(),
 		CreatedBy: ac.ActorID,
+	}
+	// Dev-local hostname auto-verify (default on; flip off on shared
+	// deployments). For hostnames an operator self-evidently owns on a
+	// developer machine (localhost, *.localhost, *.local,
+	// *.local.thanks.computer — see tenants.IsDevLocalHostname for the
+	// full list), stamp verified_at at insert time so the every-feature-
+	// smoke loop doesn't need a DNS-TXT round-trip. Surfaces to the CLI
+	// via the existing verified_at field in the response; the CLI then
+	// skips the auto-challenge + DNS-record instructions when
+	// verified_at is set.
+	if c.pu.Conf.DevAutoVerifyLocalHostnames && tenants.IsDevLocalHostname(canon) {
+		now := h.CreatedAt
+		h.VerifiedAt = &now
 	}
 
 	// Fleet-sync producer: upload artifact BEFORE the tx so an

@@ -94,12 +94,21 @@ func (s *Store) CreateHostnameTx(ctx context.Context, tx *sql.Tx, h Hostname) er
 	if h.CreatedBy != "" {
 		createdByArg = h.CreatedBy
 	}
+	// verified_at is OPTIONAL on insert: a non-nil VerifiedAt is the
+	// auto-verify signal (admin handler stamps it for dev-local
+	// hostnames). Most callers leave it nil, the normal proof-of-
+	// ownership flow stamps verified_at later via the UPDATE at
+	// line 175.
+	var verifiedAtArg any
+	if h.VerifiedAt != nil {
+		verifiedAtArg = h.VerifiedAt.UTC().Format(time.RFC3339)
+	}
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO tenant_hostnames
-		     (id, hostname, tenant_id, stack, created_at, created_by)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		h.ID, canon, h.TenantID, h.Stack,
-		now.Format(time.RFC3339), createdByArg)
+		now.Format(time.RFC3339), createdByArg, verifiedAtArg)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrHostnameInUse

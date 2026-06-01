@@ -11,8 +11,8 @@
 //   - Secret materialization. RequiredSecrets() declares which standardized
 //     names (OPENROUTER_KEY, OPENAI_KEY, …) a backend needs; the ExecAI
 //     handler materializes them through the same per-tenant store + audit
-//     counter every other op uses (with optional env-var fallback gated
-//     by AIChatEnvFallback for open-core convenience).
+//     counter every other op uses (with an optional env-var fallback gated
+//     by AIChatEnvFallback for developer-machine convenience).
 //   - Cleartext containment. Cleartext rides only in the *secrets.SecretBag
 //     passed to Run; the bag panics on every standard encoder, so it cannot
 //     reach trace, log, mock, or continuation by construction.

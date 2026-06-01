@@ -85,3 +85,47 @@ func IsValidHostname(canonical string) bool {
 	}
 	return hostnameRE.MatchString(canonical)
 }
+
+// devLocalSuffixes are hostname suffixes whose ownership the operator
+// of a local development chassis self-evidently has (the hostnames all
+// resolve to 127.0.0.1, either by RFC convention or by a chassis-side
+// wildcard DNS record). Auto-verifying these on claim removes the
+// DNS-TXT round-trip from the every-new-feature smoke path.
+var devLocalSuffixes = []string{
+	".localhost",
+	".local",
+	".local.thanks.computer",
+}
+
+// IsDevLocalHostname reports whether canonical is a hostname that a
+// dev-mode chassis can auto-verify on claim, skipping the DNS-TXT
+// proof-of-ownership round-trip. The matcher is conservative:
+//
+//   - `localhost` — RFC 6761, must resolve to loopback
+//   - `*.localhost` — RFC 6761 §6.3
+//   - `*.local` — RFC 6762 mDNS (Bonjour); a developer-machine convention
+//   - `*.local.thanks.computer` — wildcard A record we publish to 127.0.0.1
+//     so any developer can use `<feature>.local.thanks.computer` without
+//     touching /etc/hosts
+//
+// IP literals (127.0.0.1, ::1) are rejected upstream by IsValidHostname,
+// so they never reach this predicate. Public TLDs (.com, .org, ...) and
+// any operator-owned domain are never matched.
+//
+// Caller is responsible for passing an already-canonicalized host (call
+// CanonicalizeHost first). The match is case-sensitive on the
+// canonical form.
+func IsDevLocalHostname(canonical string) bool {
+	if canonical == "" {
+		return false
+	}
+	if canonical == "localhost" {
+		return true
+	}
+	for _, suf := range devLocalSuffixes {
+		if strings.HasSuffix(canonical, suf) {
+			return true
+		}
+	}
+	return false
+}
