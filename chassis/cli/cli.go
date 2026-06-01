@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
+	"github.com/loremlabs/thanks-computer/chassis/cli/cloud"
 	opcli "github.com/loremlabs/thanks-computer/chassis/cli/op"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 )
@@ -91,6 +92,15 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runSnapshot(rest, stdout, stderr), true
 	case "auth":
 		return auth.Dispatch(rest, stdout, stderr), true
+	case "login":
+		// Cloud account sign-in (OAuth against the thanks-computer cloud) —
+		// distinct from `auth login`, which mints a chassis admin browser
+		// session.
+		return cloud.Dispatch(append([]string{"login"}, rest...), stdout, stderr), true
+	case "logout":
+		return cloud.Dispatch(append([]string{"logout"}, rest...), stdout, stderr), true
+	case "cloud":
+		return cloud.Dispatch(rest, stdout, stderr), true
 	case "op":
 		return opcli.Dispatch(rest, stdout, stderr), true
 	case "install":
@@ -191,6 +201,8 @@ The thanks-computer chassis: event router + rule authoring CLI.
   %s   Author + manage packages (init/validate/publish · list/upgrade/remove)
   %s   Render the execution trace for a request (use %s for the most recent)
   %s   Manage signing keys for the admin API
+  %s   Sign in to the thanks-computer cloud
+  %s   Sign out of the thanks-computer cloud
   %s   Talk to MCP-over-HTTP servers (use %s for discovery)
   %s   Alias namespace for profile / logout (gcloud/stripe-style)
   %s   Emit a shell completion script (use %s for install steps)
@@ -231,6 +243,8 @@ Use %s for per-command flags.
 		padCmd(cmd("package")+" <command>"),
 		padCmd(cmd("trace")+" [<rid>]"), hint("`txco trace last`"),
 		padCmd(cmd("auth")+" <command>"),
+		padCmd(cmd("login")),
+		padCmd(cmd("logout")),
 		padCmd(cmd("mcp")+" <command>"), hint("`txco mcp doctor`"),
 		padCmd(cmd("config")+" <command>"),
 		padCmd(cmd("completion")+" <shell>"), hint("`txco completion bash|zsh|fish`"),

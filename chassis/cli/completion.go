@@ -210,6 +210,14 @@ var mcpChildren = []node{
 	{Name: "doctor", Desc: "Diagnose an MCP endpoint"},
 }
 
+// cloudChildren mirrors the Dispatch switch in chassis/cli/cloud/cloud.go.
+// The same verbs are also exposed top-level (`txco login` / `txco logout`).
+var cloudChildren = []node{
+	{Name: "login", Desc: "Sign in to the thanks-computer cloud"},
+	{Name: "logout", Desc: "Delete stored cloud tokens"},
+	{Name: "whoami", Desc: "Show the current cloud identity", Aliases: []string{"status"}},
+}
+
 // cliCommandTree is the authoritative root. Every non-hidden top-level
 // case arm in chassis/cli/cli.go:Dispatch has an entry here. Order
 // matches the printUsage block for visual consistency. Hidden aliases
@@ -231,6 +239,9 @@ var cliCommandTree = []node{
 	{Name: "trace", Desc: "Inspect request traces"},
 	{Name: "snapshot", Desc: "Snapshot subcommands", Children: snapshotChildren},
 	{Name: "auth", Desc: "Auth + identity management", Children: authChildren},
+	{Name: "login", Desc: "Sign in to the thanks-computer cloud"},
+	{Name: "logout", Desc: "Sign out of the thanks-computer cloud"},
+	{Name: "cloud", Desc: "Cloud account subcommands (login/logout/whoami)", Children: cloudChildren},
 	{Name: "op", Desc: "Op subcommands (scaffold/build/run/test)", Children: opChildren},
 	{Name: "install", Desc: "Install a stack from a source"},
 	{Name: "package", Desc: "Package subcommands (OCI distribution)", Children: packageChildren},
