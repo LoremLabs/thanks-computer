@@ -3,7 +3,7 @@
 //
 // "System" opstacks live under `_`-prefixed tenant slugs (`_sys`,
 // `_playground`, …). They are NOT authored through the admin API —
-// they ship embedded in the binary (the open-core default) and may be
+// they ship embedded in the binary (the bundled default) and may be
 // overridden/extended from a local directory the operator controls.
 // Filesystem control == operator trust, so these bypass the
 // tenant-level admin auth path entirely; they are the *second* writer
@@ -40,7 +40,7 @@ const embedRoot = "opstacks"
 // Config selects the optional on-disk source. Dir is a workspace root
 // that contains an `OPS/` tree; the loader reads only its `_`-prefixed
 // system stacks (OPS/_sys/...). Dir == "" means embedded-only (the
-// open-core default — `txco serve` in production). Mirrors
+// production default — `txco serve` in production). Mirrors
 // continuation.StoreConfig in spirit.
 type Config struct {
 	Dir string

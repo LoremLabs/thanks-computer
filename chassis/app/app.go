@@ -1,5 +1,5 @@
 // Package app is the chassis entrypoint, factored out of cmd/txco so a
-// downstream build (e.g. a SaaS overlay that blank-imports extra store
+// downstream build (e.g. an overlay that blank-imports extra store
 // backends) can reuse the exact boot orchestration instead of forking
 // main. cmd/txco/main.go is now a thin shim that calls Run; behavior is
 // byte-for-byte unchanged.
@@ -450,9 +450,10 @@ const (
 // openAuthDBOrDie opens the auth DB and returns its SQL dialect. A
 // postgres:// (or postgresql://) DSN selects a shared Postgres store for
 // an HA control plane — opened via the `pgx` database/sql driver, which
-// the SaaS overlay blank-imports (core never compiles a Postgres driver;
-// SQLite stays the in-tree default and only built-in driver). Anything
-// else is the historical local SQLite file, byte-for-byte unchanged.
+// a downstream overlay blank-imports (the chassis never compiles a
+// Postgres driver; SQLite stays the in-tree default and only built-in
+// driver). Anything else is the historical local SQLite file,
+// byte-for-byte unchanged.
 //
 // The DSN is logged redacted (it may carry a Postgres password).
 func openAuthDBOrDie(logger *zap.Logger, dsn string) (*sql.DB, registry.Dialect) {

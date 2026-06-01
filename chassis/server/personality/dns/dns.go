@@ -38,6 +38,20 @@ type DNSController struct {
 	rrl      *throttle.Throttle
 	wg       sync.WaitGroup
 
+	// challenges holds transient `_acme-challenge` TXT records served
+	// during ACME DNS-01 issuance. Written by the in-process solver
+	// (chassis/tls) and/or the RFC2136 UPDATE receiver; read on the query
+	// path for `_acme-challenge.*` names only. Never goes through the
+	// ZoneSnapshot / dbcache reload cycle. See challenge.go.
+	challenges ChallengeStore
+
+	// tsigKeyName/tsigSecret gate the RFC2136 UPDATE receiver (update.go).
+	// Both empty ⇒ the UPDATE path is off and every UPDATE is refused.
+	// tsigKeyName is the canonical (trailing-dot) key name; tsigSecret is
+	// the base64 shared secret.
+	tsigKeyName string
+	tsigSecret  string
+
 	queries  metric.Int64Counter
 	rrlDrops metric.Int64Counter
 }
@@ -47,8 +61,16 @@ type DNSController struct {
 // treat them uniformly.
 func NewController(ctx context.Context, pu *processor.Unit) *DNSController {
 	c := &DNSController{ctx: ctx, pu: pu}
+	// Single-node in-memory challenge store by default. A fleet selects a
+	// shared backend by DSN (overlay-registered); that wiring lands with
+	// the cert-storage config.
+	c.challenges = newMemChallengeStore()
 	if pu != nil {
 		c.synthCfg = SynthConfigFrom(pu.Conf)
+		if kn := strings.TrimSpace(pu.Conf.DNSUpdateTSIGKeyName); kn != "" && strings.TrimSpace(pu.Conf.DNSUpdateTSIGSecret) != "" {
+			c.tsigKeyName = dns.Fqdn(kn)
+			c.tsigSecret = strings.TrimSpace(pu.Conf.DNSUpdateTSIGSecret)
+		}
 	}
 	if pu != nil && pu.Mc != nil && pu.Mc.Meter != nil {
 		c.queries, _ = pu.Mc.Meter.Int64Counter("chassis.dns.queries",
@@ -104,6 +126,18 @@ func (c *DNSController) Start() {
 
 		usrv := &dns.Server{PacketConn: pc, Net: "udp", Handler: c.makeHandler(true)}
 		tsrv := &dns.Server{Listener: ln, Net: "tcp", Handler: c.makeHandler(false)}
+		// TSIG secret for the RFC2136 UPDATE receiver (update.go). Set on
+		// both transports so the server verifies inbound MACs and can sign
+		// replies; absent key ⇒ the receiver refuses every UPDATE.
+		if c.updatesEnabled() {
+			secrets := map[string]string{c.tsigKeyName: c.tsigSecret}
+			usrv.TsigSecret = secrets
+			tsrv.TsigSecret = secrets
+			// Default accept func NOTIMPs OpcodeUpdate; swap it so the
+			// receiver's UPDATEs reach the handler (queries unaffected).
+			usrv.MsgAcceptFunc = acceptDynamicUpdate
+			tsrv.MsgAcceptFunc = acceptDynamicUpdate
+		}
 		c.servers = append(c.servers, usrv, tsrv)
 		c.pu.Logger.Info("dns controller started", zap.String("bind", bind))
 
@@ -192,10 +226,35 @@ func (c *DNSController) rebuild(db *sql.DB) {
 	c.snap.Store(snap)
 }
 
+// ChallengeStore exposes the controller's transient ACME-challenge store
+// so the in-process DNS-01 solver (chassis/tls) writes to the same
+// instance this head serves from. Nil only before NewController runs.
+func (c *DNSController) ChallengeStore() ChallengeStore { return c.challenges }
+
+// Origins returns the canonical origins currently served, from the live
+// snapshot (lock-free atomic read; safe to call from an OnReload hook). The
+// bundled cert manager uses this to recompute the wildcard cert set when
+// delegated zones change.
+func (c *DNSController) Origins() []string {
+	snap := c.snap.Load()
+	if snap == nil {
+		return nil
+	}
+	return snap.Origins()
+}
+
 // makeHandler returns the miekg/dns handler for one transport. isUDP
 // drives EDNS0 size negotiation + truncation (TCP never truncates).
 func (c *DNSController) makeHandler(isUDP bool) dns.HandlerFunc {
 	return func(w dns.ResponseWriter, req *dns.Msg) {
+		// RFC2136 dynamic UPDATE (update.go): TSIG-authenticated, scoped to
+		// `_acme-challenge` TXT. Handled before RRL — it's authenticated and
+		// low-volume, not the anonymous-query flood RRL defends against.
+		if req.Opcode == dns.OpcodeUpdate {
+			c.handleUpdate(w, req)
+			return
+		}
+
 		// Response-rate-limit by source IP. On exhaustion we DROP rather
 		// than reply — replying to a spoofed source is exactly the
 		// reflection/amplification behaviour we must not exhibit.
@@ -208,7 +267,13 @@ func (c *DNSController) makeHandler(isUDP bool) dns.HandlerFunc {
 			}
 		}
 
-		m := buildReply(c.snap.Load(), req, isUDP)
+		// Transient ACME DNS-01 challenge takes precedence for the
+		// `_acme-challenge.*` name only; everything else (incl. that name
+		// with no active challenge) falls through to the snapshot.
+		m := c.answerChallenge(req, isUDP)
+		if m == nil {
+			m = buildReply(c.snap.Load(), req, isUDP)
+		}
 		if len(req.Question) == 1 {
 			c.recordQuery(req.Question[0], m.Rcode)
 		}
@@ -244,17 +309,83 @@ func buildReply(snap *ZoneSnapshot, req *dns.Msg, isUDP bool) *dns.Msg {
 		m.Authoritative = rcode != dns.RcodeRefused
 	}
 
-	if isUDP {
-		size := dns.MinMsgSize // 512
-		if opt := req.IsEdns0(); opt != nil {
-			m.SetEdns0(opt.UDPSize(), false)
-			if int(opt.UDPSize()) > size {
-				size = int(opt.UDPSize())
-			}
-		}
-		m.Truncate(size) // sets TC if the answer doesn't fit
-	}
+	applyUDPSizing(m, req, isUDP)
 	return m
+}
+
+// applyUDPSizing negotiates EDNS0 buffer size and truncates over UDP (TCP
+// never truncates). Shared by buildReply and the challenge answer path so
+// both honour the same size discipline.
+func applyUDPSizing(m, req *dns.Msg, isUDP bool) {
+	if !isUDP {
+		return
+	}
+	size := dns.MinMsgSize // 512
+	if opt := req.IsEdns0(); opt != nil {
+		m.SetEdns0(opt.UDPSize(), false)
+		if int(opt.UDPSize()) > size {
+			size = int(opt.UDPSize())
+		}
+	}
+	m.Truncate(size) // sets TC if the answer doesn't fit
+}
+
+// answerChallenge serves a transient ACME DNS-01 challenge, or returns nil
+// to let the normal snapshot path handle the query. It answers ONLY a
+// single TXT question for an `_acme-challenge.<served-zone>` owner that has
+// a live value in the challenge store — so a missing challenge falls
+// through to the snapshot's normal NXDOMAIN/NODATA, and a name outside any
+// served zone still REFUSES. Authoritative, never recursive.
+func (c *DNSController) answerChallenge(req *dns.Msg, isUDP bool) *dns.Msg {
+	if c.challenges == nil || req.Opcode != dns.OpcodeQuery || len(req.Question) != 1 {
+		return nil
+	}
+	q := req.Question[0]
+	if q.Qtype != dns.TypeTXT {
+		return nil
+	}
+	qname := strings.ToLower(dns.Fqdn(q.Name))
+	if !isACMEChallengeName(qname) {
+		return nil
+	}
+	// Only answer under a zone we actually serve (keeps authoritative-only
+	// posture; a challenge for an unserved name is not ours to answer).
+	if snap := c.snap.Load(); snap == nil || snap.zoneFor(qname) == nil {
+		return nil
+	}
+	vals := c.challenges.ActiveTXT(qname)
+	if len(vals) == 0 {
+		return nil
+	}
+	m := new(dns.Msg)
+	m.SetReply(req)
+	m.RecursionAvailable = false
+	m.Authoritative = true
+	m.Rcode = dns.RcodeSuccess
+	for _, v := range vals {
+		m.Answer = append(m.Answer, &dns.TXT{
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: challengeRecordTTL},
+			Txt: chunkTXT(v),
+		})
+	}
+	applyUDPSizing(m, req, isUDP)
+	return m
+}
+
+// chunkTXT splits a TXT value into <=255-byte character-strings as the
+// wire format requires. ACME key authorizations are 43 bytes so this is a
+// single chunk in practice, but stay correct for longer values.
+func chunkTXT(s string) []string {
+	const max = 255
+	if len(s) <= max {
+		return []string{s}
+	}
+	var out []string
+	for len(s) > max {
+		out = append(out, s[:max])
+		s = s[max:]
+	}
+	return append(out, s)
 }
 
 func (c *DNSController) recordQuery(q dns.Question, rcode int) {

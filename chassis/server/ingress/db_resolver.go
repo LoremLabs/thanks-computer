@@ -89,9 +89,9 @@ func NewDBResolverFunc(inner Resolver, dbFn func() *sql.DB, logger *zap.Logger, 
 // otherwise a verified tenant's mail gets blackholed into the
 // `system/mail_drop` stack instead of their `<tenant>/_mail`.
 //
-// Inner type-assertion via concrete *yamlResolver: the open-core's
-// inner is always a *yamlResolver (or nil). SaaS overlays that want
-// a different inner write their own resolver wrapper.
+// Inner type-assertion via concrete *yamlResolver: the bundled
+// inner is always a *yamlResolver (or nil). Downstream overlays that
+// want a different inner write their own resolver wrapper.
 func (r *DBResolver) ResolveRecipient(rcpt, listener string) (RouteTarget, bool) {
 	rcpt = strings.ToLower(rcpt)
 

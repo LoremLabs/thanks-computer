@@ -286,7 +286,7 @@ func offerAlternateProfile(currentName, urlFlag string, stderr io.Writer) (strin
 // basename when it'd make a sensible profile name (and isn't already
 // the colliding name). Falls through to "" when nothing fits — the
 // prompt then renders without a default. The cwd basename is a
-// surprisingly good fit for the open-core "I'm experimenting in
+// surprisingly good fit for the "I'm experimenting in
 // `examples/quickstart`" case, which is the main path this prompt
 // helps.
 func suggestProfileNameFromCwd(skipName string) string {

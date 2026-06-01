@@ -56,7 +56,7 @@ type Sink interface {
 	Close(ctx context.Context) error
 }
 
-// ZapSink is the default open-core sink: it folds the event into a
+// ZapSink is the bundled default sink: it folds the event into a
 // single structured log line. The stable "usage" message is the
 // downstream filter key; the timestamp is zap's own. Close is a no-op —
 // the logger's flush lifecycle is owned by the chassis, not here.
@@ -86,8 +86,9 @@ func (s *ZapSink) WriteEvent(ev UsageEvent) {
 		fields = append(fields, zap.Int("mem_bytes", ev.MemBytes))
 	}
 	// Fuel is conditional too: empty/unrouted requests do no accounted
-	// work and have nothing to meter. Open-core deployments see this
-	// field for any real request; SaaS aggregates it for billing.
+	// work and have nothing to meter. Single-tenant deployments see
+	// this field for any real request; tenant-aware deployments
+	// aggregate it for billing or quota enforcement.
 	if ev.Fuel > 0 {
 		fields = append(fields, zap.Int64("fuel", ev.Fuel))
 	}

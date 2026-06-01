@@ -1,5 +1,5 @@
 // Package filestore is the local-filesystem continuation backend: the
-// open-core default, zero infrastructure, directly inspectable.
+// bundled default, zero infrastructure, directly inspectable.
 //
 // Create-if-absent is atomic: content is written to a temp file in the
 // destination directory, then os.Link'd into place. os.Link fails with

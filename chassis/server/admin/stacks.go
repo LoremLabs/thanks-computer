@@ -878,7 +878,7 @@ func (e *materialiseError) Error() string { return e.code }
 
 // materialiseStackVersion is the transactional core of activation, extracted
 // verbatim from handleActivateStack so the identical logic can run from a
-// non-HTTP context (e.g. a control-event applier — see the SaaS/fleet plan).
+// non-HTTP context (e.g. a control-event applier — see the fleet sync plan).
 // It resolves stack+version, flips version status, clears and re-materialises
 // the (tenant, stack) ops rows from stack_files, and flips
 // stacks.active_version. The caller owns tx begin/commit and any dbcache

@@ -692,8 +692,8 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 	// Routing-record reminder. The TXT proves ownership but does NOT
 	// route traffic — that's what bit us when test2.loremlabs.com
 	// `verify` succeeded but `curl` failed with "Could not resolve
-	// host" (no CNAME/A pointed at the chassis). Kept generic so
-	// open-core doesn't hardcode an operator-specific CNAME target
+	// host" (no CNAME/A pointed at the chassis). Kept generic so the
+	// chassis doesn't hardcode an operator-specific CNAME target
 	// (different deployments, different target hostnames); the
 	// operator's docs spell out the exact value.
 	fmt.Fprintln(stdout, "")

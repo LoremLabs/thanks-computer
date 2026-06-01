@@ -13,9 +13,10 @@
 // seen-set is shared by fuel's +50 charge and TTL's penalty sleep — same map,
 // no duplication.
 //
-// Open core leaves the defaults loose; SaaS tightens per tenant. The conditional
-// emit on the `usage` log line is universal (open core sees a `fuel=N` field it
-// can ignore; SaaS aggregates it for billing).
+// The chassis defaults are loose; deployments that want per-tenant ceilings can
+// tighten via config. The conditional emit on the `usage` log line is universal
+// (single-tenant deployments see a `fuel=N` field they can ignore; tenant-aware
+// deployments aggregate it for billing or quota).
 //
 // See thanks-computer-service/docs/todo-txcl-fuel-metering.md (fuel model) and
 // todo-txcl-loops-and-cycles.md (loop analysis + TTL/penalty rationale).

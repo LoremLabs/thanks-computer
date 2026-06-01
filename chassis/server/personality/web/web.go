@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -32,7 +33,18 @@ type WebController struct {
 	shutdown chan bool
 	wg       sync.WaitGroup
 	server   *http.Server
+
+	// tlsConfig, when set (via SetTLSConfig), enables a second HTTPS
+	// listener on --web-tls-addr that terminates TLS with the bundled cert
+	// manager's certificates. Nil ⇒ HTTP-only (a front proxy terminates).
+	tlsConfig *tls.Config
+	tlsServer *http.Server
 }
+
+// SetTLSConfig wires the bundled cert manager's TLS config into the web
+// head, enabling the HTTPS listener. Call before Start. No-op effect unless
+// --web-tls-addr is also set.
+func (web *WebController) SetTLSConfig(c *tls.Config) { web.tlsConfig = c }
 
 // splitMocksHeader splits an X-Txco-Mocks header value into a clean
 // pattern list: comma-separated, whitespace-trimmed, empties dropped.
@@ -447,6 +459,40 @@ func (web *WebController) Start() {
 				MaxHeaderBytes:    1 << 18,
 			}
 
+			// Optional HTTPS listener: bundled TLS termination. Same handler,
+			// same timeouts; certificates come from the cert manager's
+			// TLSConfig (GetCertificate by SNI). Served in its own goroutine —
+			// the plain HTTP serve below still blocks this outer goroutine, as
+			// before. Off unless --web-tls-addr is set AND a TLS config was
+			// wired in (SetTLSConfig).
+			if addr := strings.TrimSpace(web.pu.Conf.WebTLSAddr); addr != "" && web.tlsConfig != nil {
+				web.tlsServer = &http.Server{
+					Addr:              addr,
+					Handler:           r,
+					TLSConfig:         web.tlsConfig,
+					ReadHeaderTimeout: time.Duration(web.pu.Conf.WebWriteTimeout) * time.Second,
+					WriteTimeout:      httpWriteTimeout,
+					ReadTimeout:       time.Duration(web.pu.Conf.WebReadTimeout) * time.Second,
+					IdleTimeout:       time.Duration(web.pu.Conf.WebIdleTimeout) * time.Second,
+					MaxHeaderBytes:    1 << 18,
+				}
+				tlsLn, terr := net.Listen("tcp", addr)
+				if terr != nil {
+					web.pu.Logger.Fatal("web TLS port already in use (or otherwise unbindable)",
+						zap.String("addr", addr), zap.String("err", terr.Error()),
+						zap.String("hint", fmt.Sprintf("lsof -iTCP%s -sTCP:LISTEN", addr)))
+				}
+				web.pu.Logger.Info("Listening on web TLS port", zap.String("port", addr))
+				web.wg.Add(1)
+				go func() {
+					defer web.wg.Done()
+					// Empty cert/key paths → ServeTLS uses TLSConfig.GetCertificate.
+					if err := web.tlsServer.ServeTLS(tlsLn, "", ""); err != nil && err != http.ErrServerClosed {
+						web.pu.Logger.Error("web TLS server stopped", zap.String("error", err.Error()))
+					}
+				}()
+			}
+
 			// Pre-bind synchronously so a port conflict surfaces with a
 			// clear, actionable error BEFORE we log "Listening on..."
 			// and BEFORE the chassis ever appears "ready". Without this
@@ -578,6 +624,11 @@ func (web *WebController) Stop() {
 		if err := web.server.Shutdown(web.ctx); err != nil {
 			// Error from closing listeners, or context timeout:
 			web.pu.Logger.Error("web server shutdown", zap.String("error", err.Error()))
+		}
+		if web.tlsServer != nil {
+			if err := web.tlsServer.Shutdown(web.ctx); err != nil {
+				web.pu.Logger.Error("web TLS server shutdown", zap.String("error", err.Error()))
+			}
 		}
 	}
 }

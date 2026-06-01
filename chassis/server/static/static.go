@@ -1,7 +1,7 @@
 // Package static serves bundled / workspace files for the txco://static
 // op, layered first-match-wins: a routed stack's own
 // <workspace>/OPS/<stack>/FILES/** , the chassis-wide
-// <workspace>/FILES/** , then the embedded open-core default
+// <workspace>/FILES/** , then the embedded chassis default
 // (favicon.ico).
 //
 // The set + the bytes are loaded into memory at startup and rebuilt on

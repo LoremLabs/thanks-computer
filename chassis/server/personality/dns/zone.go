@@ -387,6 +387,18 @@ func (s *ZoneSnapshot) byOrigin(origin string) *zone {
 	return nil
 }
 
+// Origins returns every canonical origin currently served, sorted. Used by
+// the bundled cert manager to decide which `*.<origin>` + apex wildcard
+// certificates to obtain/renew.
+func (s *ZoneSnapshot) Origins() []string {
+	out := make([]string, 0, len(s.zones))
+	for _, z := range s.zones {
+		out = append(out, z.origin)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // OriginsForTenant returns the canonical origins served for a tenant,
 // sorted. Used by the admin render endpoint.
 func (s *ZoneSnapshot) OriginsForTenant(tenantID string) []string {

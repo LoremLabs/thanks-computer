@@ -742,7 +742,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		// HTTP — no certs). Set-if-missing, so
 		// `TXCO_STRUCTURED_HOST_SUFFIX= txco dev` disables it and a
 		// custom suffix overrides. The library/`txco serve` default
-		// stays "" (open-core unchanged).
+		// stays "" (embedder behavior unchanged).
 		"TXCO_STRUCTURED_HOST_SUFFIX": ".localhost",
 		// System stacks (OPS/_sys/boot, …) live in the same OPS/ tree
 		// as application stacks, discriminated by the `_` prefix.

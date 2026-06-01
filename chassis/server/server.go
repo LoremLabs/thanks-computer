@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +17,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
-	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter"   // registers the "openrouter" ai://chat backend
+	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter"    // registers the "openrouter" ai://chat backend
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
 	_ "github.com/loremlabs/thanks-computer/chassis/compute/wazero" // registers the "wazero" engine
@@ -50,6 +51,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
+	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 	"github.com/loremlabs/thanks-computer/chassis/usage"
 )
@@ -685,7 +687,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 
 	// Usage sink. On by default — every completed request is folded
 	// into a structured "usage" log line through the existing logger
-	// (the open-core default); --usage-enabled=false opts out for the
+	// (the bundled default); --usage-enabled=false opts out for the
 	// zero-cost path (nil sink, no response tee). The Sink interface
 	// lets a file/Kafka/OTEL transport drop in later without touching
 	// the bus loop.
@@ -696,7 +698,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	}
 
 	// Continuation store: durable, immutable, derived-state storage for
-	// suspended (async) runs. The file backend is the open-core default
+	// suspended (async) runs. The file backend is the bundled default
 	// and self-registers via the blank import. Construction failure is a
 	// startup error. Only the barrier (async) path touches it; the sync
 	// fast path never does.
@@ -929,14 +931,45 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// head that default-denies every delivery.
 	var mailResolver ingress.MailResolver = resolver
 
+	webCtrl := web.NewController(ctx, pu, traceSink)
+	dnsCtrl := dnsp.NewController(ctx, pu)
+
+	// Bundled TLS: when --web-tls-addr is set the chassis terminates TLS
+	// itself, obtaining + renewing wildcard certs for delegated zones via
+	// in-process ACME DNS-01 against its OWN authoritative DNS head (the
+	// solver writes the _acme-challenge into the dns head's challenge store,
+	// which that head serves). Requires the 'dns' personality.
+	var certMgr *txtls.Manager
+	if strings.TrimSpace(conf.WebTLSAddr) != "" {
+		if !strings.Contains(conf.Personalities, "dns") {
+			logger.Warn("web-tls-addr set without the 'dns' personality: ACME DNS-01 has no authoritative server to answer challenges — enable 'dns' or terminate TLS at a front proxy")
+		}
+		m, mErr := txtls.NewManager(txtls.Options{
+			Publisher:   dnsCtrl.ChallengeStore(),
+			Email:       conf.ACMEEmail,
+			CA:          conf.ACMECA,
+			CARootFile:  conf.ACMECARootFile,
+			StorageDSN:  conf.CertStorageDSN,
+			StoragePath: conf.CertStoragePath,
+			Resolvers:   conf.ACMEDNSResolvers,
+			Logger:      logger,
+		})
+		if mErr != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("bundled TLS: %w", mErr)
+		}
+		certMgr = m
+		webCtrl.SetTLSConfig(certMgr.TLSConfig())
+	}
+
 	controllers := []controller{
 		cron.NewController(ctx, pu),
 		tcp.NewController(ctx, pu),
-		web.NewController(ctx, pu, traceSink),
+		webCtrl,
 		adminCtrl,
 		sweep.NewController(ctx, pu),
 		lmtp.NewController(ctx, pu, mailResolver),
-		dnsp.NewController(ctx, pu),
+		dnsCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
 	}
@@ -944,6 +977,34 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Start all controllers.
 	for _, c := range controllers {
 		c.Start()
+	}
+
+	// Bundled TLS: with the dns head's initial zone snapshot now built,
+	// obtain/renew the apex + wildcard cert per delegated zone, and recompute
+	// that set whenever zones change — chained AFTER the dns head's own
+	// snapshot rebuild on the same OnReload, so origins are already fresh.
+	// manageCerts reads the atomic snapshot only (no Dbc lock), so it's safe
+	// inside the OnReload hook (which runs while Dbc.Mu is held).
+	if certMgr != nil {
+		manageCerts := func() {
+			domains := txtls.WildcardDomains(dnsCtrl.Origins())
+			if err := certMgr.Manage(ctx, domains); err != nil {
+				logger.Error("bundled TLS manage failed",
+					zap.Strings("domains", domains), zap.String("err", err.Error()))
+			}
+		}
+		manageCerts()
+		if dbc != nil {
+			prev := dbc.OnReload
+			dbc.OnReload = func(db *sql.DB) error {
+				var err error
+				if prev != nil {
+					err = prev(db)
+				}
+				manageCerts()
+				return err
+			}
+		}
 	}
 
 	go func() {
@@ -1111,4 +1172,3 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	}, nil
 
 }
-

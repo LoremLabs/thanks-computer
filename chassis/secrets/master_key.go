@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-// FileMasterKey is the open-core MasterKeyProvider: a 32-byte master
+// FileMasterKey is the bundled MasterKeyProvider: a 32-byte master
 // key loaded from a host-local file. The file must have 0600 perms
 // (no group/other bits set) and contain exactly masterKeySize bytes.
 //

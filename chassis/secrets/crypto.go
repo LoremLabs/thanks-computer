@@ -32,9 +32,9 @@ const (
 
 // MasterKeyProvider yields the host-local master key.
 //
-// This interface is the explicit overlay seam. Open-core ships
-// FileMasterKey only; a SaaS overlay (or any other deployment that
-// needs KMS/HSM-backed keys) implements MasterKeyProvider in a
+// This interface is the explicit overlay seam. The chassis ships
+// FileMasterKey only; a downstream overlay (or any other deployment
+// that needs KMS/HSM-backed keys) implements MasterKeyProvider in a
 // separate package and registers it without the chassis caring.
 // No KMS-vendor code lives in the chassis tree by design — see
 // internal docs/todo-secret-store.md §1.6.

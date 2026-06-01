@@ -96,8 +96,8 @@ type Resolver interface {
 //
 // The YAML resolver implements MailResolver against
 // `ingress.lmtp.{recipients,listeners}`. The DB-backed resolver
-// (SaaS overlay or open-core's DBResolver wrapper) layers DB lookups
-// for verified-domain bypass on top.
+// (the bundled DBResolver wrapper, or a downstream overlay) layers DB
+// lookups for verified-domain bypass on top.
 //
 // `listener` is the LMTP listener name the delivery arrived on
 // (currently always "default"; multi-listener configs land later).
@@ -124,8 +124,8 @@ type File struct {
 		//   1. recipients[<exact addr>]   — operator exact override
 		//   2. recipients["@" + domain]   — operator domain wildcard
 		//   3. Strategy A — tenant.stack[+mod]@<default-host> parse
-		//   4. verified_domains[<domain>] — open-core YAML stand-in
-		//      for tenant_hostnames lookup (the DB-backed equivalent
+		//   4. verified_domains[<domain>] — YAML stand-in for the
+		//      tenant_hostnames lookup (the DB-backed equivalent
 		//      lives in DBResolver and queries the same table that
 		//      authorizes HTTP routing)
 		//   5. listeners[<listener>]      — operator listener catch-all
@@ -303,8 +303,8 @@ func (r *yamlResolver) resolveStrategyA(rcpt string) (RouteTarget, bool) {
 	}, true
 }
 
-// resolveVerifiedDomainYAML covers rule 4 in the open-core YAML
-// resolver — Strategy B's static stand-in for `tenant_hostnames`.
+// resolveVerifiedDomainYAML covers rule 4 in the YAML resolver —
+// Strategy B's static stand-in for `tenant_hostnames`.
 // Operators without a DB can list domains they own as their tenant's
 // destination; DBResolver layers the table-backed equivalent on top
 // at the same priority slot.
