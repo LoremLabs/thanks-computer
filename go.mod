@@ -15,6 +15,7 @@ require (
 	github.com/gorilla/mux v1.7.1
 	github.com/hashicorp/go-immutable-radix v1.1.0
 	github.com/jhillyerd/enmime v1.3.0
+	github.com/lestrrat-go/jwx/v2 v2.1.2
 	github.com/libdns/libdns v1.1.1
 	github.com/mattn/go-sqlite3 v1.10.0
 	github.com/miekg/dns v1.1.72
@@ -78,7 +79,6 @@ require (
 	github.com/lestrrat-go/httprc v1.0.6 // indirect
 	github.com/lestrrat-go/httprc/v3 v3.0.1 // indirect
 	github.com/lestrrat-go/iter v1.0.2 // indirect
-	github.com/lestrrat-go/jwx/v2 v2.1.2 // indirect
 	github.com/lestrrat-go/jwx/v3 v3.0.12 // indirect
 	github.com/lestrrat-go/option v1.0.1 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect

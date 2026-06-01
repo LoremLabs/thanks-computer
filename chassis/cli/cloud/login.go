@@ -147,10 +147,21 @@ Flags:
 		return 1
 	}
 
-	// Identity comes from the id_token (the cloud requests the email scope
-	// upstream). It was just received over TLS from the cloud's token endpoint
-	// in this same exchange, so an unverified decode is acceptable here.
-	sub, email := claimsFromIDToken(tr.IDToken)
+	// Identity comes from the id_token. When the cloud advertises a JWKS,
+	// verify the signature (and exp) against it; otherwise (no discovery /
+	// no jwks_uri) fall back to an unverified decode — the token was just
+	// received over TLS from the cloud's token endpoint in this exchange.
+	var sub, email string
+	if cfg.JwksURI != "" {
+		s, e, verr := verifyIDToken(ctx, hc, cfg.JwksURI, tr.IDToken)
+		if verr != nil {
+			auth.PrintCLIErrorf(stderr, "login: id_token verification failed: %v", verr)
+			return 1
+		}
+		sub, email = s, e
+	} else {
+		sub, email = claimsFromIDToken(tr.IDToken)
+	}
 
 	tok := CloudToken{
 		Kind:         "cloud",

@@ -14,6 +14,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
 // oidcConfig holds the subset of OIDC discovery metadata we use.
@@ -23,6 +26,7 @@ type oidcConfig struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 	UserinfoEndpoint      string `json:"userinfo_endpoint"`
 	RevocationEndpoint    string `json:"revocation_endpoint"`
+	JwksURI               string `json:"jwks_uri"`
 }
 
 // fallbackConfig synthesizes endpoints from the cloud base. The cloud mounts
@@ -185,10 +189,34 @@ func exchangeCode(ctx context.Context, hc *http.Client, cfg *oidcConfig, code, v
 	return &tr, nil
 }
 
+// verifyIDToken fetches the cloud-advertised JWKS and verifies the id_token's
+// signature against it (matching the token's kid), also validating temporal
+// claims (exp/nbf/iat). The keys mirror the upstream identity provider that
+// actually signed the token. Issuer/audience are intentionally NOT asserted:
+// the token's `iss` is the upstream IdP (which the cloud brokers), not the
+// cloud, and the CLI doesn't carry the client_id. Returns sub/email on success.
+func verifyIDToken(ctx context.Context, hc *http.Client, jwksURI, idToken string) (sub, email string, err error) {
+	set, err := jwk.Fetch(ctx, jwksURI, jwk.WithHTTPClient(hc))
+	if err != nil {
+		return "", "", fmt.Errorf("fetch jwks: %w", err)
+	}
+	tok, err := jwt.Parse([]byte(idToken), jwt.WithKeySet(set))
+	if err != nil {
+		return "", "", fmt.Errorf("verify id_token: %w", err)
+	}
+	if v, ok := tok.Get("email"); ok {
+		if s, ok2 := v.(string); ok2 {
+			email = s
+		}
+	}
+	return tok.Subject(), email, nil
+}
+
 // claimsFromIDToken does an UNVERIFIED decode of a JWT's payload to read
-// sub/email. The id_token was just received directly from the cloud's token
-// endpoint over TLS in the same exchange, so it isn't attacker-controlled
-// here. Never use this for a trust decision.
+// sub/email. Fallback used only when the cloud advertises no jwks_uri (e.g.
+// discovery is unreachable). The id_token was just received directly from the
+// cloud's token endpoint over TLS in the same exchange, so it isn't
+// attacker-controlled here. Never use this for a trust decision.
 func claimsFromIDToken(idToken string) (sub, email string) {
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
