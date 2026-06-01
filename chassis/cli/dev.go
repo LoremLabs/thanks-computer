@@ -30,6 +30,11 @@ import (
 
 const adminUIDevPort = ":6161"
 
+// devDNSListenAddr is the loopback address `txco dev --dns` binds the
+// authoritative-DNS head on (UDP+TCP). Deliberately NOT :5353 — that's
+// mDNS on macOS and would clash. dig with `-p 5354`.
+const devDNSListenAddr = "127.0.0.1:5354"
+
 // runDev orchestrates the developer dev loop:
 //
 //  1. Load + validate workspace config (txco.yaml).
@@ -54,6 +59,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	workspace := fs.String("workspace", ".", "workspace root (defaults to cwd)")
 	uiDev := fs.Bool("ui", false, "also start the admin-ui Vite dev server on "+adminUIDevPort+" (HMR; opens admin-ui/ found by walking up from the workspace)")
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050). Disabled by default — most workflows only need web + cron + admin.")
+	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	watch := fs.Bool("watch", true, "watch sources and hot-reload: compute edits rebuild + reactivate; OPS edits push to a per-stack draft. On by default (that's what `dev` is for); pass --watch=false to disable.")
 	apply := fs.Bool("apply", true, "push local OPS/ + computes and activate on startup (manifest-aware; skips stacks already in sync). On by default; pass --apply=false to leave chassis state untouched (e.g. when iterating via the admin UI).")
 	forceOpstacks := fs.Bool("force-opstacks", false, "overwrite an existing opstacks/ with the embedded system-opstack template (default: scaffold only if opstacks/ is absent)")
@@ -224,7 +230,7 @@ Flags:
 	chassisURL := resolved.Chassis
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -353,6 +359,10 @@ Flags:
 		// reminder of the verb.
 		fmt.Fprintln(stdout, "[txco]   tip: bind a hostname with `txco auth tenant hostnames add localhost --stack <stack>`")
 		fmt.Fprintln(stdout, "[txco]        (boot/* resonators still work; hostnames are now the recommended path)")
+		if *dnsHead {
+			fmt.Fprintf(stdout, "[txco]   dns head: %s (udp+tcp). create a zone with `txco dns zone create ops.example.com`,\n", devDNSListenAddr)
+			fmt.Fprintf(stdout, "[txco]        then `dig @127.0.0.1 -p %s ops.example.com A`\n", strings.TrimPrefix(devDNSListenAddr, "127.0.0.1:"))
+		}
 	} else {
 		fmt.Fprintf(stdout, "[txco] dev loop running (Ctrl-C to stop). chassis: %s\n", chassisURL)
 		if uiDevURL != "" {
@@ -592,7 +602,7 @@ func isVersionNotDraftErr(err error) bool {
 // default — most dev workflows use only web + cron + admin, and the
 // :5050 bind otherwise causes spurious "port in use" failures on
 // machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
@@ -626,6 +636,12 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	tcpAddr := ":5050"
 	if tcpHead {
 		if err := requirePortFree(tcpAddr, "TCP inlet"); err != nil {
+			return "", "", err
+		}
+	}
+	dnsAddr := devDNSListenAddr
+	if dnsHead {
+		if err := requirePortFree(dnsAddr, "DNS inlet"); err != nil {
 			return "", "", err
 		}
 	}
@@ -672,20 +688,22 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		"TXCO_SECRET_MASTER_KEY=" + secretKeyPath,
 	}
 
-	// TCP head: opt-in. Chassis defaults to all four personalities
-	// (cron,tcp,web,admin); we narrow that to cron+web+admin unless
-	// --tcp was passed. The TCPListenAddrs env var is only set when
-	// the head is on, otherwise the chassis would still bind :5050
-	// per its own default. Pinning Personalities suppresses the head
-	// entirely (see the strings.Contains check in personality/tcp).
+	// Personality set. We pin it to cron+web+admin and add the heavier
+	// heads (tcp, dns) only when opted in via --tcp / --dns. Each head's
+	// *ListenAddrs env is set only when that head is on (otherwise the
+	// chassis would bind the head's default port per its own default);
+	// pinning Personalities suppresses an un-opted head entirely (see the
+	// strings.Contains gate in each personality's Start).
+	heads := []string{"cron", "web", "admin"}
 	if tcpHead {
-		env = append(env,
-			"TXCO_PERSONALITIES=cron,tcp,web,admin",
-			"TXCO_TCP_LISTEN_ADDRS="+tcpAddr,
-		)
-	} else {
-		env = append(env, "TXCO_PERSONALITIES=cron,web,admin")
+		heads = append(heads, "tcp")
+		env = append(env, "TXCO_TCP_LISTEN_ADDRS="+tcpAddr)
 	}
+	if dnsHead {
+		heads = append(heads, "dns")
+		env = append(env, "TXCO_DNS_LISTEN_ADDRS="+dnsAddr)
+	}
+	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
 
 	// Dev-default toggles: enabled by default so devs get full
 	// breakpoints/private/trace out of the box. Set-if-missing: a
@@ -702,9 +720,18 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		"TXCO_LOG_LEVEL":         "info",
 		"TXCO_DEBUG_BREAKPOINTS": "true",
 		"TXCO_DEBUG_PRIVATE":     "true",
-		"TXCO_TRACE_MODE":        "full",
-		"TXCO_TRACE_DIR":         filepath.Join(devDir, "trace"),
-		"TXCO_TRACE_ASYNC":       "true",
+		// Unauthenticated admin on loopback — the documented dev posture.
+		// `basic` mode IGNORES request signatures and, with no basic
+		// creds set, treats every caller as open-dev (admin:all). Without
+		// this, dev runs in the chassis default `both` mode, which
+		// VERIFIES signatures — so a developer whose machine has an
+		// ambient signing profile gets 401 unknown_key from a fresh dev
+		// chassis that's never seen their key. Set-if-missing, so
+		// `TXCO_AUTH_MODE=both txco dev` opts back into signed-auth testing.
+		"TXCO_AUTH_MODE":   "basic",
+		"TXCO_TRACE_MODE":  "full",
+		"TXCO_TRACE_DIR":   filepath.Join(devDir, "trace"),
+		"TXCO_TRACE_ASYNC": "true",
 		// Localhost hostnames resolve to 127.0.0.1 and other private
 		// addresses; the SSRF blocklist would reject them in
 		// production. Allow the verifier through in dev.
@@ -723,6 +750,17 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		// only. `txco serve` leaves watch off (static after boot).
 		"TXCO_SYSTEM_OPSTACKS_DIR":   workspace,
 		"TXCO_SYSTEM_OPSTACKS_WATCH": "true",
+	}
+	// DNS synthesis infra defaults (only when the head is on). Edge =
+	// loopback so synthesized A records point where the dev chassis
+	// actually serves; MX = localhost (the LMTP head); placeholder NS
+	// names. Set-if-missing like the rest, so
+	// `TXCO_DNS_EDGE_IPS=… txco dev --dns` overrides. The chassis serve
+	// default for these stays empty (operator must configure in prod).
+	if dnsHead {
+		devDefaults["TXCO_DNS_NAMESERVERS"] = "ns1.localhost,ns2.localhost"
+		devDefaults["TXCO_DNS_EDGE_IPS"] = "127.0.0.1"
+		devDefaults["TXCO_DNS_MX_HOST"] = "localhost"
 	}
 	for k, v := range devDefaults {
 		if _, set := os.LookupEnv(k); !set {

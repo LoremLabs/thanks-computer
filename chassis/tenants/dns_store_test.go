@@ -93,7 +93,7 @@ func TestZoneCRUD(t *testing.T) {
 	if err != nil || len(zones) != 1 {
 		t.Fatalf("ListZones: %v n=%d", err, len(zones))
 	}
-	if zones[0].Mode != "pattern" || zones[0].Minimum != 300 || zones[0].DefaultTTL != 300 {
+	if zones[0].Mode != "pattern" || zones[0].Minimum != 90 || zones[0].DefaultTTL != 60 {
 		t.Fatalf("defaults not applied: %+v", zones[0])
 	}
 

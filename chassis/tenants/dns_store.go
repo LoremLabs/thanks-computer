@@ -180,7 +180,7 @@ func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings) error {
 	}
 	ttl := s.SynthTTL
 	if ttl <= 0 {
-		ttl = 300
+		ttl = 60
 	}
 	pri := s.MXPriority
 	if pri < 0 {
@@ -246,10 +246,10 @@ func zoneSOADefaults(z *DNSZone) {
 		z.Expire = 1209600
 	}
 	if z.Minimum == 0 {
-		z.Minimum = 300
+		z.Minimum = 90
 	}
 	if z.DefaultTTL == 0 {
-		z.DefaultTTL = 300
+		z.DefaultTTL = 60
 	}
 	if z.Mode == "" {
 		z.Mode = "pattern"

@@ -37,9 +37,9 @@ CREATE TABLE IF NOT EXISTS dns_zones (
     retry       INTEGER NOT NULL DEFAULT 3600,
     expire      INTEGER NOT NULL DEFAULT 1209600,
     -- SOA minimum doubles as the negative-cache (NXDOMAIN/NODATA) TTL.
-    minimum     INTEGER NOT NULL DEFAULT 300,
+    minimum     INTEGER NOT NULL DEFAULT 90,
     -- TTL applied to records whose own ttl is NULL.
-    default_ttl INTEGER NOT NULL DEFAULT 300,
+    default_ttl INTEGER NOT NULL DEFAULT 60,
     created_at  TEXT NOT NULL,
     -- actor_id of whoever created the zone. Cross-DB reference to
     -- auth.db.actors; un-enforced by SQLite. See feedback_audit_actor_id.md.

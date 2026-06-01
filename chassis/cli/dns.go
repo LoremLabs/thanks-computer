@@ -297,7 +297,7 @@ func runDNSConfigSet(args []string, stdout, stderr io.Writer) int {
 	edge := fs.String("edge-ips", "", "comma-separated A/AAAA target IP(s) for apex + per-stack hosts")
 	mx := fs.String("mx", "", "mail exchanger hostname (the LMTP head's public name)")
 	mxpri := fs.Int("mx-priority", 10, "MX preference value")
-	ttl := fs.Int("ttl", 300, "synthesized record TTL in seconds")
+	ttl := fs.Int("ttl", 60, "synthesized record TTL in seconds")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco dns config set [flags]\n\nOnly the flags you pass are changed. Flags:\n")

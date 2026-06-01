@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS dns_settings (
     edge_ips    TEXT NOT NULL DEFAULT '',
     mx_host     TEXT NOT NULL DEFAULT '',
     mx_priority INTEGER NOT NULL DEFAULT 10,
-    synth_ttl   INTEGER NOT NULL DEFAULT 300,
+    synth_ttl   INTEGER NOT NULL DEFAULT 60,
     updated_at  TEXT NOT NULL,
     -- actor_id of the operator who last set it. Cross-DB reference to
     -- auth.db.actors; un-enforced by SQLite. See feedback_audit_actor_id.md.

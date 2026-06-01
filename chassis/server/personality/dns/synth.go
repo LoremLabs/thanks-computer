@@ -37,12 +37,29 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 		ttl = 0
 	}
 	return SynthConfig{
-		Nameservers: conf.DNSNameservers,
-		EdgeIPs:     conf.DNSEdgeIPs,
-		MXHost:      conf.DNSMXHost,
+		Nameservers: flattenCSV(conf.DNSNameservers),
+		EdgeIPs:     flattenCSV(conf.DNSEdgeIPs),
+		MXHost:      strings.TrimSpace(conf.DNSMXHost),
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
 	}
+}
+
+// flattenCSV normalizes a list flag/env value into individual entries.
+// pflag splits comma-separated CLI flags into multiple elements, but
+// viper's env binding does NOT — so `TXCO_DNS_NAMESERVERS=a,b` arrives
+// as the single element ["a,b"]. Re-split each element on commas (and
+// trim/drop blanks) so both delivery paths yield the same list.
+func flattenCSV(in []string) []string {
+	var out []string
+	for _, e := range in {
+		for _, p := range strings.Split(e, ",") {
+			if t := strings.TrimSpace(p); t != "" {
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }
 
 // EffectiveSynthConfig is the synthesis config the chassis actually
