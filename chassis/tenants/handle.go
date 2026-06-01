@@ -74,6 +74,17 @@ func sanitizeHint(stack string) string {
 	return s
 }
 
+// SanitizeSlugHint exposes sanitizeHint for callers outside the package
+// (e.g. the cloud-enroll handler deriving a suggested tenant slug from an
+// OIDC subject). Same rules: lowercase, non-alnum runs → '-', trimmed,
+// truncated; may return "".
+func SanitizeSlugHint(s string) string { return sanitizeHint(s) }
+
+// RandLabel exposes randLabel for callers that need a fresh
+// always-alphanumeric DNS label (e.g. a fallback tenant slug when no
+// usable hint can be derived).
+func RandLabel() string { return randLabel() }
+
 // StackLabel is the deterministic leftmost DNS label for a stack within
 // a per-tenant delegated DNS zone — the sanitized stack name with NO
 // random suffix (the zone is tenant-scoped, so the label is already

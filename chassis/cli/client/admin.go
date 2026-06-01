@@ -528,6 +528,57 @@ func (c *Client) ConsumeInvitation(ctx context.Context, req ConsumeInvitationReq
 	return &out, nil
 }
 
+// OAuthEnrollRequest is the body for POST /auth/oauth/enroll. IDToken is a
+// bearer secret — do not log this struct.
+type OAuthEnrollRequest struct {
+	IDToken    string `json:"id_token"`
+	PublicKey  string `json:"public_key"`
+	Label      string `json:"label,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+	TenantSlug string `json:"tenant_slug,omitempty"`
+}
+
+// OAuthEnrollResponse mirrors the enroll endpoint's success body. ChassisURL
+// is the BASE admin URL to write into the CLI profile.
+type OAuthEnrollResponse struct {
+	ChassisURL   string   `json:"chassis_url"`
+	TenantSlug   string   `json:"tenant_slug"`
+	ActorID      string   `json:"actor_id"`
+	KeyID        string   `json:"key_id"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// OAuthEnroll POSTs to the full enroll endpoint URL (resolved by the caller
+// from cloud discovery / flags — the CLI never guesses the path), exchanging a
+// verified id_token + ed25519 public key for a tenant + actor/key. Unsigned;
+// the id_token is the credential. On a non-200 it returns *HTTPError so callers
+// can branch on StatusCode/Code — e.g. a 409 `tenant_slug_required` carrying
+// Detail["suggested_tenant_slug"].
+func (c *Client) OAuthEnroll(ctx context.Context, endpointURL string, req OAuthEnrollRequest) (*OAuthEnrollResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out OAuthEnrollResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode oauth-enroll: %w", err)
+	}
+	return &out, nil
+}
+
 // --- tenants ---------------------------------------------------------------
 
 // Tenant mirrors the server's tenant row for listing.

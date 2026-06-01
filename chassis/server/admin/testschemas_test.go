@@ -188,4 +188,11 @@ CREATE TABLE dns_zones (
 	updated_at  TEXT NOT NULL,
 	revoked_at  TEXT
 );
+CREATE TABLE oidc_subjects (
+	issuer     TEXT NOT NULL,
+	subject    TEXT NOT NULL,
+	tenant_id  TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (issuer, subject)
+);
 `

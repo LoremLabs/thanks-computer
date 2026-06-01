@@ -27,6 +27,11 @@ type oidcConfig struct {
 	UserinfoEndpoint      string `json:"userinfo_endpoint"`
 	RevocationEndpoint    string `json:"revocation_endpoint"`
 	JwksURI               string `json:"jwks_uri"`
+	// EnrollEndpoint is a thanks-computer extension to the discovery doc: the
+	// FULL chassis admin enroll URL (POST /auth/oauth/enroll). Lets the cloud
+	// point onboarding at its hosted chassis without a CLI release. Empty when
+	// the cloud doesn't advertise it (the CLI falls back to a constant/flag).
+	EnrollEndpoint string `json:"txco_enroll_endpoint"`
 }
 
 // fallbackConfig synthesizes endpoints from the cloud base. The cloud mounts

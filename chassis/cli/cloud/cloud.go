@@ -39,6 +39,15 @@ const (
 	defaultCloudURL = "https://www.thanks.computer"
 	// devCloudURL is the local www-thanks-computer dev server (--dev).
 	devCloudURL = "http://localhost:4200"
+
+	// defaultEnrollEndpoint is the hosted chassis admin enroll endpoint — a
+	// FULL URL (the CLI never guesses the path). Fallback when the cloud's
+	// discovery doc advertises no txco_enroll_endpoint and no --chassis is set.
+	defaultEnrollEndpoint = "https://admin.thanks.computer/auth/oauth/enroll"
+	// devEnrollEndpoint is the local chassis admin enroll endpoint (--dev).
+	devEnrollEndpoint = "http://localhost:8081/auth/oauth/enroll"
+	// enrollPath is appended to a --chassis BASE URL to form the full endpoint.
+	enrollPath = "/auth/oauth/enroll"
 )
 
 // loopbackPorts is the ordered set of 127.0.0.1 callback ports the CLI
@@ -61,6 +70,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) int {
 		return runLogout(args[1:], stdout, stderr)
 	case "whoami", "status":
 		return runWhoami(args[1:], stdout, stderr)
+	case "enroll":
+		return runEnroll(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0
@@ -77,7 +88,7 @@ func printUsage(w io.Writer) {
 Usage:
   txco login [flags]            Sign in to the thanks-computer cloud
   txco logout [flags]           Sign out (delete stored cloud tokens)
-  txco cloud login|logout|whoami
+  txco cloud login|logout|whoami|enroll
 
 Cloud login authenticates your *user account* against the hosted
 thanks-computer control plane (sign in with GitHub, Twitter, email…).

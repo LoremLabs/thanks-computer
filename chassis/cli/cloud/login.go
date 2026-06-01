@@ -29,6 +29,15 @@ func runLogin(args []string, stdout, stderr io.Writer) int {
 	noOpen := fs.Bool("no-open", false, "print the sign-in URL instead of opening a browser")
 	insecure := fs.Bool("insecure", false, "skip TLS verification (local dev cloud only)")
 	timeout := fs.Duration("timeout", 10*time.Minute, "how long to wait for the browser callback")
+	// Chassis enrollment (runs automatically after sign-in unless --no-enroll).
+	noEnroll := fs.Bool("no-enroll", false, "sign in only; skip creating/enrolling the hosted chassis tenant")
+	chassisFlag := fs.String("chassis", "", "chassis admin BASE URL for enrollment (overrides discovery)")
+	tenant := fs.String("tenant", "", "tenant slug to claim on first enroll (non-interactive)")
+	yes := fs.Bool("yes", false, "accept the server's suggested tenant slug without prompting")
+	sshAgent := fs.Bool("ssh-agent", false, "force ssh-agent backend for the chassis key")
+	noSSHAgent := fs.Bool("no-ssh-agent", false, "skip ssh-agent even when reachable")
+	sshKey := fs.String("ssh-key", "", "use an existing on-disk key (e.g. ~/.ssh/id_ed25519)")
+	newKey := fs.Bool("new-key", false, "generate a fresh chassis key")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -190,7 +199,31 @@ Flags:
 	}
 	fmt.Fprintf(stdout, "Signed in as %s\n", who)
 	fmt.Fprintf(stdout, "  profile: %s\n", profile)
-	fmt.Fprintf(stdout, "\nNext: ed25519 key enrollment and hosted stacks are coming soon.\n")
+
+	// Onboarding: enroll a chassis key (creating the hosted tenant on first
+	// run) so chassis commands target the cloud. Login already succeeded —
+	// any enrollment failure degrades softly (the token stays saved).
+	if *noEnroll {
+		fmt.Fprintf(stdout, "\nSkipped chassis enrollment (--no-enroll). Run `txco cloud enroll` when ready.\n")
+		return 0
+	}
+	if m, ok := alreadyEnrolled(profile); ok {
+		fmt.Fprintf(stdout, "\nAlready enrolled — profile %q targets %s.\n", profile, m.ChassisURL)
+		return 0
+	}
+
+	endpoint := resolveEnrollEndpoint(cfg, *chassisFlag, *dev)
+	ec := enrollChoices{
+		tenant:     *tenant,
+		assumeYes:  *yes,
+		sshAgent:   *sshAgent,
+		noSSHAgent: *noSSHAgent,
+		sshKey:     *sshKey,
+		newKey:     *newKey,
+	}
+	if _, err := performEnroll(endpoint, tr.IDToken, profile, ec, stdout, stderr); err != nil {
+		fmt.Fprintf(stdout, "\n%s\nRun `txco cloud enroll` to try again.\n", enrollDegradeMessage(err))
+	}
 	return 0
 }
 

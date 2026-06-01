@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/lestrrat-go/jwx/v2/jwk"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
@@ -73,6 +74,17 @@ type Controller struct {
 	// Empty means dev enrollment is disabled.
 	devEnrollSecret  string
 	devEnrollAutoGen bool
+
+	// oauthIssuer / oauthAudience / oauthJWKS configure POST
+	// /auth/oauth/enroll (cloud OIDC-bootstrap enrollment). Empty issuer
+	// ⇒ the endpoint is disabled (open-core default: no external issuer
+	// is trusted until an operator opts in; the hosted product seeds the
+	// canonical issuer at the service layer). oauthJWKS is an
+	// auto-refreshing cached key set resolved from the issuer's discovery
+	// doc — see resolveOAuthIssuer.
+	oauthIssuer   string
+	oauthAudience string
+	oauthJWKS     jwk.Set
 }
 
 func NewController(ctx context.Context, pu *processor.Unit) *Controller {
@@ -106,6 +118,7 @@ func (c *Controller) Start() {
 	c.unsignedThrottle = newThrottleFromEnv()
 
 	c.resolveDevEnrollSecret()
+	c.resolveOAuthIssuer()
 
 	r := mux.NewRouter()
 	// Surface non-2xx admin responses in the chassis log alongside
@@ -158,6 +171,14 @@ func (c *Controller) Start() {
 		throttled(http.HandlerFunc(c.handleDevEnroll))).Methods(http.MethodPost)
 	r.Handle("/auth/invitations/consume",
 		throttled(http.HandlerFunc(c.handleConsumeInvitation))).Methods(http.MethodPost)
+	// Cloud OIDC-bootstrap enrollment — a third unsigned credential-mint
+	// sibling, registered only when an issuer is configured (open-core
+	// default is disabled; the hosted product seeds the issuer). Shares
+	// the same per-IP throttle as the two above.
+	if c.oauthIssuer != "" {
+		r.Handle("/auth/oauth/enroll",
+			throttled(http.HandlerFunc(c.handleOAuthEnroll))).Methods(http.MethodPost)
+	}
 
 	// Retired flat routes — return 410 regardless of auth so an
 	// operator hitting an old URL in curl immediately sees the

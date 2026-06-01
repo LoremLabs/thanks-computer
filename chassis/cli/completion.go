@@ -216,6 +216,7 @@ var cloudChildren = []node{
 	{Name: "login", Desc: "Sign in to the thanks-computer cloud"},
 	{Name: "logout", Desc: "Delete stored cloud tokens"},
 	{Name: "whoami", Desc: "Show the current cloud identity", Aliases: []string{"status"}},
+	{Name: "enroll", Desc: "Enroll a chassis key for the signed-in cloud profile"},
 }
 
 // cliCommandTree is the authoritative root. Every non-hidden top-level
