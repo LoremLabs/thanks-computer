@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -42,6 +43,19 @@ func resolveEnrollEndpoint(cfg *oidcConfig, chassisBase string, dev bool) string
 		return devEnrollEndpoint
 	}
 	return defaultEnrollEndpoint
+}
+
+// sameChassisHost reports whether an existing profile's chassis URL points at
+// the same host:port as the resolved enroll endpoint — a genuine "already
+// enrolled in this cloud chassis", as opposed to a name collision with a
+// different (e.g. local dev) chassis profile.
+func sameChassisHost(metaURL, endpointURL string) bool {
+	mu, err1 := url.Parse(metaURL)
+	eu, err2 := url.Parse(endpointURL)
+	if err1 != nil || err2 != nil || mu.Host == "" {
+		return false
+	}
+	return strings.EqualFold(mu.Host, eu.Host)
 }
 
 // alreadyEnrolled reports whether a usable chassis profile already exists for
@@ -151,14 +165,7 @@ Flags:
 		return 2
 	}
 
-	profile, err := auth.ResolveProfile(*profileFlag)
-	if err != nil {
-		auth.PrintCLIErrorf(stderr, "cloud enroll: %v", err)
-		return 1
-	}
-	if profile == "" || profile == auth.ActiveNone {
-		profile = "cloud"
-	}
+	profile := resolveCloudReadProfile(*profileFlag)
 
 	tok, err := LoadCloudToken(profile)
 	if err != nil {

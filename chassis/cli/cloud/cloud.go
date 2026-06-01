@@ -22,9 +22,11 @@ package cloud
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -56,6 +58,78 @@ const (
 // accept — the redirect_uri is matched exactly, so an unregistered port is
 // rejected at code exchange.
 var loopbackPorts = []int{45454, 45455, 45456, 45457}
+
+// resolveCloudBase picks the cloud base URL from --cloud / --dev, defaulting to
+// the prod cloud. Shared so login and the profile-derivation agree.
+func resolveCloudBase(cloudFlag string, dev bool) string {
+	if b := strings.TrimSpace(cloudFlag); b != "" {
+		return b
+	}
+	if dev {
+		return devCloudURL
+	}
+	return defaultCloudURL
+}
+
+// derivedCloudProfile is the default profile name for a cloud target. The name
+// is USER-VISIBLE — enrollment makes it the active chassis profile shown by
+// `txco status` / `txco whoami` — so the canonical prod cloud keeps the clean
+// bare name "cloud". Other targets get a suffix so distinct clouds never share a
+// token/enrollment: --dev → "cloud-dev"; a custom --cloud → "cloud-<host>".
+func derivedCloudProfile(cloudBase string) string {
+	base := strings.TrimRight(strings.TrimSpace(cloudBase), "/")
+	switch base {
+	case "", strings.TrimRight(defaultCloudURL, "/"):
+		return "cloud"
+	case strings.TrimRight(devCloudURL, "/"):
+		return "cloud-dev"
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return "cloud-custom"
+	}
+	r := strings.NewReplacer(":", "-", ".", "-")
+	return "cloud-" + r.Replace(strings.ToLower(u.Host))
+}
+
+// cloudProfile resolves the profile name for a WRITE command (login): explicit
+// --profile → TXCO_PROFILE → the cloud-derived default. It deliberately does NOT
+// inherit the chassis *active-profile file* — doing so let a leftover local
+// chassis profile (e.g. a `bootstrap-local` "tmp" at localhost) capture
+// `txco login` and enroll against the wrong chassis.
+func cloudProfile(flagValue, cloudBase string) string {
+	if p := strings.TrimSpace(flagValue); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(os.Getenv("TXCO_PROFILE")); p != "" && p != auth.ActiveNone {
+		return p
+	}
+	return derivedCloudProfile(cloudBase)
+}
+
+// resolveCloudReadProfile resolves the profile for a READ/resume command
+// (whoami / logout / enroll), which acts on an EXISTING cloud session: explicit
+// --profile → TXCO_PROFILE → the active profile if it has a cloud token → the
+// sole cloud token if there's exactly one → the prod-derived default. This lets
+// `txco whoami` "just work" after `txco login --dev` (which set the active
+// profile) without re-specifying the cloud.
+func resolveCloudReadProfile(flagValue string) string {
+	if p := strings.TrimSpace(flagValue); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(os.Getenv("TXCO_PROFILE")); p != "" && p != auth.ActiveNone {
+		return p
+	}
+	if active, err := auth.ReadActiveProfile(); err == nil && active != "" && active != auth.ActiveNone {
+		if cloudTokenExists(active) {
+			return active
+		}
+	}
+	if sole, ok := soleCloudProfile(); ok {
+		return sole
+	}
+	return derivedCloudProfile(defaultCloudURL)
+}
 
 // Dispatch routes the cloud verb in args[0].
 func Dispatch(args []string, stdout, stderr io.Writer) int {

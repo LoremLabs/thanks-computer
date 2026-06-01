@@ -32,14 +32,7 @@ func runLogout(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	profile, err := auth.ResolveProfile(*profileFlag)
-	if err != nil {
-		auth.PrintCLIErrorf(stderr, "logout: %v", err)
-		return 1
-	}
-	if profile == "" || profile == auth.ActiveNone {
-		profile = "cloud"
-	}
+	profile := resolveCloudReadProfile(*profileFlag)
 
 	// Load first so we can revoke + name the identity. Absence is fine.
 	tok, _ := LoadCloudToken(profile)

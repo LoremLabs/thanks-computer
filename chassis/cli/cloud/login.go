@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
@@ -23,7 +22,7 @@ import (
 func runLogin(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	profileFlag := fs.String("profile", "", fmt.Sprintf("cloud profile name (defaults to TXCO_PROFILE, then %s/active, then \"cloud\")", auth.HomePathPretty()))
+	profileFlag := fs.String("profile", "", "cloud profile name (defaults to TXCO_PROFILE, else \"cloud\"; not the active chassis profile)")
 	cloudFlag := fs.String("cloud", "", "cloud base URL (default "+defaultCloudURL+")")
 	dev := fs.Bool("dev", false, "use the local dev cloud ("+devCloudURL+")")
 	noOpen := fs.Bool("no-open", false, "print the sign-in URL instead of opening a browser")
@@ -62,14 +61,7 @@ Flags:
 	banner.PrintLogo(stdout)
 
 	// Resolve the cloud base: --cloud wins; else --dev; else the prod default.
-	cloudBase := strings.TrimSpace(*cloudFlag)
-	if cloudBase == "" {
-		if *dev {
-			cloudBase = devCloudURL
-		} else {
-			cloudBase = defaultCloudURL
-		}
-	}
+	cloudBase := resolveCloudBase(*cloudFlag, *dev)
 
 	// --insecure is honored only for a local dev cloud.
 	insecureTLS := false
@@ -84,14 +76,7 @@ Flags:
 	// Resolve the cloud profile name. Cloud login is independent of the
 	// chassis signing-key state, so fall back to "cloud" when no profile is
 	// active rather than refusing.
-	profile, err := auth.ResolveProfile(*profileFlag)
-	if err != nil {
-		auth.PrintCLIErrorf(stderr, "login: %v", err)
-		return 1
-	}
-	if profile == "" || profile == auth.ActiveNone {
-		profile = "cloud"
-	}
+	profile := cloudProfile(*profileFlag, cloudBase)
 
 	hc := newHTTPClient(insecureTLS)
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -207,12 +192,21 @@ Flags:
 		fmt.Fprintf(stdout, "\nSkipped chassis enrollment (--no-enroll). Run `txco cloud enroll` when ready.\n")
 		return 0
 	}
+	endpoint := resolveEnrollEndpoint(cfg, *chassisFlag, *dev)
 	if m, ok := alreadyEnrolled(profile); ok {
-		fmt.Fprintf(stdout, "\nAlready enrolled — profile %q targets %s.\n", profile, m.ChassisURL)
+		if sameChassisHost(m.ChassisURL, endpoint) {
+			fmt.Fprintf(stdout, "\nAlready enrolled — profile %q targets %s.\n", profile, m.ChassisURL)
+			return 0
+		}
+		// The profile name is bound to a DIFFERENT chassis (e.g. a local
+		// `bootstrap-local` dev chassis). Login succeeded, but don't clobber
+		// that profile — enroll the cloud under its own name instead.
+		fmt.Fprintf(stdout, "\nSigned in, but profile %q is already bound to a different chassis (%s),\n"+
+			"so the cloud tenant was not enrolled. Rerun with `--profile <name>` to enroll\n"+
+			"the cloud under a separate profile.\n", profile, m.ChassisURL)
 		return 0
 	}
 
-	endpoint := resolveEnrollEndpoint(cfg, *chassisFlag, *dev)
 	ec := enrollChoices{
 		tenant:     *tenant,
 		assumeYes:  *yes,

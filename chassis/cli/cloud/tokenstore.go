@@ -138,6 +138,41 @@ func LoadCloudToken(profile string) (*CloudToken, error) {
 	return &t, nil
 }
 
+// cloudTokenExists reports whether a stored cloud token exists for the profile.
+func cloudTokenExists(profile string) bool {
+	path, err := tokenPath(profile)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+// soleCloudProfile returns the single stored cloud profile's name when exactly
+// one token file exists, so read commands can pick it without a flag. Returns
+// ok=false for zero or multiple tokens.
+func soleCloudProfile() (string, bool) {
+	dir, err := cloudDir()
+	if err != nil {
+		return "", false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(e.Name(), ".json"))
+	}
+	if len(names) == 1 {
+		return names[0], true
+	}
+	return "", false
+}
+
 // DeleteCloudToken removes a profile's token file. A missing file is not
 // an error; the bool reports whether a file existed.
 func DeleteCloudToken(profile string) (existed bool, err error) {
