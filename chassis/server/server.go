@@ -807,16 +807,26 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Cron dispatch queue. Default "local" is the in-process channel +
 	// worker pool, so single-node behaviour is unchanged. An overlay
 	// registers e.g. "nats" via blank import and is selected with
-	// --cron-queue. A bad/unknown name fails loudly here at boot.
+	// --cron-queue.
+	//
+	// A queue that can't be constructed (unknown backend, or a broker
+	// backend missing its auth/URL) must NOT take down the chassis: cron is
+	// a non-critical, opt-in personality, and the data plane / admin / web
+	// heads have nothing to do with it. Log loudly and run with cron
+	// DISABLED (nil queue → the controller no-ops). We deliberately do NOT
+	// fall back to the "local" queue, because on a fleet that would
+	// reintroduce duplicate firing. Fix the config and restart to enable.
 	cq, cqErr := cronq.Open(conf.CronQueue, cronq.Config{
 		MaxInflight: conf.CronMaxInflight,
 		Period:      conf.CronPeriod,
 	})
 	if cqErr != nil {
-		cancel()
-		return ctx, nil, cqErr
+		logger.Error("cron queue failed to load; cron disabled (data plane unaffected)",
+			zap.String("queue", conf.CronQueue), zap.Error(cqErr))
+		cq = nil
+	} else {
+		logger.Info("cron queue loaded", zap.String("queue", cq.Name()))
 	}
-	logger.Info("cron queue loaded", zap.String("queue", cq.Name()))
 
 	// Outbound op-dial policy. Default "open" allows everything, so
 	// local/test behaviour is unchanged; "private" refuses dials into
