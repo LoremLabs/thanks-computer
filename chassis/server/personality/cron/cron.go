@@ -2,6 +2,8 @@ package cron
 
 import (
 	"context"
+	"hash/fnv"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,84 +14,185 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	cronq "github.com/loremlabs/thanks-computer/chassis/cron"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
 
+// workerRetryBackoff is how long the worker waits before re-entering
+// queue.Work after a non-cancellation error (e.g. a broker-backed queue
+// whose stream isn't provisioned yet). Keeps cron self-healing.
+const workerRetryBackoff = 5 * time.Second
+
 type CronController struct {
 	ctx      context.Context
 	pu       *processor.Unit
+	queue    cronq.Queue
+	nodeID   string // this chassis's identity, stamped on each dispatch (_txc.cron.node)
 	shutdown chan bool
 	wg       sync.WaitGroup
 	tickN    uint64 // monotonic tick counter since boot (stamped as _txc.cron.tick)
 }
 
-func NewController(ctx context.Context, pu *processor.Unit) *CronController {
-
-	cc := &CronController{
+// NewController builds the cron controller around an opened cron Queue
+// (the scheduler enqueues onto it; the worker drains it). Mirrors
+// controlpublish.NewController(ctx, pu, sink).
+func NewController(ctx context.Context, pu *processor.Unit, queue cronq.Queue) *CronController {
+	return &CronController{
 		ctx:      ctx,
 		pu:       pu,
+		queue:    queue,
+		nodeID:   resolveNodeID(pu.Conf.Fqdn),
 		shutdown: make(chan bool),
 	}
-
-	return cc
 }
 
+// resolveNodeID picks a stable identity for THIS chassis to stamp on cron
+// dispatches, so a trace shows which node actually fired a tick (the live
+// trace tail fans in from every node with no host column otherwise).
+// Prefers the operator-set FQDN; falls back to the OS hostname (distinct
+// per container in a fleet); "local" as a last resort. For node
+// attribution to distinguish two chassis, they need distinct FQDNs or
+// hostnames — the usual case.
+func resolveNodeID(fqdn string) string {
+	if fqdn != "" {
+		return fqdn
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "local"
+}
+
+// Start launches the worker (drains the queue, dispatches) and the
+// scheduler (wall-clock-aligned ticks, enqueues per target). No-op when
+// the cron personality is disabled or no queue is wired (data-plane-only
+// chassis / tests).
 func (cc *CronController) Start() {
+	if !strings.Contains(cc.pu.Conf.Personalities, "cron") {
+		return
+	}
+	if cc.queue == nil {
+		return
+	}
 
-	// stats.Record(wac.ctx, metrics.ServerRestarts.M(1))
-	if strings.Contains(cc.pu.Conf.Personalities, "cron") {
+	ctx, cronCancel := context.WithCancel(cc.ctx)
+	cc.ctx = ctx
 
-		ctx, cronCancel := context.WithCancel(cc.ctx)
-		cc.ctx = ctx
+	period := cc.pu.Conf.CronPeriod
+	if period <= 0 {
+		period = 1 // minimum tick time, 1 second
+	}
 
-		go func() {
-			cc.pu.Logger.Info("cron controller started")
-			cc.wg.Add(1)
-
-			period := cc.pu.Conf.CronPeriod
-			if period <= 0 {
-				period = 1 // minimum tick time, 1 second
+	// Worker: drain the queue and dispatch. queue.Work blocks until ctx
+	// is cancelled; we re-enter it on a non-cancellation error (with
+	// backoff) so a broker queue whose stream isn't provisioned yet
+	// self-heals once it appears, instead of permanently disabling cron.
+	cc.wg.Add(1)
+	go func() {
+		defer cc.wg.Done()
+		cc.pu.Logger.Info("cron worker started", zap.String("queue", cc.queue.Name()))
+		for {
+			err := cc.queue.Work(ctx, cc.dispatch)
+			if ctx.Err() != nil {
+				cc.pu.Logger.Info("cron worker stopped")
+				return
 			}
+			cc.pu.Logger.Warn("cron worker exited; retrying", zap.Error(err))
+			select {
+			case <-time.After(workerRetryBackoff):
+			case <-ctx.Done():
+				cc.pu.Logger.Info("cron worker stopped")
+				return
+			}
+		}
+	}()
 
-			for {
-
-				select {
-				case <-time.After(time.Duration(period) * time.Second):
-					tick := atomic.AddUint64(&cc.tickN, 1)
-					cc.wg.Add(1)
-					go func() {
-						defer cc.wg.Done()
-						cc.fire(time.Now(), tick, period)
-					}()
-				case doshutdown := <-cc.shutdown:
-
-					if doshutdown {
-						cronCancel()
-						cc.wg.Done()
-						return
-					}
+	// Scheduler: wall-clock-aligned ticks → enqueue per target. Each
+	// tick's fan-out runs in its own tracked goroutine so a full queue
+	// buffer (backpressure) never delays the next tick or shutdown.
+	cc.wg.Add(1)
+	go func() {
+		defer cc.wg.Done()
+		cc.pu.Logger.Info("cron scheduler started", zap.Int("period", period))
+		for {
+			select {
+			case <-time.After(alignDelay(time.Now(), period)):
+				tick := atomic.AddUint64(&cc.tickN, 1)
+				now := time.Now()
+				cc.wg.Add(1)
+				go func() {
+					defer cc.wg.Done()
+					cc.scheduleTick(ctx, now, tick, period)
+				}()
+			case doshutdown := <-cc.shutdown:
+				if doshutdown {
+					cronCancel()
+					return
 				}
 			}
-		}()
-	}
+		}
+	}()
 }
 
-// fire builds the shared cron envelope for this tick and dispatches it:
-// the legacy system-wide `job="default"` event (unchanged — backward
-// compat with ingress.cron.jobs), plus one fan-out event per tenant
-// that has authored a `_cron` stack (the opt-in subscription). Each
-// dispatch is independent (its own rid/ResCh); a slow tenant never
-// delays another or the next tick.
-func (cc *CronController) fire(now time.Time, tick uint64, maxTime int) {
-	min := now.Minute()
+// alignDelay returns how long to sleep so the next tick fires on the next
+// wall-clock period boundary (period=60 → top of the next minute; 300 →
+// next :00/:05/:10…), so _txc.cron.minute and the modN buckets land on
+// real clock boundaries regardless of boot time. (Periods that don't
+// divide the hour, e.g. 7s, align to the Unix-epoch grid — acceptable;
+// the common 60/300/900/3600 divide cleanly.)
+func alignDelay(now time.Time, period int) time.Duration {
+	p := time.Duration(period) * time.Second
+	if p <= 0 {
+		return time.Second
+	}
+	next := now.Truncate(p).Add(p)
+	d := next.Sub(now)
+	if d <= 0 {
+		d = p
+	}
+	return d
+}
 
-	// Base payload with the wall-clock fields a stack's visible txcl
-	// WHEN can compare (txcl has no arithmetic/time funcs, so the
-	// useful mod buckets are precomputed here — mechanism only).
+// spreadOffset returns a deterministic [0, period) second offset for a
+// slug so the per-tick fan-out is smeared evenly across the period
+// (stampede fix). fnv-1a is stable across processes/nodes (no per-boot
+// randomization), so the same tenant always lands in the same slot.
+func spreadOffset(slug string, period int) time.Duration {
+	if period <= 1 {
+		return 0 // sub-second spread not worth it at 1s ticks
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(slug))
+	return time.Duration(h.Sum32()%uint32(period)) * time.Second
+}
+
+// scheduleTick builds the shared cron envelope for this tick ONCE and
+// enqueues it: the legacy system-wide `job="default"` event (unchanged —
+// backward compat with ingress.cron.jobs), plus one fan-out event per
+// tenant that authored a `_cron` stack, each delayed by its deterministic
+// spread offset. The payload (and thus _ts + modN buckets) is frozen here
+// at tick time, BEFORE any spread delay — so a tenant's WHEN sees the tick
+// instant, not the delayed dispatch instant.
+func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick uint64, period int) {
+	min := now.Minute()
+	// Canonical bucket at SECOND resolution (RFC3339), aligned to the
+	// period grid. Second resolution (not minute) so sub-minute periods get
+	// distinct buckets — the NATS path uses this as the Nats-Msg-Id dedup
+	// key, and a minute-resolution key would collapse every sub-minute tick
+	// in a minute into one. At the default 60s period the seconds are :00.
+	bucket := now.Truncate(time.Duration(period) * time.Second).UTC().Format(time.RFC3339)
+
+	// Base payload with the wall-clock fields a stack's visible txcl WHEN
+	// can compare (txcl has no arithmetic/time funcs, so the useful mod
+	// buckets are precomputed here — mechanism only).
 	base, _ := sjson.Set("", "_txc.src", "cron")
 	base, _ = sjson.Set(base, "_ts", now.Format(time.RFC3339))
+	// The canonical wall-clock bucket this tick belongs to — the fleet
+	// dedup key, also stamped here so every cron trace carries it (group
+	// traces by tenant+bucket to see exactly one fire per bucket).
+	base, _ = sjson.Set(base, "_txc.cron.bucket", bucket)
 	base, _ = sjson.Set(base, "_txc.cron.minute", min)
 	base, _ = sjson.Set(base, "_txc.cron.hour", now.Hour())
 	base, _ = sjson.Set(base, "_txc.cron.dom", now.Day())
@@ -106,17 +209,48 @@ func (cc *CronController) fire(now time.Time, tick uint64, maxTime int) {
 	}
 
 	// Legacy: one system-wide tick keyed by job name "default" (kept
-	// exactly as before for ingress.cron.jobs operators).
+	// exactly as before for ingress.cron.jobs operators). No spread.
 	def, _ := sjson.Set(base, "_txc.cron.job", "default")
-	cc.dispatch(def, maxTime)
+	cc.enqueue(ctx, cronq.Job{Job: "default", Bucket: bucket, MaxTime: period, Payload: def})
 
 	// Fan-out: one tick per tenant that opted in by authoring a `_cron`
-	// stack. detectTenantBody routes `src=cron`+`cron.tenant` to that
-	// tenant's `_cron/0` (the sanctioned _sys→tenant re-tenant path).
+	// stack, smeared across the period by its deterministic offset.
+	// detectTenantBody routes `src=cron`+`cron.tenant` to that tenant's
+	// `_cron/0` (the sanctioned _sys→tenant re-tenant path).
 	for _, slug := range cc.subscribers() {
 		p, _ := sjson.Set(base, "_txc.cron.tenant", slug)
 		p, _ = sjson.Set(p, "_txc.cron.job", "_cron")
-		cc.dispatch(p, maxTime)
+		job := cronq.Job{Tenant: slug, Job: "_cron", Bucket: bucket, MaxTime: period, Payload: p}
+
+		delay := spreadOffset(slug, period)
+		if delay <= 0 {
+			cc.enqueue(ctx, job)
+			continue
+		}
+		cc.wg.Add(1)
+		go func(j cronq.Job, d time.Duration) {
+			defer cc.wg.Done()
+			t := time.NewTimer(d)
+			defer t.Stop()
+			select {
+			case <-t.C:
+				cc.enqueue(ctx, j)
+			case <-ctx.Done():
+			}
+		}(job, delay)
+	}
+}
+
+// enqueue submits a job to the queue, logging a non-shutdown failure.
+func (cc *CronController) enqueue(ctx context.Context, j cronq.Job) {
+	if err := cc.queue.Enqueue(ctx, j); err != nil {
+		if ctx.Err() != nil {
+			return // expected during shutdown; not worth a warning
+		}
+		cc.pu.Logger.Warn("cron enqueue failed",
+			zap.String("tenant", j.Tenant),
+			zap.String("job", j.Job),
+			zap.String("err", err.Error()))
 	}
 }
 
@@ -159,56 +293,68 @@ func (cc *CronController) subscribers() []string {
 	return slugs
 }
 
-// dispatch sends one cron envelope onto the bus with its own rid +
-// response channel, and drains the response on a tracked goroutine so
-// the tick loop is never blocked by a slow stack.
-func (cc *CronController) dispatch(payload string, maxTime int) {
+// dispatch is the worker fn handed to queue.Work: it sends one cron
+// envelope onto the bus with its own rid + response channel and drains
+// the response. By the time it runs, the queue has claimed the job for
+// exactly one worker. The bus send is guarded by the dispatch deadline so
+// a stopped bus at shutdown can't block the worker forever.
+func (cc *CronController) dispatch(workerCtx context.Context, job cronq.Job) error {
 	rid := hxid.NewTimeSort().String()
-	payload, _ = sjson.Set(payload, "_txc.rid", rid)
+	payload, _ := sjson.Set(job.Payload, "_txc.rid", rid)
+	// Stamp the firing chassis: in fleet mode the worker that pulls the
+	// job is the one that runs it, so this is the node that actually fired
+	// the bucket (visible in the trace; the scheduling node may differ).
+	payload, _ = sjson.Set(payload, "_txc.cron.node", cc.nodeID)
 
-	ctx, cancel := context.WithTimeout(cc.ctx, time.Duration(maxTime)*time.Second)
+	maxTime := job.MaxTime
+	if maxTime <= 0 {
+		maxTime = 1
+	}
+	ctx, cancel := context.WithTimeout(workerCtx, time.Duration(maxTime)*time.Second)
+	defer cancel()
 	ctx = context.WithValue(ctx, config.CtxKeyRid, rid)
 
 	resCh := make(chan event.Payload)
 	envelope := event.PackageJSON(ctx, payload, resCh, "cron")
 
-	cc.wg.Add(1)
-	go func() {
-		defer cc.wg.Done()
-		defer cancel()
-		cc.pu.Bus <- envelope
-		select {
-		case res := <-resCh:
-			// A denied cron tick has no client to reject; surface it as
-			// a warning so a suspended/drained tenant's skipped ticks
-			// are visible (the customer stack already didn't run).
-			if status, reason, ok := admission.Denied(res.Raw); ok {
-				cc.pu.Logger.Warn("cron tick denied by admission",
-					zap.String("rid", rid),
-					zap.Int("status", status),
-					zap.String("reason", reason))
-			}
-			// The tick stays visible via the Info "usage" line
-			// (src=cron, tenant, rid, status, duration); this full
-			// envelope dump is debug-only trace.
-			if cc.pu.Logger.Core().Enabled(zap.DebugLevel) {
-				cc.pu.Logger.Debug("cron res", zap.String("response", res.Raw))
-			}
-		case <-ctx.Done():
-			cc.pu.Logger.Info("cron response timeout")
-		case <-cc.ctx.Done():
-			cc.pu.Logger.Info("cron response shutdown")
+	select {
+	case cc.pu.Bus <- envelope:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case res := <-resCh:
+		// A denied cron tick has no client to reject; surface it as a
+		// warning so a suspended/drained tenant's skipped ticks are
+		// visible (the customer stack already didn't run).
+		if status, reason, ok := admission.Denied(res.Raw); ok {
+			cc.pu.Logger.Warn("cron tick denied by admission",
+				zap.String("rid", rid),
+				zap.Int("status", status),
+				zap.String("reason", reason))
 		}
-	}()
+		// The tick stays visible via the Info "usage" line (src=cron,
+		// tenant, rid, status, duration); this full envelope dump is
+		// debug-only trace.
+		if cc.pu.Logger.Core().Enabled(zap.DebugLevel) {
+			cc.pu.Logger.Debug("cron res", zap.String("response", res.Raw))
+		}
+	case <-ctx.Done():
+		cc.pu.Logger.Info("cron response timeout")
+	}
+	return nil
 }
 
 func (cc *CronController) Stop() {
-	if strings.Contains(cc.pu.Conf.Personalities, "cron") {
-		cc.pu.Logger.Info("calling cron controller stop")
-
-		// shut down workers
-		cc.shutdown <- true
-		cc.wg.Wait()
-		cc.pu.Logger.Info("cron controller stopped")
+	if !strings.Contains(cc.pu.Conf.Personalities, "cron") || cc.queue == nil {
+		return
 	}
+	cc.pu.Logger.Info("calling cron controller stop")
+
+	// shut down scheduler (which cancels the shared ctx → worker + spread
+	// timers drain), then wait for every tracked goroutine.
+	cc.shutdown <- true
+	cc.wg.Wait()
+	cc.pu.Logger.Info("cron controller stopped")
 }

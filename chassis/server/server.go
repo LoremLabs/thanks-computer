@@ -27,6 +27,8 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/continuation/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/controlapply"
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
+	cronq "github.com/loremlabs/thanks-computer/chassis/cron"
+	_ "github.com/loremlabs/thanks-computer/chassis/cron/local" // registers the "local" cron queue backend
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
 	"github.com/loremlabs/thanks-computer/chassis/egress"
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/open"    // registers the "open" policy
@@ -44,7 +46,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
-	"github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
+	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
@@ -802,6 +804,20 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	logger.Info("control-event feed sink loaded",
 		zap.String("sink", fsink.Name()))
 
+	// Cron dispatch queue. Default "local" is the in-process channel +
+	// worker pool, so single-node behaviour is unchanged. An overlay
+	// registers e.g. "nats" via blank import and is selected with
+	// --cron-queue. A bad/unknown name fails loudly here at boot.
+	cq, cqErr := cronq.Open(conf.CronQueue, cronq.Config{
+		MaxInflight: conf.CronMaxInflight,
+		Period:      conf.CronPeriod,
+	})
+	if cqErr != nil {
+		cancel()
+		return ctx, nil, cqErr
+	}
+	logger.Info("cron queue loaded", zap.String("queue", cq.Name()))
+
 	// Outbound op-dial policy. Default "open" allows everything, so
 	// local/test behaviour is unchanged; "private" refuses dials into
 	// loopback/private/internal address space. A bad CIDR fails loudly
@@ -1010,7 +1026,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	}
 
 	controllers := []controller{
-		cron.NewController(ctx, pu),
+		cronp.NewController(ctx, pu, cq),
 		tcp.NewController(ctx, pu),
 		webCtrl,
 		adminCtrl,
