@@ -248,6 +248,10 @@ func (c *Controller) Start() {
 	// tenant" in the way ops or invitations are.
 	protected.HandleFunc("/v1/tenants", c.handleListTenants).Methods(http.MethodGet)
 	protected.HandleFunc("/v1/tenants", c.handleCreateTenant).Methods(http.MethodPost)
+	// Fleet reconcile: re-emit current control-plane state as fleet-sync
+	// events so lagging replicas converge. super_admin only (chassis-wide);
+	// non-destructive (upserts + stack.activated, never deletes).
+	protected.HandleFunc("/v1/fleet/resync", c.handleFleetResync).Methods(http.MethodPost)
 	// Demo execution-hop endpoints — registered only under --demo-mode
 	// (set by `txco demo`). Their presence is the signal the admin-ui's
 	// probeDemoMode uses to auto-route to #demo, so a plain chassis /

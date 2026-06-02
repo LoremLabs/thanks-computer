@@ -76,17 +76,22 @@ func TestAdmissionDeniesSuspendedTenantAtHandoff(t *testing.T) {
 	}
 	select {
 	case p := <-resCh:
-		if got := gjson.Get(p.Raw, "_txc.web.res.status").Int(); got != 402 {
-			t.Errorf("status = %d, want 402", got)
+		// The gate emits a transport-neutral marker; the web/lmtp/tcp
+		// outlets render it. No web shaping here.
+		if !gjson.Get(p.Raw, "_txc.admission.denied").Bool() {
+			t.Error("admission.denied marker missing")
+		}
+		if got := gjson.Get(p.Raw, "_txc.admission.status").Int(); got != 402 {
+			t.Errorf("admission.status = %d, want 402", got)
+		}
+		if got := gjson.Get(p.Raw, "_txc.admission.reason").String(); got != "payment_required" {
+			t.Errorf("admission.reason = %q, want payment_required", got)
 		}
 		if got := gjson.Get(p.Raw, "_txc.tenant").String(); got != "acme" {
 			t.Errorf("tenant = %q, want acme (usage attribution)", got)
 		}
-		if !gjson.Get(p.Raw, "_txc.admission.denied").Bool() {
-			t.Error("admission.denied marker missing")
-		}
-		if got := gjson.Get(p.Raw, "_txc.web.res.headers.x-txc-deny-reason.0").String(); got != "payment_required" {
-			t.Errorf("deny-reason = %q, want payment_required", got)
+		if gjson.Get(p.Raw, "_txc.web.res.status").Exists() {
+			t.Error("processor gate must stay transport-neutral (no _txc.web.res.*)")
 		}
 	default:
 		t.Fatal("expected a deny response on resCh")
@@ -127,7 +132,7 @@ func assertNoAdmissionDeny(t *testing.T, pu *Unit, ctx context.Context) {
 	for {
 		select {
 		case p := <-resCh:
-			if gjson.Get(p.Raw, "_txc.admission.denied").Bool() || gjson.Get(p.Raw, "_txc.web.res.status").Int() == 402 {
+			if gjson.Get(p.Raw, "_txc.admission.denied").Bool() {
 				t.Fatalf("admitted/ungated tenant must not get an admission deny: %s", p.Raw)
 			}
 		default:

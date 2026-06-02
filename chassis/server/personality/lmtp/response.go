@@ -4,7 +4,36 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
+
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 )
+
+// admissionSMTP maps a shared-gate admission denial to an SMTP verdict, or
+// nil when the request wasn't gate-denied. A suspended/over-limit tenant
+// (and a draining node) map to a TEMPORARY 451 by default, so the sender's
+// MTA queues and retries rather than bouncing — important for a non-payment
+// suspension that may clear. Only a hard-disabled/forbidden tenant (403)
+// maps to a PERMANENT 550. This precedes any rule verdict: a denied tenant
+// never reaches its stack, so there is no rule verdict to honor.
+func admissionSMTP(raw string) *smtp.SMTPError {
+	status, reason, ok := admission.Denied(raw)
+	if !ok {
+		return nil
+	}
+	code := 451
+	if status == 403 {
+		code = 550
+	}
+	msg := reason
+	if msg == "" {
+		msg = defaultMsgFor(code)
+	}
+	return &smtp.SMTPError{
+		Code:         code,
+		EnhancedCode: enhancedFor(code),
+		Message:      msg,
+	}
+}
 
 // broadcastVerdict reads `_txc.lmtp.res.{code,msg}` from the pipeline
 // response and turns it into a smtp.SMTPError (or nil for 2xx).
@@ -89,6 +118,16 @@ func computeVerdicts(rcpts []string, raw string, logger *zap.Logger) []*smtp.SMT
 	if raw == "" || !gjson.Valid(raw) {
 		for i := range verdicts {
 			verdicts[i] = defaultDeny()
+		}
+		return verdicts
+	}
+
+	// Shared admission gate denial takes precedence over any rule verdict
+	// (the tenant's stack never ran). Broadcast the mapped SMTP code —
+	// 451 by default so mail retries through a transient suspension.
+	if se := admissionSMTP(raw); se != nil {
+		for i := range verdicts {
+			verdicts[i] = se
 		}
 		return verdicts
 	}

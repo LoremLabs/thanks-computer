@@ -21,34 +21,16 @@ func TestDrainFlag(t *testing.T) {
 	}
 }
 
-func TestDrainResponseWeb(t *testing.T) {
-	// A web request carries _txc.web.req; DrainResponse shapes a 503 web
-	// response with Retry-After + Connection: close.
-	in := `{"_txc":{"src":"http","web":{"req":{"method":"GET"}}}}`
-	out := DrainResponse(in)
-	if got := gjson.Get(out, "_txc.web.res.status").Int(); got != 503 {
-		t.Errorf("status = %d, want 503", got)
+// DrainResponse stamps the transport-neutral marker (status 503). The
+// per-protocol rendering (web 503+Retry-After, lmtp 451, tcp close) is
+// tested in each personality, not here.
+func TestDrainResponseMarker(t *testing.T) {
+	out := DrainResponse(`{"_txc":{"src":"http"}}`)
+	if status, reason, ok := Denied(out); !ok || status != 503 || reason != "draining" {
+		t.Errorf("Denied = (%d,%q,%v), want (503,draining,true)", status, reason, ok)
 	}
-	if got := gjson.Get(out, "_txc.web.res.headers.retry-after.0").String(); got != "0" {
-		t.Errorf("retry-after = %q, want 0", got)
-	}
-	if got := gjson.Get(out, "_txc.web.res.headers.connection.0").String(); got != "close" {
-		t.Errorf("connection = %q, want close", got)
-	}
-	if !gjson.Get(out, "_txc.admission.denied").Bool() {
-		t.Error("admission.denied marker should be set")
-	}
-}
-
-func TestDrainResponseNonWeb(t *testing.T) {
-	// A non-web envelope (no _txc.web.req) gets the marker but no web
-	// response shaping (there's no HTTP writer to render it).
-	in := `{"_txc":{"src":"cron"}}`
-	out := DrainResponse(in)
+	// Neutral: admission must NOT shape transport-specific fields.
 	if gjson.Get(out, "_txc.web.res.status").Exists() {
-		t.Error("non-web drain should not set a web response status")
-	}
-	if !gjson.Get(out, "_txc.admission.denied").Bool() {
-		t.Error("admission.denied marker should be set even for non-web")
+		t.Error("admission must not shape web response fields (that's the outlet's job)")
 	}
 }

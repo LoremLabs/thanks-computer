@@ -1223,7 +1223,7 @@ func (pu *Unit) advanceAfterScope(
 			if d := pu.Admission.Decide(newTen); !d.Admit {
 				if !*opsDone {
 					*opsDone = true
-					resCh <- event.Payload{Raw: admission.ShapeDeny(string(resp), d, newTen), Type: event.JSON}
+					resCh <- event.Payload{Raw: admission.MarkDenied(string(resp), d, newTen), Type: event.JSON}
 				}
 				tr.Event(trace.TimelineEvent{
 					Ts: time.Now(), Event: "tenant.admission_denied",

@@ -116,6 +116,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runConfig(rest, stdout, stderr), true
 	case "dns":
 		return runDNS(rest, stdout, stderr), true
+	case "admin":
+		return runAdmin(rest, stdout, stderr), true
 	case "completion":
 		// Emit a shell completion script. Boring v1: command + flag
 		// names only; see chassis/cli/completion.go.

@@ -672,6 +672,58 @@ func (c *Client) CreateTenant(ctx context.Context, req CreateTenantRequest) (*Te
 	return &out, nil
 }
 
+// FleetResyncRequest targets one tenant by slug for a control-plane re-emit.
+type FleetResyncRequest struct {
+	TenantSlug string `json:"tenant_slug"`
+}
+
+// FleetResyncCounts reports how many of each event type were queued.
+type FleetResyncCounts struct {
+	TenantCreated  int `json:"tenant_created"`
+	HostnameBound  int `json:"hostname_bound"`
+	StackActivated int `json:"stack_activated"`
+}
+
+// FleetResyncResponse is the summary POST /v1/fleet/resync returns.
+type FleetResyncResponse struct {
+	FleetEnabled bool              `json:"fleet_enabled"`
+	TenantSlug   string            `json:"tenant_slug,omitempty"`
+	Events       FleetResyncCounts `json:"events"`
+}
+
+// FleetResync re-emits a tenant's current control-plane state (its row +
+// hostnames + active stack versions) as fresh fleet-sync events so lagging
+// replicas converge. Non-destructive (upserts only). Server-side gated by
+// super_admin. Signed.
+func (c *Client) FleetResync(ctx context.Context, req FleetResyncRequest) (*FleetResyncResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := strings.TrimRight(c.target.Addr, "/") + "/v1/fleet/resync"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(httpReq, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out FleetResyncResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode fleet-resync: %w", err)
+	}
+	return &out, nil
+}
+
 // GrantMemberRequest is the wire body for POST .../auth/members. The
 // server treats this as an upsert: re-granting an existing member
 // replaces the capability set (and clears revoked_at).

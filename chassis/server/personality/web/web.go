@@ -379,6 +379,11 @@ func (web *WebController) Start() {
 
 					output := res.Raw // is this doubling the allocation?
 
+					// Shared admission gate denials arrive transport-neutral
+					// (_txc.admission.*); render them as this outlet's HTTP
+					// status/body before the normal _txc.web.res.* path.
+					output = applyAdmission(output)
+
 					// after processing, we need to check: status, content-type, headers, body (in that order)
 					output, status := checkStatus(output)
 					output = checkContentType(output)

@@ -219,6 +219,11 @@ var cloudChildren = []node{
 	{Name: "enroll", Desc: "Enroll a chassis key for the signed-in cloud profile"},
 }
 
+// adminChildren mirrors the Dispatch switch in chassis/cli/admin.go:runAdmin.
+var adminChildren = []node{
+	{Name: "resync", Desc: "Re-emit a tenant's control-plane state to the fleet"},
+}
+
 // cliCommandTree is the authoritative root. Every non-hidden top-level
 // case arm in chassis/cli/cli.go:Dispatch has an entry here. Order
 // matches the printUsage block for visual consistency. Hidden aliases
@@ -250,6 +255,7 @@ var cliCommandTree = []node{
 	{Name: "mcp", Desc: "MCP subcommands", Children: mcpChildren},
 	{Name: "config", Desc: "Config shortcuts (alias namespace for auth)", Children: configChildren},
 	{Name: "dns", Desc: "DNS zone + record management", Children: dnsChildren},
+	{Name: "admin", Desc: "Operator-facing chassis maintenance", Children: adminChildren},
 	{Name: "completion", Desc: "Emit shell completion script (bash|zsh|fish)"},
 	{Name: "help", Desc: "Show top-level help"},
 	{Name: "version", Desc: "Print version + build info"},

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -274,6 +276,15 @@ func (tcp *TCPController) Start() {
 							// gjson.Get(output, "_txc.server.commands").ForEach(func(key, value gjson.Result) bool {
 							// 	return true
 							// })
+
+							// Shared admission gate denial: TCP has no standard
+							// rejection, so write a short "<status> <reason>"
+							// line and close the connection.
+							if status, reason, ok := admission.Denied(output); ok {
+								_, _ = conn.Write([]byte(strconv.Itoa(status) + " " + reason + "\n"))
+								_ = conn.Close()
+								return
+							}
 
 							doHangup := gjson.Get(output, "_txc.server.hangup").Bool()
 							if doHangup {

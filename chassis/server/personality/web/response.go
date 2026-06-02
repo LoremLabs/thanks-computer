@@ -30,6 +30,40 @@ func applyResponseHead(w http.ResponseWriter, output string) int {
 	return status
 }
 
+// applyAdmission translates a transport-neutral admission-denial marker
+// (_txc.admission.{denied,status,reason}, stamped by the shared gate) into
+// the _txc.web.res.* fields this outlet renders. It fires only when the
+// gate denied the request AND the pipeline didn't already shape an
+// explicit web status — so a stack that emits its own 4xx still wins. A
+// 503 (drain) additionally gets Retry-After + Connection: close so proxies
+// don't pin a draining node. The body is a minimal "<code> <text>" line;
+// no internal state leaks because getOutput writes the explicit body and
+// strips _-prefixed keys.
+func applyAdmission(output string) string {
+	if !gjson.Get(output, "_txc.admission.denied").Bool() {
+		return output
+	}
+	if gjson.Get(output, "_txc.web.res.status").Exists() {
+		return output // a stack shaped its own response; leave it alone
+	}
+	status := int(gjson.Get(output, "_txc.admission.status").Int())
+	if status < 100 || status > 599 {
+		status = http.StatusForbidden
+	}
+	output, _ = sjson.Set(output, "_txc.web.res.status", status)
+	output, _ = sjson.Set(output, "_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
+	if reason := gjson.Get(output, "_txc.admission.reason").String(); reason != "" {
+		output, _ = sjson.Set(output, "_txc.web.res.headers.x-txc-deny-reason.0", reason)
+	}
+	if status == http.StatusServiceUnavailable {
+		output, _ = sjson.Set(output, "_txc.web.res.headers.retry-after.0", "0")
+		output, _ = sjson.Set(output, "_txc.web.res.headers.connection.0", "close")
+	}
+	body := strconv.Itoa(status) + " " + http.StatusText(status) + "\n"
+	output, _ = sjson.Set(output, "_txc.web.res.body", base64.StdEncoding.EncodeToString([]byte(body)))
+	return output
+}
+
 // getOutput convert a body from base64, or return json
 func getOutput(output string, hidePrivate bool) ([]byte, error) {
 

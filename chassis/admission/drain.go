@@ -3,18 +3,15 @@ package admission
 import (
 	"net/http"
 	"sync/atomic"
-
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
-// draining is the process-level drain flag. It is global by design:
-// drain is a property of THIS node (a SIGUSR1 tells the process to bleed
-// out of its load balancer), not of any tenant or request.
+// draining is the process-level drain flag. It is global by design: drain
+// is a property of THIS node (a SIGUSR1 tells the process to bleed out of
+// its load balancer), not of any tenant or request.
 var draining atomic.Bool
 
-// SetDraining turns the node's drain state on or off. Idempotent. Wired
-// to SIGUSR1 (on) / SIGUSR2 (off) by the app signal loop.
+// SetDraining turns the node's drain state on or off. Idempotent. Wired to
+// SIGUSR1 (on) / SIGUSR2 (off) by the app signal loop.
 func SetDraining(on bool) { draining.Store(on) }
 
 // IsDraining reports whether the node is draining. Read by the health
@@ -23,14 +20,10 @@ func SetDraining(on bool) { draining.Store(on) }
 // in-flight requests are allowed to finish).
 func IsDraining() bool { return draining.Load() }
 
-// DrainResponse shapes resp into a 503 "draining" terminal response,
-// reusing ShapeDeny's web shaping and adding Retry-After + Connection:
-// close so clients and proxies don't pin a draining node.
+// DrainResponse stamps the transport-neutral admission marker for a 503
+// "draining" denial. Each outlet renders it in its own protocol (web →
+// 503 + Retry-After; lmtp → 451 so mail retries; tcp → close). Used by the
+// server bus loop while the node is draining.
 func DrainResponse(resp string) string {
-	out := ShapeDeny(resp, Decision{Status: http.StatusServiceUnavailable, Reason: "draining"}, "")
-	if gjson.Get(out, "_txc.web.req").Exists() {
-		out, _ = sjson.Set(out, "_txc.web.res.headers.retry-after.0", "0")
-		out, _ = sjson.Set(out, "_txc.web.res.headers.connection.0", "close")
-	}
-	return out
+	return MarkDenied(resp, Decision{Status: http.StatusServiceUnavailable, Reason: "draining"}, "")
 }

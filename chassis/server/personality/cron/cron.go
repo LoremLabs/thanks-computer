@@ -10,6 +10,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -178,6 +179,15 @@ func (cc *CronController) dispatch(payload string, maxTime int) {
 		cc.pu.Bus <- envelope
 		select {
 		case res := <-resCh:
+			// A denied cron tick has no client to reject; surface it as
+			// a warning so a suspended/drained tenant's skipped ticks
+			// are visible (the customer stack already didn't run).
+			if status, reason, ok := admission.Denied(res.Raw); ok {
+				cc.pu.Logger.Warn("cron tick denied by admission",
+					zap.String("rid", rid),
+					zap.Int("status", status),
+					zap.String("reason", reason))
+			}
 			// The tick stays visible via the Info "usage" line
 			// (src=cron, tenant, rid, status, duration); this full
 			// envelope dump is debug-only trace.
