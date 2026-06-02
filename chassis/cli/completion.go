@@ -219,9 +219,16 @@ var cloudChildren = []node{
 	{Name: "enroll", Desc: "Enroll a chassis key for the signed-in cloud profile"},
 }
 
+// adminTenantChildren mirrors runAdminTenant in chassis/cli/admin.go.
+var adminTenantChildren = []node{
+	{Name: "suspend", Desc: "Deny a tenant's requests until resumed"},
+	{Name: "resume", Desc: "Restore a suspended tenant"},
+}
+
 // adminChildren mirrors the Dispatch switch in chassis/cli/admin.go:runAdmin.
 var adminChildren = []node{
 	{Name: "resync", Desc: "Re-emit a tenant's control-plane state to the fleet"},
+	{Name: "tenant", Desc: "Suspend/resume a tenant's request admission", Children: adminTenantChildren},
 }
 
 // cliCommandTree is the authoritative root. Every non-hidden top-level

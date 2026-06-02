@@ -46,6 +46,9 @@ current rows (tenant + hostnames + active stacks) as fleet-sync events so a
 replica that missed an event converges. `+"`tenant suspend/resume`"+` flips a
 tenant's request admission (the 402/403 gate), live on the next request.
 All require a super_admin signing profile.
+
+To open the admin web UI in your browser, use `+"`txco auth login`"+` (it signs
+you in and opens the console).
 `)
 }
 
@@ -124,7 +127,7 @@ Flags:
 	st, err := client.New(clientTarget).SuspendTenant(context.Background(), slug,
 		client.SuspendTenantRequest{DenyStatus: *status, DenyReason: *reason})
 	if err != nil {
-		auth.PrintCLIErrorf(stderr, "admin tenant suspend: %v", err)
+		auth.PrintCLIError(stderr, requestErrorMessage("admin tenant suspend", clientTarget, *profile, err))
 		return 1
 	}
 	fmt.Fprintf(stdout, "Suspended tenant %q — requests now return %d (%s).\n", st.Slug, st.DenyStatus, st.DenyReason)
@@ -168,7 +171,7 @@ Flags:
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
 	st, err := client.New(clientTarget).ResumeTenant(context.Background(), slug)
 	if err != nil {
-		auth.PrintCLIErrorf(stderr, "admin tenant resume: %v", err)
+		auth.PrintCLIError(stderr, requestErrorMessage("admin tenant resume", clientTarget, *profile, err))
 		return 1
 	}
 	fmt.Fprintf(stdout, "Resumed tenant %q — requests are admitted again.\n", st.Slug)
@@ -216,7 +219,7 @@ Flags:
 	c := client.New(clientTarget)
 	resp, err := c.FleetResync(context.Background(), client.FleetResyncRequest{TenantSlug: *tenant})
 	if err != nil {
-		auth.PrintCLIErrorf(stderr, "admin resync: %v", err)
+		auth.PrintCLIError(stderr, requestErrorMessage("admin resync", clientTarget, *profile, err))
 		return 1
 	}
 	if !resp.FleetEnabled {
