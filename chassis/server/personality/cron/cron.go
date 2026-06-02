@@ -169,12 +169,11 @@ func spreadOffset(slug string, period int) time.Duration {
 }
 
 // scheduleTick builds the shared cron envelope for this tick ONCE and
-// enqueues it: the legacy system-wide `job="default"` event (unchanged —
-// backward compat with ingress.cron.jobs), plus one fan-out event per
-// tenant that authored a `_cron` stack, each delayed by its deterministic
-// spread offset. The payload (and thus _ts + modN buckets) is frozen here
-// at tick time, BEFORE any spread delay — so a tenant's WHEN sees the tick
-// instant, not the delayed dispatch instant.
+// enqueues it: the system-wide `job="default"` event when --cron-system-tick
+// is set, plus one fan-out event per tenant that authored a `_cron` stack,
+// each delayed by its deterministic spread offset. The payload (and thus
+// _ts + modN buckets) is frozen here at tick time, BEFORE any spread delay —
+// so a tenant's WHEN sees the tick instant, not the delayed dispatch instant.
 func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick uint64, period int) {
 	min := now.Minute()
 	// Canonical bucket at SECOND resolution (RFC3339), aligned to the
@@ -208,10 +207,14 @@ func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick 
 		base, _ = sjson.Set(base, "_txc.flag_private", true)
 	}
 
-	// Legacy: one system-wide tick keyed by job name "default" (kept
-	// exactly as before for ingress.cron.jobs operators). No spread.
-	def, _ := sjson.Set(base, "_txc.cron.job", "default")
-	cc.enqueue(ctx, cronq.Job{Job: "default", Bucket: bucket, MaxTime: period, Payload: def})
+	// A system-wide tick keyed by job name "default" (no tenant, no
+	// spread), for scheduled work hooked in _sys/boot or routed by a
+	// "default" cron-job ingress binding. Enabled with --cron-system-tick;
+	// the per-tenant fan-out below runs regardless.
+	if cc.pu.Conf.CronSystemTick {
+		def, _ := sjson.Set(base, "_txc.cron.job", "default")
+		cc.enqueue(ctx, cronq.Job{Job: "default", Bucket: bucket, MaxTime: period, Payload: def})
+	}
 
 	// Fan-out: one tick per tenant that opted in by authoring a `_cron`
 	// stack, smeared across the period by its deterministic offset.

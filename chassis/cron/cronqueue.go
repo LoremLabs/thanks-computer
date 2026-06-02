@@ -24,11 +24,11 @@ import (
 // spread offset (or a broker hop) still reports the instant the tick
 // fired, not the instant it ran.
 type Job struct {
-	// Tenant is the subscriber slug, or "" for the legacy system job.
+	// Tenant is the subscriber slug, or "" for the system job.
 	Tenant string
-	// Job is the cron job name: "default" (legacy system tick) or
-	// "_cron" (per-tenant fan-out). Stamped into Payload already;
-	// duplicated here so a backend can key/dedup without parsing JSON.
+	// Job is the cron job name: "default" (system tick) or "_cron"
+	// (per-tenant fan-out). Stamped into Payload already; duplicated here
+	// so a backend can key/dedup without parsing JSON.
 	Job string
 	// Bucket is the wall-clock period boundary this job belongs to,
 	// e.g. "2026-06-02T15:24Z". Stable dedup key for an at-least-once

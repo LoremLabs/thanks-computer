@@ -427,7 +427,13 @@ func staticResultBody(ix *static.Index, in []byte) string {
 }
 
 func dispatchEnvelope(raw, missAction string) (string, string) {
-	if missAction == "reject" {
+	// reject mode hard-404s unrouted ingress without the boot pipeline —
+	// but only for HTTP. A non-HTTP source (the cron system tick, tcp,
+	// lmtp) has no business getting a web 404, so it falls through into the
+	// boot pipeline (whose scope-1000 notfound is likewise HTTP-gated) and
+	// halts quietly instead of emitting a web-shaped 404 for a non-web
+	// transport.
+	if missAction == "reject" && gjson.Get(raw, "_txc.src").String() == "http" {
 		return raw, stageNoRoute
 	}
 	raw = ingress.StampEnvelope(raw, ingress.RouteTarget{

@@ -70,8 +70,9 @@ func TestCronTickFiresEvent(t *testing.T) {
 	bus := make(chan *event.Envelope, 1)
 	pu := &processor.Unit{
 		Conf: config.Config{
-			Personalities: "cron",
-			CronPeriod:    1,
+			Personalities:  "cron",
+			CronPeriod:     1,
+			CronSystemTick: true, // no subscribers here, so rely on the system tick to produce a dispatch
 		},
 		Logger: zap.NewNop(),
 		Bus:    bus,
@@ -262,7 +263,7 @@ func TestScheduleTickBucketAndFanout(t *testing.T) {
 
 	rq := &recordingQueue{}
 	cc := NewController(context.Background(), &processor.Unit{
-		Conf:   config.Config{Personalities: "cron"},
+		Conf:   config.Config{Personalities: "cron", CronSystemTick: true},
 		Logger: zap.NewNop(),
 		Dbc:    &dbcache.DbCache{Db: db, Source: db},
 	}, rq)
@@ -313,5 +314,53 @@ func TestScheduleTickBucketAndFanout(t *testing.T) {
 	}
 	if !tenants["acme"] || !tenants["beta"] || len(tenants) != 2 {
 		t.Errorf("tenant fan-out = %v, want {acme, beta}", tenants)
+	}
+}
+
+// TestScheduleTickSystemTickGatedOff: with --cron-system-tick off (the
+// default) the system-wide "default" job is NOT emitted, while the
+// per-tenant _cron fan-out still fires at the same interval.
+func TestScheduleTickSystemTickGatedOff(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, q := range []string{
+		`CREATE TABLE tenants (tenant_id TEXT PRIMARY KEY, slug TEXT, revoked_at TEXT)`,
+		`CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INT, name TEXT)`,
+		`INSERT INTO tenants VALUES ('tnt_acme','acme',NULL),('tnt_beta','beta',NULL)`,
+		`INSERT INTO ops VALUES ('tnt_acme','_cron',100,'a'),('tnt_beta','_cron',100,'b')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+
+	rq := &recordingQueue{}
+	// CronSystemTick defaults to false.
+	cc := NewController(context.Background(), &processor.Unit{
+		Conf:   config.Config{Personalities: "cron"},
+		Logger: zap.NewNop(),
+		Dbc:    &dbcache.DbCache{Db: db, Source: db},
+	}, rq)
+
+	cc.scheduleTick(context.Background(), time.Date(2026, 6, 2, 15, 24, 37, 0, time.UTC), 7, 1)
+
+	jobs := rq.snapshot()
+	tenants := map[string]bool{}
+	for _, j := range jobs {
+		if j.Job == "default" {
+			t.Errorf("system tick emitted with --cron-system-tick off: %+v", j)
+		}
+		if j.Job == "_cron" {
+			tenants[j.Tenant] = true
+		}
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("enqueued %d jobs, want 2 (fan-out only, no system tick): %+v", len(jobs), jobs)
+	}
+	if !tenants["acme"] || !tenants["beta"] {
+		t.Errorf("fan-out = %v, want {acme, beta} to still fire", tenants)
 	}
 }

@@ -68,6 +68,21 @@ func TestDispatchEnvelopeReject(t *testing.T) {
 	}
 }
 
+// TestDispatchEnvelopeRejectNonHTTP — reject mode is an HTTP-ingress
+// concept; a non-HTTP source (e.g. the cron system tick) must NOT take the
+// bare web-404 fast-path. It falls through into the boot pipeline instead
+// (where the scope-1000 notfound is itself HTTP-gated, so it halts quietly).
+func TestDispatchEnvelopeRejectNonHTTP(t *testing.T) {
+	in := `{"_txc":{"src":"cron","cron":{"job":"default"}}}`
+	_, stage := dispatchEnvelope(in, "reject")
+	if stage == stageNoRoute {
+		t.Fatalf("cron tick took the reject 404 fast-path; want fall-through to the boot pipeline")
+	}
+	if stage != defaultEntryStage {
+		t.Errorf("stage = %q, want %q (boot pipeline)", stage, defaultEntryStage)
+	}
+}
+
 // TestDetectTenantBodyHit: scope-0 DECIDE writes an INERT proposal
 // under _txc.route.* and must NOT set _txc.goto/_txc.tenant (no jump,
 // no re-tenant yet — scopes 1..99 get to see/modify it first).
@@ -240,4 +255,3 @@ func TestEmitNoRouteResponse(t *testing.T) {
 		t.Fatal("emitNoRouteResponse did not send on ResCh")
 	}
 }
-
