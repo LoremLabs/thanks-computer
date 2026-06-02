@@ -23,6 +23,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 )
 
 const (
@@ -35,13 +36,12 @@ type oauthTestEnv struct {
 	signKey jwk.Key
 }
 
-// newOAuthTestEnv builds a Controller wired for /auth/oauth/enroll: an RSA
-// signing key whose public half is the controller's JWKS, plus the issuer +
-// audience the handler asserts. No network — the key set is in-process.
-func newOAuthTestEnv(t *testing.T) *oauthTestEnv {
+// wireOAuth equips a Controller for /auth/oauth/enroll: an RSA signing key
+// whose public half becomes the controller's JWKS, plus the asserted issuer +
+// audience. No network — the key set is in-process. Returns the private
+// signing key.
+func wireOAuth(t *testing.T, c *Controller) jwk.Key {
 	t.Helper()
-	c := newTestController(t, config.Config{CloudChassisURL: "https://chassis.test"})
-
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("rsa: %v", err)
@@ -65,7 +65,14 @@ func newOAuthTestEnv(t *testing.T) *oauthTestEnv {
 	c.oauthIssuer = testOAuthIssuer
 	c.oauthAudience = testOAuthAud
 	c.oauthJWKS = set
-	return &oauthTestEnv{c: c, signKey: priv}
+	return priv
+}
+
+// newOAuthTestEnv builds a fleet-disabled Controller wired for enroll.
+func newOAuthTestEnv(t *testing.T) *oauthTestEnv {
+	t.Helper()
+	c := newTestController(t, config.Config{CloudChassisURL: "https://chassis.test"})
+	return &oauthTestEnv{c: c, signKey: wireOAuth(t, c)}
 }
 
 func (e *oauthTestEnv) token(t *testing.T, sub string) string {
@@ -284,6 +291,39 @@ func TestOAuthEnrollSecondMachineNewKey(t *testing.T) {
 	}
 	if second["tenant_slug"] != "matt" {
 		t.Fatalf("second machine landed in tenant %v, want matt", second["tenant_slug"])
+	}
+}
+
+// --- fleet-sync producer adherence -----------------------------------------
+
+func TestOAuthEnrollEmitsTenantCreatedEvent(t *testing.T) {
+	c := newTestController(t, config.Config{CloudChassisURL: "https://chassis.test", FeedSink: "file"})
+	withAStore(t, c)
+	e := &oauthTestEnv{c: c, signKey: wireOAuth(t, c)}
+
+	code, body := e.enroll(t, oauthEnrollRequest{
+		IDToken:    e.token(t, "email:matt@example.com"),
+		PublicKey:  newEd25519B64(t),
+		TenantSlug: "matt",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("enroll status = %d body=%v", code, body)
+	}
+
+	// Creating a tenant must queue a tenant.created outbox event for it, so a
+	// multi-worker fleet upserts the tenants row and can route its hostnames.
+	tr, err := c.tenants.LookupBySlug(context.Background(), "matt")
+	if err != nil || tr == nil {
+		t.Fatalf("tenant lookup: tr=%v err=%v", tr, err)
+	}
+	var gotType, gotTenant string
+	if err := c.pu.RuntimeDB.QueryRow(
+		`SELECT event_type, tenant_id FROM control_events_outbox WHERE event_type = ?`,
+		controlevent.TypeTenantCreated).Scan(&gotType, &gotTenant); err != nil {
+		t.Fatalf("expected a tenant.created outbox row: %v", err)
+	}
+	if gotTenant != tr.TenantID {
+		t.Fatalf("outbox tenant_id = %q, want %q", gotTenant, tr.TenantID)
 	}
 }
 

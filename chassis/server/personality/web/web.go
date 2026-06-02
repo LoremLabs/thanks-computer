@@ -19,6 +19,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -116,6 +117,16 @@ func (web *WebController) Start() {
 
 			// z-page, but what if we want to overwrite it?
 			r.PathPrefix("/healthz").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// While draining (SIGUSR1), report unhealthy so the load
+				// balancer pulls this node from rotation; SIGUSR2 restores 200.
+				if admission.IsDraining() {
+					w.Header().Set("Retry-After", "0")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					if _, err := w.Write([]byte("draining\n")); err != nil {
+						web.pu.Logger.Error("write error", zap.String("err", err.Error()))
+					}
+					return
+				}
 				w.WriteHeader(200)
 				_, err := w.Write([]byte("ok\n"))
 				if err != nil {

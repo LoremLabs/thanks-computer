@@ -127,7 +127,8 @@ func (t ResolvedTarget) AsClientTarget() client.Target {
 //  1. explicit --addr/--user/--pass flags (as passed in)
 //  2. TXCO_ADMIN_ADDR / TXCO_ADMIN_USER / TXCO_ADMIN_PASS env vars
 //  3. selected target from the workspace config file
-//  4. an EXPLICIT --profile's bound chassis_url (auth.ProfileChassisURL)
+//  4. the resolved profile's bound chassis_url — an explicit --profile if
+//     passed, else the active profile (auth.ProfileChassisURL)
 //  5. http://localhost:8081 with no auth
 //
 // dir is the workspace root the user passed to apply/diff/dev (so the
@@ -166,17 +167,18 @@ func resolveTarget(dir, targetName, addr, user, pass, profile string) client.Tar
 		target.Pass = pass
 	}
 
-	// Endpoint fallback: when --profile was EXPLICITLY passed but no
-	// endpoint was (no --addr/env, no txco.yaml target), use that
-	// profile's own bound chassis_url. Fixes the footgun the user
-	// hit — `txco apply --profile prod` signing with the right key
-	// but silently POSTing to localhost. Deliberately gated on an
-	// explicit --profile: a bare `txco apply` must NOT silently
-	// retarget to whatever profile is ambiently active (that would be
-	// the reverse footgun — a local test write landing on prod). The
-	// no-flag case is served by a txco.yaml target instead. Explicit
-	// --addr or a configured target still win.
-	if profile != "" && !explicitAddr && !t.ChassisExplicit {
+	// Endpoint fallback: when no endpoint was given (no --addr/env, no
+	// txco.yaml target), use the RESOLVED signing profile's own bound
+	// chassis_url — an explicit --profile if one was passed, otherwise the
+	// active profile. This mirrors ResolveTenant, which already follows the
+	// active profile, so after `txco login` a bare `txco status`/`apply`
+	// targets the cloud the active profile is bound to instead of a blind
+	// localhost (the asymmetry where the tenant followed the active profile
+	// but the address didn't). A workspace txco.yaml target (ChassisExplicit)
+	// and an explicit --addr/TXCO_ADMIN_ADDR still win — so local dev inside a
+	// workspace is unaffected: its configured target overrides the active
+	// profile.
+	if !explicitAddr && !t.ChassisExplicit {
 		if u := auth.ProfileChassisURL(profile); u != "" {
 			target.Addr = u
 		}

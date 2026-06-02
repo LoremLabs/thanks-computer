@@ -20,6 +20,10 @@ func TestResolveTargetPrecedence(t *testing.T) {
 
 	t.Run("default when nothing configured", func(t *testing.T) {
 		clearEnv()
+		// Isolate $TXCO_HOME so the address fallback (which now follows the
+		// active profile) finds none and stays at the localhost default.
+		t.Setenv("TXCO_HOME", t.TempDir())
+		t.Setenv("TXCO_PROFILE", "")
 		got := resolveTarget(t.TempDir(), "", "", "", "", "")
 		if got.Addr != "http://localhost:8081" || got.User != "" || got.Pass != "" {
 			t.Errorf("got %+v, want default localhost target", got)
@@ -123,10 +127,10 @@ targets:
 		}
 	})
 
-	// An EXPLICIT --profile with a bound chassis_url fills the
-	// otherwise-blind localhost default (the footgun fix), but ONLY
-	// when explicit: a bare call must never inherit it.
-	t.Run("explicit profile chassis_url beats localhost default", func(t *testing.T) {
+	// A profile's bound chassis_url fills the otherwise-blind localhost
+	// default — for an explicit --profile AND (now) the active profile,
+	// mirroring ResolveTenant. A workspace target / --addr still win.
+	t.Run("profile chassis_url beats localhost default", func(t *testing.T) {
 		clearEnv()
 		home := t.TempDir()
 		t.Setenv("TXCO_HOME", home)
@@ -149,15 +153,31 @@ targets:
 			t.Errorf("explicit profile: got addr %q, want https://admin.example", got.Addr)
 		}
 
-		// No explicit profile → must stay localhost (no silent
-		// retarget to an ambient profile — the reverse footgun).
+		// Bare call with NO active profile → localhost (nothing to follow).
 		if got := resolveTarget(t.TempDir(), "", "", "", "", ""); got.Addr != "http://localhost:8081" {
-			t.Errorf("bare call: got addr %q, want localhost (no profile fallback)", got.Addr)
+			t.Errorf("bare, no active profile: got addr %q, want localhost", got.Addr)
+		}
+
+		// Once prodprof is ACTIVE, a bare call follows its chassis too
+		// (the asymmetry fix: addr now follows the active profile like the
+		// tenant already does).
+		if err := auth.WriteActiveProfile("prodprof"); err != nil {
+			t.Fatalf("WriteActiveProfile: %v", err)
+		}
+		if got := resolveTarget(t.TempDir(), "", "", "", "", ""); got.Addr != "https://admin.example" {
+			t.Errorf("bare, active profile: got addr %q, want https://admin.example", got.Addr)
 		}
 
 		// Explicit --addr still wins over the profile URL.
 		if got := resolveTarget(t.TempDir(), "", "http://flag", "", "", "prodprof"); got.Addr != "http://flag" {
 			t.Errorf("flag vs profile: got addr %q, want http://flag", got.Addr)
+		}
+
+		// A workspace txco.yaml target still wins over the active profile.
+		wdir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(wdir, "txco.yaml"), []byte("addr: http://workspace\n"), 0o644)
+		if got := resolveTarget(wdir, "", "", "", "", ""); got.Addr != "http://workspace" {
+			t.Errorf("workspace target vs active profile: got addr %q, want http://workspace", got.Addr)
 		}
 	})
 }

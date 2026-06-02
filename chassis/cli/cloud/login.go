@@ -216,7 +216,9 @@ Flags:
 		newKey:     *newKey,
 	}
 	if _, err := performEnroll(endpoint, tr.IDToken, profile, ec, stdout, stderr); err != nil {
-		fmt.Fprintf(stdout, "\n%s\nRun `txco cloud enroll` to try again.\n", enrollDegradeMessage(err))
+		// Login succeeded; surface the partial failure (with the endpoint it
+		// tried) as a red warning on stderr rather than a silent stdout note.
+		auth.PrintCLIError(stderr, enrollDegradeMessage(err, endpoint))
 	}
 	return 0
 }

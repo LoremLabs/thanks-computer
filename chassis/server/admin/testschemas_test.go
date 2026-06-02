@@ -112,6 +112,24 @@ CREATE TABLE tenant_secret_versions (
 CREATE UNIQUE INDEX tenant_secrets_active_name_idx
     ON tenant_secrets (tenant_id, COALESCE(stack, ''), name)
     WHERE revoked_at IS NULL;
+CREATE TABLE control_events_outbox (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id                  TEXT NOT NULL UNIQUE,
+    event_type                TEXT NOT NULL,
+    tenant_id                 TEXT,
+    stack_id                  TEXT,
+    version                   INTEGER,
+    base_version              INTEGER,
+    artifact_ref              TEXT,
+    checksum                  TEXT,
+    payload_json              BLOB NOT NULL,
+    created_at                TEXT NOT NULL,
+    attempt_count             INTEGER NOT NULL DEFAULT 0,
+    last_error                TEXT,
+    last_attempt_at           TEXT,
+    published_control_version INTEGER,
+    published_at              TEXT
+);
 `
 
 const authSchemaSQL = `

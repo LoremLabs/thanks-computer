@@ -1,9 +1,13 @@
 package cloud
 
 import (
+	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
+	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 )
 
 func TestDerivedCloudProfile(t *testing.T) {
@@ -78,6 +82,18 @@ func TestResolveCloudReadProfile(t *testing.T) {
 	}
 	if got := resolveCloudReadProfile(""); got != "cloud-dev" {
 		t.Fatalf("follow active: got %q, want cloud-dev", got)
+	}
+}
+
+func TestEnrollDegradeMessageShowsEndpoint(t *testing.T) {
+	ep := "https://admin.thanks.computer/auth/oauth/enroll"
+	msg404 := enrollDegradeMessage(&client.HTTPError{StatusCode: http.StatusNotFound}, ep)
+	if !strings.Contains(msg404, ep) || !strings.Contains(msg404, "404") {
+		t.Fatalf("404 message missing endpoint/404: %q", msg404)
+	}
+	msgGeneric := enrollDegradeMessage(errors.New("boom"), ep)
+	if !strings.Contains(msgGeneric, ep) {
+		t.Fatalf("generic message missing endpoint: %q", msgGeneric)
 	}
 }
 

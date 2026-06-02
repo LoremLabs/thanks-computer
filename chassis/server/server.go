@@ -15,6 +15,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter"    // registers the "openrouter" ai://chat backend
@@ -469,6 +470,24 @@ func emitNoRouteResponse(envelope *event.Envelope) {
 	}
 }
 
+// emitDrainResponse answers an envelope with a 503 "draining" response
+// while the node is bleeding out of its load balancer (SIGUSR1). Like
+// emitNoRouteResponse it bypasses the processor and shapes the envelope
+// so the web inlet renders it the same way it renders any stack-emitted
+// response (admission.DrainResponse sets _txc.web.res.* + Retry-After).
+func emitDrainResponse(envelope *event.Envelope) {
+	raw := envelope.Payload.Raw
+	if raw == "" {
+		raw = "{}"
+	}
+	raw = admission.DrainResponse(raw)
+	select {
+	case envelope.ResCh <- event.Payload{Raw: raw, Type: event.JSON}:
+	case <-envelope.Ctx.Done():
+		// Caller already gave up; drop the synthetic response.
+	}
+}
+
 // runPipeline dispatches the processor and, when capture is set, tees
 // the final response so the caller learns the response bytes (for
 // usage sizing + the resolved `_txc.tenant`, which the pipeline pins in
@@ -639,6 +658,31 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		}
 	}
 
+	// Per-tenant admission state (tenant_runtime_state): an in-memory
+	// snapshot read on the request path, rebuilt on every dbcache reload
+	// via the OnReload chain (so an operator edit or a fleet-sync
+	// entitlement.updated apply takes effect without a restart). Inert
+	// until a row denies a tenant — a tenant with no row is admitted.
+	admissionProv := admission.NewSQLiteProvider(logger)
+	if dbc != nil {
+		if rerr := admissionProv.Rebuild(dbc.Snapshot()); rerr != nil {
+			logger.Warn("admission provider initial build failed",
+				zap.String("err", rerr.Error()))
+		}
+		prevOnReload := dbc.OnReload
+		dbc.OnReload = func(db *sql.DB) error {
+			var perr error
+			if prevOnReload != nil {
+				perr = prevOnReload(db)
+			}
+			if rerr := admissionProv.Rebuild(db); rerr != nil {
+				logger.Warn("admission provider reload failed",
+					zap.String("err", rerr.Error()))
+			}
+			return perr
+		}
+	}
+
 	// Load the trace sink. NoopSink (mode=off) is the zero-cost default.
 	// FileSink writes the per-request artifact tree; failure to create
 	// the trace dir is a startup error. When --trace-async is set, the
@@ -789,6 +833,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// resume traces — symmetric with what continuation.go does for
 	// remote worker callbacks.
 	pu.Sink = traceSink
+
+	// Per-tenant admission gate (built above, rebuilt on dbcache reload).
+	pu.Admission = admissionProv
 
 	// In-process MCP session cache. Per (tenant, endpoint), 5min TTL.
 	// Drops 3 HTTPS round-trips per MCP call to 1 on hot paths by
@@ -1017,6 +1064,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 					eventRaw := envelope.Payload.Raw
 					if logger.Core().Enabled(zap.DebugLevel) {
 						logger.Debug("✉️", zap.String("raw", eventRaw))
+					}
+
+					// Drain: while this node is bleeding out of its load
+					// balancer (SIGUSR1; SIGUSR2 to resume), reject new
+					// requests with a 503 + Retry-After before dispatch.
+					// In-flight requests already past this point finish
+					// normally; /healthz also reports 503 so the LB stops
+					// routing new traffic here.
+					if admission.IsDraining() {
+						emitDrainResponse(envelope)
+						continue
 					}
 
 					// Every event enters the editable _sys/boot pipeline

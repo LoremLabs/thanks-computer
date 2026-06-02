@@ -152,6 +152,19 @@ func (p *Process) Stop(grace time.Duration) {
 	}
 }
 
+// Signal sends sig to the child's process group (negative pid), mirroring
+// Stop's group-targeting so a forwarded signal reaches the real process
+// even when a shell leader sits in front of it. Used to forward operator
+// signals (e.g. SIGUSR1/SIGUSR2 drain) from the dev supervisor to a
+// specific child. Returns the underlying kill error (ESRCH if the group
+// is already gone).
+func (p *Process) Signal(sig syscall.Signal) error {
+	p.mu.Lock()
+	pid := p.Cmd.Process.Pid
+	p.mu.Unlock()
+	return syscall.Kill(-pid, sig)
+}
+
 // pumpLines reads lines from r and writes them to w, each prefixed with
 // tag. Long lines are passed through; reader errors are silently
 // swallowed (the parent process is exiting anyway).

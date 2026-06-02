@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
@@ -131,16 +133,65 @@ func (c *Controller) handleOAuthEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create the tenant and record the (issuer, sub) → tenant mapping.
-	// NOTE: single-chassis path — the auto-created tenant is not fleet-synced
-	// to replicas yet (same posture as the actor/key writes the existing
-	// enroll endpoints already do without fleet-sync). Multi-chassis
-	// propagation is a follow-up.
+	// Create the tenant via the fleet-sync producer pattern (identical to
+	// handleCreateTenant): upload the RowsArtifact BEFORE the tx, then inside
+	// one runtime.db tx do CreateTx + append the tenant.created outbox event,
+	// then commit. Without the tenant.created event a multi-worker fleet never
+	// learns about the tenant, and replicas 404 its hostnames (the data-plane
+	// resolver JOINs tenant_hostnames → tenants). Fleet-disabled (--feed-sink=nop)
+	// degrades to a plain tx create with no event, same as handleCreateTenant.
 	newTenantID := "tnt_" + hxid.NewTimeSort().String()
-	if err := c.tenants.Create(r.Context(), tenants.Tenant{TenantID: newTenantID, Slug: slug}); err != nil {
+	t := tenants.Tenant{TenantID: newTenantID, Slug: slug, CreatedAt: time.Now().UTC()}
+
+	var fleetArtifactRef, fleetChecksum string
+	if c.fleetEnabled() {
+		art := controlevent.RowsArtifact{
+			DB:    "runtime",
+			Table: "tenants",
+			Op:    "upsert",
+			Rows:  []map[string]any{tenantToRow(t)},
+		}
+		ref, sum, _, uerr := c.fleetUploadArtifact(r.Context(),
+			fmt.Sprintf("rows/tenants/%s", t.TenantID), art)
+		if uerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "fleet_upload", map[string]any{"err": uerr.Error()})
+			return
+		}
+		fleetArtifactRef, fleetChecksum = ref, sum
+	}
+
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := c.tenants.CreateTx(r.Context(), tx, t); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create_tenant", map[string]any{"err": err.Error()})
 		return
 	}
+	if c.fleetEnabled() {
+		if _, qerr := c.fleetQueueEvent(r.Context(), tx,
+			controlevent.TypeTenantCreated, t.TenantID, "", 0, 0,
+			fleetArtifactRef, fleetChecksum,
+		); qerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "fleet_queue", map[string]any{"err": qerr.Error()})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+
+	// The (issuer, sub) → tenant mapping lives in auth.db (a different
+	// database), so it can't share the runtime tx; record it after the commit.
 	if err := c.registry.CreateOIDCSubject(r.Context(), issuer, sub, newTenantID); err != nil {
 		if errors.Is(err, registry.ErrSubjectAlreadyMapped) {
 			// A concurrent first-enroll for the same identity won the race.

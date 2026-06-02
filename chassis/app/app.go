@@ -28,6 +28,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
@@ -315,7 +316,8 @@ func Run(bi BuildInfo) int {
 
 	// Loop and wait for any shutdown / events
 	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP,
+		syscall.SIGUSR1, syscall.SIGUSR2)
 
 	logger.Info("-ready-")
 
@@ -337,6 +339,16 @@ func Run(bi BuildInfo) int {
 
 					exiting = true
 				}
+			case syscall.SIGUSR1:
+				// Drain: bleed this node out of its load balancer.
+				// /healthz starts returning 503 and new requests get a
+				// 503 + Retry-After; in-flight requests finish. SIGUSR2
+				// resumes. The process keeps running until SIGTERM.
+				admission.SetDraining(true)
+				logger.Info("drain enabled (SIGUSR1): /healthz 503, new requests 503; SIGUSR2 to resume")
+			case syscall.SIGUSR2:
+				admission.SetDraining(false)
+				logger.Info("drain disabled (SIGUSR2): resuming normal traffic")
 			default:
 				{
 					// TODO: this could be used for graceful restarts?
@@ -393,21 +405,21 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 //
 //   - mode=rwc            — create the file on first run; standard.
 //   - _journal_mode=WAL   — concurrent readers alongside one writer.
-//                           Default rollback-journal serializes BOTH
-//                           behind an EXCLUSIVE lock; under any real
-//                           parallelism (demo Runner's per-step seed,
-//                           fleet apply, parallel CLI ops) that lock
-//                           is a bottleneck and a 500 source. WAL
-//                           creates `.db-wal` + `.db-shm` files next
-//                           to the main `.db`; cleaned on graceful
-//                           shutdown.
+//     Default rollback-journal serializes BOTH
+//     behind an EXCLUSIVE lock; under any real
+//     parallelism (demo Runner's per-step seed,
+//     fleet apply, parallel CLI ops) that lock
+//     is a bottleneck and a 500 source. WAL
+//     creates `.db-wal` + `.db-shm` files next
+//     to the main `.db`; cleaned on graceful
+//     shutdown.
 //   - _busy_timeout=5000  — 5s patience on a busy file lock. In WAL
-//                           mode readers don't block writers and
-//                           writers serialize via the WAL's commit
-//                           lock, so realistic contention is short.
-//                           5s is a generous safety net for the worst
-//                           case (e.g. brief checkpoint stalls under
-//                           burst load).
+//     mode readers don't block writers and
+//     writers serialize via the WAL's commit
+//     lock, so realistic contention is short.
+//     5s is a generous safety net for the worst
+//     case (e.g. brief checkpoint stalls under
+//     burst load).
 //
 // Why NOT cache=shared: shared-cache mode introduces a SECOND lock
 // class — TABLE-level (SQLITE_LOCKED, error code 6) — that exists on

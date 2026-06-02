@@ -26,6 +26,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
@@ -117,6 +118,13 @@ type Unit struct {
 	// `secrets` in its WITH clause must fail loud with
 	// `secret_store_unavailable` rather than silently skip.
 	Secrets *secrets.Resolver
+
+	// Admission gates the one-time _sys -> concrete-tenant handoff: a
+	// suspended/disabled tenant is denied (402/403) before its stack
+	// runs. nil-safe — when unset every tenant is admitted (the test and
+	// non-server default). Set by the server from a dbcache-backed
+	// provider rebuilt on every reload.
+	Admission admission.Provider
 }
 
 // StagePartsRE Set compile limit for stage
@@ -1204,6 +1212,27 @@ func (pu *Unit) advanceAfterScope(
 		// EXEC-ing into the target tenant's stack — the pin
 		// rebind only changes which tenant's ops resolve.
 		runCtx := pu.maybeRetenant(ctx, string(resp))
+		// Per-tenant admission: this is the one point where a request
+		// crosses from _sys into a concrete tenant's stack. If the pin
+		// changed and that tenant is denied (suspended/disabled), emit a
+		// terminal 402/403 and do NOT recurse — the customer stack never
+		// runs. Gating on pin-changed makes this fire exactly once per
+		// request and never for _sys/boot itself. resp is already
+		// budget-synced above, so ShapeDeny preserves fuel/TTL fields.
+		if newTen := tenantScope(runCtx); pu.Admission != nil && newTen != tenantScope(ctx) {
+			if d := pu.Admission.Decide(newTen); !d.Admit {
+				if !*opsDone {
+					*opsDone = true
+					resCh <- event.Payload{Raw: admission.ShapeDeny(string(resp), d, newTen), Type: event.JSON}
+				}
+				tr.Event(trace.TimelineEvent{
+					Ts: time.Now(), Event: "tenant.admission_denied",
+					Fields: map[string]any{"tenant": newTen, "status": d.Status, "reason": d.Reason},
+				})
+				endSpan()
+				return true, nil
+			}
+		}
 		runCtx = context.WithValue(runCtx, ctxKeyParentStage, stage)
 		endSpan()
 		return true, pu.Run(runCtx, string(resp), nextStage, resCh)

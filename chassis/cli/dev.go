@@ -240,6 +240,37 @@ Flags:
 		resolved.Chassis = chassisURL
 	}
 
+	// Forward drain signals to the chassis child. `txco dev` is a
+	// supervisor; the chassis runs in its own process group, so an
+	// operator who sends SIGUSR1/SIGUSR2 to the dev process expects it to
+	// reach the chassis (drain on / resume), not be swallowed by the
+	// wrapper. We forward ONLY to the chassis group — never to app
+	// children, where SIGUSR1 has its own meaning (Node, for one, starts
+	// its inspector on SIGUSR1). INT/TERM stay on the teardown path above.
+	if chassisProc != nil {
+		drainCh := make(chan os.Signal, 2)
+		signal.Notify(drainCh, syscall.SIGUSR1, syscall.SIGUSR2)
+		go func() {
+			defer signal.Stop(drainCh)
+			for {
+				select {
+				case sig := <-drainCh:
+					ssig, ok := sig.(syscall.Signal)
+					if !ok {
+						continue
+					}
+					if err := chassisProc.Signal(ssig); err != nil {
+						fmt.Fprintf(stderr, "[txco] forward %s to chassis: %v\n", sig, err)
+					} else {
+						fmt.Fprintf(stdout, "[txco] forwarded %s to chassis (drain)\n", sig)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
 	// 5. Apply the bundle when --apply is set. Default is OFF so a
 	// `txco dev` restart doesn't surprise the user by clobbering
 	// admin-UI edits with whatever's on disk. Apply is explicit:

@@ -104,19 +104,23 @@ func performEnroll(endpoint, idToken, profile string, ec enrollChoices, stdout, 
 	return res, nil
 }
 
-// enrollDegradeMessage renders the soft-failure line printed after a successful
-// login when enrollment didn't complete. The endpoint-unavailable cases get the
-// canonical wording; everything else surfaces the concrete reason.
-func enrollDegradeMessage(err error) string {
+// enrollDegradeMessage renders the soft-failure block printed after a successful
+// login when enrollment didn't complete. It always names the endpoint URL the
+// CLI tried so the user can see where it was POSTing (e.g. prod vs a local
+// --chassis). 404 / unreachable get specific wording; everything else surfaces
+// the concrete error.
+func enrollDegradeMessage(err error, endpoint string) string {
 	var he *client.HTTPError
+	var reason string
 	switch {
 	case errors.As(err, &he) && he.StatusCode == http.StatusNotFound:
-		return "Signed in, but no hosted chassis tenant was created (enrollment endpoint unavailable)."
+		reason = "Signed in, but no hosted chassis tenant was created — the enrollment endpoint returned 404 (not enabled on that chassis)."
 	case isConnRefused(err):
-		return "Signed in, but no hosted chassis tenant was created (enrollment endpoint unreachable)."
+		reason = "Signed in, but no hosted chassis tenant was created — the enrollment endpoint is unreachable."
 	default:
-		return fmt.Sprintf("Signed in, but enrollment did not complete: %v", err)
+		reason = fmt.Sprintf("Signed in, but enrollment did not complete: %v", err)
 	}
+	return fmt.Sprintf("%s\n  endpoint: %s\nRun `txco cloud enroll` to try again.", reason, endpoint)
 }
 
 // isConnRefused heuristically detects a transport-layer failure (no HTTP
@@ -210,7 +214,7 @@ Flags:
 		newKey:     *newKey,
 	}
 	if _, err := performEnroll(endpoint, tok.IDToken, profile, ec, stdout, stderr); err != nil {
-		auth.PrintCLIErrorf(stderr, "cloud enroll: %v", err)
+		auth.PrintCLIErrorf(stderr, "cloud enroll: %v\n  endpoint: %s", err, endpoint)
 		return 1
 	}
 	return 0
