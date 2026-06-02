@@ -672,6 +672,64 @@ func (c *Client) CreateTenant(ctx context.Context, req CreateTenantRequest) (*Te
 	return &out, nil
 }
 
+// SuspendTenantRequest optionally overrides the status/reason a suspended
+// tenant's requests return. Empty fields default to 402 / "payment_required".
+type SuspendTenantRequest struct {
+	DenyStatus int    `json:"deny_status,omitempty"`
+	DenyReason string `json:"deny_reason,omitempty"`
+}
+
+// TenantRuntimeState is the operator-visible admission state returned by
+// suspend/resume.
+type TenantRuntimeState struct {
+	TenantID   string `json:"tenant_id"`
+	Slug       string `json:"slug"`
+	Enabled    bool   `json:"enabled"`
+	Suspended  bool   `json:"suspended"`
+	DenyStatus int    `json:"deny_status"`
+	DenyReason string `json:"deny_reason,omitempty"`
+}
+
+// SuspendTenant marks a tenant suspended so its requests are denied
+// (deny_status, default 402) before its stack runs. super_admin. Signed.
+func (c *Client) SuspendTenant(ctx context.Context, slug string, req SuspendTenantRequest) (*TenantRuntimeState, error) {
+	return c.postTenantRuntimeState(ctx, slug, "suspend", req)
+}
+
+// ResumeTenant clears a tenant's suspension (back to admit). super_admin. Signed.
+func (c *Client) ResumeTenant(ctx context.Context, slug string) (*TenantRuntimeState, error) {
+	return c.postTenantRuntimeState(ctx, slug, "resume", SuspendTenantRequest{})
+}
+
+func (c *Client) postTenantRuntimeState(ctx context.Context, slug, action string, req SuspendTenantRequest) (*TenantRuntimeState, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := strings.TrimRight(c.target.Addr, "/") + "/v1/tenants/" + url.PathEscape(slug) + "/" + action
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(httpReq, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out TenantRuntimeState
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode tenant runtime state: %w", err)
+	}
+	return &out, nil
+}
+
 // FleetResyncRequest targets one tenant by slug for a control-plane re-emit.
 type FleetResyncRequest struct {
 	TenantSlug string `json:"tenant_slug"`

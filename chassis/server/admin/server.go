@@ -351,6 +351,14 @@ func (c *Controller) Start() {
 	// way to "see" the token was `challenge`, which rotated it.
 	tenantR.HandleFunc("/hostnames/{hostname}/status", c.handleHostnameStatus).Methods(http.MethodGet)
 
+	// Operator runtime-state controls (super_admin): suspend a tenant so its
+	// requests are denied (deny_status, default 402) before its stack runs,
+	// or resume it. The admission provider picks up the change on the dbcache
+	// reload the handler triggers. The billing system drives the same
+	// tenant_runtime_state table via entitlement.updated events.
+	tenantR.HandleFunc("/suspend", c.handleSuspendTenant).Methods(http.MethodPost)
+	tenantR.HandleFunc("/resume", c.handleResumeTenant).Methods(http.MethodPost)
+
 	// Authoritative-DNS zone preview (read-only). Renders the zone(s)
 	// this tenant would be served, in zone-file form — the same
 	// snapshot the dns head answers from. `?zone=<origin>` filters to
