@@ -45,6 +45,16 @@ type UsageEvent struct {
 	// metering primitive; per-request enforcement happens upstream via the
 	// chassis budget guards and is invisible to the sink.
 	Fuel int64
+
+	// AdmissionDenied marks a request the admission gate rejected (suspend,
+	// rate limit, concurrency, or drain) before the customer stack ran. For
+	// such requests Billable is false and Fuel is zeroed, so a downstream
+	// aggregator never counts rejected traffic as usage. AdmissionReason is
+	// the machine token ("rate_limited" | "at_capacity" | "suspended" |
+	// "payment_required" | "draining").
+	AdmissionDenied bool
+	AdmissionReason string
+	Billable        bool
 }
 
 // Sink consumes usage events. WriteEvent must be safe for concurrent
@@ -91,6 +101,18 @@ func (s *ZapSink) WriteEvent(ev UsageEvent) {
 	// aggregate it for billing or quota enforcement.
 	if ev.Fuel > 0 {
 		fields = append(fields, zap.Int64("fuel", ev.Fuel))
+	}
+	// Admission denials: tag the line so log-based billing/analytics can
+	// exclude rejected traffic. billable is emitted only when false — the
+	// unstated default for a normal request is billable=true.
+	if ev.AdmissionDenied {
+		fields = append(fields, zap.Bool("admission_denied", true))
+		if ev.AdmissionReason != "" {
+			fields = append(fields, zap.String("admission_reason", ev.AdmissionReason))
+		}
+	}
+	if !ev.Billable {
+		fields = append(fields, zap.Bool("billable", false))
 	}
 	// The "_sys" tenant is chassis infrastructure (the _sys/boot
 	// pipeline: health probe, unrouted 404s, routing) — not a customer

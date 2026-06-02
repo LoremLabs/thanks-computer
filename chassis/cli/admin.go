@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -63,6 +65,8 @@ func runAdminTenant(args []string, stdout, stderr io.Writer) int {
 		return runAdminTenantSuspend(args[1:], stdout, stderr)
 	case "resume":
 		return runAdminTenantResume(args[1:], stdout, stderr)
+	case "limits":
+		return runAdminTenantLimits(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printAdminTenantUsage(stdout)
 		return 0
@@ -79,12 +83,13 @@ func printAdminTenantUsage(w io.Writer) {
 Usage:
   txco admin tenant suspend <slug> [--status 402] [--reason payment_required]
   txco admin tenant resume  <slug>
+  txco admin tenant limits  <slug> [--rate 50/s] [--burst N] [--concurrency N]
 
-Suspend or resume a tenant's request admission. A suspended tenant's requests
-are denied (HTTP --status, default 402) before its stack runs; resume restores
-normal serving. Live on the next request (the chassis reloads its in-memory
-state); on a fleet deployment the change is also queued to replicas. Requires a
-super_admin signing profile.
+Suspend/resume a tenant's request admission (the 402/403 gate), or set its
+node-local rate-limit / concurrency caps (429). A suspended tenant's requests
+are denied before its stack runs; limits are enforced per chassis. Live on the
+next request (the chassis reloads its in-memory state); on a fleet deployment
+the change is also queued to replicas. Requires a super_admin signing profile.
 `)
 }
 
@@ -176,6 +181,120 @@ Flags:
 	}
 	fmt.Fprintf(stdout, "Resumed tenant %q — requests are admitted again.\n", st.Slug)
 	return 0
+}
+
+// runAdminTenantLimits: `txco admin tenant limits <slug> [--rate N/{s,m,h}] [--burst N] [--concurrency N]`.
+// Patch semantics: only the flags you pass are changed.
+func runAdminTenantLimits(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("admin tenant limits", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	rateStr := fs.String("rate", "", "per-tenant rate limit, e.g. 50/s, 50/m, 100/h (0 disables); bare number = /s")
+	burst := fs.Int("burst", 0, "token-bucket burst size; defaults to ceil(2×rate)")
+	concurrency := fs.Int("concurrency", 0, "max simultaneous in-flight requests (0 = unlimited)")
+	addr := fs.String("addr", "", "chassis admin endpoint (overrides the active profile's chassis URL)")
+	target := fs.String("target", "", "workspace target name")
+	user := fs.String("user", "", "basic-auth user")
+	pass := fs.String("pass", "", "basic-auth password")
+	profile := fs.String("profile", "", "signing profile (defaults to the active profile)")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco admin tenant limits <slug> [flags]
+
+Set a tenant's node-local rate-limit and/or concurrency cap (operational
+protection, enforced per chassis — not a billing meter). Only the flags you
+pass are changed. Live on the next request. Needs a super_admin profile.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		auth.PrintCLIError(stderr, "admin tenant limits: <slug> is required")
+		return 2
+	}
+	slug := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil { // allow flags after the slug
+		return 2
+	}
+
+	// Patch semantics — only send the flags the operator actually set.
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	var req client.SetTenantLimitsRequest
+	if set["rate"] {
+		rps, err := parseRate(*rateStr)
+		if err != nil {
+			auth.PrintCLIErrorf(stderr, "admin tenant limits: --rate %q: %v", *rateStr, err)
+			return 2
+		}
+		req.RPS = &rps
+	}
+	if set["burst"] {
+		req.Burst = burst
+	}
+	if set["concurrency"] {
+		req.Concurrency = concurrency
+	}
+	if req.RPS == nil && req.Burst == nil && req.Concurrency == nil {
+		auth.PrintCLIError(stderr, "admin tenant limits: set at least one of --rate / --burst / --concurrency")
+		return 2
+	}
+
+	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
+	st, err := client.New(clientTarget).SetTenantLimits(context.Background(), slug, req)
+	if err != nil {
+		auth.PrintCLIError(stderr, requestErrorMessage("admin tenant limits", clientTarget, *profile, err))
+		return 1
+	}
+	fmt.Fprintf(stdout, "Limits for tenant %q: rate=%s burst=%d concurrency=%d\n",
+		st.Slug, formatRate(st.RateLimitRPS), st.RateBurst, st.ConcurrencyLimit)
+	return 0
+}
+
+// parseRate parses "<number>[/unit]" (unit s|m|h, default s) into a
+// per-second rate. 0 means unlimited.
+func parseRate(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	num, per := s, 1.0 // per = seconds per unit
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		num = strings.TrimSpace(s[:i])
+		switch strings.ToLower(strings.TrimSpace(s[i+1:])) {
+		case "s", "sec", "second":
+			per = 1
+		case "m", "min", "minute":
+			per = 60
+		case "h", "hr", "hour":
+			per = 3600
+		default:
+			return 0, fmt.Errorf("unknown unit (use s, m, or h)")
+		}
+	}
+	n, err := strconv.ParseFloat(num, 64)
+	if err != nil {
+		return 0, fmt.Errorf("not a number: %q", num)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("must be >= 0")
+	}
+	return n / per, nil
+}
+
+// formatRate renders a per-second rate back in a friendly unit.
+func formatRate(rps float64) string {
+	switch {
+	case rps <= 0:
+		return "unlimited"
+	case rps >= 1:
+		return strconv.FormatFloat(rps, 'g', -1, 64) + "/s"
+	case rps*60 >= 1:
+		return strconv.FormatFloat(rps*60, 'g', -1, 64) + "/m"
+	default:
+		return strconv.FormatFloat(rps*3600, 'g', -1, 64) + "/h"
+	}
 }
 
 // runAdminResync re-emits ONE tenant's control-plane state as fresh fleet-sync

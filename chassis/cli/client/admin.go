@@ -682,12 +682,54 @@ type SuspendTenantRequest struct {
 // TenantRuntimeState is the operator-visible admission state returned by
 // suspend/resume.
 type TenantRuntimeState struct {
-	TenantID   string `json:"tenant_id"`
-	Slug       string `json:"slug"`
-	Enabled    bool   `json:"enabled"`
-	Suspended  bool   `json:"suspended"`
-	DenyStatus int    `json:"deny_status"`
-	DenyReason string `json:"deny_reason,omitempty"`
+	TenantID         string  `json:"tenant_id"`
+	Slug             string  `json:"slug"`
+	Enabled          bool    `json:"enabled"`
+	Suspended        bool    `json:"suspended"`
+	DenyStatus       int     `json:"deny_status"`
+	DenyReason       string  `json:"deny_reason,omitempty"`
+	RateLimitRPS     float64 `json:"rate_limit_rps"`
+	RateBurst        int     `json:"rate_burst"`
+	ConcurrencyLimit int     `json:"concurrency_limit"`
+}
+
+// SetTenantLimitsRequest patches a tenant's node-local rate/concurrency
+// caps; nil fields are left unchanged server-side.
+type SetTenantLimitsRequest struct {
+	RPS         *float64 `json:"rps,omitempty"`
+	Burst       *int     `json:"burst,omitempty"`
+	Concurrency *int     `json:"concurrency,omitempty"`
+}
+
+// SetTenantLimits sets a tenant's node-local rate-limit / concurrency caps.
+// super_admin. Signed.
+func (c *Client) SetTenantLimits(ctx context.Context, slug string, req SetTenantLimitsRequest) (*TenantRuntimeState, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := strings.TrimRight(c.target.Addr, "/") + "/v1/tenants/" + url.PathEscape(slug) + "/limits"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(httpReq, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out TenantRuntimeState
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode tenant runtime state: %w", err)
+	}
+	return &out, nil
 }
 
 // SuspendTenant marks a tenant suspended so its requests are denied

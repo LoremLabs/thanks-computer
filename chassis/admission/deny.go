@@ -1,6 +1,8 @@
 package admission
 
 import (
+	"math"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -24,6 +26,14 @@ func MarkDenied(resp string, d Decision, tenant string) string {
 	resp, _ = sjson.Set(resp, "_txc.admission.status", status)
 	if d.Reason != "" {
 		resp, _ = sjson.Set(resp, "_txc.admission.reason", d.Reason)
+	}
+	if d.Retry > 0 {
+		// Whole seconds, rounded up, min 1 — what a Retry-After header wants.
+		secs := int(math.Ceil(d.Retry.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		resp, _ = sjson.Set(resp, "_txc.admission.retry_after", secs)
 	}
 	if tenant != "" {
 		resp, _ = sjson.Set(resp, "_txc.tenant", tenant)

@@ -1105,12 +1105,20 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 					inflightWg.Add(1)
 					go func() {
 						defer inflightWg.Done()
+						// Per-request admission lease: the concurrency gate
+						// (processor) registers its slot-release on this lease;
+						// the defer frees it when the request goroutine returns
+						// (pipeline done OR continuation suspend). Nil-safe +
+						// idempotent, so deferring unconditionally is fine.
+						lease := admission.NewLease()
+						defer lease.Release()
+						reqCtx := admission.WithLease(envelope.Ctx, lease)
 						// kick off processor at the resolved entry stage.
 						// runWithTrace wraps pu.Run with the per-request
 						// tracer when tracing is enabled (mode != off); when
 						// off, it's a direct call into pu.Run.
 						reqStart := time.Now()
-						finalPayload, fuelUsed, runErr := runWithTrace(envelope.Ctx, pu, traceSink, envelope, raw, stage, usageSink != nil)
+						finalPayload, fuelUsed, runErr := runWithTrace(reqCtx, pu, traceSink, envelope, raw, stage, usageSink != nil)
 						if runErr != nil {
 							logger.Warn("error adding event", zap.String("err", runErr.Error()))
 						}
@@ -1136,16 +1144,29 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 							if tenant == "" {
 								tenant = gjson.Get(raw, "_txc.tenant").String()
 							}
+							// A request the admission gate denied (suspend / rate /
+							// concurrency / drain) is non-usage: tag it so
+							// billing/analytics never count rejected traffic as
+							// load. The customer stack never ran, so zero fuel
+							// regardless of any boot-stage accrual.
+							denied := gjson.GetBytes(finalPayload, "_txc.admission.denied").Bool()
+							fuel := fuelUsed
+							if denied {
+								fuel = 0
+							}
 							usageSink.WriteEvent(usage.UsageEvent{
-								RID:        envelope.Rid,
-								Tenant:     tenant,
-								Src:        envelope.Src,
-								Stack:      stage,
-								DurationMS: resTime,
-								Status:     status,
-								BytesIn:    len(eventRaw),
-								BytesOut:   len(finalPayload),
-								Fuel:       fuelUsed,
+								RID:             envelope.Rid,
+								Tenant:          tenant,
+								Src:             envelope.Src,
+								Stack:           stage,
+								DurationMS:      resTime,
+								Status:          status,
+								BytesIn:         len(eventRaw),
+								BytesOut:        len(finalPayload),
+								Fuel:            fuel,
+								AdmissionDenied: denied,
+								AdmissionReason: gjson.GetBytes(finalPayload, "_txc.admission.reason").String(),
+								Billable:        !denied,
 							})
 						}
 						if conf.LogOps != "" {

@@ -55,8 +55,16 @@ func applyAdmission(output string) string {
 	if reason := gjson.Get(output, "_txc.admission.reason").String(); reason != "" {
 		output, _ = sjson.Set(output, "_txc.web.res.headers.x-txc-deny-reason.0", reason)
 	}
+	// Retry-After from the gate's suggestion (rate-limit carries the bucket
+	// delay); 429/503 are transient. Drain (503) also closes the connection
+	// so proxies don't pin a draining node, and defaults Retry-After to 0.
+	if ra := gjson.Get(output, "_txc.admission.retry_after"); ra.Exists() {
+		output, _ = sjson.Set(output, "_txc.web.res.headers.retry-after.0", strconv.Itoa(int(ra.Int())))
+	}
 	if status == http.StatusServiceUnavailable {
-		output, _ = sjson.Set(output, "_txc.web.res.headers.retry-after.0", "0")
+		if !gjson.Get(output, "_txc.admission.retry_after").Exists() {
+			output, _ = sjson.Set(output, "_txc.web.res.headers.retry-after.0", "0")
+		}
 		output, _ = sjson.Set(output, "_txc.web.res.headers.connection.0", "close")
 	}
 	body := strconv.Itoa(status) + " " + http.StatusText(status) + "\n"

@@ -1220,7 +1220,9 @@ func (pu *Unit) advanceAfterScope(
 		// request and never for _sys/boot itself. resp is already
 		// budget-synced above, so ShapeDeny preserves fuel/TTL fields.
 		if newTen := tenantScope(runCtx); pu.Admission != nil && newTen != tenantScope(ctx) {
-			if d := pu.Admission.Decide(newTen); !d.Admit {
+			// Emit a terminal admission denial and stop (no recurse). Shared
+			// by the three checks below; first-deny-wins.
+			denyAdmission := func(d admission.Decision) (bool, error) {
 				if !*opsDone {
 					*opsDone = true
 					resCh <- event.Payload{Raw: admission.MarkDenied(string(resp), d, newTen), Type: event.JSON}
@@ -1231,6 +1233,20 @@ func (pu *Unit) advanceAfterScope(
 				})
 				endSpan()
 				return true, nil
+			}
+			// 1. suspend / disabled → 402 / 403.
+			if d := pu.Admission.Decide(newTen); !d.Admit {
+				return denyAdmission(d)
+			}
+			// 2. node-local rate limit → 429 (+ Retry-After from the bucket).
+			if ok, retry := pu.Admission.AllowRate(newTen); !ok {
+				return denyAdmission(admission.Decision{Status: 429, Reason: "rate_limited", Retry: retry})
+			}
+			// 3. node-local concurrency cap → 429. The slot is held until the
+			// bus-loop lease (carried on ctx) releases when this request's
+			// goroutine returns (pipeline done OR continuation suspend).
+			if !pu.Admission.AcquireConcurrency(newTen, admission.LeaseFromContext(ctx)) {
+				return denyAdmission(admission.Decision{Status: 429, Reason: "at_capacity"})
 			}
 		}
 		runCtx = context.WithValue(runCtx, ctxKeyParentStage, stage)

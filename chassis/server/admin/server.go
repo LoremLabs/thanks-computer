@@ -358,6 +358,7 @@ func (c *Controller) Start() {
 	// tenant_runtime_state table via entitlement.updated events.
 	tenantR.HandleFunc("/suspend", c.handleSuspendTenant).Methods(http.MethodPost)
 	tenantR.HandleFunc("/resume", c.handleResumeTenant).Methods(http.MethodPost)
+	tenantR.HandleFunc("/limits", c.handleSetTenantLimits).Methods(http.MethodPost)
 
 	// Authoritative-DNS zone preview (read-only). Renders the zone(s)
 	// this tenant would be served, in zone-file form — the same
