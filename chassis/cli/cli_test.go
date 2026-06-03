@@ -58,6 +58,35 @@ func TestDispatchWhoamiAlias(t *testing.T) {
 	}
 }
 
+// TestDispatchWhoamiAddrAlias verifies `txco whoami --addr` works — auth
+// commands use --url, but --addr is now accepted as an alias so the endpoint
+// flag spells the same as the workspace commands (status/diff/apply/…).
+func TestDispatchWhoamiAddrAlias(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/whoami" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"source":"open","capabilities":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	status, ok := Dispatch([]string{"txco", "whoami", "--addr", srv.URL}, &stdout, &stderr)
+	if !ok || status != 0 {
+		t.Fatalf("ok=%v status=%d; stderr=%q", ok, status, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "source: open") {
+		t.Fatalf("--addr alias did not reach the chassis; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	// The chassis address it talked to should be the one we passed via --addr.
+	if !strings.Contains(stdout.String(), srv.URL) {
+		t.Errorf("expected chassis %s in output; stdout=%q", srv.URL, stdout.String())
+	}
+}
+
 // TestDispatchFlagsFallThrough verifies that leading flags still hand
 // off to the server boot path so `txco --web-addr=:8080` works the
 // same as before.

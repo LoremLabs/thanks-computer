@@ -20,6 +20,7 @@ func runWhoami(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("auth whoami", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	urlFlag := fs.String("url", "", "chassis admin endpoint (defaults to the meta file's chassis_url, or http://localhost:8081)")
+	addrFlag := fs.String("addr", "", "alias of --url (the chassis admin endpoint, matching the workspace commands)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
 	fs.Usage = func() {
@@ -58,7 +59,15 @@ Flags:
 		resolvedProfile = ""
 	}
 
-	target, err := buildSignedTarget(resolvedProfile, *urlFlag)
+	// --addr is an alias of --url so the endpoint flag spells the same as the
+	// workspace commands (esp. for the top-level `txco whoami`). --addr wins
+	// when both are set.
+	endpoint := *urlFlag
+	if *addrFlag != "" {
+		endpoint = *addrFlag
+	}
+
+	target, err := buildSignedTarget(resolvedProfile, endpoint)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth whoami: %v\n", err)
 		return 1

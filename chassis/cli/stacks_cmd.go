@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -10,56 +9,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
+	"github.com/spf13/pflag"
+
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 )
-
-// reorderArgs moves all non-flag tokens to the end of the arg list so
-// Go's flag.Parse — which stops at the first positional — accepts
-// `txco activate <stack> --version N` the same as
-// `txco activate --version N <stack>`.
-//
-// Heuristic: a token is a flag if it starts with "-" (covers both
-// "--version" and short forms). A flag value that follows a flag without
-// `=` is also detected via the `flagsTakingValue` set so we don't pull
-// it forward as a positional.
-func reorderArgs(args []string, flagsTakingValue map[string]bool) []string {
-	out := make([]string, 0, len(args))
-	tail := make([]string, 0, len(args))
-	skipValue := false
-	for _, a := range args {
-		if skipValue {
-			out = append(out, a)
-			skipValue = false
-			continue
-		}
-		if strings.HasPrefix(a, "-") {
-			out = append(out, a)
-			// `--flag=value` carries its own value; `--flag value` needs the
-			// next token to follow it.
-			if !strings.Contains(a, "=") {
-				key := strings.TrimLeft(a, "-")
-				if flagsTakingValue[key] {
-					skipValue = true
-				}
-			}
-			continue
-		}
-		tail = append(tail, a)
-	}
-	return append(out, tail...)
-}
-
-// stackVerbFlagsWithValues is the value-taking flag set shared by
-// pull / push / versions. Used by reorderArgs to allow flags after
-// positional <stack> / [<dir>].
-var stackVerbFlagsWithValues = map[string]bool{
-	"target": true, "addr": true, "user": true, "pass": true,
-	"profile": true, "tenant": true, "version": true,
-}
 
 // runPull: `txco pull <stack> [--version N] [--force] [<dir>]`
 //
@@ -82,14 +38,9 @@ type activateResult struct {
 }
 
 func runPull(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("pull", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml")
-	addr := fs.String("addr", "", "chassis admin endpoint")
-	user := fs.String("user", "", "basic auth user")
-	pass := fs.String("pass", "", "basic auth password")
-	profile := fs.String("profile", "", fmt.Sprintf("signing profile (defaults to TXCO_PROFILE, then %s/active)", auth.HomePathPretty()))
-	tenant := fs.String("tenant", "", "tenant slug")
+	tf := bindTargetFlags(fs)
 	versionFlag := fs.Int64("version", 0, "version_number to pull (default: active)")
 	force := fs.Bool("force", false, "overwrite local files even if a dirty workspace is detected")
 	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of human output")
@@ -104,7 +55,7 @@ Flags:
 `)
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(reorderArgs(args, stackVerbFlagsWithValues)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() < 1 {
@@ -112,14 +63,14 @@ Flags:
 		return 2
 	}
 	stack := fs.Arg(0)
-	dir, err := resolveDir(fs.Arg(1))
+	dir, err := workspaceDir(fs.Arg(1))
 	if err != nil {
 		fmt.Fprintf(stderr, "pull: resolve dir: %v\n", err)
 		return 1
 	}
 
-	clientTarget := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
 
 	ctx := context.Background()
@@ -307,15 +258,10 @@ func loadLocalStackFiles(stackDir string) ([]client.StackFile, error) {
 // Without --activate the draft is held for review; `txco push <stack>`
 // is the create+activate shortcut (and resolves op:// refs like `apply`).
 func runDraft(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("draft", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("draft", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml")
-	addr := fs.String("addr", "", "chassis admin endpoint")
-	user := fs.String("user", "", "basic auth user")
-	pass := fs.String("pass", "", "basic auth password")
-	profile := fs.String("profile", "", "signing profile")
-	tenant := fs.String("tenant", "", "tenant slug")
-	activate := fs.Bool("activate", false, "activate the new draft immediately (like `txco push <stack>`, minus op:// resolution)")
+	tf := bindTargetFlags(fs)
+	activate := fs.Bool("activate", false, "activate the new draft immediately (create + activate, like push minus op:// resolution)")
 	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of human output")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -329,7 +275,7 @@ Flags:
 `)
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(reorderArgs(args, stackVerbFlagsWithValues)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() < 1 {
@@ -337,7 +283,7 @@ Flags:
 		return 2
 	}
 	stack := fs.Arg(0)
-	dir, err := resolveDir(fs.Arg(1))
+	dir, err := workspaceDir(fs.Arg(1))
 	if err != nil {
 		fmt.Fprintf(stderr, "draft: resolve dir: %v\n", err)
 		return 1
@@ -354,8 +300,8 @@ Flags:
 		return 1
 	}
 
-	clientTarget := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
 
 	ctx := context.Background()
@@ -437,28 +383,15 @@ func collectStackFiles(stackDir string) ([]client.StackFile, error) {
 	return out, nil
 }
 
-// activateFlagsWithValues lists flags that take a value, so the
-// reorderArgs helper doesn't accidentally pull a flag value forward
-// as the positional <stack>.
-var activateFlagsWithValues = map[string]bool{
-	"target": true, "addr": true, "user": true, "pass": true,
-	"profile": true, "tenant": true, "version": true,
-}
-
 // runActivate: `txco activate <stack> [--version N]`
 //
 // Without --version, picks the most recent draft (or refuses if none).
-// With --version, activates that exact version_number. Flags may
-// appear before or after <stack> — see reorderArgs.
+// With --version, activates that exact version_number. Flags may appear
+// before or after <stack> (pflag parses positionals and flags in any order).
 func runActivate(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("activate", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("activate", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml")
-	addr := fs.String("addr", "", "chassis admin endpoint")
-	user := fs.String("user", "", "basic auth user")
-	pass := fs.String("pass", "", "basic auth password")
-	profile := fs.String("profile", "", "signing profile")
-	tenant := fs.String("tenant", "", "tenant slug")
+	tf := bindTargetFlags(fs)
 	versionFlag := fs.Int64("version", 0, "version_number to activate (default: most recent draft)")
 	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of human output")
 	fs.Usage = func() {
@@ -473,7 +406,7 @@ Flags:
 `)
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(reorderArgs(args, activateFlagsWithValues)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() < 1 {
@@ -482,8 +415,13 @@ Flags:
 	}
 	stack := fs.Arg(0)
 
-	clientTarget := resolveTarget("", *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	dir, err := workspaceDir("")
+	if err != nil {
+		fmt.Fprintf(stderr, "activate: resolve dir: %v\n", err)
+		return 1
+	}
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
 
 	ctx := context.Background()
@@ -530,14 +468,9 @@ Flags:
 
 // runVersions: `txco versions <stack>` — list versions reverse chronologically.
 func runVersions(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("versions", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("versions", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml")
-	addr := fs.String("addr", "", "chassis admin endpoint")
-	user := fs.String("user", "", "basic auth user")
-	pass := fs.String("pass", "", "basic auth password")
-	profile := fs.String("profile", "", "signing profile")
-	tenant := fs.String("tenant", "", "tenant slug")
+	tf := bindTargetFlags(fs)
 	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of the table")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -550,7 +483,7 @@ Flags:
 `)
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(reorderArgs(args, stackVerbFlagsWithValues)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() < 1 {
@@ -559,8 +492,13 @@ Flags:
 	}
 	stack := fs.Arg(0)
 
-	clientTarget := resolveTarget("", *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	dir, err := workspaceDir("")
+	if err != nil {
+		fmt.Fprintf(stderr, "versions: resolve dir: %v\n", err)
+		return 1
+	}
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
 
 	versions, err := c.ListVersions(context.Background(), stack)

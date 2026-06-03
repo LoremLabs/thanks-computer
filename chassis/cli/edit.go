@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -34,14 +35,9 @@ import (
 // On a 409 from PATCH, the temp file is preserved so the user's
 // edits aren't lost — re-run after pulling the latest state.
 func runEdit(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("edit", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("edit", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml")
-	addr := fs.String("addr", "", "chassis admin endpoint")
-	user := fs.String("user", "", "basic auth user")
-	pass := fs.String("pass", "", "basic auth password")
-	profile := fs.String("profile", "", "signing profile")
-	tenant := fs.String("tenant", "", "tenant slug")
+	tf := bindTargetFlags(fs)
 	versionFlag := fs.Int64("version", 0, "draft version_number to edit (default: most recent draft; auto-creates one from active if none exists)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -59,7 +55,7 @@ Flags:
 `)
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(reorderArgs(args, stackVerbFlagsWithValues)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() < 2 {
@@ -69,8 +65,13 @@ Flags:
 	stack := fs.Arg(0)
 	filePath := fs.Arg(1)
 
-	clientTarget := resolveTarget("", *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	dir, err := workspaceDir("")
+	if err != nil {
+		fmt.Fprintf(stderr, "edit: resolve dir: %v\n", err)
+		return 1
+	}
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
 	ctx := context.Background()
 

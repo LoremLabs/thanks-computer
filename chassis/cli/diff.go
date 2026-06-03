@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
@@ -26,12 +25,7 @@ import (
 func runDiff(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("diff", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml (default: the config's `target:` field, or `dev`)")
-	addr := fs.String("addr", "", "chassis admin endpoint (overrides target's chassis URL)")
-	user := fs.String("user", "", "basic auth user (overrides target's user)")
-	pass := fs.String("pass", "", "basic auth password (overrides target's pass)")
-	profile := fs.String("profile", "", fmt.Sprintf("signing profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
-	tenant := fs.String("tenant", "", "tenant slug for the chassis (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
+	tf := bindTargetFlags(fs)
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON ({stacks, files}) instead of the text report")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -49,7 +43,7 @@ Flags:
 		return 2
 	}
 
-	dir, err := resolveDir(fs.Arg(0))
+	dir, err := workspaceDir(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "diff: resolve dir: %v\n", err)
 		return 1
@@ -64,7 +58,7 @@ Flags:
 	// Resolve op://NAME references locally so the comparison sees the
 	// same shape the chassis stores. Apply mock-strip too, so a `diff`
 	// preview matches what `apply --target prod` would push.
-	resolved := resolveFullTarget(dir, *target)
+	resolved := resolveFullTarget(dir, tf.Target)
 	resolverOps := buildOpRefMap(resolved)
 	for i, op := range localOps {
 		if !oprefs.HasRefs(op.Txcl) {
@@ -84,8 +78,8 @@ Flags:
 		}
 	}
 
-	clientTarget := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
 	ctx := context.Background()
 	remoteOps, err := c.ListOps(ctx, "")

@@ -5,12 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -29,16 +30,15 @@ import (
 // consecutive same-scope rows actually overlap in wall-clock time, a
 // `# parallel ×N` comment line marks the group.
 func runTrace(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("trace", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("trace", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml (default: the config's `target:` field, or `dev`)")
-	addr := fs.String("addr", "", "chassis admin endpoint (overrides target's chassis URL)")
-	user := fs.String("user", "", "basic auth user (overrides target's user)")
-	pass := fs.String("pass", "", "basic auth password (overrides target's pass)")
-	profile := fs.String("profile", "", fmt.Sprintf("signing profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
+	target := fs.String("target", "", "target name from txco.yaml (default: the config target, or dev)")
+	addr := fs.String("addr", "", "chassis admin endpoint (overrides the target's chassis URL)")
+	user := fs.String("user", "", "basic auth user (overrides the target's user)")
+	pass := fs.String("pass", "", "basic auth password (overrides the target's pass)")
+	profile := fs.String("profile", "", fmt.Sprintf("signing profile (TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
 	asJSON := fs.Bool("json", false, "print the aggregate JSON response as-is")
-	verbose := fs.Bool("verbose", false, "include in/out payloads (requires --trace-mode=full)")
-	fs.BoolVar(verbose, "v", false, "shorthand for --verbose")
+	verbose := fs.BoolP("verbose", "v", false, "include in/out payloads (requires --trace-mode=full)")
 	step := fs.String("step", "", "drill into a single step (e.g. \"100\" or \"100-hello\")")
 	plain := fs.Bool("plain", false, "force plain text output even on a TTY (skips the curses UI)")
 	grep := fs.String("grep", "", "list mode only: filter to traces whose step name or operation contains this substring")
@@ -64,9 +64,9 @@ Flags:
 		return 2
 	}
 
-	// Workspace dir for txco.yaml lookup. apply/diff/dev take an optional
-	// trailing <dir>; trace doesn't, so use cwd.
-	dir, err := resolveDir("")
+	// Workspace dir for txco.yaml lookup — walk up to the OPS/ root so trace
+	// resolves the workspace target from a subdirectory too.
+	dir, err := workspaceDir("")
 	if err != nil {
 		fmt.Fprintf(stderr, "trace: resolve dir: %v\n", err)
 		return 1

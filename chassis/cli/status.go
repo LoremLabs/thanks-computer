@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
@@ -22,12 +21,7 @@ import (
 func runStatus(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("status", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml")
-	addr := fs.String("addr", "", "chassis admin endpoint")
-	user := fs.String("user", "", "basic auth user")
-	pass := fs.String("pass", "", "basic auth password")
-	profile := fs.String("profile", "", fmt.Sprintf("signing profile (defaults to TXCO_PROFILE, then %s/active)", auth.HomePathPretty()))
-	tenant := fs.String("tenant", "", "tenant slug")
+	tf := bindTargetFlags(fs)
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of the table")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -47,7 +41,7 @@ Flags:
 		return 2
 	}
 
-	dir, err := resolveDir(fs.Arg(0))
+	dir, err := workspaceDir(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "status: resolve dir: %v\n", err)
 		return 1
@@ -62,8 +56,8 @@ Flags:
 		return 1
 	}
 
-	clientTarget := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
 
 	// Pull remote stack names from /stacks rather than /ops so we

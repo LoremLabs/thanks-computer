@@ -14,7 +14,6 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
@@ -27,8 +26,8 @@ import (
 // shared by `apply` (whole workspace) and `push` (one stack) so both deploy
 // through the identical path — see applyOps.
 type applyOpts struct {
-	target, addr, user, pass, profile, tenant string
-	dryRun, noValidate, jsonOut               bool
+	*targetFlags
+	dryRun, noValidate, jsonOut bool
 }
 
 // deployResult is the per-stack JSON form of a deploy, shared by the --json
@@ -56,13 +55,7 @@ type deployResult struct {
 func runApply(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("apply", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var opts applyOpts
-	fs.StringVar(&opts.target, "target", "", "target name from txco.yaml (default: the config's `target:` field, or `dev`)")
-	fs.StringVar(&opts.addr, "addr", "", "chassis admin endpoint (overrides target's chassis URL)")
-	fs.StringVar(&opts.user, "user", "", "basic auth user (overrides target's user)")
-	fs.StringVar(&opts.pass, "pass", "", "basic auth password (overrides target's pass)")
-	fs.StringVar(&opts.profile, "profile", "", fmt.Sprintf("signing profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
-	fs.StringVar(&opts.tenant, "tenant", "", "tenant slug for the chassis (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
+	opts := applyOpts{targetFlags: bindTargetFlags(fs)}
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "validate the bundle locally; do not POST")
 	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate (push+activate even if the chassis flags errors)")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (array of per-stack deploy results)")
@@ -90,18 +83,12 @@ Flags:
 		_ = os.Setenv("TXCO_VERBOSE", "1")
 	}
 
-	dir, err := resolveDir(fs.Arg(0))
+	// workspaceDir resolves <dir> (or cwd) then walks up to the OPS/ root so
+	// `txco apply` works from anywhere in the tree.
+	dir, err := workspaceDir(fs.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "apply: resolve dir: %v\n", err)
 		return 1
-	}
-	// Git-style root discovery: if there's no OPS/ right here, walk up
-	// to the workspace root so `txco apply` works from anywhere in the
-	// tree (e.g. inside OPS/<stack>/100/). An explicit <dir> arg that
-	// already contains OPS/ short-circuits this.
-	if root := findWorkspaceRoot(dir); root != "" && root != dir {
-		fmt.Fprintf(stderr, "apply: using workspace root %s (found OPS/ above %s)\n", root, dir)
-		dir = root
 	}
 
 	ops, err := bundle.Walk(dir)
@@ -127,13 +114,7 @@ Flags:
 func runPush(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("push", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var opts applyOpts
-	fs.StringVar(&opts.target, "target", "", "target name from txco.yaml")
-	fs.StringVar(&opts.addr, "addr", "", "chassis admin endpoint (overrides target's chassis URL)")
-	fs.StringVar(&opts.user, "user", "", "basic auth user")
-	fs.StringVar(&opts.pass, "pass", "", "basic auth password")
-	fs.StringVar(&opts.profile, "profile", "", fmt.Sprintf("signing profile (defaults to TXCO_PROFILE, then %s/active)", auth.HomePathPretty()))
-	fs.StringVar(&opts.tenant, "tenant", "", "tenant slug")
+	opts := applyOpts{targetFlags: bindTargetFlags(fs)}
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "validate locally; do not push")
 	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (the deploy result object)")
@@ -166,13 +147,10 @@ Flags:
 	}
 	stack := fs.Arg(0)
 
-	dir, err := resolveDir(fs.Arg(1))
+	dir, err := workspaceDir(fs.Arg(1))
 	if err != nil {
 		fmt.Fprintf(stderr, "push: resolve dir: %v\n", err)
 		return 1
-	}
-	if root := findWorkspaceRoot(dir); root != "" && root != dir {
-		dir = root
 	}
 
 	ops, err := bundle.Walk(dir)
@@ -214,7 +192,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 
 	// Resolve the selected target so we know which operations map to use
 	// and whether mock_res should be stripped.
-	resolved := resolveFullTarget(dir, opts.target)
+	resolved := resolveFullTarget(dir, opts.Target)
 	urlMap := buildOpRefMap(resolved)
 
 	// Substitute op://NAME per resonator: a colocated <resonatordir>/NAME.js compute wins
@@ -285,8 +263,8 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		return 0
 	}
 
-	clientTarget := resolveTarget(dir, opts.target, opts.addr, opts.user, opts.pass, opts.profile)
-	clientTarget.Tenant = resolveTenant(opts.tenant, opts.profile)
+	clientTarget := resolveTarget(dir, opts.Target, opts.Addr, opts.User, opts.Pass, opts.Profile)
+	clientTarget.Tenant = resolveTenant(opts.Tenant, opts.Profile)
 	c := client.New(clientTarget)
 	ctx := context.Background()
 
