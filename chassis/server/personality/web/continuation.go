@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
+	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -149,7 +150,9 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 	rctx := trace.WithContext(web.ctx, tracer)
 	// Link this resume trace back to the run / originating request so
 	// admin-ui can cross-navigate. ReadRunCreated is O(1).
+	var runTenant string // the run's tenant slug, for resume-trace attribution
 	if rc, rcErr := runs.ReadRunCreated(rctx, lk.RunID); rcErr == nil {
+		runTenant = rc.TenantID
 		tracer.Event(trace.TimelineEvent{
 			Ts:    time.Now(),
 			Event: "continuation.resume",
@@ -170,6 +173,10 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 	} else if res, ok, _ := runs.ReadResult(rctx, lk.RunID); ok {
 		final = res
 	}
+	// Attribute the resume trace to the run's stored tenant slug (what admin
+	// scoping filters on) — the resume RequestInfo has no tenant; fuel/bytes
+	// are best-effort from the stored result envelope.
+	trace.EmitUsage(tracer, processor.FuelUsedFromEnvelope(string(final)), len(final), runTenant)
 	tracer.End(status, final)
 	if rerr != nil {
 		web.pu.Logger.Error("resume failed",

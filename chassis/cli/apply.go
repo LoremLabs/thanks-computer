@@ -4,13 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
+
+	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -20,6 +22,26 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 )
+
+// applyOpts carries the resolved flag values the deploy pipeline needs. It's
+// shared by `apply` (whole workspace) and `push` (one stack) so both deploy
+// through the identical path — see applyOps.
+type applyOpts struct {
+	target, addr, user, pass, profile, tenant string
+	dryRun, noValidate, jsonOut               bool
+}
+
+// deployResult is the per-stack JSON form of a deploy, shared by the --json
+// paths of `apply`, `push`, and `draft`. PriorVersion is present only when a
+// prior active version was replaced; Activated is false for a `draft` held
+// back from activation.
+type deployResult struct {
+	Stack        string `json:"stack"`
+	Version      int64  `json:"version"`
+	PriorVersion *int64 `json:"prior_version,omitempty"`
+	Files        int    `json:"files"`
+	Activated    bool   `json:"activated"`
+}
 
 // runApply walks <dir>/OPS/, validates each resonator's txcl client-side, and
 // POSTs the bundle to the chassis admin endpoint of the selected target.
@@ -32,16 +54,18 @@ import (
 // "deny", `mock_res` is stripped from the bundle before pushing
 // (`mock_req` is preserved — it's documentation, not executable).
 func runApply(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("apply", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	target := fs.String("target", "", "target name from txco.yaml (default: the config's `target:` field, or `dev`)")
-	addr := fs.String("addr", "", "chassis admin endpoint (overrides target's chassis URL)")
-	user := fs.String("user", "", "basic auth user (overrides target's user)")
-	pass := fs.String("pass", "", "basic auth password (overrides target's pass)")
-	profile := fs.String("profile", "", fmt.Sprintf("signing profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
-	tenant := fs.String("tenant", "", "tenant slug for the chassis (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
-	dryRun := fs.Bool("dry-run", false, "validate the bundle locally; do not POST")
-	noValidate := fs.Bool("no-validate", false, "skip server-side validation before activate (push+activate even if the chassis flags errors)")
+	var opts applyOpts
+	fs.StringVar(&opts.target, "target", "", "target name from txco.yaml (default: the config's `target:` field, or `dev`)")
+	fs.StringVar(&opts.addr, "addr", "", "chassis admin endpoint (overrides target's chassis URL)")
+	fs.StringVar(&opts.user, "user", "", "basic auth user (overrides target's user)")
+	fs.StringVar(&opts.pass, "pass", "", "basic auth password (overrides target's pass)")
+	fs.StringVar(&opts.profile, "profile", "", fmt.Sprintf("signing profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
+	fs.StringVar(&opts.tenant, "tenant", "", "tenant slug for the chassis (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
+	fs.BoolVar(&opts.dryRun, "dry-run", false, "validate the bundle locally; do not POST")
+	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate (push+activate even if the chassis flags errors)")
+	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (array of per-stack deploy results)")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response (method, URL, status, error body) to stderr. Equivalent to TXCO_VERBOSE=1, which works for ANY txco command.")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -50,7 +74,8 @@ Usage: txco apply [flags] [<dir>]
 
 Walk <dir>/OPS/ for *.txcl resonator files, resolve any "op://NAME" references
 using the selected target's operations map, validate each resonator, and push
-the bundle to that target's chassis admin endpoint.
+the bundle to that target's chassis admin endpoint. Deploys (creates + activates
+a version for) every stack in the tree — use `+"`txco push <stack>`"+` for one stack.
 
 <dir> defaults to ".".
 
@@ -89,10 +114,107 @@ Flags:
 			"  Run `txco apply` from your workspace root (the dir containing OPS/), or pass it: `txco apply <dir>`.\n", dir)
 		return 1
 	}
+	return applyOps("apply", dir, ops, opts, "", stdout, stderr)
+}
+
+// runPush deploys a SINGLE named stack — the inverse of `txco pull <stack>`.
+// It runs the exact same pipeline as `apply` (resolve op:// refs, build
+// colocated computes, validate, activate) but scoped to one stack, so
+// `txco push api` deploys byte-identically to what `txco apply` would do for
+// the api stack. `txco draft <stack>` stages without activating.
+//
+//	txco push <stack> [<dir>]
+func runPush(args []string, stdout, stderr io.Writer) int {
+	fs := pflag.NewFlagSet("push", pflag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var opts applyOpts
+	fs.StringVar(&opts.target, "target", "", "target name from txco.yaml")
+	fs.StringVar(&opts.addr, "addr", "", "chassis admin endpoint (overrides target's chassis URL)")
+	fs.StringVar(&opts.user, "user", "", "basic auth user")
+	fs.StringVar(&opts.pass, "pass", "", "basic auth password")
+	fs.StringVar(&opts.profile, "profile", "", fmt.Sprintf("signing profile (defaults to TXCO_PROFILE, then %s/active)", auth.HomePathPretty()))
+	fs.StringVar(&opts.tenant, "tenant", "", "tenant slug")
+	fs.BoolVar(&opts.dryRun, "dry-run", false, "validate locally; do not push")
+	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate")
+	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (the deploy result object)")
+	verbose := fs.Bool("verbose", false, "trace every HTTP request/response to stderr (TXCO_VERBOSE=1)")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco push <stack> [<dir>]
+
+Deploy a single stack — the inverse of `+"`txco pull <stack>`"+`. Builds
+OPS/<stack>/ (resolving op:// refs + colocated computes), validates, and
+activates it on the target chassis in one step.
+
+Use `+"`txco apply`"+` to deploy the whole workspace, or `+"`txco draft <stack>`"+`
+to stage a version for review without activating.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *verbose {
+		_ = os.Setenv("TXCO_VERBOSE", "1")
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprint(stderr, "push: missing <stack> argument\n\nUsage: txco push <stack> [<dir>]\n")
+		return 2
+	}
+	stack := fs.Arg(0)
+
+	dir, err := resolveDir(fs.Arg(1))
+	if err != nil {
+		fmt.Fprintf(stderr, "push: resolve dir: %v\n", err)
+		return 1
+	}
+	if root := findWorkspaceRoot(dir); root != "" && root != dir {
+		dir = root
+	}
+
+	ops, err := bundle.Walk(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "push: walk %s: %v\n", dir, err)
+		return 1
+	}
+	if len(ops) == 0 {
+		fmt.Fprintf(stderr, "push: no resonators found — expected an OPS/ tree at or above %s.\n", dir)
+		return 1
+	}
+	return applyOps("push", dir, ops, opts, stack, stdout, stderr)
+}
+
+// applyOps is the shared deploy pipeline behind `apply` and `push`. cmd names
+// the calling verb (for error prefixes). When onlyStack is non-empty, ops are
+// filtered to that one stack first (the `push` path); "" deploys all stacks
+// (the `apply` path). The flow: resolve op:// refs (+ build colocated
+// computes), client-side parse, loop-lint, apply the target's mock policy,
+// then per stack create a draft, upload, validate, and activate.
+func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string, stdout, stderr io.Writer) int {
+	if onlyStack != "" {
+		filtered := make([]bundle.Op, 0, len(ops))
+		for _, op := range ops {
+			if op.Stack == onlyStack {
+				filtered = append(filtered, op)
+			}
+		}
+		if len(filtered) == 0 {
+			fmt.Fprintf(stderr, "%s: stack %q not found under %s/OPS/", cmd, onlyStack, dir)
+			if avail := sortedKeys(groupOpsByStack(ops)); len(avail) > 0 {
+				fmt.Fprintf(stderr, " (available: %s)", strings.Join(avail, ", "))
+			}
+			fmt.Fprintln(stderr)
+			return 1
+		}
+		ops = filtered
+	}
 
 	// Resolve the selected target so we know which operations map to use
 	// and whether mock_res should be stripped.
-	resolved := resolveFullTarget(dir, *target)
+	resolved := resolveFullTarget(dir, opts.target)
 	urlMap := buildOpRefMap(resolved)
 
 	// Substitute op://NAME per resonator: a colocated <resonatordir>/NAME.js compute wins
@@ -101,7 +223,7 @@ Flags:
 	// (skipped on --dry-run).
 	subOps, builtComputes, cerr := resolveOpRefsColocated(ops, urlMap, dir, stderr)
 	if cerr != nil {
-		fmt.Fprintf(stderr, "apply: %v\n", cerr)
+		fmt.Fprintf(stderr, "%s: %v\n", cmd, cerr)
 		return 1
 	}
 	ops = subOps
@@ -112,8 +234,8 @@ Flags:
 	// Client-side parse — fail fast before contacting the server.
 	for _, op := range ops {
 		if _, err := txcl.Resonator(op.Txcl); err != nil {
-			fmt.Fprintf(stderr, "apply: parse error at %s (%s/%d/%s): %v\n",
-				op.SourcePath, op.Stack, op.Scope, op.Name, err)
+			fmt.Fprintf(stderr, "%s: parse error at %s (%s/%d/%s): %v\n",
+				cmd, op.SourcePath, op.Stack, op.Scope, op.Name, err)
 			return 1
 		}
 	}
@@ -123,7 +245,7 @@ Flags:
 	// runtime budget guards in chassis/processor/budget.go. See
 	// chassis/cli/loop_lint.go for the detection logic.
 	for _, w := range lintStackLoops(ops) {
-		fmt.Fprintf(stderr, "apply: %s\n", w)
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
 	}
 
 	// Mock policy: when the target denies mocks, drop mock_res only.
@@ -135,7 +257,25 @@ Flags:
 		}
 	}
 
-	if *dryRun {
+	if opts.dryRun {
+		if opts.jsonOut {
+			type resonator struct {
+				Stack string `json:"stack"`
+				Scope int    `json:"scope"`
+				Name  string `json:"name"`
+			}
+			rs := make([]resonator, 0, len(ops))
+			for _, op := range ops {
+				rs = append(rs, resonator{op.Stack, op.Scope, op.Name})
+			}
+			if err := writeJSON(stdout, map[string]any{
+				"dry_run": true, "target": resolved.Name, "resonators": rs,
+			}); err != nil {
+				fmt.Fprintf(stderr, "%s: encode json: %v\n", cmd, err)
+				return 1
+			}
+			return 0
+		}
 		fmt.Fprintf(stdout, "validated %d resonator(s) for target %q (chassis: %s, mock: %s):\n",
 			len(ops), resolved.Name, resolved.Chassis, mockOrDefault(resolved.Mock))
 		for _, op := range ops {
@@ -145,25 +285,31 @@ Flags:
 		return 0
 	}
 
-	clientTarget := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
-	clientTarget.Tenant = resolveTenant(*tenant, *profile)
+	clientTarget := resolveTarget(dir, opts.target, opts.addr, opts.user, opts.pass, opts.profile)
+	clientTarget.Tenant = resolveTenant(opts.tenant, opts.profile)
 	c := client.New(clientTarget)
-
-	// Group ops by stack, then for each stack: create a draft (cloning
-	// the active version), upload the file set, and activate. `apply`
-	// is push+activate sugar — keeps the one-verb dev path while the
-	// underlying flow goes through the versioned control plane.
-	stacks := groupOpsByStack(ops)
 	ctx := context.Background()
+
+	// In --json mode stdout must carry only the result object, so route
+	// progress chatter (compute uploads) to stderr.
+	progress := stdout
+	if opts.jsonOut {
+		progress = stderr
+	}
 
 	// Upload built compute artifacts before activating any resonator that
 	// references them — activation verifies their presence and rolls back if
 	// missing.
-	if err := uploadComputes(ctx, c, builtComputes, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "apply: %v\n", err)
+	if err := uploadComputes(ctx, c, builtComputes, progress, stderr); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
 		return 1
 	}
 
+	// Group ops by stack, then for each stack: create a draft (cloning
+	// the active version), upload the file set, validate, and activate.
+	// `apply`/`push` are push+activate sugar over the versioned control plane.
+	stacks := groupOpsByStack(ops)
+	results := make([]deployResult, 0, len(stacks))
 	for _, stack := range sortedKeys(stacks) {
 		files := opsToFiles(stacks[stack])
 		versionNumber, err := c.CreateDraft(ctx, stack, "active")
@@ -174,39 +320,46 @@ Flags:
 			// pre-override and misleads when --addr is passed. A 401
 			// unknown_key usually means the key isn't enrolled on this
 			// endpoint (compare `txco auth whoami`).
-			fmt.Fprintf(stderr, "apply: %s: create draft: %v\n  (endpoint %s; txco.yaml target %q)\n",
-				stack, err, clientTarget.Addr, resolved.Name)
+			fmt.Fprintf(stderr, "%s: %s: create draft: %v\n  (endpoint %s; txco.yaml target %q)\n",
+				cmd, stack, err, clientTarget.Addr, resolved.Name)
 			return 1
 		}
 		if _, err := c.PutDraftFiles(ctx, stack, versionNumber, files); err != nil {
-			fmt.Fprintf(stderr, "apply: %s: upload files for v%d: %v\n", stack, versionNumber, err)
+			fmt.Fprintf(stderr, "%s: %s: upload files for v%d: %v\n", cmd, stack, versionNumber, err)
 			return 1
 		}
 		// Pre-activate validation: run the same checks the chassis
 		// would run on activate, but surface them before we flip the
 		// pointer. On failure we leave the draft on the chassis so the
-		// user can either fix locally and re-apply or activate it
+		// user can either fix locally and re-deploy or activate it
 		// manually via the admin UI after investigating.
-		if !*noValidate {
+		if !opts.noValidate {
 			vresp, verr := c.ValidateVersion(ctx, stack, versionNumber)
 			if verr != nil {
-				fmt.Fprintf(stderr, "apply: %s: validate v%d: %v\n", stack, versionNumber, verr)
+				fmt.Fprintf(stderr, "%s: %s: validate v%d: %v\n", cmd, stack, versionNumber, verr)
 				return 1
 			}
 			if vresp != nil && !vresp.OK {
-				fmt.Fprintf(stderr, "apply: %s v%d: validation failed (%d error%s); not activating.\n",
-					stack, versionNumber, len(vresp.Errors), pluralS(len(vresp.Errors)))
+				fmt.Fprintf(stderr, "%s: %s v%d: validation failed (%d error%s); not activating.\n",
+					cmd, stack, versionNumber, len(vresp.Errors), pluralS(len(vresp.Errors)))
 				for _, e := range vresp.Errors {
 					fmt.Fprintf(stderr, "  %s: %s\n", e.Path, e.Err)
 				}
-				fmt.Fprintf(stderr, "apply: draft v%d left on chassis; fix locally and re-run `txco apply`, or `--no-validate` to push anyway.\n", versionNumber)
+				fmt.Fprintf(stderr, "%s: draft v%d left on chassis; fix locally and re-run, or `--no-validate` to push anyway.\n", cmd, versionNumber)
 				return 1
 			}
 		}
 		act, err := c.Activate(ctx, stack, versionNumber)
 		if err != nil {
-			fmt.Fprintf(stderr, "apply: %s: activate v%d: %v\n", stack, versionNumber, err)
+			fmt.Fprintf(stderr, "%s: %s: activate v%d: %v\n", cmd, stack, versionNumber, err)
 			return 1
+		}
+		results = append(results, deployResult{
+			Stack: stack, Version: act.VersionNumber,
+			PriorVersion: act.PriorVersionNumber, Files: len(files), Activated: true,
+		})
+		if opts.jsonOut {
+			continue
 		}
 		if act.PriorVersionNumber != nil {
 			fmt.Fprintf(stdout, "%s v%d activated (was v%d, %d files)\n",
@@ -217,6 +370,19 @@ Flags:
 		}
 		if act.StructuredURL != "" {
 			fmt.Fprintf(stdout, "  → %s\n", act.StructuredURL)
+		}
+	}
+
+	if opts.jsonOut {
+		// `push` deploys exactly one stack → emit a single object; `apply`
+		// emits the array (one entry per stack).
+		var payload any = results
+		if onlyStack != "" && len(results) == 1 {
+			payload = results[0]
+		}
+		if err := writeJSON(stdout, payload); err != nil {
+			fmt.Fprintf(stderr, "%s: encode json: %v\n", cmd, err)
+			return 1
 		}
 	}
 	return 0

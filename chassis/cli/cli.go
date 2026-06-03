@@ -76,22 +76,24 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 	case "init":
 		return runInit(rest, stdout, stderr), true
 	case "apply":
-		return runApply(rest, stdout, stderr), true
+		return jsonErrWrap(rest, stdout, stderr, runApply), true
 	case "diff":
-		return runDiff(rest, stdout, stderr), true
+		return jsonErrWrap(rest, stdout, stderr, runDiff), true
 	case "status":
-		return runStatus(rest, stdout, stderr), true
+		return jsonErrWrap(rest, stdout, stderr, runStatus), true
 	case "pull":
-		return runPull(rest, stdout, stderr), true
+		return jsonErrWrap(rest, stdout, stderr, runPull), true
 	case "draft":
-		return runDraft(rest, stdout, stderr), true
+		return jsonErrWrap(rest, stdout, stderr, runDraft), true
 	case "push":
-		// Hidden back-compat alias for `draft` (pre-rename). Not shown in help.
-		return runDraft(rest, stdout, stderr), true
+		// Deploy a single stack (create draft + activate) — the inverse of
+		// `pull`. Distinct from `apply` (whole workspace) and `draft`
+		// (stage without activating). See chassis/cli/apply.go.
+		return jsonErrWrap(rest, stdout, stderr, runPush), true
 	case "activate":
-		return runActivate(rest, stdout, stderr), true
+		return jsonErrWrap(rest, stdout, stderr, runActivate), true
 	case "versions":
-		return runVersions(rest, stdout, stderr), true
+		return jsonErrWrap(rest, stdout, stderr, runVersions), true
 	case "edit":
 		return runEdit(rest, stdout, stderr), true
 	case "dev":
@@ -220,11 +222,12 @@ The thanks-computer chassis: event router + rule authoring CLI.
 %s
   %s   Run the chassis server
   %s   Scaffold a local OPS/<stack>/.../ tree
-  %s   Deploy local OPS/ tree to a chassis (creates + activates a version)
+  %s   Deploy the whole OPS/ tree (all stacks; create + activate a version)
   %s   Compare local OPS/ tree against a chassis admin endpoint
   %s   Per-stack version drift between local and chassis (exit 1 on divergence)
   %s   Materialise a stack's active version into local OPS/
-  %s   Create a draft version from local OPS/<stack>/ (add --activate to deploy)
+  %s   Deploy one stack — create + activate (inverse of pull)
+  %s   Create a draft version of one stack (stage; no activate)
   %s   Flip a stack's active version (defaults to most recent draft)
   %s   List versions for a stack with active marker
   %s   Open $EDITOR on one file from a draft and PATCH the result back
@@ -269,6 +272,7 @@ Use %s for per-command flags.
 		padCmd(cmd("diff")+"  [<dir>]"),
 		padCmd(cmd("status")+" [<dir>]"),
 		padCmd(cmd("pull")+" <stack> [<dir>]"),
+		padCmd(cmd("push")+" <stack> [<dir>]"),
 		padCmd(cmd("draft")+" <stack> [<dir>]"),
 		padCmd(cmd("activate")+" <stack>"),
 		padCmd(cmd("versions")+" <stack>"),

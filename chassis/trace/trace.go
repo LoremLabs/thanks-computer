@@ -146,3 +146,26 @@ type RequestTracer interface {
 	Event(ev TimelineEvent)
 	End(status string, finalPayload []byte)
 }
+
+// EmitUsage records the per-request usage primitives — fuel, response size,
+// and the resolved tenant slug — as a `request.usage` timeline event. The
+// trace readers (file + NATS) lift these onto the trace's Fuel / BytesOut /
+// Tenant; the tenant is what admin tenant-scoping filters on. Called from
+// every convergence point — the main request path (server.runWithTrace) and
+// each resume path (web/continuation, processor/deferred, processor/
+// continuable) — so the event name + field keys live in exactly one place.
+//
+// This is a TRACE artifact only: it is NOT the billing usage.UsageEvent and
+// never reaches the usage Sink, so emitting it on additional paths does not
+// affect metering.
+func EmitUsage(t RequestTracer, fuel int64, bytesOut int, tenant string) {
+	t.Event(TimelineEvent{
+		Ts:    time.Now(),
+		Event: "request.usage",
+		Fields: map[string]any{
+			"fuel":      fuel,
+			"bytes_out": bytesOut,
+			"tenant":    tenant,
+		},
+	})
+}

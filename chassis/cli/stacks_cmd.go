@@ -66,6 +66,21 @@ var stackVerbFlagsWithValues = map[string]bool{
 // Materialises the active (or specified) version's files under
 // <dir>/OPS/<stack>/... and writes <dir>/.txco/<stack>.state.json so
 // subsequent pushes know which version to parent off.
+// pullResult is the JSON form of a `txco pull --json`.
+type pullResult struct {
+	Stack        string `json:"stack"`
+	Version      int64  `json:"version"`
+	FilesWritten int    `json:"files_written"`
+	Dir          string `json:"dir"`
+}
+
+// activateResult is the JSON form of a `txco activate --json`.
+type activateResult struct {
+	Stack        string `json:"stack"`
+	Version      int64  `json:"version"`
+	PriorVersion *int64 `json:"prior_version,omitempty"`
+}
+
 func runPull(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -77,6 +92,7 @@ func runPull(args []string, stdout, stderr io.Writer) int {
 	tenant := fs.String("tenant", "", "tenant slug")
 	versionFlag := fs.Int64("version", 0, "version_number to pull (default: active)")
 	force := fs.Bool("force", false, "overwrite local files even if a dirty workspace is detected")
+	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of human output")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -183,6 +199,15 @@ Flags:
 		return 1
 	}
 
+	if *asJSON {
+		if err := writeJSON(stdout, pullResult{
+			Stack: stack, Version: versionNumber, FilesWritten: len(vd.Files), Dir: stackDir,
+		}); err != nil {
+			fmt.Fprintf(stderr, "pull: encode json: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "pulled %s v%d → %s (%d files)\n", stack, versionNumber, stackDir, len(vd.Files))
 	return 0
 }
@@ -275,11 +300,12 @@ func loadLocalStackFiles(stackDir string) ([]client.StackFile, error) {
 	return out, nil
 }
 
-// runDraft: `txco draft <stack> [--activate] [<dir>]` (formerly `push`,
-// still accepted as a hidden alias).
+// runDraft: `txco draft <stack> [--activate] [<dir>]`.
 //
 // Walks <dir>/OPS/<stack>/..., creates a draft (cloning from the
 // active version), uploads the file set, and optionally activates.
+// Without --activate the draft is held for review; `txco push <stack>`
+// is the create+activate shortcut (and resolves op:// refs like `apply`).
 func runDraft(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("draft", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -289,7 +315,8 @@ func runDraft(args []string, stdout, stderr io.Writer) int {
 	pass := fs.String("pass", "", "basic auth password")
 	profile := fs.String("profile", "", "signing profile")
 	tenant := fs.String("tenant", "", "tenant slug")
-	activate := fs.Bool("activate", false, "activate the new draft immediately (same as `txco apply`)")
+	activate := fs.Bool("activate", false, "activate the new draft immediately (like `txco push <stack>`, minus op:// resolution)")
+	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of human output")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -341,7 +368,10 @@ Flags:
 		fmt.Fprintf(stderr, "draft: upload files for v%d: %v\n", versionNumber, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "drafted %s v%d (%d files)\n", stack, versionNumber, len(files))
+	res := deployResult{Stack: stack, Version: versionNumber, Files: len(files)}
+	if !*asJSON {
+		fmt.Fprintf(stdout, "drafted %s v%d (%d files)\n", stack, versionNumber, len(files))
+	}
 
 	if *activate {
 		act, err := c.Activate(ctx, stack, versionNumber)
@@ -349,10 +379,20 @@ Flags:
 			fmt.Fprintf(stderr, "draft: activate v%d: %v\n", versionNumber, err)
 			return 1
 		}
-		if act.PriorVersionNumber != nil {
-			fmt.Fprintf(stdout, "activated %s v%d (was v%d)\n", stack, act.VersionNumber, *act.PriorVersionNumber)
-		} else {
-			fmt.Fprintf(stdout, "activated %s v%d\n", stack, act.VersionNumber)
+		res.Activated = true
+		res.PriorVersion = act.PriorVersionNumber
+		if !*asJSON {
+			if act.PriorVersionNumber != nil {
+				fmt.Fprintf(stdout, "activated %s v%d (was v%d)\n", stack, act.VersionNumber, *act.PriorVersionNumber)
+			} else {
+				fmt.Fprintf(stdout, "activated %s v%d\n", stack, act.VersionNumber)
+			}
+		}
+	}
+	if *asJSON {
+		if err := writeJSON(stdout, res); err != nil {
+			fmt.Fprintf(stderr, "draft: encode json: %v\n", err)
+			return 1
 		}
 	}
 	return 0
@@ -420,6 +460,7 @@ func runActivate(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", "signing profile")
 	tenant := fs.String("tenant", "", "tenant slug")
 	versionFlag := fs.Int64("version", 0, "version_number to activate (default: most recent draft)")
+	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of human output")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -470,6 +511,15 @@ Flags:
 		fmt.Fprintf(stderr, "activate: %v\n", err)
 		return 1
 	}
+	if *asJSON {
+		if err := writeJSON(stdout, activateResult{
+			Stack: stack, Version: act.VersionNumber, PriorVersion: act.PriorVersionNumber,
+		}); err != nil {
+			fmt.Fprintf(stderr, "activate: encode json: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if act.PriorVersionNumber != nil {
 		fmt.Fprintf(stdout, "activated %s v%d (was v%d)\n", stack, act.VersionNumber, *act.PriorVersionNumber)
 	} else {
@@ -488,6 +538,7 @@ func runVersions(args []string, stdout, stderr io.Writer) int {
 	pass := fs.String("pass", "", "basic auth password")
 	profile := fs.String("profile", "", "signing profile")
 	tenant := fs.String("tenant", "", "tenant slug")
+	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of the table")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -516,6 +567,16 @@ Flags:
 	if err != nil {
 		fmt.Fprintf(stderr, "versions: %v\n", err)
 		return 1
+	}
+	if *asJSON {
+		if versions == nil {
+			versions = []client.VersionRecord{}
+		}
+		if err := writeJSON(stdout, versions); err != nil {
+			fmt.Fprintf(stderr, "versions: encode json: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 	for _, v := range versions {
 		marker := "  "

@@ -324,6 +324,7 @@ func (pu *Unit) finishContinuableDetached(
 	}
 
 	var tracer trace.RequestTracer
+	var runTenant string // the run's tenant slug, for resume-trace attribution
 	if pu.Sink != nil {
 		tracer = pu.Sink.Begin(trace.RequestInfo{
 			RID:       continuation.ResumeTraceRID(runID, stage),
@@ -332,6 +333,7 @@ func (pu *Unit) finishContinuableDetached(
 			StartedAt: time.Now(),
 		})
 		if rc, rcErr := pu.Runs.ReadRunCreated(workCtx, runID); rcErr == nil {
+			runTenant = rc.TenantID
 			tracer.Event(trace.TimelineEvent{
 				Ts:    time.Now(),
 				Event: "continuation.resume",
@@ -417,6 +419,10 @@ func (pu *Unit) finishContinuableDetached(
 		} else if res, ok, _ := pu.Runs.ReadResult(workCtx, runID); ok {
 			final = res
 		}
+		// Attribute the resume trace to the run's stored tenant slug (what
+		// admin scoping filters on); fuel/bytes are best-effort from the
+		// stored result envelope (may be empty on this path).
+		trace.EmitUsage(tracer, FuelUsedFromEnvelope(string(final)), len(final), runTenant)
 		tracer.End(rStatus, final)
 	}
 }

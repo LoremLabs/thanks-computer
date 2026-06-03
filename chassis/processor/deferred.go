@@ -27,12 +27,12 @@ import (
 // deadlineHorizon computes the reap deadline (expires_at) for a deferred
 // join:
 //
-//	expires_at = now + async_budget + fixed_slack
+//		expires_at = now + async_budget + fixed_slack
 //
-//   - async_budget = the op's runtime budget (opAsyncBudget): its WITH
-//     timeout, or async-runtime-default. The long pole.
-//   - fixed_slack  = the configured deferred-join-slack pad covering the
-//     downstream synchronous scopes the run still traverses.
+//	  - async_budget = the op's runtime budget (opAsyncBudget): its WITH
+//	    timeout, or async-runtime-default. The long pole.
+//	  - fixed_slack  = the configured deferred-join-slack pad covering the
+//	    downstream synchronous scopes the run still traverses.
 //
 // v1 uses a flat slack — cheap, deterministic, and fail-closed (an
 // over-estimate only delays orphan reaping). Accurately summing each
@@ -219,7 +219,7 @@ func (pu *Unit) dispatchDeferred(ctx context.Context, raw, stage string, ops []o
 			trace.FromContext(ctx).Step(trace.StepInfo{
 				Stack: op.Stack, Scope: op.Scope, Name: name,
 				Operation: op.Resonator.Exec, Transport: "async",
-				Input:     []byte(op.Input), Output: ack,
+				Input: []byte(op.Input), Output: ack,
 				StartedAt: aStart, FinishedAt: time.Now(), Status: "pending",
 			})
 		}(op, opc, token, name, expiresAt)
@@ -411,12 +411,14 @@ func (pu *Unit) DriveDeferredResume(runID, stage string) {
 	}
 
 	var tracer trace.RequestTracer
+	var runTenant string // the run's tenant slug, for resume-trace attribution
 	if pu.Sink != nil {
 		tracer = pu.Sink.Begin(trace.RequestInfo{
 			RID: continuation.ResumeTraceRID(runID, stage), Src: "continuation",
 			Stack: stage, StartedAt: time.Now(),
 		})
 		if rc, rcErr := pu.Runs.ReadRunCreated(bg, runID); rcErr == nil {
+			runTenant = rc.TenantID
 			tracer.Event(trace.TimelineEvent{
 				Ts: time.Now(), Event: "continuation.resume",
 				Fields: map[string]any{
@@ -437,6 +439,10 @@ func (pu *Unit) DriveDeferredResume(runID, stage string) {
 		} else if res, ok, _ := pu.Runs.ReadResult(bg, runID); ok {
 			final = res
 		}
+		// Attribute the resume trace to the run's stored tenant slug (what
+		// admin scoping filters on); fuel/bytes are best-effort from the
+		// stored result envelope.
+		trace.EmitUsage(tracer, FuelUsedFromEnvelope(string(final)), len(final), runTenant)
 		tracer.End(rStatus, final)
 	}
 	if rerr != nil {
@@ -464,7 +470,7 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 	trace.FromContext(reqCtx).Step(trace.StepInfo{
 		Stack: op.Stack, Scope: op.Scope, Name: name,
 		Operation: op.Resonator.Exec, Transport: "async",
-		Input:     []byte(op.Input), Output: ack,
+		Input: []byte(op.Input), Output: ack,
 		StartedAt: aStart, FinishedAt: time.Now(), Status: "pending",
 	})
 

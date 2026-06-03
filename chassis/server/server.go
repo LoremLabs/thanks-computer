@@ -606,25 +606,13 @@ func runWithTrace(
 	if err != nil {
 		status = "error"
 	}
-	// Surface the per-request usage primitives (fuel + response size) into
-	// the trace so the admin detail view can promote them out of the _txc
-	// envelope blob. Uses the authoritative fuelUsed return value, not
-	// _txc.fuel_used — the latter is stripped from the outbound copy. Rides
-	// the generic timeline Event (written in every mode), so it survives in
-	// summary mode where out.json isn't recorded. Bytes-in is already kept
-	// as the request's payload_bytes.
-	tracer.Event(trace.TimelineEvent{
-		Ts:    time.Now(),
-		Event: "request.usage",
-		Fields: map[string]any{
-			"fuel":      fuelUsed,
-			"bytes_out": len(finalPayload),
-			// Resolved tenant (the pipeline's routed tenant), not the `_sys`
-			// entry tenant the trace was opened with. Admin tenant-scoping
-			// filters traces on this; unrouted/healthz stay `_sys`.
-			"tenant": gjson.GetBytes(finalPayload, "_txc.tenant").String(),
-		},
-	})
+	// Surface the per-request usage primitives (fuel, response size, resolved
+	// tenant) into the trace via the shared request.usage event so the admin
+	// detail view + tenant-scoping read them. Uses the authoritative fuelUsed
+	// return value (not the strippable _txc.fuel_used); the resolved tenant
+	// (not the `_sys` entry tenant) comes from the final envelope. Rides the
+	// generic timeline Event, written in every mode.
+	trace.EmitUsage(tracer, fuelUsed, len(finalPayload), processor.TenantFromEnvelope(string(finalPayload)))
 	tracer.End(status, finalPayload)
 	return finalPayload, fuelUsed, err
 }

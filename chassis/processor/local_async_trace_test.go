@@ -263,3 +263,44 @@ func TestLocalAsyncNoSinkStillWorks(t *testing.T) {
 		t.Fatalf("run state = %q, want completed (no sink, but functionality must remain)", st)
 	}
 }
+
+// TestLocalAsyncResumeTraceCarriesUsageEvent — the resume trace now emits a
+// `request.usage` event (the same one the main request path emits), so the
+// trace reader can attribute the resumed run to its tenant + fuel/bytes. The
+// keys must be present and flattened onto the event doc.
+func TestLocalAsyncResumeTraceCarriesUsageEvent(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	fs, err := filestore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("filestore: %v", err)
+	}
+	pu.Runs = continuation.NewRuns(fs)
+	traceDir := withFileSink(t, pu)
+
+	stub := newMCPStub(t)
+	stub.OnToolsCall = func(_ []byte) []byte {
+		return []byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"hi"}]}}`)
+	}
+	seedOp(t, pu, "usage-tst", 100, "ask",
+		`EXEC "`+mcpExecURL(stub.URL, "ask")+`" WITH mode = "async", timeout = "5s"`)
+
+	resCh := make(chan event.Payload, 1)
+	go func() { _ = pu.Run(context.Background(), `{}`, "usage-tst/100", resCh) }()
+	rcid, _ := waitFor202(t, resCh)
+	runID := resolveRunIDFromRcid(t, pu, rcid)
+	if st := waitForRunCompleted(t, pu, runID); st != continuation.StateCompleted {
+		t.Fatalf("run state = %q, want completed", st)
+	}
+
+	resumeRID := continuation.ResumeTraceRID(runID, "usage-tst/100")
+	events := readTimeline(t, traceDir, resumeRID)
+	u := findEventByName(events, "request.usage")
+	if u == nil {
+		t.Fatalf("resume trace missing request.usage event; timeline=%v", events)
+	}
+	for _, k := range []string{"tenant", "fuel", "bytes_out"} {
+		if _, ok := u[k]; !ok {
+			t.Errorf("request.usage missing %q key; event=%v", k, u)
+		}
+	}
+}

@@ -14,7 +14,7 @@ import (
 // help text doesn't list either. Update this allowlist (with rationale)
 // when adding a new hidden alias.
 var hiddenTopLevelCases = map[string]string{
-	"push": "back-compat alias for `draft` (pre-rename) — not advertised",
+	// (none currently — `push` is now a first-class deploy verb)
 }
 
 // TestCompletionTopLevelMatchesDispatchSwitch parses chassis/cli/cli.go

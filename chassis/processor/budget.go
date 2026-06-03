@@ -308,6 +308,14 @@ func FuelUsedFromEnvelope(raw string) int64 {
 	return gjson.Get(raw, "_txc.fuel_used").Int()
 }
 
+// TenantFromEnvelope reads the resolved tenant slug from an envelope's
+// `_txc.tenant`. Mirrors FuelUsedFromEnvelope; used at the trace-usage emit
+// sites (main + resume paths) to attribute a trace to its tenant — the slug
+// admin tenant-scoping filters on.
+func TenantFromEnvelope(raw string) string {
+	return gjson.Get(raw, "_txc.tenant").String()
+}
+
 // clampTTL implements the IP-TTL idiom for rule writes: a rule may
 // voluntarily lower its sub-budget (`EMIT @ttl = N`) but may not raise it.
 // Called from OverlayResponse when an override targets `_txc.ttl`.
@@ -336,4 +344,3 @@ func emitBudgetExhausted(err error, resCh chan event.Payload) bool {
 	resCh <- event.Payload{Raw: raw, Type: event.JSON}
 	return true
 }
-

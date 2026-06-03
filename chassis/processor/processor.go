@@ -1484,6 +1484,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		// to this trace, so admin-ui shows them under one rid
 		// distinct from the suspending request's rid.
 		var tracer trace.RequestTracer
+		var runTenant string // the run's tenant slug, for resume-trace attribution
 		if pu.Sink != nil {
 			tracer = pu.Sink.Begin(trace.RequestInfo{
 				RID:       continuation.ResumeTraceRID(runID, stage),
@@ -1495,6 +1496,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			// from the original (suspending) request to the resume
 			// trace and back.
 			if rc, rcErr := pu.Runs.ReadRunCreated(workCtx, runID); rcErr == nil {
+				runTenant = rc.TenantID
 				tracer.Event(trace.TimelineEvent{
 					Ts:    time.Now(),
 					Event: "continuation.resume",
@@ -1584,6 +1586,9 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			} else if res, ok, _ := pu.Runs.ReadResult(workCtx, runID); ok {
 				final = res
 			}
+			// Attribute the resume trace to the run's stored tenant slug (what
+			// admin scoping filters on); fuel/bytes best-effort from final.
+			trace.EmitUsage(tracer, FuelUsedFromEnvelope(string(final)), len(final), runTenant)
 			tracer.End(rStatus, final)
 		}
 	}()
