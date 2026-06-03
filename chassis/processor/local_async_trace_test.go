@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	"github.com/loremlabs/thanks-computer/chassis/continuation/filestore"
@@ -302,5 +303,54 @@ func TestLocalAsyncResumeTraceCarriesUsageEvent(t *testing.T) {
 		if _, ok := u[k]; !ok {
 			t.Errorf("request.usage missing %q key; event=%v", k, u)
 		}
+	}
+}
+
+// TestLocalAsyncResumeEmitsBillingUsage — the resume convergence emits a
+// BILLING usage.UsageEvent (src="continuation") for the resumed segment, so
+// async/suspended request work is metered, not just traced. Distinct from the
+// request.usage trace event asserted above.
+func TestLocalAsyncResumeEmitsBillingUsage(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	fs, err := filestore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("filestore: %v", err)
+	}
+	pu.Runs = continuation.NewRuns(fs)
+	us := newChanUsage()
+	pu.Usage = us
+
+	stub := newMCPStub(t)
+	stub.OnToolsCall = func(_ []byte) []byte {
+		return []byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"hi"}]}}`)
+	}
+	seedOp(t, pu, "bill-tst", 100, "ask",
+		`EXEC "`+mcpExecURL(stub.URL, "ask")+`" WITH mode = "async", timeout = "5s"`)
+
+	resCh := make(chan event.Payload, 1)
+	go func() { _ = pu.Run(context.Background(), `{}`, "bill-tst/100", resCh) }()
+	rcid, _ := waitFor202(t, resCh)
+	runID := resolveRunIDFromRcid(t, pu, rcid)
+	if st := waitForRunCompleted(t, pu, runID); st != continuation.StateCompleted {
+		t.Fatalf("run state = %q, want completed", st)
+	}
+
+	// Billing event arrives on the detached resume goroutine; block for it.
+	select {
+	case ev := <-us.ch:
+		if ev.Src != "continuation" {
+			t.Errorf("Src = %q, want continuation", ev.Src)
+		}
+		if !ev.Billable {
+			t.Error("Billable = false, want true")
+		}
+		if ev.RID != continuation.ResumeTraceRID(runID, "bill-tst/100") {
+			t.Errorf("RID = %q, want the resume trace rid", ev.RID)
+		}
+		if ev.Fuel < 0 {
+			t.Errorf("Fuel = %d, want >= 0", ev.Fuel)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("resume emitted no billing usage event within 3s")
 	}
 }

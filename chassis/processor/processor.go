@@ -1958,6 +1958,7 @@ func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh
 // failed sibling op fails the stage (design: a failed sibling fails the
 // scope). Runs in the caller's ctx, not the dead request ctx.
 func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
+	start := time.Now() // resume-segment wall-clock, for the billing usage line
 	ss, err := pu.Runs.ReadStageSuspended(ctx, runID, stage)
 	if err != nil {
 		return err
@@ -2100,11 +2101,50 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 			return werr
 		}
 		_ = pu.Runs.AppendEvent(ctx, runID, "run.completed", map[string]any{"stage": stage})
+		pu.emitResumeUsage(ss, []byte(p.Raw), runID, stage, time.Since(start))
 	default:
 		// Re-suspended at a later async barrier; the new stage's docs
-		// (and its callbacks) drive the run forward.
+		// (and its callbacks) drive the run forward. The fuel it consumed
+		// is billed when the run finally completes (its segment's delta).
 	}
 	return nil
+}
+
+// emitResumeUsage bills the resumed segment's fuel to the usage Sink — the
+// billing line the main convergence (server.go) writes for a normal request,
+// here for the resume half that bypasses that path. Per-segment delta:
+// fuel(final) − fuel(suspend envelope); the suspend already billed its
+// pre-suspend portion, so this covers only the post-suspend work. Nil-safe.
+//
+// NOTE: ss.ScopeEnvelope carries scope-ENTRY fuel while the suspend billed up
+// to the 202, so the delta slightly over-counts the suspend scope's own
+// charges (~tens of fuel per suspended request) — an accepted v1 imprecision.
+// This is the BILLING usage.UsageEvent, distinct from the request.usage TRACE
+// event (trace.EmitUsage) emitted on the same paths.
+func (pu *Unit) emitResumeUsage(ss continuation.StageSuspended, finalRaw []byte, runID, stage string, dur time.Duration) {
+	if pu.Usage == nil {
+		return
+	}
+	delta := FuelUsedFromEnvelope(string(finalRaw)) - FuelUsedFromEnvelope(ss.ScopeEnvelope)
+	if delta < 0 {
+		delta = 0
+	}
+	stack := gjson.Get(ss.ScopeEnvelope, "_txc.stack").String()
+	if stack == "" {
+		stack = stage
+	}
+	pu.Usage.WriteEvent(usage.UsageEvent{
+		RID:        continuation.ResumeTraceRID(runID, stage),
+		Tenant:     TenantFromEnvelope(ss.ScopeEnvelope), // slug, matches the suspend's line
+		Src:        "continuation",
+		Stack:      stack,
+		DurationMS: dur.Milliseconds(),
+		Status:     "ok",
+		BytesIn:    len(ss.ScopeEnvelope),
+		BytesOut:   len(finalRaw),
+		Fuel:       delta,
+		Billable:   true,
+	})
 }
 
 // MergeJSON iterate through top level keys, add them to other struct, return it

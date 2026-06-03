@@ -527,6 +527,7 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 // identity is carried), and any OTHER still-pending joins resolve via the
 // re-run's own floor check (the deferred identity is carried too).
 func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss continuation.StageSuspended) error {
+	start := time.Now() // resume-segment wall-clock, for the billing usage line
 	merged := ss.ScopeEnvelope
 	if merged == "" {
 		merged = "{}"
@@ -613,6 +614,7 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 			return werr
 		}
 		_ = pu.Runs.AppendEvent(ctx, runID, "run.completed", map[string]any{"stage": stage})
+		pu.emitResumeUsage(ss, []byte(p.Raw), runID, stage, time.Since(start))
 	default:
 		// Re-suspended at a later barrier/join; its callbacks drive the run.
 	}
