@@ -161,6 +161,13 @@ func readTimeline(reqDir string, d *RequestDetail) {
 				n := int64(v)
 				d.DurationMs = &n
 			}
+		case "request.usage":
+			if v, ok := ev["fuel"].(float64); ok {
+				d.Fuel = int64(v)
+			}
+			if v, ok := ev["bytes_out"].(float64); ok {
+				d.BytesOut = int64(v)
+			}
 		}
 	}
 }

@@ -55,6 +55,9 @@ type traceRequestResponse struct {
 	Status           string             `json:"status"`
 	PayloadBytes     int64              `json:"payload_bytes,omitempty"`
 	PayloadTruncated bool               `json:"payload_truncated,omitempty"`
+	Fuel             int64              `json:"fuel,omitempty"`
+	BytesIn          int64              `json:"bytes_in,omitempty"`
+	BytesOut         int64              `json:"bytes_out,omitempty"`
 	TraceMode        string             `json:"trace_mode,omitempty"`
 	Steps            []traceStep        `json:"steps"`
 	In               map[string]any     `json:"in,omitempty"`
@@ -153,6 +156,9 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 		Status:           d.Status,
 		PayloadBytes:     d.PayloadBytes,
 		PayloadTruncated: d.PayloadTruncated,
+		Fuel:             d.Fuel,
+		BytesIn:          d.PayloadBytes,
+		BytesOut:         d.BytesOut,
 		TraceMode:        c.pu.Conf.TraceMode,
 		Steps:            make([]traceStep, 0, len(d.Steps)),
 		In:               d.In,

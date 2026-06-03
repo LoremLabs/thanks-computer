@@ -68,7 +68,12 @@ func (pu *Unit) runScopeContinuable(
 	done := make(chan continuableResult, 1)
 	aStart := time.Now()
 	go func() {
-		out, eerr := pu.Exec(workCtx, op)
+		out, authorControlled, eerr := pu.Exec(workCtx, op)
+		// Untrusted producer output is sanitized here so BOTH the sync-merge
+		// path (below) and any async-promotion reuse see only allowed _txc.*.
+		if eerr == nil && authorControlled && out.Type == event.JSON {
+			out.Raw = sanitizeAuthorOutput(out.Raw)
+		}
 		done <- continuableResult{payload: out, err: eerr}
 	}()
 

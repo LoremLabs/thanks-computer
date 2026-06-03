@@ -600,6 +600,21 @@ func runWithTrace(
 	if err != nil {
 		status = "error"
 	}
+	// Surface the per-request usage primitives (fuel + response size) into
+	// the trace so the admin detail view can promote them out of the _txc
+	// envelope blob. Uses the authoritative fuelUsed return value, not
+	// _txc.fuel_used — the latter is stripped from the outbound copy. Rides
+	// the generic timeline Event (written in every mode), so it survives in
+	// summary mode where out.json isn't recorded. Bytes-in is already kept
+	// as the request's payload_bytes.
+	tracer.Event(trace.TimelineEvent{
+		Ts:    time.Now(),
+		Event: "request.usage",
+		Fields: map[string]any{
+			"fuel":      fuelUsed,
+			"bytes_out": len(finalPayload),
+		},
+	})
 	tracer.End(status, finalPayload)
 	return finalPayload, fuelUsed, err
 }
@@ -1167,6 +1182,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						lease := admission.NewLease()
 						defer lease.Release()
 						reqCtx := admission.WithLease(envelope.Ctx, lease)
+						// Usage attribution reads the tenant from immutable
+						// pipeline state, not the mutable response envelope: an
+						// author-controlled stack can rewrite `_txc.tenant`, so
+						// billing trusts the pinned tenant the processor records
+						// into this observer instead. See processor.TenantObserver.
+						tenantObs := processor.NewTenantObserver()
+						reqCtx = processor.WithTenantObserver(reqCtx, tenantObs)
 						// kick off processor at the resolved entry stage.
 						// runWithTrace wraps pu.Run with the per-request
 						// tracer when tracing is enabled (mode != off); when
@@ -1183,20 +1205,30 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						// Usage event. This is the single convergence
 						// point for every source; the processor emits
 						// its response from several branches, but they
-						// all funnel back here. The resolved tenant is
-						// pinned in pipeline context and rewritten onto
-						// the response envelope (not the inlet one), so
-						// read it from finalPayload first; fall back to
-						// the stamped request (`_sys` for unrouted) and
-						// log whatever we have.
+						// all funnel back here. The tenant is read from
+						// the immutable observer the processor pinned —
+						// NOT the response envelope, whose `_txc.tenant`
+						// an author-controlled stack can rewrite. Fall
+						// back to the ingress-stamped request (`_sys` for
+						// unrouted) when nothing was pinned.
 						if usageSink != nil {
 							status := "ok"
 							if runErr != nil {
 								status = "error"
 							}
-							tenant := gjson.GetBytes(finalPayload, "_txc.tenant").String()
-							if tenant == "" {
+							tenant, pinned := tenantObs.Tenant()
+							if !pinned || tenant == "" {
 								tenant = gjson.Get(raw, "_txc.tenant").String()
+							}
+							// Stack: the routed customer stack the request ran
+							// (stamped onto the envelope by ingress routing,
+							// next to _txc.tenant), so usage attributes to the
+							// tenant's stack — not the _sys/boot entry stage. Fall
+							// back to the entry stage for unrouted/_sys traffic
+							// (no customer stack was stamped).
+							stack := gjson.GetBytes(finalPayload, "_txc.stack").String()
+							if stack == "" {
+								stack = stage
 							}
 							// A request the admission gate denied (suspend / rate /
 							// concurrency / drain) is non-usage: tag it so
@@ -1212,7 +1244,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 								RID:             envelope.Rid,
 								Tenant:          tenant,
 								Src:             envelope.Src,
-								Stack:           stage,
+								Stack:           stack,
 								DurationMS:      resTime,
 								Status:          status,
 								BytesIn:         len(eventRaw),

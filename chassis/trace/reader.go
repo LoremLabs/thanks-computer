@@ -71,6 +71,13 @@ type RequestDetail struct {
 	Status           string
 	PayloadBytes     int64
 	PayloadTruncated bool
+	// Fuel is the total per-request fuel consumed (the metering primitive);
+	// BytesOut is the final response size. Both come from the request.usage
+	// timeline event the chassis emits at convergence. BytesIn is the
+	// existing PayloadBytes. Zero when the event is absent (older traces,
+	// resume traces).
+	Fuel             int64
+	BytesOut         int64
 	Steps            []Step
 	In               map[string]any
 	Out              any

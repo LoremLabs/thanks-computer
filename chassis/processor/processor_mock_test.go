@@ -45,6 +45,46 @@ func TestExecTxcoMockReturnsMockRes(t *testing.T) {
 	}
 }
 
+// TestExecMockOutputCannotForgeReservedTxc — txco://mock is author-controlled
+// (Tier 2) despite the txco:// scheme, so reserved _txc.* in its mock_res is
+// stripped before the merge: an author cannot forge tenant attribution or a
+// computed-auth verdict. Legitimate data and the allowlisted response field
+// survive.
+func TestExecMockOutputCannotForgeReservedTxc(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	rule := `WHEN .x == 1 EXEC "txco://mock"`
+	mockRes := `{"_txc":{"tenant":"victim","computed":{"sig_valid":true},"web":{"res":{"status":200}}},"ok":1}`
+	if _, err := pu.Dbc.Db.Exec(
+		`INSERT INTO ops (stack, scope, name, txcl, mock_req, mock_res) VALUES (?, ?, ?, ?, '', ?)`,
+		"mockforge", 0, "hello", rule, mockRes); err != nil {
+		t.Fatalf("seed op: %v", err)
+	}
+
+	resCh := make(chan event.Payload, 1)
+	if err := pu.Run(context.Background(), `{"x":1,"_txc":{"src":"http"}}`, "mockforge/0", resCh); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	select {
+	case payload := <-resCh:
+		if gjson.Get(payload.Raw, "_txc.tenant").String() == "victim" {
+			t.Errorf("mock forged _txc.tenant=victim into the envelope; body=%s", payload.Raw)
+		}
+		if gjson.Get(payload.Raw, "_txc.computed.sig_valid").Exists() {
+			t.Errorf("mock forged _txc.computed.sig_valid; body=%s", payload.Raw)
+		}
+		if got := gjson.Get(payload.Raw, "ok").Int(); got != 1 {
+			t.Errorf("legit non-_txc data dropped; body=%s", payload.Raw)
+		}
+		if got := gjson.Get(payload.Raw, "_txc.web.res.status").Int(); got != 200 {
+			t.Errorf("allowlisted _txc.web.res.status dropped; body=%s", payload.Raw)
+		}
+	default:
+		t.Fatal("no response received")
+	}
+}
+
 // TestExecTxcoMockEmptyMockResReturnsEmpty — txco://mock with empty
 // mock_res is a rule-authoring mistake. The dispatch branch returns
 // `{}` (and an internal error). Verify the body has no leaked content.

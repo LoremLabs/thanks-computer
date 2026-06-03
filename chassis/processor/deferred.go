@@ -313,6 +313,8 @@ func (pu *Unit) resolveDeferredJoins(ctx context.Context, di deferredIdent, curS
 			ob, _ = pu.Runs.Get(ctx, term.OutputKey)
 		}
 		if s := string(ob); s != "" && s != "{}" {
+			// Deferred op output is untrusted: strip reserved _txc.* before merge.
+			s = sanitizeAuthorOutput(s)
 			if m, merr := pu.MergeJSON(merged, s); merr == nil {
 				merged = m
 			} else {
@@ -470,7 +472,9 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 		workCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		out, eerr := pu.Exec(workCtx, op)
+		// Trust bit discarded: stored then merged at the sanitizing
+		// resume/deferred sites (async/worker output is always untrusted).
+		out, _, eerr := pu.Exec(workCtx, op)
 		status := "completed"
 		var payload string
 		if eerr != nil {
@@ -559,6 +563,8 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 			Status: "completed",
 		})
 		if s := string(ob); s != "" && s != "{}" {
+			// Deferred resume output is untrusted: strip reserved _txc.* before merge.
+			s = sanitizeAuthorOutput(s)
 			if m, merr := pu.MergeJSON(merged, s); merr == nil {
 				merged = m
 			} else {

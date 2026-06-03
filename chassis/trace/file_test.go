@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -378,6 +379,40 @@ func TestFileSinkWritesAreAtomic(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk: %v", err)
+	}
+}
+
+// TestRequestUsageRoundTrip asserts the request.usage timeline event the
+// chassis emits at convergence is parsed back into RequestDetail.Fuel and
+// BytesOut by the file reader. Uses ModeSummary to prove the value survives
+// even when out.json isn't written (the timeline carries it in every mode).
+func TestRequestUsageRoundTrip(t *testing.T) {
+	s, dir := newSink(t, ModeSummary)
+	start := time.Now()
+	tr := s.Begin(RequestInfo{
+		RID:       "req-usage",
+		Src:       "http",
+		Stack:     "boot/0",
+		StartedAt: start,
+		Payload:   []byte(`{"_txc":{"src":"http"}}`),
+	})
+	tr.Event(TimelineEvent{
+		Ts:     start.Add(time.Millisecond),
+		Event:  "request.usage",
+		Fields: map[string]any{"fuel": int64(105), "bytes_out": 42},
+	})
+	tr.End("ok", []byte(`{"ok":true}`))
+
+	rdr := &fileReader{dir: dir}
+	d, err := rdr.Get(context.Background(), "req-usage", false)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if d.Fuel != 105 {
+		t.Errorf("Fuel=%d, want 105", d.Fuel)
+	}
+	if d.BytesOut != 42 {
+		t.Errorf("BytesOut=%d, want 42", d.BytesOut)
 	}
 }
 

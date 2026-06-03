@@ -147,7 +147,7 @@ func TestExecRejectsNonNetworkSchemes(t *testing.T) {
 			Input:     `{}`,
 			Resonator: &resonator.Resonator{Exec: exec},
 		}
-		payload, err := pu.Exec(context.Background(), op)
+		payload, _, err := pu.Exec(context.Background(), op)
 		if err == nil {
 			t.Errorf("%s: expected unsupported-scheme error, got nil", exec)
 		} else if !strings.Contains(err.Error(), "unsupported EXEC value") {

@@ -15,9 +15,14 @@ import (
 // namespace, matching what `WHEN @path`, `SET @path = ...`, and
 // `EMIT @path = ...` already do (the txcl parser rewrites `@x.y` to
 // `_txc.x.y` at parse time — see chassis/txcl/parser/parser.go:216,234).
-// So `{{@web.req.body}}` reads `_txc.web.req.body`, and
-// `{{@body_text}}` reads `_txc.body_text` — what an author who already
-// knows txcl expects.
+// So `{{@web.req.body}}` reads `_txc.web.req.body`. For a scratch value
+// the author supplies (e.g. `{{@body_text}}` -> `_txc.body_text`), set it
+// with `SET PRE @body_text = …`: SET PRE decorates only this op's input,
+// so the template sees it but it never propagates to the next scope.
+// Note `_txc.*` is the chassis control namespace — reserved fields
+// (tenant, computed.*, budget, …) are NOT author-writable on the
+// propagating envelope (see chassis/processor authorMayWriteTxc); the
+// op-local SET PRE scratch above is exempt because it doesn't merge.
 //
 // The substitution is JSON-escaped by default: string values are
 // JSON-string-escaped with the outer quotes stripped, so they splice

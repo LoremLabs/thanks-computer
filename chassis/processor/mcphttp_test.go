@@ -329,7 +329,7 @@ func TestExecMCPHTTPRequiresToolFragment(t *testing.T) {
 		Input:     `{}`,
 		Resonator: &resonator.Resonator{Exec: "mcp+http://127.0.0.1:1/mcp"}, // no fragment
 	}
-	_, err := pu.Exec(context.Background(), op)
+	_, _, err := pu.Exec(context.Background(), op)
 	if err == nil {
 		t.Fatal("expected missing-fragment error, got nil")
 	}

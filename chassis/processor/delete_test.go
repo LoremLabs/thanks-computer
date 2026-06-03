@@ -63,6 +63,49 @@ func TestRunTxcDeleteRemovesTreesAfterConsumption(t *testing.T) {
 	}
 }
 
+// TestRunTxcDeleteCannotTargetReserved pins the delete-target guard: an
+// author may delete only what they may write, so `_txc.delete` targeting a
+// reserved control field is refused — including the @-aliased form
+// (@web.req.host -> _txc.web.req.host) and the explicit form (_txc.src).
+// Non-reserved targets are still honored. This closes the indirect-deletion
+// bypass (e.g. EMIT @delete = ["_txc.fuel_used"] to reset the budget).
+func TestRunTxcDeleteCannotTargetReserved(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	seed := func(scope int, name, rule string) {
+		t.Helper()
+		if _, err := pu.Dbc.Db.Exec(
+			`INSERT INTO ops (stack, scope, name, txcl, mock_req, mock_res) VALUES (?, ?, ?, ?, '', '')`,
+			"app", scope, name, rule); err != nil {
+			t.Fatalf("seed app/%d/%s: %v", scope, name, err)
+		}
+	}
+	seed(0, "scratch", `EMIT .scratch = "x"`)
+	// @web.req.host -> _txc.web.req.host (alias, reserved); _txc.src (explicit,
+	// reserved); scratch (non-_txc, deletable).
+	seed(100, "trim", `EMIT @delete = ["@web.req.host", "_txc.src", "scratch"]`)
+
+	resCh := make(chan event.Payload, 1)
+	in := `{"_txc":{"src":"http","web":{"req":{"host":"h"}}}}`
+	if err := pu.Run(context.Background(), in, "app/0", resCh); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	select {
+	case payload := <-resCh:
+		if got := gjson.Get(payload.Raw, "_txc.web.req.host").String(); got != "h" {
+			t.Errorf("aliased reserved delete (@web.req.host) was honored; host=%q body=%s", got, payload.Raw)
+		}
+		if got := gjson.Get(payload.Raw, "_txc.src").String(); got != "http" {
+			t.Errorf("explicit reserved delete (_txc.src) was honored; src=%q body=%s", got, payload.Raw)
+		}
+		if gjson.Get(payload.Raw, "scratch").Exists() {
+			t.Errorf("non-reserved target should be deleted; body=%s", payload.Raw)
+		}
+	default:
+		t.Error("expected a payload on resCh")
+	}
+}
+
 // TestRunTxcDeleteNestedPathAndSingleString covers two shapes: a dotted
 // path deletes just a nested key (the parent survives), and a single
 // string (not an array) is accepted as one path.

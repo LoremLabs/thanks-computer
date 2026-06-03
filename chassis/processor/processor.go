@@ -195,6 +195,9 @@ func deferredRunFrom(ctx context.Context) (deferredIdent, bool) {
 // (and for tests). Within the normal data plane, Run pins this itself
 // from the envelope's `_txc.tenant`.
 func WithTenant(ctx context.Context, slug string) context.Context {
+	// Record the resolved tenant for usage attribution from immutable
+	// pipeline state (see TenantObserver). No-op when no observer is attached.
+	tenantObserverFromContext(ctx).observe(slug)
 	return context.WithValue(ctx, ctxKeyTenant, slug)
 }
 
@@ -384,7 +387,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		// stages — including EXEC/goto jumps — stay boxed into this
 		// tenant even if a rule rewrites `_txc.tenant`.
 		if ctx.Value(ctxKeyTenant) == nil {
-			ctx = context.WithValue(ctx, ctxKeyTenant, gjson.Get(raw, "_txc.tenant").String())
+			ctx = WithTenant(ctx, gjson.Get(raw, "_txc.tenant").String())
 		}
 	}
 
@@ -700,6 +703,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// exec function
 			if op.Resonator != nil {
 				var output event.Payload
+				var authorControlled bool
 				var err error
 				// A rule with no EXEC clause is semantically identical
 				// to `EXEC "txco://noop"` — both produce `{}` and let
@@ -708,7 +712,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 				// _txc.mocks pattern-match interception symmetric:
 				// pattern-mocking an op shouldn't require the rule
 				// author to add a dummy EXEC.
-				output, err = pu.Exec(ctx, op)
+				output, authorControlled, err = pu.Exec(ctx, op)
 				if err != nil {
 					pu.Logger.Debug("outerr", zap.String("err", err.Error()))
 				} else {
@@ -747,7 +751,17 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 
 				if err == nil {
 					if output.Type == event.JSON {
-						op.Output = output.Raw
+						raw := output.Raw
+						if authorControlled {
+							// Untrusted producer (remote HTTP, compute, MCP,
+							// or a rule-author mock): strip reserved _txc.*
+							// control fields before EMIT + merge so it cannot
+							// forge tenant/computed-auth/budget. Trusted core/
+							// ai output (e.g. _txc.computed.*, _txc.chat.*)
+							// passes through untouched.
+							raw = sanitizeAuthorOutput(raw)
+						}
+						op.Output = raw
 					}
 					if output.Type == event.Null {
 						op.Output = `{}`
@@ -928,7 +942,23 @@ func (pu *Unit) advanceAfterScope(
 	// decorate output with any POST commands from our opstack (this ensures structures exist)
 	for _, op := range ops {
 		if op.Resonator.SetPost != nil {
-			out, derr := pu.DecorateInput(resp, op.Resonator.SetPost.Overrides) // only if it doesn't exist
+			// SET POST decorates the propagating response, so — like EMIT and
+			// op output — it cannot write reserved _txc.* control fields. (SET
+			// PRE is exempt: it decorates only the transient per-op input and
+			// never merges, so it doubles as op-local _txc scratch.) The path
+			// is normalized first so the @-aliased form (@tenant -> _txc.tenant)
+			// is caught too.
+			overrides := op.Resonator.SetPost.Overrides
+			allowed := make([]resonator.BranchValue, 0, len(overrides))
+			for _, ov := range overrides {
+				if authorMayWriteTxc(normalizeEnvelopePath(ov.Path)) {
+					allowed = append(allowed, ov)
+				} else {
+					pu.Logger.Debug("set post: dropped reserved control write",
+						zap.String("path", ov.Path))
+				}
+			}
+			out, derr := pu.DecorateInput(resp, allowed) // only if it doesn't exist
 			if derr != nil {
 				// SET POST resolution failed for this op. Per strict-by-default
 				// semantics, the merged response is replaced with a failure
@@ -949,9 +979,19 @@ func (pu *Unit) advanceAfterScope(
 	if len(val.Array()) > 0 {
 		for _, del := range val.Array() {
 			for _, b := range del.Array() {
-				branch := b.String()
-				branch = strings.TrimPrefix(branch, ".")
-				resp, _ = sjson.Delete(resp, branch)
+				p := normalizeEnvelopePath(b.String())
+				if p == "" {
+					continue
+				}
+				// Authors may delete only what they may write: a reserved
+				// _txc.* target (tenant, fuel_used, computed, …) is refused so
+				// deletion can't indirectly clear a control field.
+				if !authorMayWriteTxc(p) {
+					pu.Logger.Debug("delete: refused reserved target",
+						zap.String("path", p))
+					continue
+				}
+				resp, _ = sjson.Delete(resp, p)
 			}
 		}
 	}
@@ -969,9 +1009,19 @@ func (pu *Unit) advanceAfterScope(
 	// "london.year") and `@`-prefixed `_txc.` paths via normalizeEnvelopePath.
 	if dels := gjson.Get(resp, "_txc.delete"); dels.Exists() {
 		for _, d := range dels.Array() {
-			if p := normalizeEnvelopePath(d.String()); p != "" {
-				resp, _ = sjson.Delete(resp, p)
+			p := normalizeEnvelopePath(d.String())
+			if p == "" {
+				continue
 			}
+			// Authors may delete only what they may write (see above): a
+			// reserved _txc.* target is refused, including the @-aliased form
+			// (@tenant -> _txc.tenant via normalizeEnvelopePath).
+			if !authorMayWriteTxc(p) {
+				pu.Logger.Debug("delete: refused reserved target",
+					zap.String("path", p))
+				continue
+			}
+			resp, _ = sjson.Delete(resp, p)
 		}
 		resp, _ = sjson.Delete(resp, "_txc.delete")
 	}
@@ -1449,7 +1499,10 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			workCtx = trace.WithContext(workCtx, tracer)
 		}
 
-		out, eerr := pu.Exec(workCtx, op)
+		// Trust bit discarded: this output is stored (RecordTerminal) and
+		// merged later at the resume/deferred sites, which sanitize
+		// unconditionally (async/worker output is always untrusted).
+		out, _, eerr := pu.Exec(workCtx, op)
 		status := "completed"
 		var payload string
 		if eerr != nil {
@@ -1746,7 +1799,9 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 			defer cancel()
 
 			if !async {
-				out, eerr := pu.Exec(octx, op)
+				// Trust bit discarded: stored then merged at the sanitizing
+				// resume/deferred sites (async/worker output is always untrusted).
+				out, _, eerr := pu.Exec(octx, op)
 				if eerr != nil {
 					_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "failed",
 						failPayload(eerr.Error()))
@@ -1950,6 +2005,10 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 			Status: "completed",
 		})
 		if s := string(ob); s != "" && s != "{}" {
+			// Async worker output is untrusted: strip reserved _txc.* control
+			// fields so a hostile/buggy worker cannot forge tenant/computed/
+			// budget on resume.
+			s = sanitizeAuthorOutput(s)
 			if m, merr := pu.MergeJSON(merged, s); merr == nil {
 				merged = m
 			} else {
@@ -2286,7 +2345,15 @@ func injectRuntimeIdentity(body, stack, name string, scope int) string {
 }
 
 // Exec Execute an operation at this step
-func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload, error) {
+// Exec dispatches an operation to its transport and returns the produced
+// payload. The bool return — authorControlled — reports whether the output came
+// from an author-controlled producer (remote HTTP, sandboxed compute, an MCP
+// tool, or a rule-author mock) as opposed to a trusted built-in core handler,
+// the chassis-owned ai:// namespace, or a synthesized control output. Callers
+// that merge this output into the envelope MUST sanitizeAuthorOutput it when
+// authorControlled is true, so an untrusted producer cannot forge reserved
+// `_txc.*` control fields (tenant, computed auth, budget, …).
+func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload, bool, error) {
 
 	execStart := time.Now()
 
@@ -2487,7 +2554,7 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 		Error:      stepErr,
 	})
 
-	return payload, err
+	return payload, transportAuthorControlled(transport), err
 }
 
 // computeLogWriter routes a sandboxed compute's diagnostic output (console.*,
@@ -2996,14 +3063,10 @@ func (pu *Unit) OverlayResponse(env, output string, overrides []resonator.Branch
 		if rerr != nil {
 			return output, fmt.Errorf("overlay %s: %w", override.Path, rerr)
 		}
-		// Chassis-internal budget fields: rule writes to fuel/seen are
-		// silently dropped (fuel only goes up; seen is chassis state).
-		// _txc.ttl follows the IP-TTL idiom: rules may lower their
-		// sub-budget (handy for guarded sub-flows) but never raise it.
-		switch {
-		case branch == "_txc.fuel_used", strings.HasPrefix(branch, "_txc._seen"):
-			continue
-		case branch == "_txc.ttl":
+		// _txc.ttl follows the IP-TTL idiom: a rule may LOWER its sub-budget
+		// (handy for guarded sub-flows) but never raise it. This is the one
+		// reserved control field an author may touch, and only downward.
+		if branch == "_txc.ttl" {
 			var requested int64
 			switch v := val.(type) {
 			case int64:
@@ -3020,6 +3083,16 @@ func (pu *Unit) OverlayResponse(env, output string, overrides []resonator.Branch
 			if err == nil {
 				output = altered
 			}
+			continue
+		}
+		// Reserved control fields (tenant, src, rid, route.*, cron.*,
+		// computed.*, chat.*, fuel_used, _seen, …) are not author-writable.
+		// `branch` is the post-@-expansion path (the lexer maps @tenant ->
+		// _txc.tenant), so an aliased EMIT is caught here too. Silently
+		// dropped — same posture as the previous fuel/_seen drop.
+		if !authorMayWriteTxc(branch) {
+			pu.Logger.Debug("emit overlay: dropped reserved control write",
+				zap.String("path", branch))
 			continue
 		}
 		altered, err := sjson.Set(output, branch, val)
