@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { getTrace, type TraceResponse, type TraceStep } from '../lib/api'
+    import { getTrace, traceRawUrl, type TraceResponse, type TraceStep } from '../lib/api'
     import { store } from '../lib/store.svelte'
     import Ago from './Ago.svelte'
     import CopyButton from './CopyButton.svelte'
@@ -161,7 +161,7 @@
     }
     const orderedSteps = $derived((trace?.steps ?? []).slice().sort((a, b) => stepStart(a) - stepStart(b)))
 
-    const rawUrl = $derived(`/traces/requests/${encodeURIComponent(rid)}/`)
+    const rawUrl = $derived(traceRawUrl(store.state.currentTenant, rid))
     // Capture into locally-named refs so the template doesn't have to
     // wrestle the narrowing back from `trace.stack` (which the type
     // checker sees as possibly undefined inside async closures).

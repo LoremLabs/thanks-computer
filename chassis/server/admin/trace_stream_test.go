@@ -137,6 +137,56 @@ func TestTraceStream_DeliversEvents(t *testing.T) {
 	}
 }
 
+// TestTraceStream_CarriesFuelAndBytes guards the prod fuel-visibility fix:
+// the live-stream wire shape must carry Fuel/BytesIn/BytesOut. On the
+// NATS/R2 backend the stream is the ONLY path that serves a successful
+// trace, so if closedTraceToWire drops these (as it originally did) the
+// admin "fuel" row stays blank in prod even though the sink computed them.
+func TestTraceStream_CarriesFuelAndBytes(t *testing.T) {
+	in := []trace.ClosedTrace{
+		{RequestDetail: trace.RequestDetail{
+			RID: "rid-fuel", Status: "ok",
+			Fuel: 1234, BytesOut: 567, PayloadBytes: 89,
+		}, Cursor: "1"},
+	}
+	c := newStreamControllerForTest(t, &memArmable{preloaded: in}, 1000)
+	req := asSuperAdmin(httptest.NewRequest(http.MethodGet, "/traces/stream?wait=500", nil))
+	w := httptest.NewRecorder()
+	c.handleTraceStream(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp traceStreamResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Events) != 1 {
+		t.Fatalf("got %d events, want 1", len(resp.Events))
+	}
+	ev := resp.Events[0]
+	if ev.Fuel != 1234 {
+		t.Errorf("Fuel = %d, want 1234", ev.Fuel)
+	}
+	if ev.BytesOut != 567 {
+		t.Errorf("BytesOut = %d, want 567", ev.BytesOut)
+	}
+	if ev.BytesIn != 89 {
+		t.Errorf("BytesIn = %d, want 89 (from PayloadBytes)", ev.BytesIn)
+	}
+	// And confirm they survive the JSON wire under their snake_case keys.
+	var raw struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("raw decode: %v", err)
+	}
+	for _, k := range []string{"fuel", "bytes_in", "bytes_out"} {
+		if _, ok := raw.Events[0][k]; !ok {
+			t.Errorf("wire JSON missing %q key", k)
+		}
+	}
+}
+
 func TestTraceStream_CursorFilters(t *testing.T) {
 	in := []trace.ClosedTrace{
 		{RequestDetail: trace.RequestDetail{RID: "rid-a"}, Cursor: "1"},

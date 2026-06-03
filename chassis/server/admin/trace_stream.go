@@ -15,21 +15,30 @@ import (
 // path — clients can resolve them by opening /traces/requests/{rid}.
 // json on click) and plus an opaque per-subscription cursor.
 type traceStreamEvent struct {
-	RID              string         `json:"rid"`
-	Src              string         `json:"src,omitempty"`
-	Tenant           string         `json:"tenant,omitempty"`
-	Stack            string         `json:"stack,omitempty"`
-	Route            string         `json:"route,omitempty"`
-	StartedAt        string         `json:"started_at,omitempty"`
-	FinishedAt       string         `json:"finished_at,omitempty"`
-	DurationMs       *int64         `json:"duration_ms,omitempty"`
-	Status           string         `json:"status"`
-	PayloadBytes     int64          `json:"payload_bytes,omitempty"`
-	PayloadTruncated bool           `json:"payload_truncated,omitempty"`
-	Steps            []traceStep    `json:"steps"`
-	In               map[string]any `json:"in,omitempty"`
-	Out              any            `json:"out,omitempty"`
-	Cursor           string         `json:"cursor"`
+	RID              string `json:"rid"`
+	Src              string `json:"src,omitempty"`
+	Tenant           string `json:"tenant,omitempty"`
+	Stack            string `json:"stack,omitempty"`
+	Route            string `json:"route,omitempty"`
+	StartedAt        string `json:"started_at,omitempty"`
+	FinishedAt       string `json:"finished_at,omitempty"`
+	DurationMs       *int64 `json:"duration_ms,omitempty"`
+	Status           string `json:"status"`
+	PayloadBytes     int64  `json:"payload_bytes,omitempty"`
+	PayloadTruncated bool   `json:"payload_truncated,omitempty"`
+	// Fuel/BytesIn/BytesOut mirror the archive detail response
+	// (traceRequestResponse): per-request fuel + request/response sizes,
+	// lifted from the request.usage timeline event. Without these the
+	// admin's "fuel" row stays blank on the live path — which, on the
+	// NATS/R2 backend, is the ONLY path that serves a successful trace
+	// (the archive is on-error only). BytesIn is the payload size.
+	Fuel     int64          `json:"fuel,omitempty"`
+	BytesIn  int64          `json:"bytes_in,omitempty"`
+	BytesOut int64          `json:"bytes_out,omitempty"`
+	Steps    []traceStep    `json:"steps"`
+	In       map[string]any `json:"in,omitempty"`
+	Out      any            `json:"out,omitempty"`
+	Cursor   string         `json:"cursor"`
 }
 
 // traceStreamResponse is the body of a 200 response: a batch of new
@@ -205,6 +214,9 @@ func closedTraceToWire(t trace.ClosedTrace) traceStreamEvent {
 		Status:           t.Status,
 		PayloadBytes:     t.PayloadBytes,
 		PayloadTruncated: t.PayloadTruncated,
+		Fuel:             t.Fuel,
+		BytesIn:          t.PayloadBytes,
+		BytesOut:         t.BytesOut,
 		Steps:            make([]traceStep, 0, len(t.Steps)),
 		In:               t.In,
 		Out:              t.Out,

@@ -39,6 +39,12 @@ export interface TraceStreamEvent {
     status?: string
     payload_bytes?: number
     payload_truncated?: boolean
+    // Per-request usage, mirrored from the archive detail shape. The live
+    // stream is the only path that carries a successful trace on the
+    // NATS/R2 backend, so without these the fuel row never renders in prod.
+    fuel?: number
+    bytes_in?: number
+    bytes_out?: number
     steps?: unknown[]
     in?: unknown
     out?: unknown

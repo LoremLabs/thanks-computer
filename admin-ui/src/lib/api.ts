@@ -506,6 +506,16 @@ function traceDetailPath(tenant: string, rid: string): string {
     return `${base}?include=full`
 }
 
+// traceRawUrl is the "open raw" target: the tenant-scoped full-JSON detail
+// document. Replaces the old /traces/requests/{rid}/ filesystem-browse path,
+// which only the file backend serves (the NATS/R2 reader has no RawFS and
+// 404s it). The JSON endpoint works on every backend — though on R2 it
+// resolves only for archived traces (errors always; successful requests when
+// TXCO_TRACE_ARCHIVE writes a summary).
+export function traceRawUrl(tenant: string, rid: string): string {
+    return traceDetailPath(tenant, rid)
+}
+
 export async function listTraces(tenant: string, limit = 20): Promise<TraceSummary[]> {
     const body = await getJSON<TraceListResponse>(
         traceListPath(tenant, `limit=${limit}`)

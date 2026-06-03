@@ -451,7 +451,20 @@ function createStore() {
     async function refreshLastDurations(limit = 20) {
         try {
             const summaries = await listTraces(state.currentTenant, limit)
-            if (summaries.length === 0) return
+            if (summaries.length === 0) {
+                // Empty archive list (the NATS/R2 backend keeps no index).
+                // Reconstruct the per-op samples from whatever the live tail
+                // has cached this session — oldest-first so the newest
+                // observation wins. Tenant-filtered so a super-admin's
+                // cross-tenant cache doesn't bleed into a scoped view.
+                for (const rid of state.liveTraceOrder) {
+                    const ev = state.liveTraceCache[rid]
+                    if (!ev) continue
+                    if (state.currentTenant && ev.tenant !== state.currentTenant) continue
+                    foldTraceSamples(ev)
+                }
+                return
+            }
             const traces = await Promise.all(
                 summaries.map((s) => getTrace(state.currentTenant, s.rid).catch(() => null))
             )
@@ -1123,6 +1136,37 @@ function createStore() {
             }
         }
         state.liveTraceCache[ev.rid] = ev
+        // Fold this trace's steps into the per-op sample maps. On the
+        // NATS/R2 backend the archive list is empty, so refreshLastDurations
+        // can't seed the Sample tab / duration hints — the live tail is the
+        // only source. Latest-streamed wins (overwrite).
+        foldTraceSamples(ev)
+    }
+
+    // foldTraceSamples merges one closed trace's steps into the per-op
+    // sample maps (lastInputs/lastOutputs/lastDurations) and the per-stack
+    // wallclock map, keyed by opId() = `${stack}/${scope}/${name}`. Mirrors
+    // the aggregation refreshLastDurations does from the archive list, but
+    // sourced from a single live/cached trace so it works on backends whose
+    // archive list is empty (NATS/R2). Overwrites unconditionally so the
+    // most recent observation wins.
+    function foldTraceSamples(ev: TraceCachedEvent) {
+        const steps = (ev.steps ?? []) as TraceStep[]
+        if (steps.length === 0) return
+        const byStack = new Map<string, TraceStep[]>()
+        for (const step of steps) {
+            const id = `${step.stack}/${step.scope}/${step.name}`
+            if (typeof step.duration_ms === 'number') {
+                state.lastDurations[id] = step.duration_ms
+            }
+            if (step.in !== undefined) state.lastInputs[id] = step.in
+            if (step.out !== undefined) state.lastOutputs[id] = step.out
+            if (!byStack.has(step.stack)) byStack.set(step.stack, [])
+            byStack.get(step.stack)!.push(step)
+        }
+        for (const [s, ss] of byStack) {
+            state.stackLastDurations[s] = stackWallclockMs(ss)
+        }
     }
 
     function getCachedTrace(rid: string): TraceCachedEvent | undefined {
