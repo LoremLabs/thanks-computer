@@ -7,6 +7,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -604,9 +605,64 @@ func (c *Controller) bootstrapHintURL() string {
 	return "http://" + addr
 }
 
+// handleHealth is the unauthenticated liveness probe. By default it returns
+// the legacy plain-text "ok\n" so load-balancer / uptime probes are
+// unchanged. When the caller asks for JSON (Accept: application/json or
+// ?format=json) it returns the server's build identity plus the operator-
+// configured client-version policy — the txco CLI reads this for self-sync,
+// and it doubles as a "what's deployed?" debug surface. Status stays 200.
 func (c *Controller) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if !healthWantsJSON(r) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+
+	b := c.pu.Conf.Build
+	type clientPolicy struct {
+		Latest           string `json:"latest,omitempty"`
+		MinimumSupported string `json:"minimum_supported,omitempty"`
+		Critical         bool   `json:"critical,omitempty"`
+	}
+	resp := struct {
+		Status         string        `json:"status"`
+		Version        string        `json:"version,omitempty"`
+		Commit         string        `json:"commit,omitempty"`
+		Chassis        string        `json:"chassis,omitempty"`
+		BuildTimestamp string        `json:"build_timestamp,omitempty"`
+		Client         *clientPolicy `json:"client,omitempty"`
+	}{
+		Status:         "ok",
+		Version:        b.Version,
+		Commit:         b.Commit,
+		Chassis:        b.Chassis,
+		BuildTimestamp: b.BuildTimestamp,
+	}
+	// Only advertise a policy block when the operator set at least one value;
+	// a vanilla chassis stays silent (the CLI treats absence as "no policy").
+	if c.pu.Conf.ClientVersionLatest != "" || c.pu.Conf.ClientVersionMinimum != "" || c.pu.Conf.ClientVersionCritical {
+		resp.Client = &clientPolicy{
+			Latest:           c.pu.Conf.ClientVersionLatest,
+			MinimumSupported: c.pu.Conf.ClientVersionMinimum,
+			Critical:         c.pu.Conf.ClientVersionCritical,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+// healthWantsJSON reports whether /healthz should return the rich JSON form
+// rather than the plain-text probe response: an explicit ?format=json, or an
+// Accept header that prefers application/json.
+func healthWantsJSON(r *http.Request) bool {
+	if r.URL.Query().Get("format") == "json" {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
 }
 
 // authedUser extracts the actor id (signed) or basic-auth user.

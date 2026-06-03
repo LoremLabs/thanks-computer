@@ -167,6 +167,12 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 // has none, so the pin stays `_sys` and txc-continuation/0 resolves
 // under `_sys`. Parity keys are carried only when present in the
 // proposal (continuation polls get just the goto, as before).
+//
+// The spent `_txc.route.*` proposal is NOT removed here (op output is
+// merged, which can only add) — the chassis strips it when this op's
+// `_txc.goto` is consumed (processor.advanceAfterScope, alongside the
+// halt/goto strip), so the promoted keys above are the single surviving
+// copy rather than a duplicate riding next to the inert proposal.
 func routeBody(in []byte) string {
 	to := gjson.GetBytes(in, "_txc.route.to").String()
 	if to == "" {

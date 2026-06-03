@@ -10,6 +10,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
+	"github.com/loremlabs/thanks-computer/chassis/cli/update"
 )
 
 // runLogin performs the OAuth Authorization Code + PKCE handshake through the
@@ -33,10 +34,10 @@ func runLogin(args []string, stdout, stderr io.Writer) int {
 	chassisFlag := fs.String("chassis", "", "chassis admin BASE URL for enrollment (overrides discovery)")
 	tenant := fs.String("tenant", "", "tenant slug to claim on first enroll (non-interactive)")
 	yes := fs.Bool("yes", false, "accept the server's suggested tenant slug without prompting")
-	sshAgent := fs.Bool("ssh-agent", false, "force ssh-agent backend for the chassis key")
-	noSSHAgent := fs.Bool("no-ssh-agent", false, "skip ssh-agent even when reachable")
+	sshAgent := fs.Bool("ssh-agent", false, "enroll an ssh-agent key instead of the default")
+	_ = fs.Bool("no-ssh-agent", false, "(deprecated; no-op — the default no longer auto-detects ssh-agent)")
 	sshKey := fs.String("ssh-key", "", "use an existing on-disk key (e.g. ~/.ssh/id_ed25519)")
-	newKey := fs.Bool("new-key", false, "generate a fresh chassis key")
+	newKey := fs.Bool("new-key", false, "generate a fresh chassis key under $TXCO_HOME instead of ~/.ssh/")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -185,6 +186,11 @@ Flags:
 	fmt.Fprintf(stdout, "Signed in as %s\n", who)
 	fmt.Fprintf(stdout, "  profile: %s\n", profile)
 
+	// After all the success paths below settle the bound chassis, warn
+	// (warn-only) if this CLI is below the chassis's advertised minimum.
+	// Deferred so it sees the profile's chassis_url written by performEnroll.
+	defer warnClientOutdated(stdout, profile)
+
 	// Onboarding: enroll a chassis key (creating the hosted tenant on first
 	// run) so chassis commands target the cloud. Login already succeeded —
 	// any enrollment failure degrades softly (the token stays saved).
@@ -208,12 +214,11 @@ Flags:
 	}
 
 	ec := enrollChoices{
-		tenant:     *tenant,
-		assumeYes:  *yes,
-		sshAgent:   *sshAgent,
-		noSSHAgent: *noSSHAgent,
-		sshKey:     *sshKey,
-		newKey:     *newKey,
+		tenant:    *tenant,
+		assumeYes: *yes,
+		sshAgent:  *sshAgent,
+		sshKey:    *sshKey,
+		newKey:    *newKey,
 	}
 	if _, err := performEnroll(endpoint, tr.IDToken, profile, ec, stdout, stderr); err != nil {
 		// Login succeeded; surface the partial failure (with the endpoint it
@@ -221,6 +226,29 @@ Flags:
 		auth.PrintCLIError(stderr, enrollDegradeMessage(err, endpoint))
 	}
 	return 0
+}
+
+// warnClientOutdated fetches the bound chassis's client-version policy and
+// prints a warning (warn-only) when this CLI is below its advertised minimum.
+// Entirely best-effort: no version/profile/URL, an unreachable chassis, or a
+// chassis advertising no policy all result in silence.
+func warnClientOutdated(stdout io.Writer, profile string) {
+	if ClientVersion == "" {
+		return
+	}
+	base := auth.ProfileChassisURL(profile)
+	if base == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	info, err := update.FetchServerInfo(ctx, base, "txco-cli/"+ClientVersion)
+	if err != nil {
+		return
+	}
+	if n := update.OutdatedNotice(ClientVersion, info.Client); n != "" {
+		fmt.Fprintf(stdout, "\n%s\n", n)
+	}
 }
 
 // isLocalCloud reports whether the cloud base points at a loopback host (used

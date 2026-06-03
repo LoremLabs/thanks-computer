@@ -14,12 +14,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
+	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/cloud"
 	opcli "github.com/loremlabs/thanks-computer/chassis/cli/op"
-	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 )
 
 // BuildInfo carries the ldflag-injected build identity (set in
@@ -31,6 +32,17 @@ type BuildInfo struct {
 	Version        string
 	CommitId       string
 	BuildTimestamp string
+	// InstallMethod is the build origin stamped via ldflag: "source"
+	// (Makefile / unstamped dev builds) or "release" (the GitHub release
+	// build). The update package refines it at runtime — see
+	// chassis/cli/update. Empty is treated as "source".
+	InstallMethod string
+	// Chassis is the embedded open-core pin for a distribution that wraps
+	// the chassis as a dependency (e.g. the txco-saas overlay stamps the
+	// core pseudo-version here, while Version/CommitId describe the overlay
+	// build itself). Empty for the open-core binary, where Version/CommitId
+	// already are the chassis build.
+	Chassis string
 }
 
 // Build is the process-wide build identity. Zero values are tolerated —
@@ -95,11 +107,14 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 	case "login":
 		// Cloud account sign-in (OAuth against the thanks-computer cloud) —
 		// distinct from `auth login`, which mints a chassis admin browser
-		// session.
+		// session. Hand the cloud package our version so it can warn (warn-
+		// only) after login if this CLI is below the chassis's minimum.
+		cloud.ClientVersion = Build.Version
 		return cloud.Dispatch(append([]string{"login"}, rest...), stdout, stderr), true
 	case "logout":
 		return cloud.Dispatch(append([]string{"logout"}, rest...), stdout, stderr), true
 	case "cloud":
+		cloud.ClientVersion = Build.Version
 		return cloud.Dispatch(rest, stdout, stderr), true
 	case "op":
 		return opcli.Dispatch(rest, stdout, stderr), true
@@ -118,6 +133,14 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runDNS(rest, stdout, stderr), true
 	case "admin":
 		return runAdmin(rest, stdout, stderr), true
+	case "update":
+		// Check for a newer txco CLI release. `txco upgrade` performs it.
+		return runCLIUpdate(rest, stdout, stderr), true
+	case "upgrade":
+		// Upgrade the txco CLI binary itself (self-update for self-managed
+		// installs; brew/source guidance otherwise). Distinct from
+		// `txco package upgrade`, which re-resolves installed packages.
+		return runCLIUpgrade(rest, stdout, stderr), true
 	case "completion":
 		// Emit a shell completion script. Boring v1: command + flag
 		// names only; see chassis/cli/completion.go.
@@ -209,6 +232,8 @@ The thanks-computer chassis: event router + rule authoring CLI.
   %s   Alias namespace for profile / logout (gcloud/stripe-style)
   %s   Emit a shell completion script (use %s for install steps)
   %s   Print version info as JSON
+  %s   Check for a newer txco CLI release on GitHub
+  %s   Upgrade the txco CLI binary (self-update, or brew/source guidance)
 
 %s
   %s   Target name from txco.yaml (default: 'dev')
@@ -251,6 +276,8 @@ Use %s for per-command flags.
 		padCmd(cmd("config")+" <command>"),
 		padCmd(cmd("completion")+" <shell>"), hint("`txco completion bash|zsh|fish`"),
 		padCmd(cmd("version")),
+		padCmd(cmd("update")+" check"),
+		padCmd(cmd("upgrade")),
 		heading("Common flags for apply/diff/status/dev/trace:"),
 		padCmd(cmd("--target NAME")),
 		padCmd(cmd("--addr URL")),
@@ -278,17 +305,22 @@ func padCmd(s string) string {
 // the output machine-parseable from a release-automation script while
 // still being readable at a terminal.
 func runVersion(w io.Writer) int {
+	version, commit := buildVersionCommit()
 	info := struct {
 		Version        string `json:"version"`
 		Commit         string `json:"commit"`
+		Chassis        string `json:"chassis,omitempty"`
 		BuildTimestamp string `json:"build_timestamp"`
+		InstallMethod  string `json:"install_method"`
 		GoVersion      string `json:"go_version"`
 		OS             string `json:"os"`
 		Arch           string `json:"arch"`
 	}{
-		Version:        Build.Version,
-		Commit:         Build.CommitId,
+		Version:        version,
+		Commit:         commit,
+		Chassis:        Build.Chassis,
 		BuildTimestamp: Build.BuildTimestamp,
+		InstallMethod:  Build.InstallMethod,
 		GoVersion:      runtime.Version(),
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
@@ -300,6 +332,34 @@ func runVersion(w io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// buildVersionCommit returns the build's version + commit, falling back to
+// the Go-embedded module build info when ldflags weren't set (e.g. a
+// `go install`/`go run` build, or a wrapper image that forgot to stamp).
+// This makes `txco version` self-report rather than echo a stale literal —
+// mirrors chassis/snapshot/snapshot.go:sourceChassisVersion.
+func buildVersionCommit() (version, commit string) {
+	version, commit = Build.Version, Build.CommitId
+	if version != "" && commit != "" && commit != "dev" {
+		return version, commit
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version, commit
+	}
+	if version == "" && bi.Main.Version != "" {
+		version = bi.Main.Version
+	}
+	if commit == "" || commit == "dev" {
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				commit = s.Value
+				break
+			}
+		}
+	}
+	return version, commit
 }
 
 // versionLine renders the one-line version banner shown under the logo on

@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 
 	"golang.org/x/term"
+
+	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 )
 
 // resolveSecret returns the dev-enroll secret, preferring the flag
@@ -95,6 +98,28 @@ func promptLine(stderr io.Writer, label, suggest string) (string, bool, error) {
 func explainEnrollErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	// 409 key_already_enrolled is the new-default's most likely
+	// stumble: the user has ~/.ssh/id_ed25519-txco already enrolled
+	// on this chassis under another profile, and they're now running
+	// bootstrap-local under a fresh --profile name. The chassis
+	// recognises the pubkey and refuses; surface the actor it already
+	// belongs to AND the two escape hatches.
+	var he *client.HTTPError
+	if errors.As(err, &he) && he.StatusCode == http.StatusConflict && he.Code == "key_already_enrolled" {
+		existing, _ := he.Detail["actor_id"].(string)
+		ownerMsg := ""
+		if existing != "" {
+			ownerMsg = fmt.Sprintf(" (already bound to %s)", existing)
+		}
+		return fmt.Errorf(
+			"%w\n"+
+				"  → this public key is already enrolled on this chassis%s.\n"+
+				"  By default, txco uses ~/.ssh/id_ed25519-txco. If you wanted a separate\n"+
+				"  identity for this profile, pass --new-key to generate one under\n"+
+				"  $TXCO_HOME instead. To reuse the existing binding, run\n"+
+				"  `txco auth profiles` and `txco auth profile use <name>`.",
+			err, ownerMsg)
 	}
 	msg := err.Error()
 	if strings.Contains(msg, "404") && strings.Contains(msg, "not_found") {

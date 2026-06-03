@@ -33,10 +33,10 @@ func runAccept(args []string, stdout, stderr io.Writer) int {
 	name := fs.String("name", "", "alias for --profile (kept for back-compat; prompted on collision if both omitted)")
 	label := fs.String("label", "", "label stored with your new actor")
 	kind := fs.String("kind", "human", "actor kind written to the new actor row")
-	sshAgent := fs.Bool("ssh-agent", false, "force ssh-agent backend (override auto-detect)")
-	noSSHAgent := fs.Bool("no-ssh-agent", false, "skip ssh-agent even when reachable")
+	sshAgent := fs.Bool("ssh-agent", false, "enroll an ssh-agent key instead of the default")
+	_ = fs.Bool("no-ssh-agent", false, "(deprecated; no-op — the default no longer auto-detects ssh-agent)")
 	sshKey := fs.String("ssh-key", "", "use an existing on-disk key (e.g. ~/.ssh/id_ed25519)")
-	newKey := fs.Bool("new-key", false, fmt.Sprintf("generate a fresh key under %s (skip auto-detect)", homeHint))
+	newKey := fs.Bool("new-key", false, fmt.Sprintf("generate a fresh key under %s instead of ~/.ssh/", homeHint))
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprintf(stderr, `
@@ -46,10 +46,11 @@ Redeem an invitation token to mint your own actor + key on the
 chassis. After this command, 'txco apply', 'txco auth whoami', etc.
 sign their requests automatically with the new key.
 
-By default, ssh-agent is preferred when available; otherwise
-~/.ssh/id_ed25519 is offered (TTY confirmation); otherwise a fresh
-key is generated under %[1]s. --ssh-agent, --ssh-key, --new-key,
---no-ssh-agent steer the selection explicitly.
+By default, a fresh ed25519 key is created at ~/.ssh/id_ed25519-txco
+(loaded if it already exists). The key is byte-for-byte compatible
+with ssh-keygen output, so ssh-agent / ssh pick it up. Pass
+--ssh-agent to enroll an agent key instead, --ssh-key <path> for an
+existing on-disk key, or --new-key to store under %[1]s.
 
 Flags:
 `, homeHint)
@@ -73,12 +74,11 @@ Flags:
 		resolveName = defaultKeyName
 	}
 	ek, err := resolveEnrollmentKey(EnrollmentChoices{
-		SSHAgent:   *sshAgent,
-		NoSSHAgent: *noSSHAgent,
-		SSHKey:     *sshKey,
-		NewKey:     *newKey,
-		Name:       resolveName,
-		Label:      *label,
+		SSHAgent: *sshAgent,
+		SSHKey:   *sshKey,
+		NewKey:   *newKey,
+		Name:     resolveName,
+		Label:    *label,
 	}, os.Stdin, term.IsTerminal(int(os.Stdin.Fd())), stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth accept: %v\n", err)

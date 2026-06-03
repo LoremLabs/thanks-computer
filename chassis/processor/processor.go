@@ -1028,12 +1028,23 @@ func (pu *Unit) advanceAfterScope(
 
 	// Op-set control flow lives in `_txc.*` in the merged response.
 	// Read halt/goto, then strip them so they don't accumulate across
-	// stages or leak into the user-facing envelope.
+	// stages or leak into the user-facing envelope. `_txc.route` — the
+	// inert routing proposal detect-tenant@0 writes and txco://route@100
+	// promotes into `_txc.{goto,tenant,stack,…}` — is the same class of
+	// consumed control field: spent once its goto is taken, so it's
+	// stripped here too rather than riding along into the tenant stack
+	// and the trace's final `out` (the promoted keys are the live copy).
+	// gotoStage is captured BEFORE the strip, so the goto recursion below
+	// jumps with the cleaned envelope. The gate (halt||goto) is also what
+	// keeps this from firing at detect@0, where the proposal must survive
+	// for route@100; a later tenant-stack goto re-runs this block but
+	// _txc.route is already gone, so the extra delete is a no-op.
 	halt := gjson.Get(resp, "_txc.halt").Bool()
 	gotoStage := pu.resolveGoto(stage, gjson.Get(resp, "_txc.goto").String())
 	if halt || gotoStage != "" {
 		resp, _ = sjson.Delete(resp, "_txc.halt")
 		resp, _ = sjson.Delete(resp, "_txc.goto")
+		resp, _ = sjson.Delete(resp, "_txc.route")
 	}
 
 	// Breakpoint: only honored when _txc.flag_breakpoint is set on

@@ -4,7 +4,7 @@ VERSION = "0.2.3"
 WORKSPACE ?= $(shell pwd)
 BUILD_TIMESTAMP = $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 GIT_HASH ?= $(shell git rev-parse HEAD)
-LDFLAGS = -ldflags "-X main.BuildTimestamp=$(BUILD_TIMESTAMP) -X main.CommitId=$(GIT_HASH) -X main.Version=$(VERSION)"
+LDFLAGS = -ldflags "-X main.BuildTimestamp=$(BUILD_TIMESTAMP) -X main.CommitId=$(GIT_HASH) -X main.Version=$(VERSION) -X main.InstallMethod=source"
 
 # Path to the txco command package, relative to the module root.
 TXCO_CMD = ../cmd/txco

@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -124,12 +123,11 @@ func probeWhoami(target client.Target) (bool, error) {
 // it from its own FlagSet without a long function signature, and so
 // new flags can land without rippling through callers.
 type EnrollmentChoices struct {
-	SSHAgent   bool   // --ssh-agent: force agent backend
-	NoSSHAgent bool   // --no-ssh-agent: forbid agent backend even when available
-	SSHKey     string // --ssh-key <path>: use this existing on-disk key
-	NewKey     bool   // --new-key: generate a fresh key under $TXCO_HOME
-	Name       string // --name: destination basename for new keys / meta file
-	Label      string // --label: used to suggest a renamed key on collision (ssh-keygen-style prompt)
+	SSHAgent bool   // --ssh-agent: force agent backend
+	SSHKey   string // --ssh-key <path>: use this existing on-disk key
+	NewKey   bool   // --new-key: generate a fresh key under $TXCO_HOME
+	Name     string // --name: destination basename for new keys / meta file
+	Label    string // --label: used to suggest a renamed key on collision (ssh-keygen-style prompt)
 }
 
 // EnrollmentKey is the resolved choice: which public key to send to
@@ -217,6 +215,51 @@ var agentDialer = func() (agent.Agent, error) {
 // somewhere predictable. Production reads $HOME via os.UserHomeDir.
 var userHomeDir = os.UserHomeDir
 
+// defaultTxcoSSHKeyBase is the filename for the txco-owned signing key
+// that lives next to the user's other SSH keys. Drop-in for
+// ssh-add / ssh-agent / any tooling that scans ~/.ssh/.
+const defaultTxcoSSHKeyBase = "id_ed25519-txco"
+
+// defaultTxcoSSHKeyPath returns ~/.ssh/id_ed25519-txco.
+func defaultTxcoSSHKeyPath() (string, error) {
+	home, err := userHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home dir: %w", err)
+	}
+	return filepath.Join(home, ".ssh", defaultTxcoSSHKeyBase), nil
+}
+
+// tryDefaultTxcoKey is the no-flag default: either reuse the existing
+// ~/.ssh/id_ed25519-txco file (load + return its pubkey) or stage a
+// fresh ed25519 keygen for write at that path. No prompts, no
+// ssh-agent probing — explicit and predictable.
+//
+// The fresh-keygen branch produces a key byte-for-byte compatible
+// with `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519-txco`, so once
+// PersistFreshKey commits it after a successful chassis enrolment,
+// ssh-add / ssh / any SSH tool picks it up like any other key.
+//
+// `~/.ssh/` is created at mode 0700 only if it doesn't already exist
+// — we never chmod a user's pre-existing dir.
+func tryDefaultTxcoKey(stderr io.Writer) (*EnrollmentKey, error) {
+	path, err := defaultTxcoSSHKeyPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("ensure %s: %w", filepath.Dir(path), err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		// Existing file → reuse. Matches --ssh-key semantics.
+		return chooseExistingFile(path, stderr)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	// Fresh path: generate in memory; PersistFreshKey writes the
+	// OpenSSH PEM + .pub sidecar after the chassis confirms.
+	return makeFreshFileEnrollmentKey(path, stderr)
+}
+
 // resolveEnrollmentKey picks the key the chassis will register and
 // the backend that will sign with it. See docs/auth.md "Bring your
 // own key" for the canonical precedence; the inline comments below
@@ -240,10 +283,6 @@ func resolveEnrollmentKey(c EnrollmentChoices, stdin io.Reader, isTTY bool, stde
 	if explicit > 1 {
 		return nil, errors.New("conflicting key flags; pass at most one of --ssh-agent, --ssh-key, --new-key")
 	}
-	if c.SSHAgent && c.NoSSHAgent {
-		return nil, errors.New("--ssh-agent and --no-ssh-agent are mutually exclusive")
-	}
-
 	switch {
 	case c.SSHAgent:
 		return chooseAgentKey(stdin, isTTY, stderr)
@@ -253,46 +292,18 @@ func resolveEnrollmentKey(c EnrollmentChoices, stdin io.Reader, isTTY bool, stde
 		return generateFreshKey(c.Name, c.Label, stdin, isTTY, stderr)
 	}
 
-	// No explicit flag. Auto-precedence:
-	//   ssh-agent (unless --no-ssh-agent)
-	//   → ~/.ssh/id_ed25519 prompt on TTY
-	//   → fresh keygen under $TXCO_HOME
-	if !c.NoSSHAgent {
-		ek, err := tryAutoAgent(stdin, isTTY, stderr)
-		if err == nil {
-			return ek, nil
-		}
-		// Not finding an agent or a matching key is not an error in
-		// the auto path — we fall through. Surface other errors
-		// (multi-key on non-TTY, agent reachable but listing failed)
-		// so the user can intervene.
-		if !errors.Is(err, signer.ErrNoAgent) && err != errAutoSkip {
-			return nil, err
-		}
-	}
-
-	if ek, err := tryDefaultSSHKey(stdin, isTTY, stderr); err == nil && ek != nil {
-		return ek, nil
-	} else if err != nil && err != errAutoSkip {
-		return nil, err
-	}
-
-	return generateFreshKey(c.Name, c.Label, stdin, isTTY, stderr)
+	// No explicit flag: drop a fresh ed25519 at ~/.ssh/id_ed25519-txco
+	// (or reuse it if already there). Never reaches into ssh-agent or
+	// the user's other SSH keys without being asked to.
+	return tryDefaultTxcoKey(stderr)
 }
-
-// errAutoSkip is the sentinel "this branch declined to pick a key
-// but it wasn't a real failure; try the next branch." Used internal
-// to the auto-precedence walk so we don't return half-baked
-// EnrollmentKey{} values from helpers.
-var errAutoSkip = errors.New("auto-detect declined")
 
 // chooseAgentKey is the --ssh-agent (explicit) path. The caller
 // explicitly asked for an agent key, so we don't second-guess with a
 // confirmation prompt — the flag IS the confirmation. Returns
-// errAutoSkip when the agent has zero Ed25519 identities (caller can
-// fall through if it wants), ErrNoAgent when SSH_AUTH_SOCK is unset,
-// and a hard error for multi-key-on-non-TTY. On TTY with multiple
-// keys, prompts the user to pick.
+// ErrNoAgent when SSH_AUTH_SOCK is unset or the agent has no Ed25519
+// identities, and a hard error for multi-key-on-non-TTY. On TTY with
+// multiple keys, prompts the user to pick.
 //
 // Always prints a "using ssh-agent key SHA256:… (comment)" status
 // line so the user sees which key got bound, both for trust and for
@@ -313,56 +324,12 @@ func chooseAgentKey(stdin io.Reader, isTTY bool, stderr io.Writer) (*EnrollmentK
 	}, nil
 }
 
-// tryAutoAgent is the wrapper the AUTO (no explicit flag) path
-// calls. Unlike chooseAgentKey it prompts the user for explicit
-// confirmation before binding the agent key — the user didn't ask
-// for the agent path, so silent enrolment would surprise them. On
-// non-TTY (CI) we proceed silently with a printed status line, since
-// pipelines can't answer prompts.
-//
-// errAutoSkip is returned when the user declines the prompt OR when
-// the agent isn't usable. The auto path's caller falls through to
-// `~/.ssh/id_ed25519` and fresh keygen.
-func tryAutoAgent(stdin io.Reader, isTTY bool, stderr io.Writer) (*EnrollmentKey, error) {
-	picked, err := selectAgentKey(stdin, isTTY, stderr)
-	if err != nil {
-		if errors.Is(err, signer.ErrNoAgent) {
-			return nil, signer.ErrNoAgent
-		}
-		return nil, err
-	}
-	pub, _ := agentKeyToEd25519(picked)
-	fp := signer.Fingerprint(pub)
-
-	if isTTY {
-		// Don't surprise the user — they typed `txco auth
-		// bootstrap-local`, not `--ssh-agent`. Show the fingerprint
-		// AND the comment, then ask.
-		prompt := fmt.Sprintf("use ssh-agent key %s  (%s)? [Y/n]: ", fp, picked.Comment)
-		if !promptYesNo(stdin, stderr, prompt, true) {
-			return nil, errAutoSkip
-		}
-	} else {
-		fmt.Fprintf(stderr, "using ssh-agent key %s\n", fp)
-	}
-
-	return &EnrollmentKey{
-		PublicKey:         pub,
-		KeySource:         SourceSSHAgent,
-		Fingerprint:       fp,
-		CommentSuggestion: picked.Comment,
-	}, nil
-}
-
-// selectAgentKey is the shared agent-key picker for both the
-// explicit (--ssh-agent) and the auto paths. Returns the single
-// matching agent.Key, or an appropriate error sentinel:
+// selectAgentKey is the agent-key picker for the --ssh-agent path.
+// Returns the single matching agent.Key, or an appropriate error:
 //
 //   - signer.ErrNoAgent: socket unset / unreachable.
-//   - errAutoSkip: agent reachable but has zero Ed25519 keys.
-//   - hard error: multiple Ed25519 keys on non-TTY (the auto path
-//     converts this back to errAutoSkip via its caller; the explicit
-//     path surfaces it to the user).
+//   - hard error: agent reachable but has zero Ed25519 keys, or
+//     multiple Ed25519 keys on non-TTY (the user gets actionable text).
 //
 // On TTY with multiple keys, prompts the user to pick by number.
 func selectAgentKey(stdin io.Reader, isTTY bool, stderr io.Writer) (*agent.Key, error) {
@@ -460,99 +427,13 @@ func readPubCommentBesides(privPath string) string {
 	return comment
 }
 
-// tryDefaultSSHKey is the auto-fall-through that scans ~/.ssh/ for
-// Ed25519 private keys and lets the user pick one (or skip to fresh
-// keygen). Non-TTY callers (CI) skip outright — a pipeline shouldn't
-// silently bind a developer's SSH identity.
-//
-// The picker shows:
-//   - one numbered entry per discovered Ed25519 key (private only;
-//     .pub / config / known_hosts are ignored). Encrypted keys are
-//     listed as "(encrypted)" — they'll prompt for a passphrase if
-//     selected.
-//   - an "enter another path" option for keys outside ~/.ssh/.
-//   - a "skip" option that falls through to fresh keygen.
-//
-// Default selection is "skip" so just hitting Enter doesn't bind
-// anything. After picking, the user gets a y/N confirmation that
-// defaults to N — they have to actively type "y" to enrol an
-// existing key.
-func tryDefaultSSHKey(stdin io.Reader, isTTY bool, stderr io.Writer) (*EnrollmentKey, error) {
-	if !isTTY {
-		return nil, errAutoSkip
-	}
-	home, err := userHomeDir()
-	if err != nil {
-		return nil, errAutoSkip
-	}
-	sshDir := filepath.Join(home, ".ssh")
-	candidates := scanSSHEd25519Keys(sshDir)
-	if len(candidates) == 0 {
-		return nil, errAutoSkip
-	}
-
-	// One bufio.Reader threaded through both prompts. Critical:
-	// bufio reads ahead, so creating a fresh reader between the
-	// picker and the confirmation would lose whatever the user
-	// already typed for the second prompt — invisibly, with no
-	// error. See promptYesNoReader's comment.
-	reader := bufio.NewReader(stdin)
-
-	picked, err := pickSSHCandidate(candidates, sshDir, home, reader, stderr)
-	if err != nil || picked.path == "" {
-		return nil, errAutoSkip
-	}
-
-	// If the user typed a non-existent path and opted to create a
-	// new ed25519 there, this is a "fresh keygen, just at a
-	// user-chosen path" — set up an EnrollmentKey whose
-	// PersistFreshKey will write both the OpenSSH private key AND
-	// the standard .pub sidecar, matching what `ssh-keygen -t
-	// ed25519 -f <path>` would produce.
-	if picked.createNew {
-		return makeFreshFileEnrollmentKey(picked.path, stderr)
-	}
-
-	priv, err := signer.LoadEd25519PrivateKey(picked.path, true)
-	if err != nil {
-		fmt.Fprintf(stderr, "  (couldn't load %s: %v)\n", picked.path, err)
-		return nil, errAutoSkip
-	}
-	pub, ok := priv.Public().(ed25519.PublicKey)
-	if !ok {
-		fmt.Fprintf(stderr, "  (%s is not an ed25519 key)\n", picked.path)
-		return nil, errAutoSkip
-	}
-	fp := signer.Fingerprint(pub)
-
-	// Default-N confirmation. The user picked the key from a list,
-	// but enrolling an SSH identity is non-reversible enough (the
-	// chassis will record this pubkey forever) that an explicit
-	// "yes" beats "press enter to enrol."
-	if !promptYesNoReader(reader, stderr,
-		fmt.Sprintf("enroll %s (%s)? [y/N]: ", picked.path, fp), false) {
-		return nil, errAutoSkip
-	}
-	return &EnrollmentKey{
-		PublicKey:         pub,
-		KeySource:         SourceFile,
-		KeyPath:           picked.path,
-		Fingerprint:       fp,
-		CommentSuggestion: readPubCommentBesides(picked.path),
-	}, nil
-}
-
-// makeFreshFileEnrollmentKey generates a new ed25519 keypair to be
-// persisted at the user-chosen path on successful enrolment.
-// Mirrors the data shape of generateFreshKey (privKey + persistPath),
-// so PersistFreshKey writes the key+sidecar only AFTER the chassis
-// has confirmed enrolment — a failed enrol leaves no orphan files.
-//
-// Used when the user picks "[N] enter another path" with a path
-// that doesn't exist yet, and opts in to "create here?". The
-// resulting on-disk artifacts are byte-for-byte what `ssh-keygen
-// -t ed25519 -f <path>` would write (OpenSSH PEM + .pub sidecar),
-// so the file is fully usable by any other SSH tooling later.
+// makeFreshFileEnrollmentKey generates a new ed25519 keypair staged
+// for write at the given path. The actual disk write happens via
+// EnrollmentKey.PersistFreshKey AFTER the chassis confirms enrolment,
+// so a failed enrol leaves no orphan files. The resulting on-disk
+// artifacts (OpenSSH PEM + .pub sidecar) are byte-for-byte what
+// `ssh-keygen -t ed25519 -f <path>` would write — fully usable by any
+// other SSH tooling later.
 func makeFreshFileEnrollmentKey(path string, stderr io.Writer) (*EnrollmentKey, error) {
 	pub, priv, err := GenerateKey()
 	if err != nil {
@@ -570,245 +451,6 @@ func makeFreshFileEnrollmentKey(path string, stderr io.Writer) (*EnrollmentKey, 
 	}, nil
 }
 
-// sshKeyCandidate is one entry in the picker. fingerprint is "" for
-// encrypted files (we can't compute it without unlocking), in which
-// case the picker shows "(encrypted)" instead.
-type sshKeyCandidate struct {
-	path        string
-	fingerprint string
-	encrypted   bool
-}
-
-// scanSSHEd25519Keys walks dir for private-key files that parse as
-// ed25519 (or are encrypted, which we can't disprove without a
-// passphrase — include them and prompt later). Returns nil on an
-// unreadable or missing dir; the caller treats that as
-// "nothing to offer" and falls through.
-func scanSSHEd25519Keys(dir string) []sshKeyCandidate {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var out []sshKeyCandidate
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !looksLikePrivateKeyFile(name) {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		priv, err := signer.LoadEd25519PrivateKey(path, false)
-		if err != nil {
-			// Encrypted? List as a candidate; the user can choose
-			// to unlock it. Any other error → silently drop (not
-			// our key, or unparseable).
-			var pme *signer.PassphraseMissingError
-			if errors.As(err, &pme) {
-				out = append(out, sshKeyCandidate{path: path, encrypted: true})
-			}
-			continue
-		}
-		pub, ok := priv.Public().(ed25519.PublicKey)
-		if !ok {
-			continue
-		}
-		out = append(out, sshKeyCandidate{
-			path:        path,
-			fingerprint: signer.Fingerprint(pub),
-		})
-	}
-	// Stable order: id_ed25519 first (the conventional default),
-	// then alphabetical. Mirrors what `ls -1` would show with the
-	// most-likely-intended key on top.
-	sort.SliceStable(out, func(i, j int) bool {
-		a, b := filepath.Base(out[i].path), filepath.Base(out[j].path)
-		if a == "id_ed25519" && b != "id_ed25519" {
-			return true
-		}
-		if b == "id_ed25519" && a != "id_ed25519" {
-			return false
-		}
-		return a < b
-	})
-	return out
-}
-
-// looksLikePrivateKeyFile is a cheap pre-filter so we don't try to
-// parse every random file in ~/.ssh/ as a private key. Anything that
-// matches a typical private-key naming convention AND doesn't end in
-// .pub passes; everything else (config, known_hosts*, authorized_*,
-// agent socket, etc.) is dropped.
-func looksLikePrivateKeyFile(name string) bool {
-	if strings.HasSuffix(name, ".pub") {
-		return false
-	}
-	switch {
-	case strings.HasPrefix(name, "id_"),
-		strings.HasSuffix(name, ".ed25519"),
-		strings.HasSuffix(name, "_ed25519"):
-		return true
-	}
-	// Anything starting with "known_hosts" / "authorized_" / "config" /
-	// "environment" / agent socket names falls through implicitly.
-	return false
-}
-
-// pickSSHCandidate shows the numbered picker and returns the
-// chosen path along with a createNew flag for the "type a path that
-// doesn't exist" → "generate here" case. An empty path means "skip"
-// (the user took the default or hit Enter at the manual-entry
-// prompt).
-//
-// Supports:
-//   - bare numbers selecting one of the discovered candidates
-//     (existing files; createNew is always false).
-//   - a "type a path" option that prompts for an arbitrary path
-//     (with ~/ expansion). If the path doesn't exist, the user is
-//     offered the choice to generate a fresh ed25519 there — that's
-//     the SSH-keystore-drop-in flow.
-//   - a "skip" option that's the default — pressing Enter at the
-//     prompt falls through to fresh keygen under $TXCO_HOME.
-//
-// Invalid input (typo / out-of-range) falls through to skip rather
-// than looping — the auto path would still produce a working key
-// via fresh keygen, and an infinite-loop prompt would be hostile.
-//
-// Takes a *bufio.Reader (not io.Reader) because callers chain
-// further prompts after this one and need the underlying buffer
-// preserved. See promptYesNoReader's comment.
-func pickSSHCandidate(candidates []sshKeyCandidate, sshDir, home string, reader *bufio.Reader, stderr io.Writer) (manualPathChoice, error) {
-	fmt.Fprintf(stderr, "found Ed25519 keys under %s:\n", sshDir)
-	for i, c := range candidates {
-		if c.encrypted {
-			fmt.Fprintf(stderr, "  [%d] %s  (encrypted)\n", i+1, c.path)
-		} else {
-			fmt.Fprintf(stderr, "  [%d] %s  %s\n", i+1, c.path, c.fingerprint)
-		}
-	}
-	typeIdx := len(candidates) + 1
-	skipIdx := len(candidates) + 2
-	fmt.Fprintf(stderr, "  [%d] enter another path\n", typeIdx)
-	fmt.Fprintf(stderr, "  [%d] skip (generate a fresh key under %s) [default]\n", skipIdx, HomePathPretty())
-	fmt.Fprintf(stderr, "pick [%d]: ", skipIdx)
-
-	line, readErr := reader.ReadString('\n')
-	if readErr != nil && readErr != io.EOF {
-		return manualPathChoice{}, fmt.Errorf("read selection: %w", readErr)
-	}
-	sel := strings.TrimSpace(line)
-	if sel == "" {
-		return manualPathChoice{}, nil // default: skip
-	}
-	n, err := strconv.Atoi(sel)
-	if err != nil {
-		fmt.Fprintln(stderr, "  invalid selection; skipping to fresh keygen")
-		return manualPathChoice{}, nil
-	}
-	switch {
-	case n == skipIdx:
-		return manualPathChoice{}, nil
-	case n == typeIdx:
-		// Loop on bad input — the user chose this branch
-		// explicitly ("enter another path"), so a typo should give
-		// them another chance, not silently fall through to fresh
-		// keygen. Empty input is the escape hatch: hit Enter to
-		// skip back to "[default] skip" semantics. A non-existent
-		// path triggers the "create here?" prompt.
-		return promptForManualPath(home, reader, stderr)
-	case n >= 1 && n <= len(candidates):
-		return manualPathChoice{path: candidates[n-1].path}, nil
-	default:
-		fmt.Fprintln(stderr, "  out-of-range selection; skipping to fresh keygen")
-		return manualPathChoice{}, nil
-	}
-}
-
-// manualPathChoice is what promptForManualPath returns. createNew=true
-// means the user asked us to generate a fresh key at this path; the
-// caller will set up an EnrollmentKey whose persistPath is this path
-// (so the key gets written to disk only after the chassis confirms
-// enrolment, mirroring the --new-key flow).
-type manualPathChoice struct {
-	path      string // "" → user picked Enter-to-skip
-	createNew bool   // true → caller generates + writes a fresh ed25519 here
-}
-
-// promptForManualPath is the "enter another path" sub-prompt. Loops
-// until either:
-//   - the user enters an existing path (returned as absolute, with
-//     ~/ expansion applied), createNew=false.
-//   - the user enters a path that doesn't yet exist, AND opts in to
-//     "create a new ed25519 key here?" — returned with createNew=true.
-//   - the user enters an empty line — escape hatch, path="" means
-//     "skip back to fresh keygen under $TXCO_HOME."
-//
-// The create-new branch is what makes txco a drop-in for the SSH
-// keystore: a user can enroll under a fresh path like
-// ~/.ssh/id_ed25519-txco and end up with a working OpenSSH-format
-// key + .pub sidecar that any other SSH tool can also consume.
-func promptForManualPath(home string, reader *bufio.Reader, stderr io.Writer) (manualPathChoice, error) {
-	for {
-		fmt.Fprint(stderr, "path (Enter to skip): ")
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil && readErr != io.EOF {
-			return manualPathChoice{}, fmt.Errorf("read path: %w", readErr)
-		}
-		p := strings.TrimSpace(line)
-		if p == "" {
-			return manualPathChoice{}, nil
-		}
-		// Expand ~ — the user types what they'd type at the shell.
-		if p == "~" {
-			p = home
-		} else if strings.HasPrefix(p, "~/") {
-			p = filepath.Join(home, p[2:])
-		}
-		abs, err := filepath.Abs(p)
-		if err != nil {
-			fmt.Fprintf(stderr, "  invalid path %q; try again or hit Enter to skip\n", p)
-			if errors.Is(readErr, io.EOF) {
-				return manualPathChoice{}, nil
-			}
-			continue
-		}
-
-		// Path exists → use as-is. The caller will load it.
-		if _, statErr := os.Stat(abs); statErr == nil {
-			return manualPathChoice{path: abs}, nil
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			fmt.Fprintf(stderr, "  cannot stat %s: %v\n", abs, statErr)
-			if errors.Is(readErr, io.EOF) {
-				return manualPathChoice{}, nil
-			}
-			continue
-		}
-
-		// Path doesn't exist. Two sub-options:
-		//   (a) generate a fresh ed25519 key here. The destination
-		//       has to be in a directory we can write to, so we
-		//       require the parent directory to already exist
-		//       (mkdir -p is sharp tooling for an auto-flow).
-		//   (b) the user mistyped; back to the path prompt.
-		parent := filepath.Dir(abs)
-		if _, perr := os.Stat(parent); perr != nil {
-			fmt.Fprintf(stderr, "  %s does not exist (parent dir %s is also missing); fix the path or hit Enter to skip\n", abs, parent)
-			if errors.Is(readErr, io.EOF) {
-				return manualPathChoice{}, nil
-			}
-			continue
-		}
-		fmt.Fprintf(stderr, "  %s does not exist.\n", abs)
-		if !promptYesNoReader(reader, stderr,
-			fmt.Sprintf("  create a new ed25519 key at %s? [Y/n]: ", abs), true) {
-			// User declined creation; loop to ask for a different
-			// path (or Enter to skip).
-			continue
-		}
-		return manualPathChoice{path: abs, createNew: true}, nil
-	}
-}
 
 // generateFreshKey produces a brand-new ed25519 key in memory and
 // returns the path it will be persisted to. If the default name is

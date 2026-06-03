@@ -34,8 +34,25 @@ const (
 	CtxKeyRid     ctxKey = "rid"
 )
 
+// BuildIdentity is the process build identity, set programmatically by
+// app.Run at boot (NOT from flags/env — no `id` tag, so the flag loader
+// skips it) and surfaced by the admin /healthz JSON. Kept on Config so it
+// reaches server/admin via processor.Unit.Conf without a chassis/cli import
+// cycle (files under chassis/cli import chassis/server).
+type BuildIdentity struct {
+	Version        string
+	Commit         string
+	Chassis        string
+	BuildTimestamp string
+	InstallMethod  string
+}
+
 // Command Line Flags / Environment variables to configure runtime environment
 type Config struct {
+	// Build is set by app.Run after Load (no `id` tag ⇒ ignored by the flag
+	// loader); see BuildIdentity.
+	Build BuildIdentity
+
 	AdminAddr                    string   `id:"admin-addr" default:":8081" desc:"The port to listen on for the admin web server (:8081)"`
 	AdminPass                    string   `id:"admin-pass" default:"" desc:"Basic Auth password ()"`
 	AdminUser                    string   `id:"admin-user" default:"" desc:"User for basic auth ()"`
@@ -49,6 +66,9 @@ type Config struct {
 	CloudOAuthIssuer             string   `id:"cloud-oauth-issuer" default:"" desc:"OIDC issuer URL whose id_tokens this chassis trusts for POST /auth/oauth/enroll; its discovery doc resolves the JWKS (oidc-provider /jwks fallback). Empty (default) disables the endpoint — open-core trusts no external issuer until an operator opts in."`
 	CloudOAuthAudience           string   `id:"cloud-oauth-audience" default:"" desc:"When set, the id_token aud must contain this value (the OAuth client_id). Empty skips the aud check."`
 	CloudChassisURL              string   `id:"cloud-chassis-url" default:"" desc:"Public admin BASE URL echoed to OAuth-enrolled clients in chassis_url (written to the CLI profile). Empty defaults to the request scheme+host."`
+	ClientVersionLatest          string   `id:"client-version-latest" default:"" desc:"Latest txco CLI version this server advertises (no leading v, e.g. 0.2.6), surfaced in the admin /healthz JSON for client self-sync. Empty omits it."`
+	ClientVersionMinimum         string   `id:"client-version-minimum" default:"" desc:"Minimum supported txco CLI version (no leading v). Clients older than this are warned (warn-only; never blocked) via the /healthz policy. Empty disables the warning."`
+	ClientVersionCritical        bool     `id:"client-version-critical" default:"false" desc:"When true, the advertised client-version update is flagged critical in the /healthz policy so out-of-date CLIs warn more loudly. Still warn-only."`
 	SecretMasterKeyPath          string   `id:"secret-master-key" default:"./chassis/data/secrets/txco-master.key" desc:"Path to the host-local master-key file for the per-tenant secret store. Auto-minted on first boot if absent (same convention as the runtime DB). File is 32 bytes with 0600 perms. Set to empty to disable the feature entirely (library / embedder opt-out)."`
 	DemoMode                     bool     `id:"demo-mode" default:"false" desc:"Register the /v1/demo/* execution-hop endpoints (the txcl learning environment served by 'txco demo'). Default false: a normal chassis / 'txco dev' exposes no demo surface, so the admin UI loads the standard interface. 'txco demo' sets TXCO_DEMO_MODE=true. NEVER enable in production."`
 	DebugBreakpoints             bool     `id:"debug-breakpoints" default:"false" desc:"Enable breakpoint debugging: inlet stamps _txc.flag_breakpoint=true on every event and reads ?_txc.break=<scope> from HTTP query strings. NEVER enable in production."`

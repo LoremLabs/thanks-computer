@@ -354,10 +354,18 @@ func TestBootstrapLocalHitsEnrollEndpoint(t *testing.T) {
 		t.Fatalf("public_key_b64 doesn't decode to 32 bytes: len=%d err=%v", len(dec), err)
 	}
 
-	// Both key and meta should now exist on disk.
-	kp, _ := KeyPath("local")
+	// Both key and meta should now exist on disk. The default key path
+	// is the new ~/.ssh/id_ed25519-txco (withFakeHome points $HOME at
+	// a tmp dir, so this is fully isolated).
+	kp, err := defaultTxcoSSHKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(kp); err != nil {
 		t.Fatalf("expected key file at %q: %v", kp, err)
+	}
+	if _, err := os.Stat(kp + ".pub"); err != nil {
+		t.Errorf("expected .pub sidecar at %q: %v", kp+".pub", err)
 	}
 	mp, _ := MetaPath("local")
 	m, err := LoadMeta(mp)
@@ -572,8 +580,12 @@ func TestAcceptHappy(t *testing.T) {
 	if pk == "" {
 		t.Errorf("missing public_key_b64 in request: %v", got)
 	}
-	// Files exist with the standard layout.
-	kp, _ := KeyPath("local")
+	// Files exist with the standard layout. Accept inherits the new
+	// default key path (~/.ssh/id_ed25519-txco under the fake $HOME).
+	kp, err := defaultTxcoSSHKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(kp); err != nil {
 		t.Fatalf("expected key at %q: %v", kp, err)
 	}

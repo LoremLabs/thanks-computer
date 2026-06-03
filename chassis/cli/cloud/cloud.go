@@ -52,6 +52,12 @@ const (
 	enrollPath = "/auth/oauth/enroll"
 )
 
+// ClientVersion is the running CLI's version, set by the cli package before
+// dispatch (cloud can't import cli — files under cli import chassis/server,
+// and cli imports cloud). Used to warn (warn-only) after login when the CLI
+// is below the bound chassis's advertised minimum. Empty disables the check.
+var ClientVersion string
+
 // loopbackPorts is the ordered set of 127.0.0.1 callback ports the CLI
 // tries, binding the first free one. These MUST match the loopback
 // redirect_uris the cloud (and the upstream identity provider it brokers)

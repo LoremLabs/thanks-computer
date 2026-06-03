@@ -27,11 +27,11 @@ type OAuthEnrollOptions struct {
 	AssumeYes   bool   // --yes: accept the server's suggestion without prompting
 
 	// Key selection — mirrors `txco auth accept`'s steering. Zero values
-	// auto-detect (ssh-agent → ~/.ssh/id_ed25519 on a TTY → fresh keygen).
-	SSHAgent   bool
-	NoSSHAgent bool
-	SSHKey     string
-	NewKey     bool
+	// take the default: ~/.ssh/id_ed25519-txco (load if exists, else
+	// fresh keygen). Explicit flags override.
+	SSHAgent bool
+	SSHKey   string
+	NewKey   bool
 
 	Stdin  io.Reader
 	Stderr io.Writer
@@ -79,12 +79,11 @@ func OAuthEnroll(opts OAuthEnrollOptions) (*OAuthEnrollResult, error) {
 	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
 
 	ek, err := resolveEnrollmentKey(EnrollmentChoices{
-		SSHAgent:   opts.SSHAgent,
-		NoSSHAgent: opts.NoSSHAgent,
-		SSHKey:     opts.SSHKey,
-		NewKey:     opts.NewKey,
-		Name:       profile,
-		Label:      opts.Label,
+		SSHAgent: opts.SSHAgent,
+		SSHKey:   opts.SSHKey,
+		NewKey:   opts.NewKey,
+		Name:     profile,
+		Label:    opts.Label,
 	}, stdin, isTTY, stderr)
 	if err != nil {
 		return nil, err

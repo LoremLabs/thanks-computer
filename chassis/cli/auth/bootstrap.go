@@ -17,11 +17,10 @@ import (
 // POST its public half to /auth/dev/enroll, write the returned meta.
 //
 // Key selection goes through resolveEnrollmentKey (see
-// chassis/cli/auth/key_resolve.go) so this command inherits the
-// auto-precedence: ssh-agent first, then ~/.ssh/id_ed25519 (with
-// TTY confirmation), then a freshly-generated key under $TXCO_HOME.
-// Explicit flags (--ssh-agent, --ssh-key, --new-key, --no-ssh-agent)
-// short-circuit the auto path.
+// chassis/cli/auth/key_resolve.go). The default (no key flags) creates
+// a fresh ed25519 key at ~/.ssh/id_ed25519-txco (loaded if already
+// there), byte-for-byte compatible with ssh-keygen output. Explicit
+// flags (--ssh-agent, --ssh-key, --new-key) override that.
 func runBootstrapLocal(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("auth bootstrap-local", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -32,10 +31,10 @@ func runBootstrapLocal(args []string, stdout, stderr io.Writer) int {
 	name := fs.String("name", defaultKeyName, "alias for --profile (kept for back-compat)")
 	label := fs.String("label", "", "human-readable label stored with the actor")
 	kind := fs.String("kind", "human", "actor kind (default human)")
-	sshAgent := fs.Bool("ssh-agent", false, "force ssh-agent backend (override auto-detect)")
-	noSSHAgent := fs.Bool("no-ssh-agent", false, "skip ssh-agent even when reachable")
+	sshAgent := fs.Bool("ssh-agent", false, "enroll an ssh-agent key instead of the default")
+	_ = fs.Bool("no-ssh-agent", false, "(deprecated; no-op — the default no longer auto-detects ssh-agent)")
 	sshKey := fs.String("ssh-key", "", "use an existing on-disk key (e.g. ~/.ssh/id_ed25519)")
-	newKey := fs.Bool("new-key", false, fmt.Sprintf("generate a fresh key under %s (skip auto-detect)", homeHint))
+	newKey := fs.Bool("new-key", false, fmt.Sprintf("generate a fresh key under %s instead of ~/.ssh/", homeHint))
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprintf(stderr, `
@@ -46,10 +45,11 @@ and write the returned actor_id + key_id to %[1]s/keys/<name>.meta.json.
 After this runs, 'txco apply' against the chassis signs requests
 automatically.
 
-By default, ssh-agent is preferred when available; otherwise
-~/.ssh/id_ed25519 is offered (TTY confirmation); otherwise a fresh
-key is generated under %[1]s. --ssh-agent, --ssh-key, --new-key,
---no-ssh-agent steer the selection explicitly.
+By default, a fresh ed25519 key is created at ~/.ssh/id_ed25519-txco
+(loaded if it already exists). The key is byte-for-byte compatible
+with ssh-keygen output, so ssh-agent / ssh pick it up. Pass
+--ssh-agent to enroll an agent key instead, --ssh-key <path> for an
+existing on-disk key, or --new-key to store under %[1]s.
 
 Flags:
 `, homeHint)
@@ -134,11 +134,10 @@ Flags:
 	}
 
 	ek, err := resolveEnrollmentKey(EnrollmentChoices{
-		SSHAgent:   *sshAgent,
-		NoSSHAgent: *noSSHAgent,
-		SSHKey:     *sshKey,
-		NewKey:     *newKey,
-		Name:       *name,
+		SSHAgent: *sshAgent,
+		SSHKey:   *sshKey,
+		NewKey:   *newKey,
+		Name:     *name,
 	}, os.Stdin, term.IsTerminal(int(os.Stdin.Fd())), stderr)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth bootstrap-local: %v", err)

@@ -166,7 +166,6 @@ func TestResolveConflictingFlagsErrors(t *testing.T) {
 		{SSHAgent: true, SSHKey: "/tmp/k"},
 		{SSHAgent: true, NewKey: true},
 		{SSHKey: "/tmp/k", NewKey: true},
-		{SSHAgent: true, NoSSHAgent: true},
 	}
 	for i, c := range cases {
 		if _, err := resolveEnrollmentKey(c, strings.NewReader(""), false, new(bytes.Buffer)); err == nil {
@@ -350,298 +349,143 @@ func TestResolveNewKey(t *testing.T) {
 	}
 }
 
-// TestResolveAutoUsesAgentWhenAvailable — no explicit flag + agent
-// reachable + one Ed25519 key → use the agent. The "happy default"
-// for developers with ssh-agent already running.
-func TestResolveAutoUsesAgentWhenAvailable(t *testing.T) {
+// TestResolveDefaultGeneratesAtSSHTxcoPathWhenMissing — no flags, no
+// pre-existing ~/.ssh/id_ed25519-txco: the resolver returns an
+// EnrollmentKey staged to write at exactly that path. The file is NOT
+// yet on disk; PersistFreshKey commits it after enrolment confirms.
+func TestResolveDefaultGeneratesAtSSHTxcoPathWhenMissing(t *testing.T) {
 	withHome(t)
-	_, priv, _ := ed25519.GenerateKey(nil)
-	withAgent(t, priv)
+	home := withFakeHome(t)
+	want := filepath.Join(home, ".ssh", "id_ed25519-txco")
 
 	ek, err := resolveEnrollmentKey(EnrollmentChoices{},
 		strings.NewReader(""), false, new(bytes.Buffer))
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if ek.KeySource != SourceSSHAgent {
-		t.Errorf("KeySource=%q, want %q (auto path should prefer agent)", ek.KeySource, SourceSSHAgent)
+	if ek.KeyPath != want {
+		t.Errorf("KeyPath=%q, want %q", ek.KeyPath, want)
+	}
+	if ek.persistPath != want {
+		t.Errorf("persistPath=%q, want %q", ek.persistPath, want)
+	}
+	if ek.privKey == nil {
+		t.Errorf("fresh-keygen path should populate privKey")
+	}
+	if _, err := os.Stat(want); err == nil {
+		t.Errorf("default path should not be written until PersistFreshKey; found %q on disk", want)
+	}
+	// Persist + verify both files appear.
+	if err := ek.PersistFreshKey("matt@laptop"); err != nil {
+		t.Fatalf("PersistFreshKey: %v", err)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("private key at %q after persist: %v", want, err)
+	}
+	pubData, err := os.ReadFile(want + ".pub")
+	if err != nil {
+		t.Fatalf(".pub sidecar at %q: %v", want+".pub", err)
+	}
+	if !bytes.HasPrefix(pubData, []byte("ssh-ed25519 ")) {
+		t.Errorf(".pub must start with `ssh-ed25519 `; got %q", pubData)
 	}
 }
 
-// TestResolveAutoOffersDefaultSSHKeyPicker — no agent, but
-// ~/.ssh/id_ed25519 exists and we're on a TTY: show a numbered
-// picker. User selects [1] then confirms with "y" (default N, so
-// must type "y" explicitly).
-func TestResolveAutoOffersDefaultSSHKeyPicker(t *testing.T) {
+// TestResolveDefaultReusesExistingSSHTxcoFile — when
+// ~/.ssh/id_ed25519-txco already exists, the resolver loads its pubkey
+// (matches --ssh-key semantics) instead of writing a new file. No
+// privKey/persistPath set: nothing to write later.
+func TestResolveDefaultReusesExistingSSHTxcoFile(t *testing.T) {
 	withHome(t)
-	withoutAgent(t)
 	home := withFakeHome(t)
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	path := writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", priv)
+	written := writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519-txco", priv)
 
-	var stderr bytes.Buffer
-	// First line: pick "1" (the id_ed25519 entry).
-	// Second line: confirm "y" (default-N confirmation).
 	ek, err := resolveEnrollmentKey(EnrollmentChoices{},
-		strings.NewReader("1\ny\n"), true, &stderr)
+		strings.NewReader(""), false, new(bytes.Buffer))
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	if ek.KeySource != SourceFile {
-		t.Errorf("KeySource=%q, want %q", ek.KeySource, SourceFile)
+		t.Errorf("KeySource=%q, want %q (existing file → load)", ek.KeySource, SourceFile)
 	}
-	if ek.KeyPath != path {
-		t.Errorf("KeyPath=%q, want %q", ek.KeyPath, path)
-	}
-	if !pub.Equal(ek.PublicKey) {
-		t.Errorf("PublicKey mismatch")
-	}
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "[1]") || !strings.Contains(stderrStr, "id_ed25519") {
-		t.Errorf("picker should list id_ed25519 as [1]; got %q", stderrStr)
-	}
-	if !strings.Contains(stderrStr, "[y/N]") {
-		t.Errorf("confirmation should default to N (capital); got %q", stderrStr)
-	}
-}
-
-// TestResolveAutoSkipsWithEmptyInput — pressing Enter at the
-// picker prompt falls through to fresh keygen (the "skip" option
-// is the default). Critical safety property: a developer who isn't
-// paying attention doesn't accidentally bind their SSH identity.
-func TestResolveAutoSkipsWithEmptyInput(t *testing.T) {
-	withHome(t)
-	withoutAgent(t)
-	home := withFakeHome(t)
-	_, priv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", priv)
-
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{Name: "local"},
-		strings.NewReader("\n"), true, new(bytes.Buffer)) // press enter
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if ek.privKey == nil {
-		t.Errorf("empty input should fall through to keygen, not bind ssh-key")
-	}
-}
-
-// TestResolveAutoConfirmDefaultNDeclines — user picks [1] but then
-// hits Enter on the y/N confirmation. Default N means we don't
-// enrol — fall through to keygen.
-func TestResolveAutoConfirmDefaultNDeclines(t *testing.T) {
-	withHome(t)
-	withoutAgent(t)
-	home := withFakeHome(t)
-	_, priv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", priv)
-
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{Name: "local"},
-		strings.NewReader("1\n\n"), true, new(bytes.Buffer)) // pick 1, then enter (= N)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if ek.privKey == nil {
-		t.Errorf("default-N confirm should decline; expected fall-through to keygen")
-	}
-}
-
-// TestResolveAutoManualPathRetries — user picks the manual-entry
-// branch and types a path that doesn't exist (typo). The picker
-// should loop and ask again, NOT silently fall through to fresh
-// keygen. Confirms the bug-fix for the "typo'd path swallowed"
-// regression.
-func TestResolveAutoManualPathRetries(t *testing.T) {
-	withHome(t)
-	withoutAgent(t)
-	home := withFakeHome(t)
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	good := writeOpenSSHKey(t, filepath.Join(home, "elsewhere"), "alt", priv)
-	// Decoy in ~/.ssh so the picker has a numbered list.
-	_, decoyPriv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", decoyPriv)
-
-	// Inputs:
-	//   "2"                        → pick "enter another path"
-	//   "/no/such/path"            → bad path, should re-prompt
-	//   good                       → correct path, accepted
-	//   "y"                        → confirm enrolment
-	in := strings.NewReader(
-		"2\n" +
-			"/no/such/path\n" +
-			good + "\n" +
-			"y\n",
-	)
-	var stderr bytes.Buffer
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{}, in, true, &stderr)
-	if err != nil {
-		t.Fatalf("resolve: %v\nstderr=%s", err, stderr.String())
-	}
-	if ek.KeyPath != good {
-		t.Errorf("KeyPath=%q, want %q (the corrected path)", ek.KeyPath, good)
+	if ek.KeyPath != written {
+		t.Errorf("KeyPath=%q, want %q", ek.KeyPath, written)
 	}
 	if !pub.Equal(ek.PublicKey) {
-		t.Errorf("PublicKey mismatch")
+		t.Errorf("PublicKey mismatch — resolver must load the pubkey of the existing file")
 	}
-	// The "does not exist" line must have appeared so the user
-	// knew their typo was caught.
-	if !strings.Contains(stderr.String(), "does not exist") {
-		t.Errorf("expected 'does not exist' feedback for typo'd path; got %q", stderr.String())
-	}
-}
-
-// TestResolveAutoManualPathCreateNew — user picks manual-entry and
-// types a path that doesn't exist; CLI offers to create a fresh
-// ed25519 there (the "drop-in for ssh-keygen" flow). User accepts.
-// Resulting EnrollmentKey has privKey set and persistPath pointing
-// at the user-chosen location — same shape as --new-key, just at
-// an arbitrary path.
-func TestResolveAutoManualPathCreateNew(t *testing.T) {
-	withHome(t)
-	withoutAgent(t)
-	home := withFakeHome(t)
-	// Decoy in ~/.ssh so the picker has a list to render.
-	_, decoyPriv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", decoyPriv)
-
-	// Pick "2" (enter another path), type a non-existent path
-	// whose parent (home/.ssh) DOES exist, accept "create here?".
-	target := filepath.Join(home, ".ssh", "id_ed25519-txco")
-	in := strings.NewReader("2\n" + target + "\ny\n")
-	var stderr bytes.Buffer
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{Label: "txco@laptop"}, in, true, &stderr)
-	if err != nil {
-		t.Fatalf("resolve: %v\nstderr=%s", err, stderr.String())
-	}
-	if ek.privKey == nil {
-		t.Errorf("create-new path should set privKey for later PersistFreshKey")
-	}
-	if ek.persistPath != target {
-		t.Errorf("persistPath=%q, want %q", ek.persistPath, target)
-	}
-	if ek.KeyPath != target {
-		t.Errorf("KeyPath=%q, want %q", ek.KeyPath, target)
-	}
-	// Persisting writes both the OpenSSH PEM and the .pub sidecar.
-	if err := ek.PersistFreshKey("txco@laptop"); err != nil {
-		t.Fatalf("PersistFreshKey: %v", err)
-	}
-	if _, err := os.Stat(target); err != nil {
-		t.Errorf("expected private key at %q: %v", target, err)
-	}
-	if _, err := os.Stat(target + ".pub"); err != nil {
-		t.Errorf("expected .pub sidecar at %q.pub: %v", target, err)
+	if ek.privKey != nil || ek.persistPath != "" {
+		t.Errorf("reuse path must NOT stage a fresh write; privKey=%v persistPath=%q",
+			ek.privKey != nil, ek.persistPath)
 	}
 }
 
-// TestResolveAutoManualPathDeclineCreate — user types a path that
-// doesn't exist but declines the create prompt (typed "n"). The
-// picker should re-prompt for a path (loop), not silently fall
-// through to fresh keygen under $TXCO_HOME.
-func TestResolveAutoManualPathDeclineCreate(t *testing.T) {
+// TestResolveDefaultCreatesSSHDirWith0700 — starting from a home with
+// no ~/.ssh/ at all, the resolver creates the dir at mode 0700 (per
+// the SSH convention). Pre-existing dirs are not chmod'd.
+func TestResolveDefaultCreatesSSHDirWith0700(t *testing.T) {
 	withHome(t)
-	withoutAgent(t)
 	home := withFakeHome(t)
-	_, decoyPriv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", decoyPriv)
-
-	// Inputs:
-	//   "2"  → pick manual-entry
-	//   "/no/such/path" → bad path; parent doesn't exist, re-prompts
-	//   "" → Enter at path: prompt → skip
-	in := strings.NewReader("2\n/no/such/path\n\n")
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{Name: "local"}, in, true, new(bytes.Buffer))
-	if err != nil {
+	sshDir := filepath.Join(home, ".ssh")
+	if _, err := os.Stat(sshDir); err == nil {
+		t.Fatalf("test setup: %q should not exist yet", sshDir)
+	}
+	if _, err := resolveEnrollmentKey(EnrollmentChoices{},
+		strings.NewReader(""), false, new(bytes.Buffer)); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if ek.privKey == nil {
-		t.Errorf("decline-create + Enter-to-skip should fall through to $TXCO_HOME keygen; got %+v", ek)
-	}
-}
-
-// TestResolveAutoManualPathEnterToSkip — user picks manual-entry
-// but hits Enter (empty input). That's the escape hatch back to
-// fresh keygen.
-func TestResolveAutoManualPathEnterToSkip(t *testing.T) {
-	withHome(t)
-	withoutAgent(t)
-	home := withFakeHome(t)
-	_, priv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", priv)
-
-	// Inputs: pick "2" (manual path), then Enter (skip).
-	in := strings.NewReader("2\n\n")
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{Name: "local"}, in, true, new(bytes.Buffer))
+	info, err := os.Stat(sshDir)
 	if err != nil {
-		t.Fatalf("resolve: %v", err)
+		t.Fatalf("expected %q to exist after resolve: %v", sshDir, err)
 	}
-	if ek.privKey == nil {
-		t.Errorf("Enter at manual-path prompt should fall through to keygen; got %+v", ek)
-	}
-}
-
-// TestResolveAutoManualPath — user picks the "enter another path"
-// option and types an arbitrary path. Confirms the manual-entry
-// branch reaches the same load + confirm machinery.
-func TestResolveAutoManualPath(t *testing.T) {
-	withHome(t)
-	withoutAgent(t)
-	home := withFakeHome(t)
-	// Put a key OUTSIDE ~/.ssh/ so it's not in the auto-listed set.
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	outside := writeOpenSSHKey(t, filepath.Join(home, "elsewhere"), "alt", priv)
-	// Also put one IN ~/.ssh/ so the picker has a list to render.
-	_, decoyPriv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", decoyPriv)
-
-	// Candidates list will have [1] id_ed25519, [2] enter path, [3] skip.
-	in := strings.NewReader("2\n" + outside + "\ny\n")
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{}, in, true, new(bytes.Buffer))
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if ek.KeyPath != outside {
-		t.Errorf("KeyPath=%q, want %q", ek.KeyPath, outside)
-	}
-	if !pub.Equal(ek.PublicKey) {
-		t.Errorf("PublicKey mismatch (should be the manually-entered key)")
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("~/.ssh mode = %o, want 0700", perm)
 	}
 }
 
-// TestResolveAutoNonTTYNoAgentFallsToFresh — CI-style: no agent, no
-// TTY → don't surprise the pipeline by binding ~/.ssh/id_ed25519
-// even if it exists. Generate a fresh key.
-func TestResolveAutoNonTTYNoAgentFallsToFresh(t *testing.T) {
-	withHome(t)
+// TestResolveExplicitNewKeyStillUsesTxcoHome — --new-key keeps its old
+// semantics: generate fresh under $TXCO_HOME/keys/<name>.ed25519, NOT
+// under ~/.ssh/. The escape hatch for users who don't want a key in
+// ~/.ssh/.
+func TestResolveExplicitNewKeyStillUsesTxcoHome(t *testing.T) {
+	home := withHome(t)
 	withoutAgent(t)
-	home := withFakeHome(t)
-	_, priv, _ := ed25519.GenerateKey(nil)
-	writeOpenSSHKey(t, filepath.Join(home, ".ssh"), "id_ed25519", priv)
+	withFakeHome(t) // ensure ~/.ssh stays untouched
 
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{Name: "local"},
+	ek, err := resolveEnrollmentKey(EnrollmentChoices{NewKey: true, Name: "local"},
 		strings.NewReader(""), false, new(bytes.Buffer))
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if ek.privKey == nil || ek.KeyPath == "" {
-		t.Errorf("non-TTY auto path should generate a fresh key; got %+v", ek)
+	wantUnder := filepath.Join(home, "keys")
+	if !strings.HasPrefix(ek.KeyPath, wantUnder) {
+		t.Errorf("KeyPath=%q, want under %q (--new-key must land in $TXCO_HOME, not ~/.ssh/)",
+			ek.KeyPath, wantUnder)
+	}
+	if strings.Contains(ek.KeyPath, ".ssh") {
+		t.Errorf("--new-key must not write into ~/.ssh/; got %q", ek.KeyPath)
 	}
 }
 
-// TestResolveNoSSHAgentDeclines — --no-ssh-agent forces the auto
-// path to skip the agent even when one is reachable.
-func TestResolveNoSSHAgentDeclines(t *testing.T) {
+// TestResolveExplicitSSHKeyStillReadsThatPath — --ssh-key <path>
+// continues to honor the caller's chosen path; the new default
+// doesn't override explicit flags.
+func TestResolveExplicitSSHKeyStillReadsThatPath(t *testing.T) {
 	withHome(t)
-	_, priv, _ := ed25519.GenerateKey(nil)
-	withAgent(t, priv)
-	withFakeHome(t) // no ~/.ssh/id_ed25519 set up
+	home := withFakeHome(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	chosen := writeOpenSSHKey(t, filepath.Join(home, "custom"), "my-key", priv)
 
-	ek, err := resolveEnrollmentKey(EnrollmentChoices{NoSSHAgent: true, Name: "local"},
+	ek, err := resolveEnrollmentKey(EnrollmentChoices{SSHKey: chosen},
 		strings.NewReader(""), false, new(bytes.Buffer))
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if ek.KeySource == SourceSSHAgent {
-		t.Errorf("--no-ssh-agent should not pick agent backend; got %+v", ek)
+	if ek.KeyPath != chosen {
+		t.Errorf("KeyPath=%q, want %q", ek.KeyPath, chosen)
+	}
+	if !pub.Equal(ek.PublicKey) {
+		t.Errorf("PublicKey mismatch — --ssh-key must load the chosen file's pubkey")
 	}
 }

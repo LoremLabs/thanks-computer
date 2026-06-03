@@ -267,6 +267,10 @@ var cliCommandTree = []node{
 	{Name: "completion", Desc: "Emit shell completion script (bash|zsh|fish)"},
 	{Name: "help", Desc: "Show top-level help"},
 	{Name: "version", Desc: "Print version + build info"},
+	{Name: "update", Desc: "Check for a newer txco CLI release", Children: []node{
+		{Name: "check", Desc: "Compare the running version against the latest release"},
+	}},
+	{Name: "upgrade", Desc: "Upgrade the txco CLI binary (self-update or package-manager guidance)"},
 }
 
 // --- runCompletion: dispatcher for `txco completion <shell>` ---

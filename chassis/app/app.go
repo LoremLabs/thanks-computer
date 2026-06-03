@@ -52,6 +52,11 @@ type BuildInfo struct {
 	Version        string
 	CommitId       string
 	BuildTimestamp string
+	InstallMethod  string
+	// Chassis is the embedded open-core pin for a wrapping distribution
+	// (e.g. txco-saas stamps the core pseudo-version here while
+	// Version/CommitId describe the overlay build). Empty for open-core.
+	Chassis string
 }
 
 func init() {
@@ -73,6 +78,8 @@ func Run(bi BuildInfo) int {
 		Version:        bi.Version,
 		CommitId:       bi.CommitId,
 		BuildTimestamp: bi.BuildTimestamp,
+		InstallMethod:  bi.InstallMethod,
+		Chassis:        bi.Chassis,
 	}
 
 	// CLI subcommand dispatch (txco init / apply / diff / help). Runs before
@@ -92,6 +99,17 @@ func Run(bi BuildInfo) int {
 	conf, err := config.Load()
 	if err != nil {
 		log.Fatalf("Unknown command line option %v", err)
+	}
+
+	// Stamp the build identity onto the config so server surfaces (admin
+	// /healthz JSON) can report it. Kept off chassis/cli to avoid an import
+	// cycle (files under chassis/cli import chassis/server).
+	conf.Build = config.BuildIdentity{
+		Version:        bi.Version,
+		Commit:         bi.CommitId,
+		Chassis:        bi.Chassis,
+		BuildTimestamp: bi.BuildTimestamp,
+		InstallMethod:  bi.InstallMethod,
 	}
 
 	// setup logger

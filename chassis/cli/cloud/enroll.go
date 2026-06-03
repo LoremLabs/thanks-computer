@@ -19,12 +19,11 @@ import (
 // enrollChoices steers the ed25519 key selection + tenant naming for an enroll
 // attempt. Mirrors the relevant subset of `txco auth accept`'s flags.
 type enrollChoices struct {
-	tenant     string
-	assumeYes  bool
-	sshAgent   bool
-	noSSHAgent bool
-	sshKey     string
-	newKey     bool
+	tenant    string
+	assumeYes bool
+	sshAgent  bool
+	sshKey    string
+	newKey    bool
 }
 
 // resolveEnrollEndpoint picks the FULL enroll URL: the cloud's advertised
@@ -87,7 +86,6 @@ func performEnroll(endpoint, idToken, profile string, ec enrollChoices, stdout, 
 		TenantSlug:  ec.tenant,
 		AssumeYes:   ec.assumeYes,
 		SSHAgent:    ec.sshAgent,
-		NoSSHAgent:  ec.noSSHAgent,
 		SSHKey:      ec.sshKey,
 		NewKey:      ec.newKey,
 		Stderr:      stderr,
@@ -148,10 +146,10 @@ func runEnroll(args []string, stdout, stderr io.Writer) int {
 	tenant := fs.String("tenant", "", "tenant slug to claim on first enroll (non-interactive)")
 	yes := fs.Bool("yes", false, "accept the server's suggested tenant slug without prompting")
 	insecure := fs.Bool("insecure", false, "skip TLS verification (local dev cloud only)")
-	sshAgent := fs.Bool("ssh-agent", false, "force ssh-agent backend for the chassis key")
-	noSSHAgent := fs.Bool("no-ssh-agent", false, "skip ssh-agent even when reachable")
+	sshAgent := fs.Bool("ssh-agent", false, "enroll an ssh-agent key instead of the default")
+	_ = fs.Bool("no-ssh-agent", false, "(deprecated; no-op — the default no longer auto-detects ssh-agent)")
 	sshKey := fs.String("ssh-key", "", "use an existing on-disk key (e.g. ~/.ssh/id_ed25519)")
-	newKey := fs.Bool("new-key", false, "generate a fresh chassis key")
+	newKey := fs.Bool("new-key", false, "generate a fresh chassis key under $TXCO_HOME instead of ~/.ssh/")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -206,12 +204,11 @@ Flags:
 	endpoint := resolveEnrollEndpoint(cfg, *chassis, *dev)
 
 	ec := enrollChoices{
-		tenant:     *tenant,
-		assumeYes:  *yes,
-		sshAgent:   *sshAgent,
-		noSSHAgent: *noSSHAgent,
-		sshKey:     *sshKey,
-		newKey:     *newKey,
+		tenant:    *tenant,
+		assumeYes: *yes,
+		sshAgent:  *sshAgent,
+		sshKey:    *sshKey,
+		newKey:    *newKey,
 	}
 	if _, err := performEnroll(endpoint, tok.IDToken, profile, ec, stdout, stderr); err != nil {
 		auth.PrintCLIErrorf(stderr, "cloud enroll: %v\n  endpoint: %s", err, endpoint)
