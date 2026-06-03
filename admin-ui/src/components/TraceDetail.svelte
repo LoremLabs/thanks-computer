@@ -101,6 +101,13 @@
         return Math.round(ms) + ' ms'
     }
 
+    function formatBytes(n?: number): string {
+        if (typeof n !== 'number' || !isFinite(n) || n < 0) return '—'
+        if (n < 1024) return n + ' B'
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+        return (n / (1024 * 1024)).toFixed(1) + ' MB'
+    }
+
     function stepLabel(s: TraceStep): string {
         // Matches the on-disk steps/<scope>-<name>/ folder naming —
         // 4-digit scope so the column lines up across rows.
@@ -219,6 +226,14 @@
                 <span class="font-mono text-neutral-400"><Ago at={trace.started_at} /></span>
                 <span class="text-neutral-500">duration</span>
                 <span class="font-mono text-neutral-800">{formatDuration(trace.duration_ms)}</span>
+                {#if typeof trace.bytes_in === 'number' || typeof trace.bytes_out === 'number'}
+                    <span class="text-neutral-500">bytes in / out</span>
+                    <span class="font-mono text-neutral-800">{formatBytes(trace.bytes_in)} <span class="text-neutral-400">/</span> {formatBytes(trace.bytes_out)}</span>
+                {/if}
+                {#if typeof trace.fuel === 'number'}
+                    <span class="text-neutral-500">fuel</span>
+                    <span class="font-mono text-neutral-800">{trace.fuel.toLocaleString()}</span>
+                {/if}
                 <span class="text-neutral-500">status</span>
                 <span>
                     <span class="rounded px-1.5 py-0.5 text-[11px] font-medium {statusBadgeClass(trace.status)}">

@@ -466,6 +466,11 @@ export interface TraceResponse {
     finished_at?: string
     duration_ms?: number
     status?: string
+    // Per-request usage, promoted out of the _txc envelope: fuel consumed,
+    // request payload size in, final response size out.
+    fuel?: number
+    bytes_in?: number
+    bytes_out?: number
     steps?: TraceStep[]
     in?: unknown
     out?: unknown
