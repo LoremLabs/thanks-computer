@@ -2,25 +2,59 @@ package cli
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
 // TestDispatchUnknownSubcommand verifies that a bare word that isn't a
 // known subcommand fails loudly instead of falling through to the
-// server-boot path. `txco whoami` used to silently start the chassis;
-// the intent of the user was almost always `txco auth whoami`.
+// server-boot path — a typo like `txco aply` should be told it's
+// unknown, not silently boot the chassis.
 func TestDispatchUnknownSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	status, ok := Dispatch([]string{"txco", "whoami"}, &stdout, &stderr)
+	status, ok := Dispatch([]string{"txco", "aply"}, &stdout, &stderr)
 	if !ok {
 		t.Fatalf("ok=false: dispatcher fell through to server boot")
 	}
 	if status == 0 {
 		t.Fatalf("status=0: want non-zero exit for unknown subcommand")
 	}
-	if !strings.Contains(stderr.String(), `unknown subcommand "whoami"`) {
+	if !strings.Contains(stderr.String(), `unknown subcommand "aply"`) {
 		t.Fatalf("stderr lacks unknown-subcommand message: %q", stderr.String())
+	}
+}
+
+// TestDispatchWhoamiAlias verifies `txco whoami` routes to `auth whoami`
+// (a top-level convenience alias) rather than failing as unknown. Points
+// at an httptest chassis so the round-trip is deterministic and offline.
+func TestDispatchWhoamiAlias(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/whoami" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"source":"open","capabilities":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	status, ok := Dispatch([]string{"txco", "whoami", "--url", srv.URL}, &stdout, &stderr)
+	if !ok {
+		t.Fatalf("ok=false: whoami alias fell through to server boot")
+	}
+	if strings.Contains(stderr.String(), "unknown subcommand") {
+		t.Fatalf("whoami treated as unknown subcommand: %q", stderr.String())
+	}
+	if status != 0 {
+		t.Fatalf("status=%d, want 0; stderr=%q", status, stderr.String())
+	}
+	// Proves the alias actually reached `auth whoami` (its output shape).
+	if !strings.Contains(stdout.String(), "source: open") {
+		t.Fatalf("whoami alias did not reach `auth whoami`; stdout=%q", stdout.String())
 	}
 }
 

@@ -104,6 +104,11 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runSnapshot(rest, stdout, stderr), true
 	case "auth":
 		return auth.Dispatch(rest, stdout, stderr), true
+	case "whoami":
+		// Top-level convenience alias for `auth whoami` — confirm the
+		// chassis's view of the active identity. Users reflexively type
+		// `txco whoami`, so route it instead of erroring as unknown.
+		return auth.Dispatch(append([]string{"whoami"}, rest...), stdout, stderr), true
 	case "login":
 		// Cloud account sign-in (OAuth against the thanks-computer cloud) —
 		// distinct from `auth login`, which mints a chassis admin browser

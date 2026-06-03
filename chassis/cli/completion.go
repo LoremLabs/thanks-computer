@@ -253,6 +253,7 @@ var cliCommandTree = []node{
 	{Name: "trace", Desc: "Inspect request traces"},
 	{Name: "snapshot", Desc: "Snapshot subcommands", Children: snapshotChildren},
 	{Name: "auth", Desc: "Auth + identity management", Children: authChildren},
+	{Name: "whoami", Desc: "Show the chassis's view of your identity (alias for 'auth whoami')", Flags: []string{"url", "profile", "name"}},
 	{Name: "login", Desc: "Sign in to the thanks-computer cloud"},
 	{Name: "logout", Desc: "Sign out of the thanks-computer cloud"},
 	{Name: "cloud", Desc: "Cloud account subcommands (login/logout/whoami)", Children: cloudChildren},
