@@ -182,6 +182,7 @@ type Config struct {
 	WebDebug                     string   `id:"web-debug" default:"" desc:"Debug flags: SHOW_PRIVATE_VARS, HIDE_PRIVATE_VARS"`
 	WebMockHeader                bool     `id:"web-mock-header" default:"false" desc:"Honor the X-Txco-Mocks request header and map it into _txc.mocks (caller-driven mock interception). Dev convenience; leave off in production."`
 	UsageEnabled                 bool     `id:"usage-enabled" default:"true" desc:"Emit one structured 'usage' log line per completed request (rid, tenant, sizes, timing, status) for downstream accounting. On by default; set --usage-enabled=false to disable."`
+	UsageSink                    string   `id:"usage-sink" default:"zap" desc:"Usage sink backend: {zap}. The bundled 'zap' sink folds each event into the structured 'usage' log line. An out-of-tree sink (e.g. a per-node rollup) self-registers via blank import and is selected here. usage-enabled=false disables usage entirely regardless of this."`
 }
 
 func Load() (Config, error) {

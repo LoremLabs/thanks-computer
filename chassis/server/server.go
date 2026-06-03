@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/feed"
 	_ "github.com/loremlabs/thanks-computer/chassis/feed/filesource" // registers the "file" backend
 	_ "github.com/loremlabs/thanks-computer/chassis/feed/nop"        // registers the "nop" backend
+	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
 	"github.com/loremlabs/thanks-computer/chassis/ops"
@@ -745,8 +747,28 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// the bus loop.
 	var usageSink usage.Sink
 	if conf.UsageEnabled {
-		usageSink = usage.NewZapSink(logger)
-		logger.Info("usage sink loaded", zap.String("sink", "zap"))
+		// Epoch is a dedicated per-boot mint, NOT conf.ServerId: an
+		// out-of-tree cumulative sink keys its counters on the epoch as a
+		// reset boundary, and conf.ServerId (--sid) is a pinnable knob, so
+		// reusing it could collide a fresh-from-zero local store with a
+		// prior cumulative and undercount. A fresh mint per boot guarantees
+		// a new series every boot. sid is logged for correlation.
+		usageEpoch := hxid.New().String()
+		s, uerr := usage.Open(conf.UsageSink, usage.SinkConfig{
+			Epoch:   usageEpoch,
+			NodeID:  resolveUsageNodeID(conf.Fqdn),
+			DataDir: conf.DbRoot,
+			Logger:  logger,
+		})
+		if uerr != nil {
+			cancel()
+			return ctx, nil, uerr
+		}
+		usageSink = s
+		logger.Info("usage sink loaded",
+			zap.String("sink", usageSink.Name()),
+			zap.String("epoch", usageEpoch),
+			zap.String("sid", conf.ServerId))
 	}
 
 	// Continuation store: durable, immutable, derived-state storage for
@@ -1282,4 +1304,19 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		logger.Info("--thanks computer chassis shutdown--", zap.String("reason", reason))
 	}, nil
 
+}
+
+// resolveUsageNodeID picks a stable identity for THIS chassis to stamp on
+// usage rows, so a many-node store can attribute counters to a node.
+// Prefers the operator-set FQDN; falls back to the OS hostname (distinct
+// per container in a fleet); "local" as a last resort. Mirrors the cron
+// head's resolveNodeID (unexported there).
+func resolveUsageNodeID(fqdn string) string {
+	if fqdn != "" {
+		return fqdn
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "local"
 }

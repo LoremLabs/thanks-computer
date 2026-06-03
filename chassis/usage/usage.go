@@ -60,10 +60,20 @@ type UsageEvent struct {
 // Sink consumes usage events. WriteEvent must be safe for concurrent
 // calls (the bus loop emits from per-request goroutines). Close is
 // called once on chassis shutdown; synchronous sinks return nil
-// immediately.
+// immediately. Name reports the backend's registered name for the
+// startup load log.
 type Sink interface {
 	WriteEvent(ev UsageEvent)
+	Name() string
 	Close(ctx context.Context) error
+}
+
+// init self-registers the bundled "zap" sink so a build with no backend
+// blank import still has a working default (mirrors trace's built-ins).
+func init() {
+	Register("zap", func(cfg SinkConfig) (Sink, error) {
+		return NewZapSink(cfg.Logger), nil
+	})
 }
 
 // ZapSink is the bundled default sink: it folds the event into a
@@ -126,5 +136,7 @@ func (s *ZapSink) WriteEvent(ev UsageEvent) {
 	}
 	s.log.Info("usage", fields...)
 }
+
+func (s *ZapSink) Name() string { return "zap" }
 
 func (s *ZapSink) Close(context.Context) error { return nil }

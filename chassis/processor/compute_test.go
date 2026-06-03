@@ -135,6 +135,7 @@ func TestExecComputePropagatesEngineError(t *testing.T) {
 type stubUsage struct{ ev *usage.UsageEvent }
 
 func (s *stubUsage) WriteEvent(e usage.UsageEvent) { s.ev = &e }
+func (s *stubUsage) Name() string                  { return "stub" }
 func (s *stubUsage) Close(context.Context) error   { return nil }
 
 // TestComputeEmitsUsage: a compute invocation emits a usage event with
