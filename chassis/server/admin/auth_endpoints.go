@@ -341,6 +341,17 @@ func (c *Controller) handleRevokeActor(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "missing actor id", nil)
 		return
 	}
+	// Refuse self-revoke. The capability check passed, so the caller is
+	// authorized in principle — but revoking yourself cascades to all
+	// your keys (registry.RevokeActor at registry.go:312), bricking the
+	// account that just made the call. Force the operator to ask a peer
+	// super_admin so there's always at least one working key on the
+	// other side of the action.
+	if ac := auth.FromContext(r.Context()); ac != nil && ac.ActorID == actorID {
+		writeJSONError(w, http.StatusConflict, "cannot revoke yourself",
+			map[string]any{"hint": "ask a peer super_admin to revoke this actor"})
+		return
+	}
 	if err := c.registry.RevokeActor(r.Context(), actorID); err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "actor not found", map[string]any{"actor_id": actorID})

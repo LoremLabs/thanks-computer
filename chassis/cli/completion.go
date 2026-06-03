@@ -67,6 +67,7 @@ var authChildren = []node{
 	{Name: "whoami", Desc: "Show current identity (signed call)"},
 	{Name: "rotate-key", Desc: "Generate a new signing key for the active profile"},
 	{Name: "revoke-key", Desc: "Revoke a signing key"},
+	{Name: "revoke-actor", Desc: "Revoke an actor (cascades to all its keys)"},
 	{Name: "invite", Desc: "Mint a signed teammate invitation"},
 	{Name: "invitations", Desc: "List active invitations"},
 	{Name: "revoke-invitation", Desc: "Revoke a pending invitation"},

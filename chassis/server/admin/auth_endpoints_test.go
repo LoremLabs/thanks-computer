@@ -331,6 +331,71 @@ func TestRevokedKeyBlocksRequest(t *testing.T) {
 	}
 }
 
+// TestRevokeActorBlocksSelf — handleRevokeActor must refuse a request
+// where the signing actor IS the target actor. The capability check
+// (admin:all → actor:*:revoke) passes, but revoking yourself cascades
+// to all your keys and bricks the account that just made the call. The
+// 409 + hint is what tells the operator to ask a peer super_admin.
+//
+// Pairs with TestRunRevokeActorRefusesSelfRevoke in the CLI package
+// (which covers the client-side ergonomic guard).
+func TestRevokeActorBlocksSelf(t *testing.T) {
+	c := newTestController(t, config.Config{
+		Personalities:       "admin",
+		AuthMode:            "signed",
+		AuthDevEnrollSecret: "shhh",
+		Environment:         "dev",
+	})
+	srv := httptest.NewServer(withRouter(t, c, auth.ModeSigned))
+	t.Cleanup(srv.Close)
+
+	keyID, priv := enroll(t, srv, "shhh")
+
+	// Resolve the actor id behind this key by signing a whoami.
+	r1 := signedGET(t, srv, "/auth/whoami", keyID, priv)
+	defer r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("whoami status=%d", r1.StatusCode)
+	}
+	var wr whoamiResponse
+	if err := json.NewDecoder(r1.Body).Decode(&wr); err != nil {
+		t.Fatalf("decode whoami: %v", err)
+	}
+	if wr.ActorID == "" {
+		t.Fatalf("whoami didn't return an actor_id: %+v", wr)
+	}
+
+	// Self-revoke must 409.
+	selfPath := "/v1/tenants/default/auth/actors/" + wr.ActorID + "/revoke"
+	r2 := signedPOST(t, srv, selfPath, keyID, priv, nil)
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusConflict {
+		out, _ := io.ReadAll(r2.Body)
+		t.Fatalf("self-revoke status=%d (want 409); body=%s", r2.StatusCode, out)
+	}
+	body, _ := io.ReadAll(r2.Body)
+	var er map[string]any
+	if err := json.Unmarshal(body, &er); err != nil {
+		t.Fatalf("decode 409 body: %v (body=%s)", err, body)
+	}
+	if er["error"] != "cannot revoke yourself" {
+		t.Errorf("error=%v, want %q", er["error"], "cannot revoke yourself")
+	}
+	det, _ := er["detail"].(map[string]any)
+	if hint, _ := det["hint"].(string); hint == "" {
+		t.Errorf("missing hint in detail: %+v", er)
+	}
+
+	// Subsequent whoami still succeeds — self-revoke was rejected, not
+	// half-applied. Belt-and-suspenders against a buggy guard that
+	// returned 409 after the registry write.
+	r3 := signedGET(t, srv, "/auth/whoami", keyID, priv)
+	defer r3.Body.Close()
+	if r3.StatusCode != http.StatusOK {
+		t.Errorf("post-409 whoami status=%d (want 200 — actor must NOT be revoked)", r3.StatusCode)
+	}
+}
+
 // TestUnsignedRequestRejectedInSignedMode is the basic guarantee that
 // `--auth-mode=signed` actually keeps unsigned callers out.
 func TestUnsignedRequestRejectedInSignedMode(t *testing.T) {

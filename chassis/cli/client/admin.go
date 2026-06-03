@@ -360,6 +360,35 @@ func (c *Client) RevokeKey(ctx context.Context, keyID string) (*RevokeResponse, 
 	return &out, nil
 }
 
+// RevokeActor signs a POST /v1/tenants/{tenant}/auth/actors/{id}/revoke.
+// Soft-revokes the actor (stamps actors.revoked_at) and cascades to all
+// its keys. Capability gate: actor:*:revoke (super_admin). Server
+// refuses self-revoke with 409.
+func (c *Client) RevokeActor(ctx context.Context, actorID string) (*RevokeResponse, error) {
+	suffix := "/auth/actors/" + url.PathEscape(actorID) + "/revoke"
+	endpoint := c.scopedURL(suffix)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out RevokeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode revoke-actor response: %w", err)
+	}
+	return &out, nil
+}
+
 // --- invitations -----------------------------------------------------------
 
 // CreateInvitationRequest is the wire body POST /auth/invitations expects.

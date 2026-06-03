@@ -27,6 +27,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) int {
 		return runRotate(args[1:], stdout, stderr)
 	case "revoke-key":
 		return runRevoke(args[1:], stdout, stderr)
+	case "revoke-actor":
+		return runRevokeActor(args[1:], stdout, stderr)
 	case "invite":
 		return runInvite(args[1:], stdout, stderr)
 	case "invitations":
@@ -92,6 +94,7 @@ Available commands:
   whoami                    Print the chassis's view of the current key's identity
   rotate-key                Generate a new key, enroll it, revoke the old one
   revoke-key                Revoke a specific key (signed)
+  revoke-actor              Revoke an actor + cascade to its keys (signed; super_admin)
   invite                    Mint a single-use invitation token for a teammate (signed)
   invitations               List outstanding invitations (signed)
   revoke-invitation         Revoke a pending invitation (signed)

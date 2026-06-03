@@ -66,6 +66,38 @@ func TestScopedURLWithTenant(t *testing.T) {
 	}
 }
 
+// TestRevokeActorHitsTenantScopedPath — RevokeActor MUST hit the
+// tenant-scoped path. The legacy chassis-wide /auth/actors/<id>/revoke
+// was retired (server.go:197 → handleRouteRetired) so a misconfigured
+// caller that lands on the flat path silently 410s. This test pins the
+// path shape — `/v1/tenants/<slug>/auth/actors/<id>/revoke` — so a
+// future refactor of scopedURL can't quietly drop the tenant prefix.
+func TestRevokeActorHitsTenantScopedPath(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"revoked":true,"actor_id":"actor_target"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(Target{Addr: srv.URL, Tenant: "loremlabs"})
+	resp, err := c.RevokeActor(context.Background(), "actor_target")
+	if err != nil {
+		t.Fatalf("RevokeActor: %v", err)
+	}
+	if !resp.Revoked || resp.ActorID != "actor_target" {
+		t.Errorf("got %+v; want Revoked=true, ActorID=actor_target", resp)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got %q, want POST", gotMethod)
+	}
+	if gotPath != "/v1/tenants/loremlabs/auth/actors/actor_target/revoke" {
+		t.Errorf("path: got %q, want /v1/tenants/loremlabs/auth/actors/actor_target/revoke", gotPath)
+	}
+}
+
 // TestScopedURLDefaultsTenant — phase 7 retired the legacy flat
 // routes; a Target with no Tenant now falls through to the literal
 // "default" tenant slug (the bottom rung of ResolveTenant). This

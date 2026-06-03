@@ -200,6 +200,7 @@ func TestCompletionAuthTreeIncludesKeyVerbs(t *testing.T) {
 		"generate",
 		"rotate",
 		"verify",
+		"revoke-actor",
 	}
 	emitters := map[string]func([]node) string{
 		"bash": emitBash,

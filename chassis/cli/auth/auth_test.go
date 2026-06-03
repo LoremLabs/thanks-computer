@@ -706,3 +706,134 @@ func TestAcceptFromStdin(t *testing.T) {
 		t.Errorf("server saw token=%v, want the piped string", got["token"])
 	}
 }
+
+// --- revoke-actor tests ---------------------------------------------------
+
+// seedSignedProfile pre-creates a key + meta for the "local" profile
+// under TXCO_HOME with the given actor id, so any command going through
+// buildSignedTarget signs as that actor against the test server.
+func seedSignedProfile(t *testing.T, actorID, chassisURL string) {
+	t.Helper()
+	kp, _ := KeyPath("local")
+	if err := os.MkdirAll(filepath.Dir(kp), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePrivateKey(kp, priv); err != nil {
+		t.Fatal(err)
+	}
+	mp, _ := MetaPath("local")
+	if err := SaveMeta(mp, Meta{
+		ActorID:    actorID,
+		KeyID:      "key_" + actorID,
+		ChassisURL: chassisURL,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunRevokeActorHappyPath — super_admin revoking a different actor.
+// whoami returns actor_admin, target is actor_target; CLI posts to the
+// tenant-scoped revoke path and prints "revoked actor_target".
+func TestRunRevokeActorHappyPath(t *testing.T) {
+	withHome(t)
+
+	var revokePath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/auth/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"source":       "signed",
+				"actor_id":     "actor_admin",
+				"key_id":       "key_actor_admin",
+				"capabilities": []string{"actor:*:revoke"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/revoke"):
+			revokePath = r.URL.Path
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"revoked":  true,
+				"actor_id": "actor_target",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	seedSignedProfile(t, "actor_admin", srv.URL)
+
+	var stdout, stderr bytes.Buffer
+	code := runRevokeActor([]string{"--url", srv.URL, "actor_target"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runRevokeActor exit=%d stderr=%s", code, stderr.String())
+	}
+	if want := "/v1/tenants/default/auth/actors/actor_target/revoke"; revokePath != want {
+		t.Errorf("revoke path: got %q, want %q", revokePath, want)
+	}
+	if !strings.Contains(stdout.String(), "revoked actor_target") {
+		t.Errorf("stdout: want `revoked actor_target`; got %q", stdout.String())
+	}
+}
+
+// TestRunRevokeActorRefusesSelfRevoke — without --i-am-sure, the CLI's
+// whoami-based guard must refuse and never POST. With --i-am-sure, it
+// proceeds (the server's own 409 guard remains the load-bearing check;
+// here we just verify the override flag takes effect).
+func TestRunRevokeActorRefusesSelfRevoke(t *testing.T) {
+	withHome(t)
+
+	var sawRevoke bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/auth/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"source":       "signed",
+				"actor_id":     "actor_admin",
+				"key_id":       "key_actor_admin",
+				"capabilities": []string{"actor:*:revoke"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/revoke"):
+			sawRevoke = true
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"revoked":  true,
+				"actor_id": "actor_admin",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	seedSignedProfile(t, "actor_admin", srv.URL)
+
+	// Bare self-revoke must refuse before POSTing.
+	var stdout, stderr bytes.Buffer
+	code := runRevokeActor([]string{"--url", srv.URL, "actor_admin"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runRevokeActor self-revoke exit=%d (want 2) stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--i-am-sure") {
+		t.Errorf("stderr should reference --i-am-sure; got %q", stderr.String())
+	}
+	if sawRevoke {
+		t.Errorf("server saw a revoke POST despite client-side guard")
+	}
+
+	// With --i-am-sure, the CLI should skip the whoami check entirely
+	// and proceed to POST (server's own 409 isn't simulated here — that
+	// path is covered by the server-side test).
+	stdout.Reset()
+	stderr.Reset()
+	code = runRevokeActor([]string{"--url", srv.URL, "--i-am-sure", "actor_admin"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runRevokeActor --i-am-sure exit=%d stderr=%s", code, stderr.String())
+	}
+	if !sawRevoke {
+		t.Errorf("server did not see revoke POST despite --i-am-sure")
+	}
+}
