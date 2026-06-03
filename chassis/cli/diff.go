@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
-	"flag"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -22,7 +24,7 @@ import (
 // map before comparison, so the local rules' txcl matches what the server
 // stores.
 func runDiff(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("diff", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("diff", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
 	target := fs.String("target", "", "target name from txco.yaml (default: the config's `target:` field, or `dev`)")
 	addr := fs.String("addr", "", "chassis admin endpoint (overrides target's chassis URL)")
@@ -30,6 +32,7 @@ func runDiff(args []string, stdout, stderr io.Writer) int {
 	pass := fs.String("pass", "", "basic auth password (overrides target's pass)")
 	profile := fs.String("profile", "", fmt.Sprintf("signing profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
 	tenant := fs.String("tenant", "", "tenant slug for the chassis (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON ({stacks, files}) instead of the text report")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -99,6 +102,9 @@ Flags:
 	// been edited out-of-band.
 	remoteStackNames := uniqueStackNamesFromOps(remoteOps)
 	drifts := buildDrifts(ctx, c, dir, localOps, remoteStackNames)
+	if len(drifts) > 0 {
+		decorateStackURLs(ctx, c, drifts)
+	}
 	anyDivergent := false
 	for _, d := range drifts {
 		if d.Divergent {
@@ -106,7 +112,7 @@ Flags:
 			break
 		}
 	}
-	if anyDivergent {
+	if anyDivergent && !*jsonOut {
 		fmt.Fprintln(stdout, "stacks:")
 		printDriftTable(stdout, drifts)
 		fmt.Fprintln(stdout)
@@ -152,6 +158,14 @@ Flags:
 		return changes[i].name < changes[j].name
 	})
 
+	if *jsonOut {
+		files := make([]diffFileChange, 0, len(changes))
+		for _, ch := range changes {
+			files = append(files, diffFileChange{Stack: ch.stack, Scope: ch.scope, Name: ch.name, Kind: ch.kind})
+		}
+		return emitDiffJSON(stdout, stderr, drifts, files)
+	}
+
 	if len(changes) == 0 {
 		if anyDivergent {
 			fmt.Fprintln(stdout, "no per-file content changes; version pointers differ — see stacks above.")
@@ -174,3 +188,32 @@ Flags:
 	return 0
 }
 
+// diffFileChange is the JSON form of one pending rule add/change.
+type diffFileChange struct {
+	Stack string `json:"stack"`
+	Scope int    `json:"scope"`
+	Name  string `json:"name"`
+	Kind  string `json:"kind"` // "add" | "change"
+}
+
+// emitDiffJSON writes the diff as a single `{stacks, files}` object. Unlike
+// the text form (which prints the stacks block only when something diverged),
+// the JSON always includes every stack so consumers get a stable shape. Diff
+// is a preview, not a probe — exit stays 0 on success regardless of pending
+// changes; only an encode failure is non-zero.
+func emitDiffJSON(stdout, stderr io.Writer, drifts []stackDrift, files []diffFileChange) int {
+	if files == nil {
+		files = []diffFileChange{}
+	}
+	payload := struct {
+		Stacks []stackDriftJSON `json:"stacks"`
+		Files  []diffFileChange `json:"files"`
+	}{driftsToJSON(drifts), files}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(payload); err != nil {
+		fmt.Fprintf(stderr, "diff: encode json: %v\n", err)
+		return 1
+	}
+	return 0
+}

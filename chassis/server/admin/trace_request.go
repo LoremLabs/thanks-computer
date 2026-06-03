@@ -9,9 +9,40 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth"
+	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
+	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
+
+// traceTenantScope authorizes a trace request and returns the tenant slug to
+// scope reads to. On a tenant-scoped route (/v1/tenants/{slug}/traces/…,
+// where resolveTenantMiddleware has set ac.TenantSlug) it requires the
+// opstack:*:trace capability and returns that slug — a tenant-owner (who
+// holds opstack:*:*) passes, a non-member (empty caps) is denied. On a flat
+// route (ac.TenantSlug == "") it requires super-admin and returns "" (no
+// filter — the chassis-wide operator view, incl. _sys). ok=false means a
+// 403 was already written.
+func (c *Controller) traceTenantScope(w http.ResponseWriter, r *http.Request) (tenant string, ok bool) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return "", false
+	}
+	if ac.TenantSlug != "" {
+		if err := policy.RequireCapability(r.Context(), "opstack:*:trace"); err != nil {
+			auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+			return "", false
+		}
+		return ac.TenantSlug, true
+	}
+	if err := policy.RequireSuperAdmin(r.Context()); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return "", false
+	}
+	return "", true
+}
 
 // traceListResponse backs GET /traces/requests.json — a paginated list
 // of recent traces. Total is the uncapped count (or, with ?grep=, the
@@ -121,6 +152,10 @@ func (c *Controller) traceRdr() (trace.Reader, error) {
 // backend when admin is a separate machine) — only the continuation
 // cross-links are composed here from the run store.
 func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := c.traceTenantScope(w, r)
+	if !ok {
+		return
+	}
 	rid := mux.Vars(r)["rid"]
 	if !validRID.MatchString(rid) {
 		http.Error(w, "invalid rid", http.StatusBadRequest)
@@ -141,6 +176,12 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		http.Error(w, "trace read error", http.StatusInternalServerError)
+		return
+	}
+	// Tenant-scoped callers may only read their own tenant's traces; 404
+	// (not 403) so a cross-tenant rid isn't even confirmed to exist.
+	if tenant != "" && d.Tenant != tenant {
+		http.Error(w, "trace not found", http.StatusNotFound)
 		return
 	}
 
@@ -224,6 +265,10 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 // the long-poll 304. All of that is the reader's job; this handler only
 // parses params, echoes the (opaque) ETag, and maps to the wire shape.
 func (c *Controller) handleTraceList(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := c.traceTenantScope(w, r)
+	if !ok {
+		return
+	}
 	limit := traceListDefaultLimit
 	if q := r.URL.Query().Get("limit"); q != "" {
 		if n, err := strconv.Atoi(q); err == nil && n > 0 {
@@ -243,6 +288,7 @@ func (c *Controller) handleTraceList(w http.ResponseWriter, r *http.Request) {
 		Limit:       limit,
 		Grep:        r.URL.Query().Get("grep"),
 		IfNoneMatch: r.Header.Get("If-None-Match"),
+		Tenant:      tenant,
 	})
 	if err != nil {
 		http.Error(w, "list error", http.StatusInternalServerError)

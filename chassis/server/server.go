@@ -619,6 +619,10 @@ func runWithTrace(
 		Fields: map[string]any{
 			"fuel":      fuelUsed,
 			"bytes_out": len(finalPayload),
+			// Resolved tenant (the pipeline's routed tenant), not the `_sys`
+			// entry tenant the trace was opened with. Admin tenant-scoping
+			// filters traces on this; unrouted/healthz stay `_sys`.
+			"tenant": gjson.GetBytes(finalPayload, "_txc.tenant").String(),
 		},
 	})
 	tracer.End(status, finalPayload)

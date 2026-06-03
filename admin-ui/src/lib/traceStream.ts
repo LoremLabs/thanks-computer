@@ -64,6 +64,7 @@ export class TraceStreamUnavailableError extends Error {
 // with no events) so the caller can distinguish "loop again" from
 // "received a batch."
 export async function fetchTraceStream(
+    tenant: string,
     cursor: string,
     waitMs: number,
     signal?: AbortSignal,
@@ -71,7 +72,12 @@ export async function fetchTraceStream(
     const qp = new URLSearchParams()
     if (cursor) qp.set('cursor', cursor)
     qp.set('wait', String(waitMs))
-    const resp = await fetch(`/traces/stream?${qp.toString()}`, {
+    // Tenant-scoped stream when a tenant is selected (server confines it to
+    // that tenant's traces); flat /traces/stream (super-admin) otherwise.
+    const base = tenant
+        ? `/v1/tenants/${encodeURIComponent(tenant)}/traces/stream`
+        : '/traces/stream'
+    const resp = await fetch(`${base}?${qp.toString()}`, {
         credentials: 'same-origin',
         signal,
     })
@@ -88,6 +94,8 @@ export async function fetchTraceStream(
 }
 
 export interface TraceStreamOpts {
+    // Tenant slug to scope the stream to (empty = flat super-admin stream).
+    tenant?: string
     // Per-request long-poll budget. Server clamps to its own
     // TraceStreamLongPollMS, so values above ~30000 just hit the cap.
     waitMs?: number
@@ -101,6 +109,7 @@ export interface TraceStreamOpts {
 // 15s); the 404 unavailable case calls onUnavailable once and stops
 // the loop so the UI can switch to archive mode.
 export function startTraceStream(opts: TraceStreamOpts): () => void {
+    const tenant = opts.tenant ?? ''
     const waitMs = opts.waitMs ?? 25000
     const ac = new AbortController()
     let cursor = ''
@@ -111,7 +120,7 @@ export function startTraceStream(opts: TraceStreamOpts): () => void {
     void (async () => {
         while (!stopped) {
             try {
-                const r = await fetchTraceStream(cursor, waitMs, ac.signal)
+                const r = await fetchTraceStream(tenant, cursor, waitMs, ac.signal)
                 backoff = 500
                 if (r) {
                     for (const ev of r.events ?? []) {

@@ -477,7 +477,9 @@
             // settles. A missing trace doesn't blank the response.
             trace = null
             for (let i = 0; i < 12; i++) {
-                const t = await getTrace(fired.rid).catch(() => null)
+                // Demo runs in the open/local learning chassis; the flat
+                // (super-admin/open) trace route applies — pass no tenant.
+                const t = await getTrace('', fired.rid).catch(() => null)
                 if (t) trace = t
                 if (t?.finished_at) break
                 await new Promise((r) => setTimeout(r, 200))

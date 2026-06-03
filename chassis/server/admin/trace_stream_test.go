@@ -8,9 +8,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
+
+// asSuperAdmin attaches a super-admin auth.Context so a request exercises the
+// flat (chassis-wide) trace path past the traceTenantScope gate.
+func asSuperAdmin(r *http.Request) *http.Request {
+	return r.WithContext(auth.WithContext(r.Context(), &auth.Context{Source: "signed", SuperAdmin: true}))
+}
+
+// asTenant attaches a tenant-owner auth.Context (as resolveTenantMiddleware
+// would for /v1/tenants/{slug}/…), confining the request to `slug`.
+func asTenant(r *http.Request, slug string) *http.Request {
+	return r.WithContext(auth.WithContext(r.Context(), &auth.Context{
+		Source: "signed", TenantSlug: slug, Capabilities: []string{"opstack:*:*"},
+	}))
+}
 
 // memArmable is an in-memory trace.Armable for unit tests. Subscribe
 // pre-loads any events whose cursor is strictly greater than
@@ -67,7 +82,7 @@ func TestTraceStream_NotFoundWhenNoArmable(t *testing.T) {
 
 func TestTraceStream_TimeoutReturns202(t *testing.T) {
 	c := newStreamControllerForTest(t, &memArmable{}, 50)
-	req := httptest.NewRequest(http.MethodGet, "/traces/stream?wait=50", nil)
+	req := asSuperAdmin(httptest.NewRequest(http.MethodGet, "/traces/stream?wait=50", nil))
 	w := httptest.NewRecorder()
 	start := time.Now()
 	c.handleTraceStream(w, req)
@@ -95,7 +110,7 @@ func TestTraceStream_DeliversEvents(t *testing.T) {
 		{RequestDetail: trace.RequestDetail{RID: "rid-c", Status: "error"}, Cursor: "3"},
 	}
 	c := newStreamControllerForTest(t, &memArmable{preloaded: in}, 1000)
-	req := httptest.NewRequest(http.MethodGet, "/traces/stream?wait=500", nil)
+	req := asSuperAdmin(httptest.NewRequest(http.MethodGet, "/traces/stream?wait=500", nil))
 	w := httptest.NewRecorder()
 	c.handleTraceStream(w, req)
 	if w.Code != http.StatusOK {
@@ -132,7 +147,7 @@ func TestTraceStream_CursorFilters(t *testing.T) {
 	}
 	c := newStreamControllerForTest(t, &memArmable{preloaded: in}, 1000)
 	// Reconnect with cursor=3 ⇒ should receive only 4 and 5.
-	req := httptest.NewRequest(http.MethodGet, "/traces/stream?cursor=3&wait=500", nil)
+	req := asSuperAdmin(httptest.NewRequest(http.MethodGet, "/traces/stream?cursor=3&wait=500", nil))
 	w := httptest.NewRecorder()
 	c.handleTraceStream(w, req)
 	if w.Code != http.StatusOK {
@@ -151,5 +166,54 @@ func TestTraceStream_CursorFilters(t *testing.T) {
 	}
 	if resp.NextCursor != "5" {
 		t.Errorf("NextCursor = %q, want 5", resp.NextCursor)
+	}
+}
+
+// TestTraceStream_TenantScopedFilters: a tenant-scoped subscriber sees only
+// its own tenant's events, but the cursor still advances past foreign/_sys
+// events so a quiet tenant doesn't re-poll them forever.
+func TestTraceStream_TenantScopedFilters(t *testing.T) {
+	in := []trace.ClosedTrace{
+		{RequestDetail: trace.RequestDetail{RID: "a", Tenant: "prod-mankins", Status: "ok"}, Cursor: "1"},
+		{RequestDetail: trace.RequestDetail{RID: "b", Tenant: "acme", Status: "ok"}, Cursor: "2"},
+		{RequestDetail: trace.RequestDetail{RID: "c", Tenant: "prod-mankins", Status: "ok"}, Cursor: "3"},
+		{RequestDetail: trace.RequestDetail{RID: "d", Tenant: "_sys", Status: "ok"}, Cursor: "4"},
+	}
+	c := newStreamControllerForTest(t, &memArmable{preloaded: in}, 1000)
+	req := asTenant(httptest.NewRequest(http.MethodGet, "/traces/stream?wait=500", nil), "prod-mankins")
+	w := httptest.NewRecorder()
+	c.handleTraceStream(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp traceStreamResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Events) != 2 {
+		t.Fatalf("got %d events, want 2 (only prod-mankins)", len(resp.Events))
+	}
+	for _, ev := range resp.Events {
+		if ev.Tenant != "prod-mankins" {
+			t.Errorf("leaked %s (tenant %s) to prod-mankins", ev.RID, ev.Tenant)
+		}
+	}
+	if resp.NextCursor != "4" {
+		t.Errorf("NextCursor = %q, want 4 (advanced past foreign/_sys events)", resp.NextCursor)
+	}
+}
+
+// TestTraceStream_FlatRequiresSuperAdmin: a tenant-owner (opstack:*:*, not
+// super-admin) hitting the flat /traces/stream is denied — the leak fix.
+func TestTraceStream_FlatRequiresSuperAdmin(t *testing.T) {
+	c := newStreamControllerForTest(t, &memArmable{}, 50)
+	req := httptest.NewRequest(http.MethodGet, "/traces/stream?wait=50", nil)
+	req = req.WithContext(auth.WithContext(req.Context(), &auth.Context{
+		Source: "signed", Capabilities: []string{"opstack:*:*"}, // no TenantSlug, not super-admin
+	}))
+	w := httptest.NewRecorder()
+	c.handleTraceStream(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (flat stream is super-admin only)", w.Code)
 	}
 }

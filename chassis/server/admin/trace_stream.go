@@ -60,6 +60,12 @@ func (c *Controller) handleTraceStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "trace stream not available on this backend", http.StatusNotFound)
 		return
 	}
+	// Authorize + scope: tenant-scoped callers stream only their own tenant's
+	// traces; flat callers must be super-admin (chassis-wide, no filter).
+	tenant, ok := c.traceTenantScope(w, r)
+	if !ok {
+		return
+	}
 
 	cursor := r.URL.Query().Get("cursor")
 
@@ -111,55 +117,59 @@ func (c *Controller) handleTraceStream(w http.ResponseWriter, r *http.Request) {
 	const flushIdle = 50 * time.Millisecond
 
 	deadline := time.After(budget)
-	events := make([]traceStreamEvent, 0, 8)
+	kept := make([]traceStreamEvent, 0, 8)
+	var lastCursor string // advances over ALL seen events, incl. filtered ones
+	seen := false
 
-	// First event: wait up to the full budget. After we have at least
-	// one event, switch to a short flushIdle window to greedily drain
-	// the channel.
+	// Wait up to the full budget for the first event of ANY tenant; once one
+	// arrives, switch to a short flushIdle window to greedily drain. Tenant-
+	// scoped callers keep only their own events but still advance lastCursor
+	// past foreign ones, so a quiet tenant on a busy chassis doesn't re-poll
+	// the same foreign events every long-poll cycle.
 	for {
-		if len(events) == 0 {
-			select {
-			case <-r.Context().Done():
-				writeTraceStreamTimeout(w)
+		var idle <-chan time.Time
+		if seen {
+			idle = time.After(flushIdle)
+		}
+		select {
+		case <-r.Context().Done():
+			flushTraceStream(w, kept, lastCursor, seen)
+			return
+		case <-deadline:
+			flushTraceStream(w, kept, lastCursor, seen)
+			return
+		case <-idle:
+			flushTraceStream(w, kept, lastCursor, seen)
+			return
+		case ev, more := <-sub.Events():
+			if !more {
+				flushTraceStream(w, kept, lastCursor, seen)
 				return
-			case <-deadline:
-				writeTraceStreamTimeout(w)
-				return
-			case ev, ok := <-sub.Events():
-				if !ok {
-					writeTraceStreamTimeout(w)
-					return
-				}
-				events = append(events, closedTraceToWire(ev))
-				if len(events) >= maxBatch {
-					writeTraceStreamBatch(w, events)
-					return
-				}
 			}
-		} else {
-			select {
-			case <-r.Context().Done():
-				writeTraceStreamBatch(w, events)
+			seen = true
+			lastCursor = ev.Cursor
+			if tenant != "" && ev.Tenant != tenant {
+				continue
+			}
+			kept = append(kept, closedTraceToWire(ev))
+			if len(kept) >= maxBatch {
+				flushTraceStream(w, kept, lastCursor, seen)
 				return
-			case <-deadline:
-				writeTraceStreamBatch(w, events)
-				return
-			case <-time.After(flushIdle):
-				writeTraceStreamBatch(w, events)
-				return
-			case ev, ok := <-sub.Events():
-				if !ok {
-					writeTraceStreamBatch(w, events)
-					return
-				}
-				events = append(events, closedTraceToWire(ev))
-				if len(events) >= maxBatch {
-					writeTraceStreamBatch(w, events)
-					return
-				}
 			}
 		}
 	}
+}
+
+// flushTraceStream writes the long-poll response: 202 when no event was seen
+// at all (client re-polls with the same cursor); otherwise a 200 batch with
+// the cursor advanced past every seen event — even when `events` is empty
+// because a tenant-scoped caller filtered them all out.
+func flushTraceStream(w http.ResponseWriter, events []traceStreamEvent, nextCursor string, seen bool) {
+	if !seen {
+		writeTraceStreamTimeout(w)
+		return
+	}
+	writeTraceStreamBatch(w, events, nextCursor)
 }
 
 func writeTraceStreamTimeout(w http.ResponseWriter) {
@@ -168,13 +178,10 @@ func writeTraceStreamTimeout(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func writeTraceStreamBatch(w http.ResponseWriter, events []traceStreamEvent) {
+func writeTraceStreamBatch(w http.ResponseWriter, events []traceStreamEvent, nextCursor string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	resp := traceStreamResponse{Events: events}
-	if n := len(events); n > 0 {
-		resp.NextCursor = events[n-1].Cursor
-	}
+	resp := traceStreamResponse{Events: events, NextCursor: nextCursor}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(resp)

@@ -46,7 +46,7 @@
         }
         ;(async () => {
             try {
-                const t = await getTrace(target)
+                const t = await getTrace(store.state.currentTenant, target)
                 if (target !== rid) return
                 if (!t) {
                     error = 'trace not found'

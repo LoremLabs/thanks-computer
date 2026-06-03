@@ -73,7 +73,7 @@
     async function tick() {
         if (typeof document !== 'undefined' && document.hidden) return
         try {
-            const r = await listTracesETag(50, search, etag)
+            const r = await listTracesETag(store.state.currentTenant, 50, search, etag)
             if (r.notModified) {
                 error = ''
                 return
@@ -99,8 +99,10 @@
         if (_m !== 'archive') return
         const _s = search
         const _r = refreshNonce
+        const _t = store.state.currentTenant // re-fetch on tenant switch
         void _s
         void _r
+        void _t
         etag = ''
         tick()
         const id = setInterval(tick, ARCHIVE_POLL_MS)
@@ -117,10 +119,13 @@
         const _m = mode
         if (_m !== 'live') return
         const _r = refreshNonce
+        const _t = store.state.currentTenant // re-subscribe on tenant switch
         void _r
+        void _t
         loading = true
         liveEvents = []
         const stop = startTraceStream({
+            tenant: _t,
             onEvent: (ev) => {
                 // Prepend to keep newest first; bound at LIVE_RING_MAX.
                 // Splice on the Svelte $state array re-triggers reactivity.

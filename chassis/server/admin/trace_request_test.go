@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
 // writeTraceFixture lays down a minimal trace tree under traceDir/requests/<rid>
@@ -115,7 +116,7 @@ func TestHandleTraceRequest_Summary(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests/"+rid+".json", nil)
 	req = mux.SetURLVars(req, map[string]string{"rid": rid})
 	w := httptest.NewRecorder()
-	c.handleTraceRequest(w, req)
+	c.handleTraceRequest(w, asSuperAdmin(req))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
@@ -175,7 +176,7 @@ func TestHandleTraceRequest_IncludeFull(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests/"+rid+".json?include=full", nil)
 	req = mux.SetURLVars(req, map[string]string{"rid": rid})
 	w := httptest.NewRecorder()
-	c.handleTraceRequest(w, req)
+	c.handleTraceRequest(w, asSuperAdmin(req))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
@@ -208,7 +209,7 @@ func TestHandleTraceRequest_NotFound(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests/MISSING.json", nil)
 	req = mux.SetURLVars(req, map[string]string{"rid": "MISSING"})
 	w := httptest.NewRecorder()
-	c.handleTraceRequest(w, req)
+	c.handleTraceRequest(w, asSuperAdmin(req))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("got status %d, want 404", w.Code)
 	}
@@ -223,7 +224,7 @@ func TestHandleTraceRequest_BadRID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests/..%2Fetc.json", nil)
 	req = mux.SetURLVars(req, map[string]string{"rid": "../etc"})
 	w := httptest.NewRecorder()
-	c.handleTraceRequest(w, req)
+	c.handleTraceRequest(w, asSuperAdmin(req))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want 400", w.Code)
 	}
@@ -271,7 +272,7 @@ func TestHandleTraceList(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests.json", nil)
 	w := httptest.NewRecorder()
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
@@ -348,7 +349,7 @@ func TestHandleTraceList_Grep(t *testing.T) {
 	// grep=stripe → only the Stripe trace matches.
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests.json?grep=stripe", nil)
 	w := httptest.NewRecorder()
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	var resp traceListResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -361,7 +362,7 @@ func TestHandleTraceList_Grep(t *testing.T) {
 	// grep=api → all three (each has an "api" substring in operation).
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json?grep=api", nil)
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -372,7 +373,7 @@ func TestHandleTraceList_Grep(t *testing.T) {
 	// grep=NoSuchThing → empty result, total=0.
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json?grep=NoSuchThing", nil)
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -384,7 +385,7 @@ func TestHandleTraceList_Grep(t *testing.T) {
 	// "world" name + "words/world" operation.
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json?grep=world", nil)
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -398,7 +399,7 @@ func TestHandleTraceList_Grep(t *testing.T) {
 	// in.json — exercises the broader file-walk grep.
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json?grep=zztop", nil)
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -410,7 +411,7 @@ func TestHandleTraceList_Grep(t *testing.T) {
 	// Case-insensitive: "ZZTOP" matches the same as "zztop".
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json?grep=ZZTOP", nil)
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -446,7 +447,7 @@ func TestHandleTraceList_ETag(t *testing.T) {
 	// First request → 200 + ETag.
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests.json", nil)
 	w := httptest.NewRecorder()
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if w.Code != http.StatusOK {
 		t.Fatalf("first request: status %d", w.Code)
 	}
@@ -459,7 +460,7 @@ func TestHandleTraceList_ETag(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json", nil)
 	req.Header.Set("If-None-Match", etag)
 	w = httptest.NewRecorder()
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if w.Code != http.StatusNotModified {
 		t.Errorf("matching ETag: status %d, want 304", w.Code)
 	}
@@ -475,7 +476,7 @@ func TestHandleTraceList_ETag(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json", nil)
 	req.Header.Set("If-None-Match", etag)
 	w = httptest.NewRecorder()
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if w.Code != http.StatusOK {
 		t.Errorf("after touch: status %d, want 200 (etag should have changed)", w.Code)
 	}
@@ -487,7 +488,7 @@ func TestHandleTraceList_ETag(t *testing.T) {
 	// Changing grep alone (no on-disk change) → ETag differs.
 	req = httptest.NewRequest(http.MethodGet, "/traces/requests.json?grep=foo", nil)
 	w = httptest.NewRecorder()
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 	if w.Code != http.StatusOK {
 		t.Fatalf("grep request: status %d", w.Code)
 	}
@@ -524,7 +525,7 @@ func TestHandleTraceList_Limit(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests.json?limit=2", nil)
 	w := httptest.NewRecorder()
-	c.handleTraceList(w, req)
+	c.handleTraceList(w, asSuperAdmin(req))
 
 	var resp traceListResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -560,7 +561,7 @@ func TestHandleTraceRequest_InFlight(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/traces/requests/"+rid+".json", nil)
 	req = mux.SetURLVars(req, map[string]string{"rid": rid})
 	w := httptest.NewRecorder()
-	c.handleTraceRequest(w, req)
+	c.handleTraceRequest(w, asSuperAdmin(req))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d, body=%s", w.Code, w.Body.String())
@@ -574,5 +575,39 @@ func TestHandleTraceRequest_InFlight(t *testing.T) {
 	}
 	if resp.DurationMs != nil {
 		t.Errorf("duration_ms should be nil for in-flight, got %v", *resp.DurationMs)
+	}
+}
+
+// TestHandleTraceRequest_TenantIsolation is the leak fix at the handler: a
+// trace resolved to prod-mankins is readable by that tenant-owner but returns
+// 404 (no existence leak) to a different tenant.
+func TestHandleTraceRequest_TenantIsolation(t *testing.T) {
+	dir := t.TempDir()
+	sink, err := trace.NewFileSink(dir, trace.ModeSummary)
+	if err != nil {
+		t.Fatalf("NewFileSink: %v", err)
+	}
+	// Enters pinned to _sys, resolves to prod-mankins via request.usage.
+	tr := sink.Begin(trace.RequestInfo{
+		RID: "rid-mankins", Src: "http", Tenant: "_sys", Stack: "boot/0",
+		StartedAt: time.Now(), Payload: []byte(`{}`),
+	})
+	tr.Event(trace.TimelineEvent{Ts: time.Now(), Event: "request.usage", Fields: map[string]any{"tenant": "prod-mankins"}})
+	tr.End("ok", []byte(`{}`))
+
+	c := newTestController(t, config.Config{Personalities: "admin", TraceDir: dir, TraceMode: "summary"})
+
+	get := func(tenantSlug string) int {
+		req := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/x", nil), map[string]string{"rid": "rid-mankins"})
+		w := httptest.NewRecorder()
+		c.handleTraceRequest(w, asTenant(req, tenantSlug))
+		return w.Code
+	}
+
+	if code := get("prod-mankins"); code != http.StatusOK {
+		t.Errorf("owner read: status %d, want 200", code)
+	}
+	if code := get("acme"); code != http.StatusNotFound {
+		t.Errorf("cross-tenant read: status %d, want 404", code)
 	}
 }

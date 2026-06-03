@@ -450,10 +450,10 @@ function createStore() {
 
     async function refreshLastDurations(limit = 20) {
         try {
-            const summaries = await listTraces(limit)
+            const summaries = await listTraces(state.currentTenant, limit)
             if (summaries.length === 0) return
             const traces = await Promise.all(
-                summaries.map((s) => getTrace(s.rid).catch(() => null))
+                summaries.map((s) => getTrace(state.currentTenant, s.rid).catch(() => null))
             )
             const nextDur: Record<string, number> = {}
             const nextIn: Record<string, unknown> = {}

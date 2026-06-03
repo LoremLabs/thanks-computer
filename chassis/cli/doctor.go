@@ -62,12 +62,12 @@ type section struct {
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("doctor", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var profile, addr, format string
-	var offline bool
+	var profile, addr string
+	var offline, jsonOut bool
 	fs.StringVar(&profile, "profile", "", "signing profile to inspect (default: active profile)")
 	fs.StringVar(&addr, "addr", "", "chassis admin endpoint (overrides the resolved target)")
 	fs.BoolVar(&offline, "offline", false, "skip network checks (chassis reachability + updates)")
-	fs.StringVar(&format, "format", "", "output format: text (default) or json")
+	fs.BoolVar(&jsonOut, "json", false, "emit machine-readable JSON instead of the text report")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -95,7 +95,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		secs = append(secs, cs)
 	}
 
-	if format == "json" {
+	if jsonOut {
 		if err := renderDoctorJSON(stdout, secs); err != nil {
 			fmt.Fprintf(stderr, "txco: doctor: %v\n", err)
 			return 1

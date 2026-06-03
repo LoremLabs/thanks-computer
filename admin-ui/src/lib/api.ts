@@ -487,9 +487,28 @@ export interface TraceContinuation {
     resumes?: { rid: string; stage: string }[]
 }
 
-export async function listTraces(limit = 20): Promise<TraceSummary[]> {
+// Trace endpoints are tenant-scoped: pass the selected tenant slug and the
+// request goes to /v1/tenants/{slug}/traces/... (the server confines the
+// caller to that tenant's traces). An empty tenant uses the flat /traces/...
+// route, which the server gates behind super-admin (operator chassis-wide
+// view) — used by demo/open contexts.
+function traceListPath(tenant: string, qs: string): string {
+    const base = tenant
+        ? `/v1/tenants/${encodeURIComponent(tenant)}/traces/requests.json`
+        : '/traces/requests.json'
+    return qs ? `${base}?${qs}` : base
+}
+
+function traceDetailPath(tenant: string, rid: string): string {
+    const base = tenant
+        ? `/v1/tenants/${encodeURIComponent(tenant)}/traces/requests/${encodeURIComponent(rid)}.json`
+        : `/traces/requests/${encodeURIComponent(rid)}.json`
+    return `${base}?include=full`
+}
+
+export async function listTraces(tenant: string, limit = 20): Promise<TraceSummary[]> {
     const body = await getJSON<TraceListResponse>(
-        `/traces/requests.json?limit=${limit}`
+        traceListPath(tenant, `limit=${limit}`)
     )
     return body?.traces ?? []
 }
@@ -505,6 +524,7 @@ export interface ListTracesResult {
 }
 
 export async function listTracesETag(
+    tenant: string,
     limit = 50,
     grep = '',
     ifNoneMatch = ''
@@ -514,7 +534,7 @@ export async function listTracesETag(
     if (grep) qp.set('grep', grep)
     const headers: Record<string, string> = {}
     if (ifNoneMatch) headers['If-None-Match'] = ifNoneMatch
-    const resp = await fetch(`/traces/requests.json?${qp.toString()}`, {
+    const resp = await fetch(traceListPath(tenant, qp.toString()), {
         credentials: 'same-origin',
         headers,
     })
@@ -549,10 +569,8 @@ export async function listTracesETag(
 // `include=full` so per-step `in` / `out` payloads come along — we
 // surface them in the "Last req" / "Last res" tabs and need them
 // cached client-side after one fetch.
-export async function getTrace(rid: string): Promise<TraceResponse | null> {
-    return getJSON<TraceResponse>(
-        `/traces/requests/${encodeURIComponent(rid)}.json?include=full`
-    )
+export async function getTrace(tenant: string, rid: string): Promise<TraceResponse | null> {
+    return getJSON<TraceResponse>(traceDetailPath(tenant, rid))
 }
 
 // --- browser-auth session endpoints (Phase 2b consumer) -----------------

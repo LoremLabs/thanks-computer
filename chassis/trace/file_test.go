@@ -177,9 +177,9 @@ func TestFileSinkPrettifiesBodies(t *testing.T) {
 	tr.Step(StepInfo{
 		Stack: "s", Scope: 100, Name: "n",
 		Operation: "http://x", Transport: "http",
-		Input:      compactStepIn,
-		Output:     compactStepOut,
-		StartedAt:  now, FinishedAt: now,
+		Input:     compactStepIn,
+		Output:    compactStepOut,
+		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
 	tr.End("ok", compactFinal)
@@ -241,9 +241,9 @@ func TestFileSinkPrettifyToleratesNonJSON(t *testing.T) {
 	tr := s.Begin(RequestInfo{RID: "notjson", StartedAt: now, Payload: []byte(`{}`)})
 	tr.Step(StepInfo{
 		Stack: "s", Scope: 100, Name: "n",
-		Input:      notJSON,
-		Output:     notJSON,
-		StartedAt:  now, FinishedAt: now,
+		Input:     notJSON,
+		Output:    notJSON,
+		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
 	tr.End("ok", []byte(`{}`))
@@ -265,9 +265,9 @@ func TestFileSinkSummaryModeOmitsBytes(t *testing.T) {
 	tr.Step(StepInfo{
 		Stack: "s", Scope: 100, Name: "n",
 		Operation: "http://x", Transport: "http",
-		Input:      []byte("inbytes"),
-		Output:     []byte("outbytes"),
-		StartedAt:  now, FinishedAt: now,
+		Input:     []byte("inbytes"),
+		Output:    []byte("outbytes"),
+		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
 	tr.End("ok", []byte(`{}`))
@@ -313,9 +313,9 @@ func TestFileSinkConcurrentSteps(t *testing.T) {
 			tr.Step(StepInfo{
 				Stack: "s", Scope: 100, Name: "op",
 				Operation: "http://x", Transport: "http",
-				Input:      []byte(`{}`),
-				Output:     []byte(`{}`),
-				StartedAt:  now, FinishedAt: now,
+				Input:     []byte(`{}`),
+				Output:    []byte(`{}`),
+				StartedAt: now, FinishedAt: now,
 				Status: "ok",
 			})
 		}(i)
@@ -347,9 +347,9 @@ func TestFileSinkWritesAreAtomic(t *testing.T) {
 	tr.Step(StepInfo{
 		Stack: "s", Scope: 100, Name: "op",
 		Operation: "http://x", Transport: "http",
-		Input:      []byte(`{"in":1}`),
-		Output:     []byte(`{"out":1}`),
-		StartedAt:  now, FinishedAt: now,
+		Input:     []byte(`{"in":1}`),
+		Output:    []byte(`{"out":1}`),
+		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
 	tr.End("ok", []byte(`{"final":true}`))
@@ -379,6 +379,84 @@ func TestFileSinkWritesAreAtomic(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk: %v", err)
+	}
+}
+
+// TestRequestUsageTenantOverride: every request enters pinned to `_sys`, so
+// in.json always records `_sys`; the resolved tenant rides the request.usage
+// event and must override it in both Get and the list Summary — that's what
+// admin tenant-scoping filters on.
+func TestRequestUsageTenantOverride(t *testing.T) {
+	s, dir := newSink(t, ModeSummary)
+	start := time.Now()
+	tr := s.Begin(RequestInfo{
+		RID:       "r-routed",
+		Src:       "http",
+		Tenant:    "_sys", // entry tenant
+		Stack:     "boot/0",
+		StartedAt: start,
+		Payload:   []byte(`{"_txc":{"tenant":"_sys"}}`),
+	})
+	tr.Event(TimelineEvent{
+		Ts:     start.Add(time.Millisecond),
+		Event:  "request.usage",
+		Fields: map[string]any{"tenant": "prod-mankins"},
+	})
+	tr.End("ok", []byte(`{"ok":true}`))
+
+	rdr := &fileReader{dir: dir}
+	d, err := rdr.Get(context.Background(), "r-routed", false)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if d.Tenant != "prod-mankins" {
+		t.Errorf("Get tenant = %q, want prod-mankins (resolved overrides _sys)", d.Tenant)
+	}
+	res, err := rdr.List(context.Background(), ListQuery{Limit: 50})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(res.Traces) != 1 || res.Traces[0].Tenant != "prod-mankins" {
+		t.Errorf("List summary tenant = %+v, want prod-mankins", res.Traces)
+	}
+}
+
+// TestListTenantFilter: q.Tenant restricts the list to traces resolved to that
+// tenant (the leak fix); the unfiltered list still sees everything.
+func TestListTenantFilter(t *testing.T) {
+	s, dir := newSink(t, ModeSummary)
+	seed := func(rid, tenant string) {
+		tr := s.Begin(RequestInfo{RID: rid, Src: "http", Tenant: "_sys", Stack: "boot/0", StartedAt: time.Now(), Payload: []byte(`{}`)})
+		tr.Event(TimelineEvent{Ts: time.Now(), Event: "request.usage", Fields: map[string]any{"tenant": tenant}})
+		tr.End("ok", []byte(`{}`))
+	}
+	seed("r-a", "tenant-a")
+	seed("r-b", "tenant-b")
+	seed("r-sys", "_sys")
+
+	rdr := &fileReader{dir: dir}
+	scoped, err := rdr.List(context.Background(), ListQuery{Limit: 50, Tenant: "tenant-a"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if scoped.Total != 1 {
+		t.Errorf("scoped Total = %d, want 1", scoped.Total)
+	}
+	for _, su := range scoped.Traces {
+		if su.Tenant != "tenant-a" {
+			t.Errorf("scoped list leaked %s (tenant %s)", su.RID, su.Tenant)
+		}
+	}
+	all, err := rdr.List(context.Background(), ListQuery{Limit: 50})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if all.Total != 3 {
+		t.Errorf("unfiltered Total = %d, want 3", all.Total)
+	}
+	// Tenant scoping must vary the ETag so caches don't cross tenants.
+	if scoped.ETag == all.ETag {
+		t.Errorf("scoped + unfiltered share ETag %q", scoped.ETag)
 	}
 }
 

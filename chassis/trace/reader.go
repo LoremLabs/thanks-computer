@@ -18,6 +18,10 @@ type ListQuery struct {
 	Limit       int
 	Grep        string
 	IfNoneMatch string
+	// Tenant, when non-empty, restricts the list to traces resolved to
+	// that tenant slug (admin tenant-scoping). Empty = no filter (the
+	// super-admin/operator chassis-wide view).
+	Tenant string
 }
 
 // Summary is one row in the trace list (the wire shape the admin list
@@ -76,11 +80,11 @@ type RequestDetail struct {
 	// timeline event the chassis emits at convergence. BytesIn is the
 	// existing PayloadBytes. Zero when the event is absent (older traces,
 	// resume traces).
-	Fuel             int64
-	BytesOut         int64
-	Steps            []Step
-	In               map[string]any
-	Out              any
+	Fuel     int64
+	BytesOut int64
+	Steps    []Step
+	In       map[string]any
+	Out      any
 }
 
 // ListResult is the aggregated list response. ETag is an OPAQUE cursor:

@@ -408,7 +408,11 @@ func (c *Controller) Start() {
 			Mode: trace.ParseMode(c.pu.Conf.TraceMode),
 		}); aerr == nil {
 			c.traceArmable = armable
+			// Flat = super-admin chassis-wide; tenant-scoped confines a
+			// tenant-owner to their own traces. Same handler — it branches on
+			// the resolved tenant in auth.Context (see traceTenantScope).
 			protected.HandleFunc("/traces/stream", c.handleTraceStream).Methods(http.MethodGet)
+			tenantR.HandleFunc("/traces/stream", c.handleTraceStream).Methods(http.MethodGet)
 			c.pu.Logger.Info("traces stream endpoint mounted",
 				zap.String("store", c.pu.Conf.TraceStore),
 				zap.String("path", "/traces/stream"))
@@ -432,18 +436,35 @@ func (c *Controller) Start() {
 				zap.String("err", terr.Error()))
 		} else {
 			c.traceReader = tr
-			// Custom paginated listing at the exact /traces/requests/
-			// path. Must be registered BEFORE the catch-all PathPrefix
-			// below — gorilla/mux matches in declaration order.
+			// Flat routes are super-admin / operator (chassis-wide, incl.
+			// _sys); the tenant-scoped copies confine a tenant-owner to their
+			// own traces. Same handler funcs — they branch on the resolved
+			// tenant in auth.Context (see traceTenantScope). The HTML index +
+			// raw browse stay flat-only (operator file-backend conveniences).
+			// Must be registered BEFORE the catch-all PathPrefix below —
+			// gorilla/mux matches in declaration order.
 			protected.HandleFunc("/traces/requests/", c.handleTraceRequestsIndex).Methods(http.MethodGet)
 			// JSON list of recent traces — backs `txco trace` (no rid).
 			protected.HandleFunc("/traces/requests.json", c.handleTraceList).Methods(http.MethodGet)
 			// JSON aggregator for a single request — backs `txco trace <rid>`.
 			protected.HandleFunc("/traces/requests/{rid}.json", c.handleTraceRequest).Methods(http.MethodGet)
+			// Tenant-scoped copies (per-tenant isolation).
+			tenantR.HandleFunc("/traces/requests.json", c.handleTraceList).Methods(http.MethodGet)
+			tenantR.HandleFunc("/traces/requests/{rid}.json", c.handleTraceRequest).Methods(http.MethodGet)
 			// Raw artifact browse: only when the backend is
 			// filesystem-shaped; non-fs backends 404 the raw path.
 			if fsys, ok := tr.RawFS(); ok {
-				protected.PathPrefix("/traces/").Handler(http.StripPrefix("/traces/", http.FileServer(fsys)))
+				// Raw artifact browse is chassis-wide (it serves any tenant's
+				// trace files); gate it behind super-admin like the flat HTML
+				// index. traceTenantScope returns ("", super-admin) on this
+				// non-{tenant} path.
+				rawFS := http.StripPrefix("/traces/", http.FileServer(fsys))
+				protected.PathPrefix("/traces/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if _, okScope := c.traceTenantScope(w, r); !okScope {
+						return
+					}
+					rawFS.ServeHTTP(w, r)
+				})
 			} else {
 				protected.PathPrefix("/traces/").HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					http.Error(w, "raw trace browse unavailable for this backend", http.StatusNotFound)

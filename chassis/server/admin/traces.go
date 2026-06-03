@@ -16,6 +16,12 @@ const tracesShowLatest = 250
 // trace.Reader (filesystem by default; a non-fs backend when admin is
 // a separate machine); rendering stays here.
 func (c *Controller) handleTraceRequestsIndex(w http.ResponseWriter, r *http.Request) {
+	// Flat-only chassis-wide HTML index (operator convenience): super-admin
+	// only. traceTenantScope returns "" here (no {tenant} in the path) and
+	// requires super-admin.
+	if _, ok := c.traceTenantScope(w, r); !ok {
+		return
+	}
 	rdr, rerr := c.traceRdr()
 	if rerr != nil {
 		http.Error(w, rerr.Error(), http.StatusInternalServerError)

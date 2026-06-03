@@ -168,6 +168,13 @@ func readTimeline(reqDir string, d *RequestDetail) {
 			if v, ok := ev["bytes_out"].(float64); ok {
 				d.BytesOut = int64(v)
 			}
+			// Resolved tenant (the one the pipeline routed to), which
+			// overrides the `_sys` entry tenant in in.json — every request
+			// enters pinned to _sys, so in.json is always _sys. This is the
+			// value admin tenant-scoping filters on.
+			if v, ok := ev["tenant"].(string); ok && v != "" {
+				d.Tenant = v
+			}
 		}
 	}
 }
@@ -304,7 +311,7 @@ func (fr *fileReader) List(_ context.Context, q ListQuery) (ListResult, error) {
 	}
 	grep := strings.ToLower(q.Grep)
 
-	etag := computeListETag(dir, dirs, limit, grep)
+	etag := computeListETag(dir, dirs, limit, grep, q.Tenant)
 	res := ListResult{ETag: etag}
 	if etag != "" && q.IfNoneMatch != "" && q.IfNoneMatch == etag {
 		res.NotModified = true
@@ -312,7 +319,7 @@ func (fr *fileReader) List(_ context.Context, q ListQuery) (ListResult, error) {
 	}
 
 	res.Traces = make([]Summary, 0, limit)
-	if grep == "" {
+	if grep == "" && q.Tenant == "" {
 		res.Total = len(dirs)
 		if len(dirs) > limit {
 			dirs = dirs[:limit]
@@ -321,29 +328,44 @@ func (fr *fileReader) List(_ context.Context, q ListQuery) (ListResult, error) {
 			res.Traces = append(res.Traces, readListEntry(filepath.Join(dir, e.Name()), e.Name()))
 		}
 	} else {
+		// Scan path: grep and/or tenant filtering. Tenant scoping needs the
+		// entry's RESOLVED tenant (from its request.usage event), so read the
+		// entry before the count/limit decision when filtering by tenant.
 		scanCap := fileListGrepScanMax
 		if scanCap > len(dirs) {
 			scanCap = len(dirs)
 		}
 		for _, e := range dirs[:scanCap] {
 			reqDir := filepath.Join(dir, e.Name())
-			if !matchesGrep(reqDir, grep) {
+			if grep != "" && !matchesGrep(reqDir, grep) {
 				continue
+			}
+			var entry Summary
+			read := false
+			if q.Tenant != "" {
+				entry = readListEntry(reqDir, e.Name())
+				read = true
+				if entry.Tenant != q.Tenant {
+					continue
+				}
 			}
 			res.Total++
 			if len(res.Traces) < limit {
-				res.Traces = append(res.Traces, readListEntry(reqDir, e.Name()))
+				if !read {
+					entry = readListEntry(reqDir, e.Name())
+				}
+				res.Traces = append(res.Traces, entry)
 			}
 		}
 	}
 	return res, nil
 }
 
-func computeListETag(reqRoot string, dirs []os.DirEntry, limit int, grep string) string {
+func computeListETag(reqRoot string, dirs []os.DirEntry, limit int, grep, tenant string) string {
 	h := fnv.New64a()
-	fmt.Fprintf(h, "v=1 limit=%d grep=%s total=%d\n", limit, grep, len(dirs))
+	fmt.Fprintf(h, "v=1 limit=%d grep=%s tenant=%s total=%d\n", limit, grep, tenant, len(dirs))
 	top := limit
-	if grep != "" {
+	if grep != "" || tenant != "" {
 		top = fileListGrepScanMax
 	}
 	if top > len(dirs) {
@@ -462,6 +484,12 @@ func readListEntry(reqDir, rid string) Summary {
 				if v, ok := ev["duration_ms"].(float64); ok {
 					n := int64(v)
 					s.DurationMs = &n
+				}
+			case "request.usage":
+				// Resolved tenant overrides the `_sys` entry tenant in
+				// in.json — what admin tenant-scoping filters on.
+				if v, ok := ev["tenant"].(string); ok && v != "" {
+					s.Tenant = v
 				}
 			}
 		}

@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
-	"flag"
+	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -18,7 +20,7 @@ import (
 // "am I in sync?" probe — exit code is 0 when all stacks are aligned
 // and 1 when any are divergent or unknown.
 func runStatus(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs := pflag.NewFlagSet("status", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
 	target := fs.String("target", "", "target name from txco.yaml")
 	addr := fs.String("addr", "", "chassis admin endpoint")
@@ -26,6 +28,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	pass := fs.String("pass", "", "basic auth password")
 	profile := fs.String("profile", "", fmt.Sprintf("signing profile (defaults to TXCO_PROFILE, then %s/active)", auth.HomePathPretty()))
 	tenant := fs.String("tenant", "", "tenant slug")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of the table")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -33,7 +36,8 @@ Usage: txco status [flags] [<dir>]
 
 Print per-stack version drift between the local workspace and the
 chassis. Shows whether each stack is in-sync, ahead/behind, or
-untracked. Exit code is 0 when all stacks are in sync, 1 otherwise.
+untracked, plus each stack's reachable URL. Exit code is 0 when all
+stacks are in sync, 1 otherwise (in both table and --json modes).
 
 Flags:
 `)
@@ -83,11 +87,46 @@ Flags:
 	}
 
 	drifts := buildDrifts(context.Background(), c, dir, localOps, remoteNames)
+	// Annotate each stack with a reachable URL so the user can click
+	// straight through. Best-effort: a chassis without hostname routing
+	// just leaves the column (or JSON field) off.
+	if len(drifts) > 0 {
+		decorateStackURLs(context.Background(), c, drifts)
+	}
+
+	if *jsonOut {
+		return emitStatusJSON(stdout, stderr, drifts)
+	}
+
 	if len(drifts) == 0 {
 		fmt.Fprintln(stdout, "no stacks found locally or remotely")
 		return 0
 	}
-	any := printDriftTable(stdout, drifts)
+	if printDriftTable(stdout, drifts) {
+		return 1
+	}
+	return 0
+}
+
+// emitStatusJSON writes the drift list as a JSON array (one object per
+// stack) and returns the same exit code as the table form: 0 when every
+// stack is in sync, 1 when any is divergent — so `txco status --json`
+// stays usable as a scriptable "am I in sync?" probe. An empty workspace
+// emits `[]`, not the human "no stacks" line.
+func emitStatusJSON(stdout, stderr io.Writer, drifts []stackDrift) int {
+	any := false
+	for _, d := range drifts {
+		if d.Divergent {
+			any = true
+			break
+		}
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(driftsToJSON(drifts)); err != nil {
+		fmt.Fprintf(stderr, "status: encode json: %v\n", err)
+		return 1
+	}
 	if any {
 		return 1
 	}

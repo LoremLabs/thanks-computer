@@ -272,7 +272,7 @@ var cliCommandTree = []node{
 		{Name: "check", Desc: "Compare the running version against the latest release"},
 	}},
 	{Name: "upgrade", Desc: "Upgrade the txco CLI binary (self-update or package-manager guidance)"},
-	{Name: "doctor", Desc: "Diagnose local setup + chassis reachability", Flags: []string{"profile", "addr", "offline", "format"}},
+	{Name: "doctor", Desc: "Diagnose local setup + chassis reachability", Flags: []string{"profile", "addr", "offline", "json"}},
 }
 
 // --- runCompletion: dispatcher for `txco completion <shell>` ---
