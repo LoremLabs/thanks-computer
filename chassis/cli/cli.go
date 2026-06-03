@@ -141,6 +141,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// installs; brew/source guidance otherwise). Distinct from
 		// `txco package upgrade`, which re-resolves installed packages.
 		return runCLIUpgrade(rest, stdout, stderr), true
+	case "doctor":
+		// Diagnose local setup + chassis reachability (home/profile/keys/
+		// signer/version sync). Diagnose-only; see chassis/cli/doctor.go.
+		return runDoctor(rest, stdout, stderr), true
 	case "completion":
 		// Emit a shell completion script. Boring v1: command + flag
 		// names only; see chassis/cli/completion.go.
@@ -234,6 +238,7 @@ The thanks-computer chassis: event router + rule authoring CLI.
   %s   Print version info as JSON
   %s   Check for a newer txco CLI release on GitHub
   %s   Upgrade the txco CLI binary (self-update, or brew/source guidance)
+  %s   Diagnose local setup + chassis reachability (auth/keys/version)
 
 %s
   %s   Target name from txco.yaml (default: 'dev')
@@ -278,6 +283,7 @@ Use %s for per-command flags.
 		padCmd(cmd("version")),
 		padCmd(cmd("update")+" check"),
 		padCmd(cmd("upgrade")),
+		padCmd(cmd("doctor")),
 		heading("Common flags for apply/diff/status/dev/trace:"),
 		padCmd(cmd("--target NAME")),
 		padCmd(cmd("--addr URL")),
