@@ -1263,6 +1263,16 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				map[string]any{"err": qerr.Error()})
 			return
 		}
+		// Propagate the auto-minted delegated-zone routing host (if this tenant
+		// has a delegated zone, materialiseStackVersion just minted
+		// <label>.<origin>). The dns_zones row isn't fleet-synced, so a
+		// data-plane node can't re-derive it from this stack.activated replay —
+		// ship the row so it can route + cert the host. See dns_fleet.go.
+		if qerr := c.queueZoneHostnameUpserts(r.Context(), tx, ac.TenantID, name); qerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "fleet_zone_hostname",
+				map[string]any{"err": qerr.Error()})
+			return
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

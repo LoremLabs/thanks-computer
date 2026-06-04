@@ -150,6 +150,19 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Wire every already-active stack of this tenant into the new zone
+	// (<label>.<origin>) and fleet-publish the routing rows. Without this a
+	// zone created AFTER its stacks were activated leaves them unrouted (the
+	// activation-time mint only fires when the zone already exists), and on a
+	// multi-node fleet only the admin node would hold the rows. Pattern mode
+	// only — manual zones synthesize nothing. See dns_fleet.go.
+	if z.Mode == "" || strings.EqualFold(z.Mode, "pattern") {
+		if err := c.reconcileZoneHostnames(r.Context(), tx, z.TenantID, z.Origin); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "reconcile_zone_hostnames",
+				map[string]any{"err": err.Error()})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
 		return

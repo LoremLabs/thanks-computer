@@ -166,10 +166,14 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 	case "version", "--version", "-v":
 		return runVersion(stdout), true
 	default:
-		// Unknown built-in → try an external plugin `txco-<cmd>` on $PATH
-		// (git/kubectl convention: the SaaS overlay ships `txco-credit`, etc).
-		// Built-ins above always win; this only runs on a switch miss.
+		// Unknown built-in → first try a local external plugin `txco-<cmd>`
+		// (git/kubectl convention), then the zero-install path: forward it to
+		// the connected chassis's /v1/cli (a silent signed request that the
+		// server either runs or 404s). Built-ins above always win.
 		if status, ok := execPlugin(cmd, rest, stdout, stderr); ok {
+			return status, true
+		}
+		if status, ok := forwardToServer(cmd, rest, stdout, stderr); ok {
 			return status, true
 		}
 		// A bare word (not a flag) that isn't a known subcommand is

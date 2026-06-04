@@ -253,6 +253,12 @@ func (c *Controller) Start() {
 	// events so lagging replicas converge. super_admin only (chassis-wide);
 	// non-destructive (upserts + stack.activated, never deletes).
 	protected.HandleFunc("/v1/fleet/resync", c.handleFleetResync).Methods(http.MethodPost)
+
+	// Zero-install plugin dispatch: the CLI forwards an unknown subcommand here
+	// (`txco <name> ...` → POST /v1/cli) and the server runs the registered
+	// command for args[0]. Unknown commands 404 (open core registers none);
+	// known commands require super-admin. Overlays register commands via clicmd.
+	protected.HandleFunc("/v1/cli", c.handleCLIExec).Methods(http.MethodPost)
 	// Demo execution-hop endpoints — registered only under --demo-mode
 	// (set by `txco demo`). Their presence is the signal the admin-ui's
 	// probeDemoMode uses to auto-route to #demo, so a plain chassis /
