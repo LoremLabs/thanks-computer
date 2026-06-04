@@ -345,8 +345,9 @@ Flags:
 		fmt.Fprintf(stdout, "Fleet sync is disabled on this chassis (--feed-sink=nop); nothing to resync.\n")
 		return 0
 	}
-	fmt.Fprintf(stdout, "Resynced tenant %q — queued %d tenant, %d hostname, %d stack event(s).\n",
-		resp.TenantSlug, resp.Events.TenantCreated, resp.Events.HostnameBound, resp.Events.StackActivated)
+	fmt.Fprintf(stdout, "Resynced tenant %q — queued %d tenant, %d hostname, %d dns-zone, %d stack event(s).\n",
+		resp.TenantSlug, resp.Events.TenantCreated, resp.Events.HostnameBound,
+		resp.Events.DNSZoneUpserted, resp.Events.StackActivated)
 	fmt.Fprintf(stdout, "Replicas converge on their next poll.\n")
 	return 0
 }

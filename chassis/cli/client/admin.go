@@ -832,9 +832,10 @@ type FleetResyncRequest struct {
 
 // FleetResyncCounts reports how many of each event type were queued.
 type FleetResyncCounts struct {
-	TenantCreated  int `json:"tenant_created"`
-	HostnameBound  int `json:"hostname_bound"`
-	StackActivated int `json:"stack_activated"`
+	TenantCreated   int `json:"tenant_created"`
+	HostnameBound   int `json:"hostname_bound"`
+	StackActivated  int `json:"stack_activated"`
+	DNSZoneUpserted int `json:"dns_zone_upserted"`
 }
 
 // FleetResyncResponse is the summary POST /v1/fleet/resync returns.
