@@ -74,6 +74,14 @@ Flags:
 
 	t := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
 	c := client.New(t)
+	// Trace reads are tenant-scoped by default (the caller's membership caps
+	// apply, like every other CLI command). A super-admin should see every
+	// tenant, so auto-detect via whoami and switch to the chassis-wide view —
+	// no flag. A whoami failure (unsigned/basic-auth target, older chassis)
+	// leaves the safe tenant-scoped default.
+	if who, werr := c.Whoami(context.Background()); werr == nil && who.SuperAdmin {
+		c.SetTraceAllTenants(true)
+	}
 
 	// No-rid mode: list the recent traces and let the user pick one.
 	if fs.NArg() == 0 {
@@ -441,4 +449,3 @@ func routeOrStack(route, stack string) string {
 	}
 	return stack
 }
-

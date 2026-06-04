@@ -27,21 +27,52 @@ import (
 func (c *Controller) traceTenantScope(w http.ResponseWriter, r *http.Request) (tenant string, ok bool) {
 	ac := auth.FromContext(r.Context())
 	if ac == nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		auth.WriteForbiddenDetail(w, signature.ErrCapabilityDenied, map[string]any{
+			"required": "authenticated session",
+			"scope":    "trace",
+			"hint":     "no auth context on the request — enroll/sign in (txco enroll) or pass --user/--pass",
+		})
 		return "", false
 	}
 	if ac.TenantSlug != "" {
 		if err := policy.RequireCapability(r.Context(), "opstack:*:trace"); err != nil {
-			auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+			auth.WriteForbiddenDetail(w, signature.ErrCapabilityDenied, traceDeniedDetail(ac,
+				"opstack:*:trace",
+				"tenant:"+ac.TenantSlug,
+				"your membership in "+ac.TenantSlug+" lacks the opstack:*:trace capability for this tenant"))
 			return "", false
 		}
 		return ac.TenantSlug, true
 	}
 	if err := policy.RequireSuperAdmin(r.Context()); err != nil {
-		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		auth.WriteForbiddenDetail(w, signature.ErrCapabilityDenied, traceDeniedDetail(ac,
+			"super-admin",
+			"flat (chassis-wide operator view)",
+			"the flat /traces view is super-admin only; tenant members read their own traces at /v1/tenants/<slug>/traces (txco trace auto-selects the tenant-scoped path for non-super-admins)"))
 		return "", false
 	}
 	return "", true
+}
+
+// traceDeniedDetail builds the structured 403 detail for a trace authz denial:
+// the caller's own resolved identity plus what the endpoint required. Returned
+// to the authenticated caller, so it leaks nothing cross-tenant — it just makes
+// "403 capability_denied" debuggable ("who does it think I am, and what's
+// needed?").
+func traceDeniedDetail(ac *auth.Context, required, scope, hint string) map[string]any {
+	d := map[string]any{
+		"required": required,
+		"scope":    scope,
+		"hint":     hint,
+	}
+	if ac != nil {
+		d["source"] = ac.Source
+		d["actor_id"] = ac.ActorID
+		d["super_admin"] = ac.SuperAdmin
+		d["tenant_slug"] = ac.TenantSlug
+		d["capabilities"] = ac.Capabilities
+	}
+	return d
 }
 
 // traceListResponse backs GET /traces/requests.json — a paginated list

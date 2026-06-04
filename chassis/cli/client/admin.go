@@ -35,8 +35,9 @@ type ListResponse struct {
 }
 
 type ErrorResponse struct {
-	Error  string         `json:"error"`
-	Detail map[string]any `json:"detail,omitempty"`
+	Error   string         `json:"error"`
+	Message string         `json:"message,omitempty"`
+	Detail  map[string]any `json:"detail,omitempty"`
 }
 
 // Target is the destination chassis — URL plus optional basic auth.
@@ -63,6 +64,12 @@ type Target struct {
 type Client struct {
 	http   *http.Client
 	target Target
+	// traceAllTenants selects the chassis-wide (flat) trace endpoints instead
+	// of the tenant-scoped ones. Off by default: trace reads are tenant-
+	// scoped like every other CLI call. The trace command flips this on
+	// automatically for a super-admin caller (who should see every tenant);
+	// the flat view is super-admin-only server-side.
+	traceAllTenants bool
 }
 
 func New(t Target) *Client {
@@ -70,6 +77,23 @@ func New(t Target) *Client {
 		http:   &http.Client{Timeout: 30 * time.Second},
 		target: t,
 	}
+}
+
+// SetTraceAllTenants switches trace reads to the chassis-wide (all-tenant)
+// endpoints. Default (false) is tenant-scoped; the trace command turns this
+// on when whoami reports the caller is a super-admin.
+func (c *Client) SetTraceAllTenants(on bool) { c.traceAllTenants = on }
+
+// tracesURL builds a trace endpoint. By default it's tenant-scoped (under
+// /v1/tenants/{tenant}/traces, where the caller's membership caps apply) —
+// matching the rest of the CLI. In all-tenants mode it's the flat
+// /traces/{suffix} chassis-wide view (super-admin only). suffix is the
+// slash-prefixed path under .../traces (e.g. "/requests.json").
+func (c *Client) tracesURL(suffix string) string {
+	if c.traceAllTenants {
+		return strings.TrimRight(c.target.Addr, "/") + "/traces" + suffix
+	}
+	return c.scopedURL("/traces" + suffix)
 }
 
 // do is the single chokepoint every Client call uses to send an HTTP
@@ -1275,7 +1299,7 @@ func (c *Client) ListTraces(ctx context.Context, limit int, grep string) (*Trace
 // grep is non-empty the server filters to traces whose files contain
 // the substring (case-insensitive).
 func (c *Client) ListTracesETag(ctx context.Context, limit int, grep, ifNoneMatch string) (*TraceListResponse, string, bool, error) {
-	endpoint := strings.TrimRight(c.target.Addr, "/") + "/traces/requests.json"
+	endpoint := c.tracesURL("/requests.json")
 	params := url.Values{}
 	if limit > 0 {
 		params.Set("limit", strconv.Itoa(limit))
@@ -1385,7 +1409,7 @@ func (e *TraceNotFoundError) Error() string {
 // Also returns the raw response bytes so callers that want to emit the
 // untouched JSON (e.g. `txco trace --json`) don't have to re-encode.
 func (c *Client) GetTrace(ctx context.Context, rid string, full bool) (*TraceResponse, []byte, error) {
-	endpoint := strings.TrimRight(c.target.Addr, "/") + "/traces/requests/" + url.PathEscape(rid) + ".json"
+	endpoint := c.tracesURL("/requests/" + url.PathEscape(rid) + ".json")
 	if full {
 		endpoint += "?include=full"
 	}
@@ -1427,15 +1451,26 @@ type HTTPError struct {
 	StatusCode int
 	Status     string
 	Code       string
+	Message    string
 	Detail     map[string]any
 	Raw        string
 }
 
 func (e *HTTPError) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("%s: %s (detail=%v)", e.Status, e.Code, e.Detail)
+	if e.Code == "" {
+		return fmt.Sprintf("%s: %s", e.Status, e.Raw)
 	}
-	return fmt.Sprintf("%s: %s", e.Status, e.Raw)
+	// Lead with code, then the human message (the server's humanMessage) —
+	// previously dropped, which is why a 403 read as a bare "capability_denied
+	// (detail=map[])". Append detail only when present.
+	msg := e.Code
+	if e.Message != "" {
+		msg += ": " + e.Message
+	}
+	if len(e.Detail) > 0 {
+		return fmt.Sprintf("%s: %s (detail=%v)", e.Status, msg, e.Detail)
+	}
+	return fmt.Sprintf("%s: %s", e.Status, msg)
 }
 
 func decodeError(resp *http.Response) error {
@@ -1448,6 +1483,7 @@ func decodeError(resp *http.Response) error {
 	var er ErrorResponse
 	if json.Unmarshal(body, &er) == nil && er.Error != "" {
 		out.Code = er.Error
+		out.Message = er.Message
 		out.Detail = er.Detail
 	}
 	return out

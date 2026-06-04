@@ -400,3 +400,24 @@ func WriteForbidden(w http.ResponseWriter, code string) {
 		"message": humanMessage(code),
 	})
 }
+
+// WriteForbiddenDetail is WriteForbidden plus a structured `detail` map for
+// diagnosability — e.g. how the caller resolved (source/actor/caps) and what
+// the endpoint required. The detail is the caller's OWN identity plus the
+// required capability, returned to the already-authenticated caller, so it
+// discloses nothing cross-tenant. Empty detail behaves like WriteForbidden.
+func WriteForbiddenDetail(w http.ResponseWriter, code string, detail map[string]any) {
+	if code == "" {
+		code = signature.ErrCapabilityDenied
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	body := map[string]any{
+		"error":   code,
+		"message": humanMessage(code),
+	}
+	if len(detail) > 0 {
+		body["detail"] = detail
+	}
+	_ = json.NewEncoder(w).Encode(body)
+}
