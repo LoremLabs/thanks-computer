@@ -42,6 +42,12 @@ const (
 	TypeMembershipChanged  = "membership.changed"
 	TypeEntitlementUpdated = "entitlement.updated"
 	TypeSystemOpstack      = "system.opstack.updated"
+	// TypeDNSZoneUpserted carries a dns_zones row (RowsArtifact, op=upsert;
+	// revocation is an upsert with revoked_at set). Lets a data-plane node hold
+	// the delegated-zone state so it re-derives `<label>.<origin>` routing hosts
+	// itself and (with the dns personality) can serve the zone — see
+	// internal docs/todo-dns-authority.md §9 fleet note.
+	TypeDNSZoneUpserted = "dns.zone.upserted"
 )
 
 var knownTypes = map[string]bool{
@@ -50,6 +56,7 @@ var knownTypes = map[string]bool{
 	TypeHostnameRevoked: true, TypeActorChanged: true,
 	TypeKeyChanged: true, TypeMembershipChanged: true,
 	TypeEntitlementUpdated: true, TypeSystemOpstack: true,
+	TypeDNSZoneUpserted: true,
 }
 
 // Event is the control-plane event contract.

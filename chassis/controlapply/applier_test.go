@@ -30,6 +30,7 @@ CREATE TABLE stack_versions (version_id INTEGER PRIMARY KEY, stack_id TEXT, vers
 CREATE TABLE stack_files (version_id INTEGER, path TEXT, content TEXT, content_hash TEXT, PRIMARY KEY(version_id,path));
 CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INTEGER, name TEXT, txcl TEXT, mock_req TEXT, mock_res TEXT);
 CREATE TABLE applied_events (event_id TEXT PRIMARY KEY, control_version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT, origin TEXT, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT, created_at TEXT, created_by TEXT, updated_at TEXT, revoked_at TEXT);
 INSERT INTO tenants VALUES ('tnt_a','a');
 `
 
@@ -165,6 +166,67 @@ func TestGenericRowUpsert(t *testing.T) {
 	}
 	if h.cursor(t) != 7 {
 		t.Fatalf("cursor=%d want 7", h.cursor(t))
+	}
+}
+
+// TestDNSZoneUpsertLandsOnNode proves the long-term fleet-sync fix: a data-plane
+// node applying a dns.zone.upserted event gains the delegated-zone row, so it can
+// re-derive routing hosts (and, with the dns head, serve the zone) instead of
+// relying on the admin node having shipped each hostname row.
+func TestDNSZoneUpsertLandsOnNode(t *testing.T) {
+	h := newHarness(t)
+	rows := RowsArtifact{DB: "runtime", Table: "dns_zones", Op: "upsert",
+		Rows: []map[string]any{{
+			"id": "dnz_1", "tenant_id": "tnt_a", "origin": "ops.example.com",
+			"mname": "ns1.thanks.computer", "rname": "hostmaster.ops.example.com",
+			"refresh": 7200, "retry": 3600, "expire": 1209600, "minimum": 90,
+			"default_ttl": 60, "mode": "pattern",
+			"created_at": "2026-06-04T00:00:00Z", "updated_at": "2026-06-04T00:00:00Z",
+		}}}
+	data, _ := json.Marshal(rows)
+	_ = h.astore.Put(context.Background(), "rows/dns_zones/dnz_1", data, []byte(`{}`))
+	h.putEvent(t, "e1.json", controlevent.Event{
+		EventID: "evt-dnszone-1",
+		Type:    controlevent.TypeDNSZoneUpserted, ArtifactRef: "rows/dns_zones/dnz_1",
+		Checksum: "sha256:" + sha256Hex(data), ControlVersion: 3,
+	})
+	h.c.pollOnce(context.Background())
+
+	var origin, mode string
+	if err := h.db.QueryRow(`SELECT origin, mode FROM dns_zones WHERE id='dnz_1'`).Scan(&origin, &mode); err != nil {
+		t.Fatalf("dns_zones row not applied on node: %v", err)
+	}
+	if origin != "ops.example.com" || mode != "pattern" {
+		t.Fatalf("zone applied wrong: origin=%q mode=%q", origin, mode)
+	}
+	if h.cursor(t) != 3 {
+		t.Fatalf("cursor=%d want 3", h.cursor(t))
+	}
+
+	// Revoke arrives as an upsert with revoked_at set → row flips inactive.
+	rev := RowsArtifact{DB: "runtime", Table: "dns_zones", Op: "upsert",
+		Rows: []map[string]any{{
+			"id": "dnz_1", "tenant_id": "tnt_a", "origin": "ops.example.com",
+			"mname": "ns1.thanks.computer", "rname": "hostmaster.ops.example.com",
+			"refresh": 7200, "retry": 3600, "expire": 1209600, "minimum": 90,
+			"default_ttl": 60, "mode": "pattern",
+			"created_at": "2026-06-04T00:00:00Z", "updated_at": "2026-06-04T01:00:00Z",
+			"revoked_at": "2026-06-04T01:00:00Z",
+		}}}
+	rdata, _ := json.Marshal(rev)
+	_ = h.astore.Put(context.Background(), "rows/dns_zones/dnz_1-rev", rdata, []byte(`{}`))
+	h.putEvent(t, "e2.json", controlevent.Event{
+		EventID: "evt-dnszone-2",
+		Type:    controlevent.TypeDNSZoneUpserted, ArtifactRef: "rows/dns_zones/dnz_1-rev",
+		Checksum: "sha256:" + sha256Hex(rdata), ControlVersion: 4,
+	})
+	h.c.pollOnce(context.Background())
+	var revoked string
+	if err := h.db.QueryRow(`SELECT COALESCE(revoked_at,'') FROM dns_zones WHERE id='dnz_1'`).Scan(&revoked); err != nil {
+		t.Fatalf("read revoked: %v", err)
+	}
+	if revoked == "" {
+		t.Fatal("zone not revoked on node after revoke event")
 	}
 }
 

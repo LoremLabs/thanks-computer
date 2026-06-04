@@ -32,6 +32,7 @@ var tableWhitelist = map[string]map[string]bool{
 		"tenants":              true,
 		"tenant_hostnames":     true,
 		"tenant_runtime_state": true, // designed-not-shipped; skipped if absent
+		"dns_zones":            true, // delegated-zone state; lets a data-plane node re-derive routing hosts + (with the dns head) serve the zone
 	},
 	dbAuth: {
 		"actors":            true,

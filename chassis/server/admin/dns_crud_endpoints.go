@@ -163,6 +163,21 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Fleet-sync the zone row so data-plane nodes hold the delegated-zone state
+	// (re-derive routing hosts on future activations; serve it with the dns
+	// head). Read the persisted row so CreateZoneTx's SOA + timestamp defaults
+	// ride along.
+	if c.fleetEnabled() {
+		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, z.ID)
+		if gerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
+			return
+		}
+		if err := c.fleetPublishZone(r.Context(), tx, persisted); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "publish_zone", map[string]any{"err": err.Error()})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
 		return
@@ -215,6 +230,17 @@ func (c *Controller) handleRevokeZone(w http.ResponseWriter, r *http.Request) {
 	}
 	origin := mux.Vars(r)["origin"]
 
+	// Capture the zone id before revoking so the revoke can be fleet-published
+	// (the row-upsert is keyed by id). No active zone ⇒ RevokeZoneTx is a no-op
+	// and there's nothing to propagate.
+	var zoneID string
+	if z, lerr := c.tenants.LookupActiveZone(r.Context(), ac.TenantID, origin); lerr == nil {
+		zoneID = z.ID
+	} else if !errors.Is(lerr, tenants.ErrNotFound) {
+		writeJSONError(w, http.StatusInternalServerError, "lookup_zone", map[string]any{"err": lerr.Error()})
+		return
+	}
+
 	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
@@ -230,6 +256,19 @@ func (c *Controller) handleRevokeZone(w http.ResponseWriter, r *http.Request) {
 	if rerr != nil && !errors.Is(rerr, tenants.ErrNotFound) {
 		writeJSONError(w, http.StatusInternalServerError, "revoke_zone", map[string]any{"err": rerr.Error()})
 		return
+	}
+	// Propagate the now-revoked row (revoked_at set) so data-plane nodes drop
+	// the zone from their state too.
+	if c.fleetEnabled() && zoneID != "" {
+		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zoneID)
+		if gerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
+			return
+		}
+		if err := c.fleetPublishZone(r.Context(), tx, persisted); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "publish_zone", map[string]any{"err": err.Error()})
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})

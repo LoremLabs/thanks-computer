@@ -331,6 +331,29 @@ func (s *Store) ListZones(ctx context.Context, tenantID string, includeRevoked b
 	return out, rows.Err()
 }
 
+// GetZoneByIDTx loads a single zone (active or revoked) by id from the tx, so a
+// producer can read the fully-defaulted persisted row — SOA timers + timestamps
+// filled by CreateZoneTx/RevokeZoneTx — to fleet-publish it. Returns ErrNotFound
+// if absent.
+func GetZoneByIDTx(ctx context.Context, tx *sql.Tx, id string) (DNSZone, error) {
+	var z DNSZone
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
+		        minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
+		        updated_at, COALESCE(revoked_at, '')
+		   FROM dns_zones
+		  WHERE id = ?`, id).Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
+		&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
+		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DNSZone{}, ErrNotFound
+	}
+	if err != nil {
+		return DNSZone{}, err
+	}
+	return z, nil
+}
+
 // LookupActiveZone returns the active zone for (tenantID, origin), or
 // ErrNotFound. Used to authorize record writes against the caller's zone.
 func (s *Store) LookupActiveZone(ctx context.Context, tenantID, origin string) (DNSZone, error) {

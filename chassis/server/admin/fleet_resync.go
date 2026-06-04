@@ -39,9 +39,10 @@ type fleetResyncRequest struct {
 }
 
 type fleetResyncCounts struct {
-	TenantCreated  int `json:"tenant_created"`
-	HostnameBound  int `json:"hostname_bound"`
-	StackActivated int `json:"stack_activated"`
+	TenantCreated   int `json:"tenant_created"`
+	HostnameBound   int `json:"hostname_bound"`
+	StackActivated  int `json:"stack_activated"`
+	DNSZoneUpserted int `json:"dns_zone_upserted"`
 }
 
 type fleetResyncResponse struct {
@@ -145,6 +146,7 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 		zap.String("tenant_slug", req.TenantSlug),
 		zap.Int("tenant_created", counts.TenantCreated),
 		zap.Int("hostname_bound", counts.HostnameBound),
+		zap.Int("dns_zone_upserted", counts.DNSZoneUpserted),
 		zap.Int("stack_activated", counts.StackActivated))
 
 	writeJSON(w, http.StatusOK, fleetResyncResponse{
@@ -188,6 +190,28 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 			}
 			pending = append(pending, resyncEvent{eventType: controlevent.TypeHostnameBound, tenantID: t.TenantID, ref: hRef, sum: hSum})
 			counts.HostnameBound++
+		}
+
+		// dns.zone.upserted for each active delegated zone — so a node brought
+		// up via resync holds the zone state (re-derives routing hosts + can
+		// serve the zone), not just the hostname rows.
+		zones, zerr := c.tenants.ListZones(ctx, t.TenantID, false)
+		if zerr != nil {
+			return nil, counts, fmt.Errorf("tenant %s zones: %w", t.TenantID, zerr)
+		}
+		for _, z := range zones {
+			zArt := controlevent.RowsArtifact{
+				DB:    "runtime",
+				Table: "dns_zones",
+				Op:    "upsert",
+				Rows:  []map[string]any{zoneToRow(z)},
+			}
+			zRef, zSum, _, zuerr := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/dns_zones/%s", z.ID), zArt)
+			if zuerr != nil {
+				return nil, counts, fmt.Errorf("zone %s: %w", z.ID, zuerr)
+			}
+			pending = append(pending, resyncEvent{eventType: controlevent.TypeDNSZoneUpserted, tenantID: t.TenantID, ref: zRef, sum: zSum})
+			counts.DNSZoneUpserted++
 		}
 
 		// stack.activated for each stack with an active version. active_version
