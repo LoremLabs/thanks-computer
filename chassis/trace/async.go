@@ -216,8 +216,23 @@ func (s *AsyncSink) run() {
 				}
 			case opEnd:
 				if tt, ok := tracers[op.rid]; ok {
-					tt.tracer.End(op.status, op.final)
+					// Flush in a goroutine so the worker returns to draining
+					// the channel immediately instead of blocking through the
+					// per-request End burst (for a network-backed sink — e.g.
+					// the NATS+R2 archiver — End does a remote write that can
+					// take 100s of ms; serializing it here backs the buffer up
+					// and drops traces under load). Delete from the map first
+					// so the handed-off tracer is ours alone; capture the
+					// payload by value. Mirrors the stale-GC + drain paths;
+					// flushWg gates shutdown so Close waits for in-flight ends.
+					tracer := tt.tracer
+					status, final := op.status, op.final
 					delete(tracers, op.rid)
+					s.flushWg.Add(1)
+					go func() {
+						defer s.flushWg.Done()
+						tracer.End(status, final)
+					}()
 				}
 			}
 		case <-ticker.C:
