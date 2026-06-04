@@ -19,11 +19,11 @@ import (
 // traceTenantScope authorizes a trace request and returns the tenant slug to
 // scope reads to. On a tenant-scoped route (/v1/tenants/{slug}/traces/…,
 // where resolveTenantMiddleware has set ac.TenantSlug) it requires the
-// opstack:*:trace capability and returns that slug — a tenant-owner (who
-// holds opstack:*:*) passes, a non-member (empty caps) is denied. On a flat
-// route (ac.TenantSlug == "") it requires super-admin and returns "" (no
-// filter — the chassis-wide operator view, incl. _sys). ok=false means a
-// 403 was already written.
+// opstack:*:read capability and returns that slug — anyone who can read the
+// tenant's ops can see the traces those ops produced; a non-member (empty
+// caps) is denied. On a flat route (ac.TenantSlug == "") it requires
+// super-admin and returns "" (no filter — the chassis-wide operator view,
+// incl. _sys). ok=false means a 403 was already written.
 func (c *Controller) traceTenantScope(w http.ResponseWriter, r *http.Request) (tenant string, ok bool) {
 	ac := auth.FromContext(r.Context())
 	if ac == nil {
@@ -35,11 +35,11 @@ func (c *Controller) traceTenantScope(w http.ResponseWriter, r *http.Request) (t
 		return "", false
 	}
 	if ac.TenantSlug != "" {
-		if err := policy.RequireCapability(r.Context(), "opstack:*:trace"); err != nil {
+		if err := policy.RequireCapability(r.Context(), "opstack:*:read"); err != nil {
 			auth.WriteForbiddenDetail(w, signature.ErrCapabilityDenied, traceDeniedDetail(ac,
-				"opstack:*:trace",
+				"opstack:*:read",
 				"tenant:"+ac.TenantSlug,
-				"your membership in "+ac.TenantSlug+" lacks the opstack:*:trace capability for this tenant"))
+				"your membership in "+ac.TenantSlug+" lacks the opstack:*:read capability for this tenant"))
 			return "", false
 		}
 		return ac.TenantSlug, true

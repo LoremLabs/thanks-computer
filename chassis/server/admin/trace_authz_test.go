@@ -29,7 +29,13 @@ func TestTraceTenantScope(t *testing.T) {
 			t.Errorf("got (%q, %v), want (prod-mankins, true)", tn, ok)
 		}
 	})
-	t.Run("tenant member without trace cap denied", func(t *testing.T) {
+	t.Run("tenant member with opstack:*:read allowed + scoped", func(t *testing.T) {
+		tn, ok, _ := call(&auth.Context{Source: "signed", TenantSlug: "prod-mankins", Capabilities: []string{"opstack:*:read"}})
+		if !ok || tn != "prod-mankins" {
+			t.Errorf("got (%q, %v), want (prod-mankins, true)", tn, ok)
+		}
+	})
+	t.Run("tenant member without opstack cap denied", func(t *testing.T) {
 		_, ok, code := call(&auth.Context{Source: "signed", TenantSlug: "prod-mankins", Capabilities: []string{"stack:*:read"}})
 		if ok || code != http.StatusForbidden {
 			t.Errorf("got (ok=%v, code=%d), want (false, 403)", ok, code)
