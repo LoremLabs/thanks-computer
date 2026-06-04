@@ -47,14 +47,14 @@ func withSuperAdminTenantContext(req *http.Request, tenantID, slug string) *http
 	return req.WithContext(auth.WithContext(req.Context(), ac))
 }
 
-func runtimeStateRow(t *testing.T, c *Controller, tenantID string) (suspended, denyStatus int, denyReason string, ok bool) {
+func runtimeStateRow(t *testing.T, c *Controller, tenantID string) (enabled, suspended, denyStatus int, denyReason string, ok bool) {
 	t.Helper()
 	row := c.pu.RuntimeDB.QueryRow(
-		`SELECT suspended, deny_status, deny_reason FROM tenant_runtime_state WHERE tenant_id=?`, tenantID)
-	if err := row.Scan(&suspended, &denyStatus, &denyReason); err != nil {
-		return 0, 0, "", false
+		`SELECT enabled, suspended, deny_status, deny_reason FROM tenant_runtime_state WHERE tenant_id=?`, tenantID)
+	if err := row.Scan(&enabled, &suspended, &denyStatus, &denyReason); err != nil {
+		return 0, 0, 0, "", false
 	}
-	return suspended, denyStatus, denyReason, true
+	return enabled, suspended, denyStatus, denyReason, true
 }
 
 func TestSuspendThenResumeTenant(t *testing.T) {
@@ -72,11 +72,13 @@ func TestSuspendThenResumeTenant(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &rec); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !rec.Suspended || rec.DenyStatus != 402 || rec.DenyReason != "payment_required" {
+	// Column split: operator suspend disables via `enabled`, leaving the
+	// programmatic `suspended` gate untouched.
+	if rec.Enabled || rec.DenyStatus != 402 || rec.DenyReason != "payment_required" {
 		t.Errorf("unexpected record: %+v", rec)
 	}
-	if s, ds, dr, ok := runtimeStateRow(t, c, "tnt_default"); !ok || s != 1 || ds != 402 || dr != "payment_required" {
-		t.Errorf("row after suspend: suspended=%d deny_status=%d reason=%q ok=%v", s, ds, dr, ok)
+	if e, _, ds, dr, ok := runtimeStateRow(t, c, "tnt_default"); !ok || e != 0 || ds != 402 || dr != "payment_required" {
+		t.Errorf("row after suspend: enabled=%d deny_status=%d reason=%q ok=%v", e, ds, dr, ok)
 	}
 
 	req = withSuperAdminTenantContext(httptest.NewRequest(http.MethodPost,
@@ -86,8 +88,8 @@ func TestSuspendThenResumeTenant(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("resume status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if s, _, _, ok := runtimeStateRow(t, c, "tnt_default"); !ok || s != 0 {
-		t.Errorf("row after resume: suspended=%d ok=%v, want 0", s, ok)
+	if e, _, _, _, ok := runtimeStateRow(t, c, "tnt_default"); !ok || e != 1 {
+		t.Errorf("row after resume: enabled=%d ok=%v, want 1", e, ok)
 	}
 }
 
@@ -100,8 +102,8 @@ func TestSuspendTenantDefaultsTo402(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if s, ds, dr, ok := runtimeStateRow(t, c, "tnt_default"); !ok || s != 1 || ds != 402 || dr != "payment_required" {
-		t.Errorf("row: suspended=%d deny_status=%d reason=%q ok=%v", s, ds, dr, ok)
+	if e, _, ds, dr, ok := runtimeStateRow(t, c, "tnt_default"); !ok || e != 0 || ds != 402 || dr != "payment_required" {
+		t.Errorf("row: enabled=%d deny_status=%d reason=%q ok=%v", e, ds, dr, ok)
 	}
 }
 

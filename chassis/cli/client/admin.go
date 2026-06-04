@@ -1357,18 +1357,24 @@ type TraceResponse struct {
 	Tenant string `json:"tenant,omitempty"`
 	// Stack is the boot trampoline; Route is the first stage.jump's
 	// destination. See TraceSummary for the rationale.
-	Stack            string         `json:"stack,omitempty"`
-	Route            string         `json:"route,omitempty"`
-	StartedAt        string         `json:"started_at,omitempty"`
-	FinishedAt       string         `json:"finished_at,omitempty"`
-	DurationMs       *int64         `json:"duration_ms,omitempty"`
-	Status           string         `json:"status"`
-	PayloadBytes     int64          `json:"payload_bytes,omitempty"`
-	PayloadTruncated bool           `json:"payload_truncated,omitempty"`
-	TraceMode        string         `json:"trace_mode,omitempty"`
-	Steps            []TraceStep    `json:"steps"`
-	In               map[string]any `json:"in,omitempty"`
-	Out              any            `json:"out,omitempty"`
+	Stack            string `json:"stack,omitempty"`
+	Route            string `json:"route,omitempty"`
+	StartedAt        string `json:"started_at,omitempty"`
+	FinishedAt       string `json:"finished_at,omitempty"`
+	DurationMs       *int64 `json:"duration_ms,omitempty"`
+	Status           string `json:"status"`
+	PayloadBytes     int64  `json:"payload_bytes,omitempty"`
+	PayloadTruncated bool   `json:"payload_truncated,omitempty"`
+	// Fuel is the per-request fuel consumed; BytesIn/BytesOut are the
+	// request/response sizes. Promoted from the request.usage event (mirror
+	// of server traceRequestResponse). Zero when absent (older/resume traces).
+	Fuel      int64          `json:"fuel,omitempty"`
+	BytesIn   int64          `json:"bytes_in,omitempty"`
+	BytesOut  int64          `json:"bytes_out,omitempty"`
+	TraceMode string         `json:"trace_mode,omitempty"`
+	Steps     []TraceStep    `json:"steps"`
+	In        map[string]any `json:"in,omitempty"`
+	Out       any            `json:"out,omitempty"`
 }
 
 type TraceStep struct {

@@ -6,9 +6,18 @@ package admin
 // row back — both locally and as the fleet artifact — so suspend never
 // clobbers limits and `limits` never clobbers suspend (the consumer applier
 // does a full-row INSERT OR REPLACE). Then it reloads the dbcache mirror so
-// the admission provider picks the change up on the next request. The billing
-// system drives the SAME table via entitlement.updated fleet events; this is
-// the manual operator surface.
+// the admission provider picks the change up on the next request.
+//
+// Column ownership: admission denies on `enabled==0 || suspended==1` (two
+// independent columns). The OPERATOR verbs here drive `enabled` (suspend ->
+// enabled=0, resume -> enabled=1). The `suspended` column is the PROGRAMMATIC
+// gate driven by background services via entitlement.updated fleet events (e.g.
+// the credit reconciler), reached in-process through applyRuntimeRow. Splitting
+// the two across columns lets an operator disable and a programmatic gate
+// coexist without clobbering each other. The single shared (deny_status,
+// deny_reason) pair is only cleared back to default when BOTH columns are open
+// (clearDenyIfOpen), so re-enabling a tenant the gate still holds down keeps
+// the gate's reason surfaced.
 //
 // Routes sit under the tenant-scoped subrouter (/v1/tenants/{tenant}/...) so
 // resolveTenantMiddleware has already resolved the slug → ac.TenantID (and
@@ -89,6 +98,18 @@ func (rr runtimeRow) toMap(tenantID string) map[string]any {
 	}
 }
 
+// clearDenyIfOpen resets the shared (deny_status, deny_reason) pair to the
+// default only when the row is fully open — neither column denying. When the
+// other denier is still active (an operator disable via enabled, or a
+// programmatic gate via suspended), the reason is left in place so it keeps
+// surfacing. Used by operator resume (it owns enabled) and gate release (it
+// owns suspended); each clears its own column first, then calls this.
+func (rr *runtimeRow) clearDenyIfOpen() {
+	if rr.Enabled == 1 && rr.Suspended == 0 {
+		rr.DenyStatus, rr.DenyReason = 403, ""
+	}
+}
+
 func (c *Controller) loadRuntimeRow(ctx context.Context, tenantID string) (runtimeRow, error) {
 	rr := defaultRuntimeRow()
 	err := c.pu.RuntimeDB.QueryRowContext(ctx,
@@ -134,7 +155,9 @@ func (c *Controller) handleSuspendTenant(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusInternalServerError, "load_runtime_state", map[string]any{"err": err.Error()})
 		return
 	}
-	rr.Enabled, rr.Suspended, rr.DenyStatus, rr.DenyReason = 1, 1, denyStatus, denyReason
+	// Operator disable drives the `enabled` column; leave `suspended` (the
+	// programmatic gate) untouched so a credit gate isn't clobbered.
+	rr.Enabled, rr.DenyStatus, rr.DenyReason = 0, denyStatus, denyReason
 	c.writeRuntimeRow(w, r, ac, rr)
 }
 
@@ -148,7 +171,11 @@ func (c *Controller) handleResumeTenant(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusInternalServerError, "load_runtime_state", map[string]any{"err": err.Error()})
 		return
 	}
-	rr.Enabled, rr.Suspended, rr.DenyStatus, rr.DenyReason = 1, 0, 403, ""
+	// Operator re-enable drives the `enabled` column; leave `suspended` (the
+	// programmatic gate) untouched. Clear the shared deny reason only if the
+	// row is now fully open (no still-active programmatic gate).
+	rr.Enabled = 1
+	rr.clearDenyIfOpen()
 	c.writeRuntimeRow(w, r, ac, rr)
 }
 
@@ -213,28 +240,40 @@ func (c *Controller) runtimeStateAuth(w http.ResponseWriter, r *http.Request) *a
 	return ac
 }
 
-// writeRuntimeRow upserts the full row (local + fleet), reloads the dbcache,
-// and responds. The fleet artifact carries the same full row, so a replica's
-// INSERT OR REPLACE never drops a column this verb didn't touch.
-func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac *auth.Context, rr runtimeRow) {
-	row := rr.toMap(ac.TenantID)
+// runtimeWriteError carries the per-step error code so the HTTP wrapper can
+// surface the same machine code it did before applyRuntimeRow was extracted.
+type runtimeWriteError struct {
+	code string
+	err  error
+}
+
+func (e *runtimeWriteError) Error() string { return e.err.Error() }
+func (e *runtimeWriteError) Unwrap() error { return e.err }
+
+// applyRuntimeRow upserts the full row (local + fleet artifact), queues the
+// entitlement.updated event, commits, and reloads the dbcache mirror. The
+// fleet artifact carries the same full row, so a replica's INSERT OR REPLACE
+// never drops a column this write didn't touch. This is the one true write
+// path: the HTTP operator verbs (via writeRuntimeRow) and the in-process
+// programmatic gate (SetGate) both route through here, so neither can emit a
+// partial row.
+func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, rr runtimeRow) error {
+	row := rr.toMap(tenantID)
 
 	// Fleet-sync producer: upload the artifact BEFORE the tx so an orphaned
 	// upload (commit fails) is GC-recoverable. Single-node skips this.
 	var fleetRef, fleetSum string
 	if c.fleetEnabled() {
-		ref, sum, ferr := c.fleetUploadEntitlementUpsert(r.Context(), ac.TenantID, row)
+		ref, sum, ferr := c.fleetUploadEntitlementUpsert(ctx, tenantID, row)
 		if ferr != nil {
-			writeJSONError(w, http.StatusInternalServerError, "fleet_upload", map[string]any{"err": ferr.Error()})
-			return
+			return &runtimeWriteError{"fleet_upload", ferr}
 		}
 		fleetRef, fleetSum = ref, sum
 	}
 
-	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	tx, err := c.pu.RuntimeDB.BeginTx(ctx, nil)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
-		return
+		return &runtimeWriteError{"begin_tx", err}
 	}
 	committed := false
 	defer func() {
@@ -243,7 +282,7 @@ func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac 
 		}
 	}()
 
-	if _, err := tx.ExecContext(r.Context(),
+	if _, err := tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO tenant_runtime_state
 		   (tenant_id, enabled, suspended, deny_status, deny_reason,
 		    rate_limit_rps, rate_burst, concurrency_limit, updated_at)
@@ -251,22 +290,19 @@ func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac 
 		row["tenant_id"], row["enabled"], row["suspended"], row["deny_status"], row["deny_reason"],
 		row["rate_limit_rps"], row["rate_burst"], row["concurrency_limit"], row["updated_at"],
 	); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "write_runtime_state", map[string]any{"err": err.Error()})
-		return
+		return &runtimeWriteError{"write_runtime_state", err}
 	}
 
 	if c.fleetEnabled() {
-		if _, qerr := c.fleetQueueEvent(r.Context(), tx,
-			controlevent.TypeEntitlementUpdated, ac.TenantID, "", 0, 0, fleetRef, fleetSum,
+		if _, qerr := c.fleetQueueEvent(ctx, tx,
+			controlevent.TypeEntitlementUpdated, tenantID, "", 0, 0, fleetRef, fleetSum,
 		); qerr != nil {
-			writeJSONError(w, http.StatusInternalServerError, "fleet_queue", map[string]any{"err": qerr.Error()})
-			return
+			return &runtimeWriteError{"fleet_queue", qerr}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
-		return
+		return &runtimeWriteError{"commit", err}
 	}
 	committed = true
 
@@ -275,6 +311,21 @@ func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac 
 	if err := c.pu.Dbc.Reload(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after tenant runtime-state write failed; FS watcher will retry",
 			zap.String("err", err.Error()))
+	}
+	return nil
+}
+
+// writeRuntimeRow is the HTTP wrapper around applyRuntimeRow: it applies the
+// row and renders the resulting record (or the per-step error code).
+func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac *auth.Context, rr runtimeRow) {
+	if err := c.applyRuntimeRow(r.Context(), ac.TenantID, rr); err != nil {
+		code := "write_runtime_state"
+		var we *runtimeWriteError
+		if errors.As(err, &we) {
+			code = we.code
+		}
+		writeJSONError(w, http.StatusInternalServerError, code, map[string]any{"err": err.Error()})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, tenantRuntimeStateRecord{

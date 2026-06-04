@@ -18,6 +18,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
+	"github.com/loremlabs/thanks-computer/chassis/bgservice"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter"    // registers the "openrouter" ai://chat backend
 	"github.com/loremlabs/thanks-computer/chassis/compute"
@@ -1086,6 +1087,24 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		dnsCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
+	}
+
+	// Background services: overlay-registered long-running loops the chassis
+	// owns (started/stopped with the controllers above). Inert when none are
+	// named (single-node default). They drive per-tenant admission state
+	// through the admin controller's Gate; each reads its own backend config
+	// (e.g. a shared-Postgres DSN) from its env in its constructor.
+	bgsvcs, bgerr := bgservice.Open(conf.BackgroundServices, bgservice.Config{
+		Logger: logger,
+		Gate:   adminCtrl,
+		NodeID: resolveUsageNodeID(conf.Fqdn),
+	})
+	if bgerr != nil {
+		cancel()
+		return ctx, nil, bgerr
+	}
+	for _, svc := range bgsvcs {
+		controllers = append(controllers, svc)
 	}
 
 	// Start all controllers.

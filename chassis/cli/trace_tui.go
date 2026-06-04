@@ -18,10 +18,12 @@ import (
 )
 
 // selectScope tracks what `c` will copy on the focused node:
-//   scopeWhole — `"key": <value-as-json>` (the entire row content)
-//   scopeKey   — just the key name (no quotes — handy for greps)
-//   scopeValue — the value as JSON (a single-scalar array unwraps to
-//                its inner scalar so what's copied matches what's shown)
+//
+//	scopeWhole — `"key": <value-as-json>` (the entire row content)
+//	scopeKey   — just the key name (no quotes — handy for greps)
+//	scopeValue — the value as JSON (a single-scalar array unwraps to
+//	             its inner scalar so what's copied matches what's shown)
+//
 // Reset to scopeWhole on cursor move, tab switch, or after copy.
 type selectScope int
 
@@ -562,7 +564,6 @@ func buildStepDetail(resp *client.TraceResponse, step *client.TraceStep, back fu
 		}
 		return ev
 	}
-
 
 	// JSON tabs: every key the user expects to "do tree things" has to
 	// be bound explicitly because this version of tview's TreeView
@@ -1178,6 +1179,12 @@ func formatTraceHeader(r *client.TraceResponse, rid string) string {
 	}
 	fmt.Fprintf(&b, "  status   [%s]%-12s[-] duration %s\n",
 		statusColorName(r.Status), r.Status, dur)
+	if r.BytesIn > 0 || r.BytesOut > 0 {
+		fmt.Fprintf(&b, "  bytes    %s → %s\n", humanBytes(r.BytesIn), humanBytes(r.BytesOut))
+	}
+	if r.Fuel > 0 {
+		fmt.Fprintf(&b, "  fuel     %d\n", r.Fuel)
+	}
 	return b.String()
 }
 
@@ -1211,7 +1218,7 @@ func formatStepMetaPlain(s *client.TraceStep) string {
 	fmt.Fprintf(&b, "  status      %-12s duration %dms\n", s.Status, s.DurationMs)
 	fmt.Fprintf(&b, "  in→out      %s → %s\n",
 		humanBytes(s.InputBytes), humanBytes(s.OutputBytes))
-if s.Error != "" {
+	if s.Error != "" {
 		fmt.Fprintf(&b, "  error       %s\n", s.Error)
 	}
 	return b.String()
@@ -1241,7 +1248,7 @@ func formatStepMeta(s *client.TraceStep) string {
 		statusColorName(s.Status), s.Status, s.DurationMs)
 	fmt.Fprintf(&b, "  in→out      %s → %s\n",
 		humanBytes(s.InputBytes), humanBytes(s.OutputBytes))
-if s.Error != "" {
+	if s.Error != "" {
 		fmt.Fprintf(&b, "  [red]error       %s[-]\n", s.Error)
 	}
 	return b.String()

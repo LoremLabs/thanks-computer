@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-func runtimeLimits(t *testing.T, c *Controller, tenantID string) (rps float64, burst, conc, suspended int) {
+func runtimeLimits(t *testing.T, c *Controller, tenantID string) (rps float64, burst, conc, enabled int) {
 	t.Helper()
 	if err := c.pu.RuntimeDB.QueryRow(
-		`SELECT rate_limit_rps, rate_burst, concurrency_limit, suspended
+		`SELECT rate_limit_rps, rate_burst, concurrency_limit, enabled
 		   FROM tenant_runtime_state WHERE tenant_id=?`, tenantID).
-		Scan(&rps, &burst, &conc, &suspended); err != nil {
+		Scan(&rps, &burst, &conc, &enabled); err != nil {
 		t.Fatalf("read limits: %v", err)
 	}
 	return
@@ -53,17 +53,17 @@ func TestSuspendPreservesLimits(t *testing.T) {
 	post("/v1/tenants/default/limits", mustJSON(t, map[string]any{"rps": 3, "concurrency": 7}), c.handleSetTenantLimits)
 	post("/v1/tenants/default/suspend", []byte(`{}`), c.handleSuspendTenant)
 
-	rps, _, conc, suspended := runtimeLimits(t, c, "tnt_default")
-	if suspended != 1 {
-		t.Errorf("suspended=%d, want 1", suspended)
+	rps, _, conc, enabled := runtimeLimits(t, c, "tnt_default")
+	if enabled != 0 {
+		t.Errorf("enabled=%d, want 0 (operator disable owns the enabled column)", enabled)
 	}
 	if rps != 3 || conc != 7 {
 		t.Errorf("suspend clobbered limits: rps %v conc %d, want 3/7", rps, conc)
 	}
 
 	post("/v1/tenants/default/resume", []byte(`{}`), c.handleResumeTenant)
-	rps, _, conc, suspended = runtimeLimits(t, c, "tnt_default")
-	if suspended != 0 || rps != 3 || conc != 7 {
-		t.Errorf("resume state: suspended=%d rps=%v conc=%d, want 0/3/7", suspended, rps, conc)
+	rps, _, conc, enabled = runtimeLimits(t, c, "tnt_default")
+	if enabled != 1 || rps != 3 || conc != 7 {
+		t.Errorf("resume state: enabled=%d rps=%v conc=%d, want 1/3/7", enabled, rps, conc)
 	}
 }

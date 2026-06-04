@@ -187,6 +187,12 @@ func printSummary(w io.Writer, r *client.TraceResponse) {
 		}
 		fmt.Fprintf(w, "  payload  %s%s\n", humanBytes(r.PayloadBytes), trunc)
 	}
+	if r.BytesIn > 0 || r.BytesOut > 0 {
+		fmt.Fprintf(w, "  bytes    %s → %s\n", humanBytes(r.BytesIn), humanBytes(r.BytesOut))
+	}
+	if r.Fuel > 0 {
+		fmt.Fprintf(w, "  fuel     %d\n", r.Fuel)
+	}
 	fmt.Fprintln(w)
 }
 

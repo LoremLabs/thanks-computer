@@ -355,8 +355,10 @@ func (c *Controller) Start() {
 	// Operator runtime-state controls (super_admin): suspend a tenant so its
 	// requests are denied (deny_status, default 402) before its stack runs,
 	// or resume it. The admission provider picks up the change on the dbcache
-	// reload the handler triggers. The billing system drives the same
-	// tenant_runtime_state table via entitlement.updated events.
+	// reload the handler triggers. Column split: these operator verbs drive the
+	// `enabled` column; the `suspended` column is the programmatic gate driven
+	// by background services (e.g. the credit reconciler) via entitlement.updated
+	// events / the in-process SetGate path — so the two never clobber each other.
 	tenantR.HandleFunc("/suspend", c.handleSuspendTenant).Methods(http.MethodPost)
 	tenantR.HandleFunc("/resume", c.handleResumeTenant).Methods(http.MethodPost)
 	tenantR.HandleFunc("/limits", c.handleSetTenantLimits).Methods(http.MethodPost)
