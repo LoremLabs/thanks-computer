@@ -106,8 +106,8 @@ Flags:
 	}
 
 	if *noOpen {
-		fmt.Fprintf(stdout, "Open this URL in your browser to sign in:\n\n  %s\n\nToken expires in %d seconds.\n",
-			resp.URL, resp.ExpiresInSeconds)
+		fmt.Fprintf(stdout, "Open this URL in your browser to sign in:\n\n  %s\n\n",
+			resp.URL)
 		return 0
 	}
 	if err := openBrowser(resp.URL); err != nil {
@@ -115,8 +115,8 @@ Flags:
 		PrintCLIErrorf(stderr, "auth login: couldn't open browser (%v); paste this URL instead:\n\n  %s", err, resp.URL)
 		return 0
 	}
-	fmt.Fprintf(stdout, "Opened %s in your browser.\nToken expires in %d seconds.\n",
-		resp.URL, resp.ExpiresInSeconds)
+	fmt.Fprintf(stdout, "Opened %s in your browser.\n",
+		resp.URL)
 	return 0
 }
 
