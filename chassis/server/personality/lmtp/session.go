@@ -205,6 +205,35 @@ func (s *lmtpSession) LMTPData(r io.Reader, status smtp.StatusCollector) error {
 		}
 	}
 
+	// One Info line per LMTP delivery so inbound mail is visible in the
+	// chassis log regardless of disposition. This matters most under
+	// deny-by-default: unrouted recipients never dispatch to the bus, so
+	// they produce NO trace — without this line a denied delivery is
+	// completely silent on the chassis side. Recipient addresses are NOT
+	// logged here (they ride the Postfix log + the trace for routed
+	// rcpts); we log connection metadata + disposition counts only.
+	accepted, rejected := 0, 0
+	for _, v := range verdicts {
+		if v == nil {
+			accepted++
+		} else {
+			rejected++
+		}
+	}
+	clientIP := ""
+	if addr := s.conn.Conn().RemoteAddr(); addr != nil {
+		if ta, ok := addr.(*net.TCPAddr); ok && ta != nil {
+			clientIP = ta.IP.String()
+		}
+	}
+	s.ctrl.pu.Logger.Info("lmtp delivery",
+		zap.String("client_ip", clientIP),
+		zap.String("helo", s.conn.Hostname()),
+		zap.Int("rcpts", len(s.rcpts)),
+		zap.Int("accepted", accepted),
+		zap.Int("rejected", rejected),
+		zap.Int("bytes", len(body)))
+
 	// Write verdicts. Order doesn't matter for SetStatus (the library
 	// maps rcpt → status by rcpt string), but iterating s.rcpts keeps
 	// the call order deterministic for tests and logs.
