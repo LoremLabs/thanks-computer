@@ -76,6 +76,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		diagnosticsSection(),
 		homeProfileSection(profile),
 		signingSection(profile),
+		pluginsSection(),
 	}
 
 	var srv update.ServerInfo
@@ -337,6 +338,26 @@ func updatesSection(srv update.ServerInfo, srvOK, offline bool) section {
 		fs = append(fs, finding{Status: statusOK, Label: "latest release", Value: "up to date (v" + res.Current + ")"})
 	}
 	return section{Title: "Updates", Findings: fs}
+}
+
+// pluginsSection lists discovered external txco-<name> CLI plugins (the same set
+// `txco plugin list` reports) so the doctor surfaces what's installed and where
+// each resolves from. Local-only; informational — it never fails the run.
+func pluginsSection() section {
+	var fs []finding
+	if dir, ok := pluginsDir(); ok {
+		fs = append(fs, finding{Status: statusInfo, Label: "plugins dir", Value: dir})
+	}
+	plugins := discoverPlugins()
+	if len(plugins) == 0 {
+		fs = append(fs, finding{Status: statusInfo, Label: "installed",
+			Value: "[none]"})
+		return section{Title: "Plugins", Findings: fs}
+	}
+	for _, p := range plugins {
+		fs = append(fs, finding{Status: statusInfo, Label: p.name, Value: p.path})
+	}
+	return section{Title: "Plugins", Findings: fs}
 }
 
 // cloudSection reports stored cloud tokens, if any. Returns ok=false (omit the

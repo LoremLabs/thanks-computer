@@ -43,6 +43,24 @@ func HomePath() (string, error) {
 	return dir, nil
 }
 
+// HomeDir resolves the txco home directory WITHOUT creating it — for
+// read-only lookups (e.g. plugin discovery) that must not have the side effect
+// of materializing ~/.config/txco just by being consulted. Resolution mirrors
+// HomePath (TXCO_HOME, else $XDG_CONFIG_HOME/txco, else ~/.config/txco).
+// ok=false only when even the user home dir can't be resolved.
+func HomeDir() (dir string, ok bool) {
+	if v := os.Getenv("TXCO_HOME"); v != "" {
+		return v, true
+	}
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return filepath.Join(v, "txco"), true
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", "txco"), true
+	}
+	return "", false
+}
+
 // KeyPath returns the path to a named ed25519 key under TXCO_HOME. The
 // keys/ subdirectory is created on demand; the key file itself isn't
 // touched. Names should be bare (no `.ed25519` suffix); a name like

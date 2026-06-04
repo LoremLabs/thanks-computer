@@ -156,12 +156,22 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// Emit a shell completion script. Boring v1: command + flag
 		// names only; see chassis/cli/completion.go.
 		return runCompletion(rest, stdout, stderr), true
+	case "plugin":
+		// List external txco-<name> CLI plugins (git/kubectl convention).
+		// The exec-on-unknown-subcommand path lives in the default arm.
+		return runPlugin(rest, stdout, stderr), true
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0, true
 	case "version", "--version", "-v":
 		return runVersion(stdout), true
 	default:
+		// Unknown built-in → try an external plugin `txco-<cmd>` on $PATH
+		// (git/kubectl convention: the SaaS overlay ships `txco-credit`, etc).
+		// Built-ins above always win; this only runs on a switch miss.
+		if status, ok := execPlugin(cmd, rest, stdout, stderr); ok {
+			return status, true
+		}
 		// A bare word (not a flag) that isn't a known subcommand is
 		// almost certainly a typo — `txco whoami` instead of `txco
 		// auth whoami`, etc. Falling through to server boot would be

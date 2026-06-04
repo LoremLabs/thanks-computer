@@ -274,6 +274,9 @@ var cliCommandTree = []node{
 	}},
 	{Name: "upgrade", Desc: "Upgrade the txco CLI binary (self-update or package-manager guidance)"},
 	{Name: "doctor", Desc: "Diagnose local setup + chassis reachability", Flags: []string{"profile", "addr", "offline", "json"}},
+	{Name: "plugin", Desc: "List installed txco-* CLI plugins", Children: []node{
+		{Name: "list", Desc: "List plugins found in the plugins dir and $PATH"},
+	}},
 }
 
 // --- runCompletion: dispatcher for `txco completion <shell>` ---
