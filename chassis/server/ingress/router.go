@@ -316,7 +316,7 @@ func (r *yamlResolver) resolveStrategyA(rcpt string) (RouteTarget, bool) {
 	}
 	return RouteTarget{
 		Tenant:   tenant,
-		Stack:    tenant + "/" + stack,
+		Stack:    stack + "/_mail",
 		Ingress:  "lmtp:" + tenant + "." + stack + "@" + host,
 		Verified: true,
 	}, true
@@ -351,7 +351,7 @@ func (r *yamlResolver) resolveVerifiedDomainYAML(rcpt string) (RouteTarget, bool
 	}
 	stack := t.Stack
 	if stack == "" {
-		stack = t.Tenant + "/_mail"
+		stack = "_mail"
 	}
 	return RouteTarget{
 		Tenant:   t.Tenant,
@@ -380,7 +380,7 @@ func (r *yamlResolver) AcceptMailDomain(domain string) (RouteTarget, bool) {
 	if t, ok := r.file.Ingress.LMTP.VerifiedDomains[domain]; ok {
 		stack := t.Stack
 		if stack == "" {
-			stack = t.Tenant + "/_mail"
+			stack = "_mail"
 		}
 		return RouteTarget{Tenant: t.Tenant, Stack: stack, Ingress: "domain:" + domain, Verified: true}, true
 	}

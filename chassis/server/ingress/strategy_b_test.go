@@ -22,8 +22,8 @@ ingress:
 	if got.Tenant != "acme" {
 		t.Errorf("tenant = %q, want %q", got.Tenant, "acme")
 	}
-	if got.Stack != "acme/_mail" {
-		t.Errorf("stack = %q, want %q (convention default)", got.Stack, "acme/_mail")
+	if got.Stack != "_mail" {
+		t.Errorf("stack = %q, want %q (mail-only convention default)", got.Stack, "_mail")
 	}
 	if got.Ingress != "domain:acme.example" {
 		t.Errorf("ingress = %q, want %q", got.Ingress, "domain:acme.example")
@@ -121,10 +121,10 @@ ingress:
 	if !ok {
 		t.Fatal("expected hit")
 	}
-	// Strategy A parses tenant=acme, stack=acme/support — must win
+	// Strategy A parses tenant=acme, stack=support/_mail — must win
 	// over verified_domains' tenant=legacy.
-	if got.Tenant != "acme" || got.Stack != "acme/support" {
-		t.Errorf("Strategy A did not win: got tenant=%q stack=%q, want acme acme/support",
+	if got.Tenant != "acme" || got.Stack != "support/_mail" {
+		t.Errorf("Strategy A did not win: got tenant=%q stack=%q, want acme support/_mail",
 			got.Tenant, got.Stack)
 	}
 }
@@ -156,8 +156,8 @@ ingress:
 	if !ok {
 		t.Fatal("expected verified_domains fallthrough hit")
 	}
-	if got.Stack != "acme/_mail" {
-		t.Errorf("got %q, want %q", got.Stack, "acme/_mail")
+	if got.Stack != "_mail" {
+		t.Errorf("got %q, want %q", got.Stack, "_mail")
 	}
 }
 
@@ -179,7 +179,7 @@ ingress:
 	mr := mailResolverFor(t, yaml)
 
 	got, _ := mr.ResolveRecipient("foo@acme.example", "default")
-	if got.Stack != "acme/_mail" {
+	if got.Stack != "_mail" {
 		t.Errorf("verified_domains expected to win; got %q", got.Stack)
 	}
 	got, _ = mr.ResolveRecipient("foo@unrelated.example", "default")
@@ -197,7 +197,7 @@ ingress:
 func TestStrategyB_DBVerifiedDomain_Hit(t *testing.T) {
 	db := newDBResolverTestStore(t)
 	seedTenant(t, db, "tnt_a", "acme")
-	seedHostname(t, db, "thn_1", "acme.example", "tnt_a", "acme/web")
+	seedHostname(t, db, "thn_1", "acme.example", "tnt_a", "web")
 	// Flip verified_at to "now".
 	if _, err := db.Exec(
 		`UPDATE tenant_hostnames SET verified_at = '2026-01-01T00:00:01Z' WHERE id = 'thn_1'`,
@@ -213,8 +213,8 @@ func TestStrategyB_DBVerifiedDomain_Hit(t *testing.T) {
 	if got.Tenant != "acme" {
 		t.Errorf("tenant = %q, want acme", got.Tenant)
 	}
-	if got.Stack != "acme/_mail" {
-		t.Errorf("stack = %q, want acme/_mail (synthesized; NOT from h.stack)", got.Stack)
+	if got.Stack != "web/_mail" {
+		t.Errorf("stack = %q, want web/_mail (nested under the bound stack h.stack=web)", got.Stack)
 	}
 	if !got.Verified {
 		t.Error("verified row should produce Verified=true")
@@ -238,8 +238,8 @@ func TestStrategyB_DBVerifiedDomain_UnverifiedPermissive(t *testing.T) {
 	if got.Verified {
 		t.Error("unverified row should have Verified=false")
 	}
-	if got.Stack != "acme/_mail" {
-		t.Errorf("stack = %q, want acme/_mail", got.Stack)
+	if got.Stack != "_mail" {
+		t.Errorf("stack = %q, want _mail", got.Stack)
 	}
 }
 
@@ -324,8 +324,8 @@ ingress:
 	}
 	// And a non-VIP rcpt falls through inner overrides → DB hit.
 	got, _ = r.ResolveRecipient("intern@acme.example", "")
-	if got.Stack != "acme/_mail" {
-		t.Errorf("DB Strategy B miss: got %q, want acme/_mail", got.Stack)
+	if got.Stack != "_mail" {
+		t.Errorf("DB Strategy B miss: got %q, want _mail", got.Stack)
 	}
 }
 
@@ -358,8 +358,8 @@ ingress:
 	if !ok {
 		t.Fatal("expected hit")
 	}
-	if got.Stack != "acme/_mail" {
-		t.Errorf("DB Strategy B should beat listener: got %q, want acme/_mail (otherwise verified tenant's mail blackholes into operator catch-all)",
+	if got.Stack != "_mail" {
+		t.Errorf("DB Strategy B should beat listener: got %q, want _mail (otherwise verified tenant's mail blackholes into operator catch-all)",
 			got.Stack)
 	}
 }

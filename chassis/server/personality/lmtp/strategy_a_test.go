@@ -64,8 +64,8 @@ func TestStrategyA_EndToEnd(t *testing.T) {
 	if got := gjson.Get(env, "_txc.route.tenant").String(); got != "acme" {
 		t.Errorf("_txc.route.tenant = %q, want %q", got, "acme")
 	}
-	if got := gjson.Get(env, "_txc.route.stack").String(); got != "acme/support" {
-		t.Errorf("_txc.route.stack = %q, want %q", got, "acme/support")
+	if got := gjson.Get(env, "_txc.route.stack").String(); got != "support/_mail" {
+		t.Errorf("_txc.route.stack = %q, want %q", got, "support/_mail")
 	}
 	// rcpt list carries the full original address (with +monday) —
 	// the source of truth for rules that want the modifier.

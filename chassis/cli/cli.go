@@ -111,6 +111,14 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// chassis's view of the active identity. Users reflexively type
 		// `txco whoami`, so route it instead of erroring as unknown.
 		return auth.Dispatch(append([]string{"whoami"}, rest...), stdout, stderr), true
+	case "ui":
+		// Top-level convenience alias for `auth login` — signs a browser
+		// session with the active profile's key and opens the chassis admin
+		// UI already authenticated. Surfaced at the top level (and in help)
+		// because users look for "the admin interface", not a login verb
+		// nested under `auth`. Takes the same flags (--profile, --tenant,
+		// --url, --no-open, --label).
+		return auth.Dispatch(append([]string{"login"}, rest...), stdout, stderr), true
 	case "login":
 		// Cloud account sign-in (OAuth against the thanks-computer cloud) —
 		// distinct from `auth login`, which mints a chassis admin browser
@@ -192,9 +200,7 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 
 func printUsage(w io.Writer) {
 	banner.PrintLogo(w)
-	var (
-		cyan, yellow, dim, bold, reset string
-	)
+	var cyan, yellow, dim, bold, reset string
 	if banner.IsTTY(w) {
 		cyan = "\x1b[36m"
 		yellow = "\x1b[33m"
@@ -206,114 +212,87 @@ func printUsage(w io.Writer) {
 	// with the banner. Suppressed entirely when ldflags weren't set (so
 	// `go run ./cmd/txco --help` from a dev tree stays uncluttered).
 	if line := versionLine(); line != "" {
-		fmt.Fprintf(w, "%s%s%s\n", dim, line, reset)
+		fmt.Fprintf(w, "                     %s%s%s\n", dim, line, reset)
 	}
-	// Helpers — concatenate ANSI around tokens. No-ops when not TTY.
+	// Token painters — concatenate ANSI around a string. No-ops when not TTY.
 	heading := func(s string) string { return bold + cyan + s + reset }
-	cmd := func(s string) string { return bold + s + reset }
+	cmdName := func(s string) string { return bold + s + reset }
 	example := func(s string) string { return cyan + s + reset }
 	comment := func(s string) string { return dim + s + reset }
+	muted := func(s string) string { return dim + s + reset } // command/flag descriptions
 	hint := func(s string) string { return yellow + s + reset }
 
-	fmt.Fprintf(w, `
-%s
-  txco [flags]
-  txco <command> [flags]
+	p := func(format string, a ...any) { fmt.Fprintf(w, format, a...) }
 
-The thanks-computer chassis: event router + rule authoring CLI.
+	p("\n\n%s\n", heading("Usage:"))
+	p("  txco [flags]\n")
+	p("  txco <command> [flags]\n\n")
 
-%s
-  %s
-  %s
-  %s
+	p("%s\n", heading("Examples:"))
+	p("  %s\n", comment("# Open the admin web interface"))
+	p("  %s\n\n", example("txco ui"))
+	p("  %s\n", comment("# Scaffold a new stack and start the chassis"))
+	p("  %s\n", example("txco init my-stack"))
+	p("  %s\n\n", example("txco serve"))
+	p("  %s\n", comment("# Push local rules to a running chassis"))
+	p("  %s\n\n", example("txco push"))
+	p("  %s\n", comment("# First-time auth setup (keygen + enroll)"))
+	p("  %s\n\n", example("txco auth bootstrap-local --secret <s>"))
 
-  %s
-  %s
+	// Command table. Label + description live together in one row, so a
+	// description can never drift away from its command (the bug the old
+	// split format-string/positional-args layout invited). Descriptions may
+	// embed a colored hint; padCmd measures the label's visible width, so
+	// trailing ANSI in the description doesn't disturb the column.
+	p("%s\n", heading("Available commands:"))
+	type row struct{ label, desc string }
+	rows := []row{
+		{"serve", muted("Run the chassis server")},
+		{"init <stack> [<dir>]", muted("Scaffold a local OPS/<stack>/.../ tree")},
+		{"apply [<dir>]", muted("Deploy the whole OPS/ tree (all stacks; create + activate a version)")},
+		{"diff [<dir>]", muted("Compare local OPS/ tree against a chassis admin endpoint")},
+		{"status [<dir>]", muted("Per-stack version drift between local and chassis (exit 1 on divergence)")},
+		{"pull <stack> [<dir>]", muted("Materialise a stack's active version into local OPS/")},
+		{"push <stack> [<dir>]", muted("Deploy one stack — create + activate (inverse of pull)")},
+		{"draft <stack> [<dir>]", muted("Create a draft version of one stack (stage; no activate)")},
+		{"activate <stack>", muted("Flip a stack's active version (defaults to most recent draft)")},
+		{"versions <stack>", muted("List versions for a stack with active marker")},
+		{"edit <stack> <path>", muted("Open $EDITOR on one file from a draft and PATCH the result back")},
+		{"dev", muted("Spawn apps + chassis, watch for changes (add --apply for startup push)")},
+		{"demo", muted("Boot a chassis and open the txcl demo in your browser")},
+		{"op <command>", muted("Author + build sandboxed op:// nano-ops (init/build/run/test)")},
+		{"install <source> --as <stack>", muted("Install a package into OPS/ (sales@v3, oci:, dir:, github:), then apply")},
+		{"package <command>", muted("Author + manage packages (init/validate/publish · list/upgrade/remove)")},
+		{"trace [<rid>]", muted("Render the execution trace for a request (use ") + hint("`txco trace last`") + muted(" for the most recent)")},
+		{"auth <command>", muted("Manage signing keys for the admin API")},
+		{"ui", muted("Open the chassis admin UI in your browser, signed in via your profile")},
+		{"login", muted("Sign in to the thanks-computer cloud")},
+		{"logout", muted("Sign out of the thanks-computer cloud")},
+		{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},
+		{"config <command>", muted("Alias namespace for profile / logout (gcloud/stripe-style)")},
+		{"completion <shell>", muted("Emit a shell completion script (use ") + hint("`txco completion bash|zsh|fish`") + muted(" for install steps)")},
+		{"version", muted("Print version info as JSON")},
+		{"update check", muted("Check for a newer txco CLI release on GitHub")},
+		{"upgrade", muted("Upgrade the txco CLI binary (self-update, or brew/source guidance)")},
+		{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
+	}
+	for _, r := range rows {
+		p("  %s   %s\n", padCmd(cmdName(r.label)), r.desc)
+	}
 
-  %s
-  %s
+	p("\n%s\n", heading("Common flags for apply/diff/status/trace:"))
+	flags := []row{
+		{"--profile NAME", muted("Signing profile (TXCO_PROFILE, then your active profile, then 'local')")},
+		{"--target NAME", muted("Target name from txco.yaml (default: 'dev')")},
+		{"--addr URL", muted("Admin endpoint (overrides target's chassis URL)")},
+		{"--user USER", muted("Basic auth user")},
+		{"--pass PASS", muted("Basic auth password")},
+	}
+	for _, f := range flags {
+		p("  %s   %s\n", padCmd(cmdName(f.label)), f.desc)
+	}
 
-%s
-  %s   Run the chassis server
-  %s   Scaffold a local OPS/<stack>/.../ tree
-  %s   Deploy the whole OPS/ tree (all stacks; create + activate a version)
-  %s   Compare local OPS/ tree against a chassis admin endpoint
-  %s   Per-stack version drift between local and chassis (exit 1 on divergence)
-  %s   Materialise a stack's active version into local OPS/
-  %s   Deploy one stack — create + activate (inverse of pull)
-  %s   Create a draft version of one stack (stage; no activate)
-  %s   Flip a stack's active version (defaults to most recent draft)
-  %s   List versions for a stack with active marker
-  %s   Open $EDITOR on one file from a draft and PATCH the result back
-  %s   Spawn apps + chassis, watch for changes (add --apply for startup push)
-  %s   Boot a chassis and open the txcl demo in your browser
-  %s   Author + build sandboxed op:// nano-ops (init/build/run/test)
-  %s   Install a package into OPS/ (sales@v3, oci:, dir:, github:), then apply
-  %s   Author + manage packages (init/validate/publish · list/upgrade/remove)
-  %s   Render the execution trace for a request (use %s for the most recent)
-  %s   Manage signing keys for the admin API
-  %s   Sign in to the thanks-computer cloud
-  %s   Sign out of the thanks-computer cloud
-  %s   Talk to MCP-over-HTTP servers (use %s for discovery)
-  %s   Alias namespace for profile / logout (gcloud/stripe-style)
-  %s   Emit a shell completion script (use %s for install steps)
-  %s   Print version info as JSON
-  %s   Check for a newer txco CLI release on GitHub
-  %s   Upgrade the txco CLI binary (self-update, or brew/source guidance)
-  %s   Diagnose local setup + chassis reachability (auth/keys/version)
-
-%s
-  %s   Target name from txco.yaml (default: 'dev')
-  %s   Admin endpoint (overrides target's chassis URL)
-  %s   Basic auth user
-  %s   Basic auth password
-
-Use %s for per-command flags.
-`,
-		heading("Usage:"),
-		heading("Examples:"),
-		comment("# Scaffold a new stack and start the chassis"),
-		example("txco init my-stack"),
-		example("txco serve"),
-		comment("# Push local rules to a running chassis"),
-		example("txco apply"),
-		comment("# First-time auth setup (keygen + enroll)"),
-		example("txco auth bootstrap-local --secret <s>"),
-		heading("Available commands:"),
-		padCmd(cmd("serve")),
-		padCmd(cmd("init")+" <stack> [<dir>]"),
-		padCmd(cmd("apply")+" [<dir>]"),
-		padCmd(cmd("diff")+"  [<dir>]"),
-		padCmd(cmd("status")+" [<dir>]"),
-		padCmd(cmd("pull")+" <stack> [<dir>]"),
-		padCmd(cmd("push")+" <stack> [<dir>]"),
-		padCmd(cmd("draft")+" <stack> [<dir>]"),
-		padCmd(cmd("activate")+" <stack>"),
-		padCmd(cmd("versions")+" <stack>"),
-		padCmd(cmd("edit")+" <stack> <path>"),
-		padCmd(cmd("dev")),
-		padCmd(cmd("demo")),
-		padCmd(cmd("op")+" <command>"),
-		padCmd(cmd("install")+" <source> --as <stack>"),
-		padCmd(cmd("package")+" <command>"),
-		padCmd(cmd("trace")+" [<rid>]"), hint("`txco trace last`"),
-		padCmd(cmd("auth")+" <command>"),
-		padCmd(cmd("login")),
-		padCmd(cmd("logout")),
-		padCmd(cmd("mcp")+" <command>"), hint("`txco mcp doctor`"),
-		padCmd(cmd("config")+" <command>"),
-		padCmd(cmd("completion")+" <shell>"), hint("`txco completion bash|zsh|fish`"),
-		padCmd(cmd("version")),
-		padCmd(cmd("update")+" check"),
-		padCmd(cmd("upgrade")),
-		padCmd(cmd("doctor")),
-		heading("Common flags for apply/diff/status/dev/trace:"),
-		padCmd(cmd("--target NAME")),
-		padCmd(cmd("--addr URL")),
-		padCmd(cmd("--user USER")),
-		padCmd(cmd("--pass PASS")),
-		hint("`txco <command> --help`"),
-	)
+	p("\nUse %s for per-command flags.\n", hint("`txco <command> --help`"))
 }
 
 // padCmd left-aligns a command label to a fixed visible width so the

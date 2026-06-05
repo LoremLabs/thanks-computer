@@ -32,8 +32,8 @@ func TestStrategyA_BasicParse(t *testing.T) {
 	if got.Tenant != "acme" {
 		t.Errorf("tenant = %q, want %q", got.Tenant, "acme")
 	}
-	if got.Stack != "acme/support" {
-		t.Errorf("stack = %q, want %q", got.Stack, "acme/support")
+	if got.Stack != "support/_mail" {
+		t.Errorf("stack = %q, want %q", got.Stack, "support/_mail")
 	}
 	if !got.Verified {
 		t.Error("Strategy A hits must be Verified=true")
@@ -99,7 +99,7 @@ func TestStrategyA_InvalidSlugFallsThrough(t *testing.T) {
 		{"empty_tenant", ".stack@chassis.example"},
 		{"empty_stack", "acme.@chassis.example"},
 		{"tenant_starts_with_digit", "1acme.stack@chassis.example"},
-		{"tenant_contains_dot", "acme.foo.stack@chassis.example"}, // first-dot split gives stack="foo.stack" → invalid
+		{"tenant_contains_dot", "acme.foo.stack@chassis.example"},   // first-dot split gives stack="foo.stack" → invalid
 		{"uppercase_after_lowercase", "Acme.Stack@chassis.example"}, // lowercased to "acme.stack" → actually valid; not a fall-through case
 		{"tenant_with_underscore", "ac_me.stack@chassis.example"},
 	}
@@ -143,7 +143,7 @@ ingress:
 		t.Fatalf("expected hit")
 	}
 	if got.Stack != "acme/override_stack" {
-		t.Errorf("override did not win: got %q, want %q (Strategy A would route to acme/support)",
+		t.Errorf("override did not win: got %q, want %q (Strategy A would route to support/_mail)",
 			got.Stack, "acme/override_stack")
 	}
 }

@@ -33,9 +33,11 @@ type State struct {
 	// the same int users see in `txco versions <stack>` and in URLs.
 	VersionNumber int64 `json:"version_number"`
 	// ParentVersionNumber is what the next `push` will set as the new
-	// draft's parent_version_number. After a fresh pull it equals
-	// VersionNumber. The CLI advances this only on the next pull, not
-	// on push or activate.
+	// draft's parent_version_number. After a sync it equals VersionNumber.
+	// Both `pull` (fetch-based sync) and `push`/`apply` (which deploy the
+	// local files and activate them) record a synced row with parent ==
+	// version; `activate`/`draft` never write state (they don't establish
+	// local==version).
 	ParentVersionNumber int64 `json:"parent_version_number"`
 	// ManifestHash is what the server reported at pull time. Used by
 	// `txco push` to short-circuit "no changes locally" before walking

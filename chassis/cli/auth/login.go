@@ -105,6 +105,8 @@ Flags:
 		return 1
 	}
 
+	fmt.Fprintln(stdout, loginIdentitySummary(resolvedProfile, target))
+
 	if *noOpen {
 		fmt.Fprintf(stdout, "Open this URL in your browser to sign in:\n\n  %s\n\n",
 			resp.URL)
@@ -118,6 +120,31 @@ Flags:
 	fmt.Fprintf(stdout, "Opened %s in your browser.\n",
 		resp.URL)
 	return 0
+}
+
+// loginIdentitySummary returns a one-line "who am I opening the UI as"
+// summary, so the user can confirm the identity (and tenant + chassis)
+// the browser session will carry before it pops open. Pulled from the
+// local meta — no extra signed round-trip. Best-effort: if the meta
+// can't be read it falls back to just the profile.
+func loginIdentitySummary(profile string, target client.Target) string {
+	who := ""
+	if metaPath, err := MetaPath(profile); err == nil {
+		if m, err := LoadMeta(metaPath); err == nil && m != nil {
+			switch {
+			case m.Label != "":
+				who = m.Label
+			case m.ActorID != "":
+				who = m.ActorID
+			}
+		}
+	}
+	if who != "" {
+		return fmt.Sprintf("Opening the admin UI as %s (profile %q, tenant %q) on %s",
+			who, profile, target.Tenant, target.Addr)
+	}
+	return fmt.Sprintf("Opening the admin UI as profile %q (tenant %q) on %s",
+		profile, target.Tenant, target.Addr)
 }
 
 // openBrowser shells out to the platform-native "open this URL"

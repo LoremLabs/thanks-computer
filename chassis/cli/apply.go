@@ -19,6 +19,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	computeapi "github.com/loremlabs/thanks-computer/chassis/cli/op"
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
+	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 )
 
@@ -331,6 +332,20 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %s: activate v%d: %v\n", cmd, stack, versionNumber, err)
 			return 1
+		}
+		// Record local state so `txco status` shows this stack in sync. Push
+		// deployed the LOCAL files as v<act.VersionNumber>, so the workspace now
+		// mirrors that version's content exactly — the same invariant a fresh
+		// `pull` establishes. ManifestHash is computed on the same basis status
+		// recomputes (localManifestHash), so the stack reads "(clean)" right
+		// after. Best-effort: the deploy already succeeded, so a state-write
+		// failure only warns — it must not fail the push.
+		if serr := state.Save(dir, stack, state.State{
+			VersionNumber:       act.VersionNumber,
+			ParentVersionNumber: act.VersionNumber,
+			ManifestHash:        localManifestHash(files),
+		}); serr != nil {
+			fmt.Fprintf(stderr, "%s: %s: warning: could not record local state: %v\n", cmd, stack, serr)
 		}
 		results = append(results, deployResult{
 			Stack: stack, Version: act.VersionNumber,

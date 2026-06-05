@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 )
 
 func TestWriteJSON(t *testing.T) {
@@ -71,6 +74,44 @@ func TestRunPushJSON(t *testing.T) {
 	}
 	if got.PriorVersion == nil || *got.PriorVersion != 2 {
 		t.Errorf("prior_version = %v, want 2", got.PriorVersion)
+	}
+}
+
+// TestRunPushRecordsLocalState proves a successful push now writes the local
+// state file so `txco status` reports the stack in sync (the prior behavior:
+// "no local state recorded — run `txco pull`"). Crucially the recorded
+// ManifestHash must equal what drift/status recomputes from the on-disk OPS
+// tree, so the stack reads "(clean)" immediately after push.
+func TestRunPushRecordsLocalState(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir())
+	root := t.TempDir()
+	writeStackFixture(t, root, "api", "0", "root", `EMIT .ok = "yes"`)
+	srv := deployChassis(t)
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	if code := runPush([]string{"api", root, "--addr", srv.URL}, &out, &errb); code != 0 {
+		t.Fatalf("exit=%d; stderr=%q", code, errb.String())
+	}
+
+	st, err := state.Load(root, "api")
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	if st == nil {
+		t.Fatal("push did not record local state (.txco/api.state.json missing)")
+	}
+	if st.VersionNumber != 3 || st.ParentVersionNumber != 3 {
+		t.Errorf("state versions = %d/%d, want 3/3 (the activated version)", st.VersionNumber, st.ParentVersionNumber)
+	}
+	// Status (drift) recomputes localManifestHash(loadLocalStackFiles(...)); the
+	// recorded hash must match it so the stack reads "(clean)" right after push.
+	localFiles, ferr := loadLocalStackFiles(filepath.Join(root, "OPS", "api"))
+	if ferr != nil {
+		t.Fatalf("loadLocalStackFiles: %v", ferr)
+	}
+	if want := localManifestHash(localFiles); st.ManifestHash != want {
+		t.Errorf("recorded ManifestHash %q != status's recompute %q — status would show 'edited' right after push", st.ManifestHash, want)
 	}
 }
 

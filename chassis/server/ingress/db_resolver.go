@@ -182,22 +182,25 @@ func (r *DBResolver) AcceptMailDomain(domain string) (RouteTarget, bool) {
 // `*@acme.example`. Operators who want all subdomains verify the apex.
 //
 // Filters mirror lookupHTTP: revoked rows excluded; verified_at
-// handled per the chassis-level requireVerified flag. The key
-// difference is the route SHAPE — we synthesize `<slug>/_mail`
-// regardless of `h.stack`, since `h.stack` is the HTTP-bound stack
-// and may be empty for mail-only deployments.
+// handled per the chassis-level requireVerified flag. The route SHAPE
+// NESTS mail under the hostname's bound stack: `<h.stack>/_mail`, so one
+// stack owns its hostname across HTTP + mail. A mail-only hostname
+// (empty `h.stack`) falls back to the tenant-level `_mail`. The name is
+// BARE (no tenant prefix) — the tenant rides RouteTarget.Tenant and
+// OpsForStage scopes by tenant_id, so a tenant-prefixed stack name would
+// never match the materialised (bare) ops rows.
 func (r *DBResolver) lookupMailDomain(db *sql.DB, canonical string) (RouteTarget, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	var slug string
-	var verifiedAt sql.NullString
+	var hStack, verifiedAt sql.NullString
 	err := db.QueryRowContext(ctx,
-		`SELECT t.slug, h.verified_at
+		`SELECT t.slug, h.stack, h.verified_at
 		   FROM tenant_hostnames h
 		   JOIN tenants t ON t.tenant_id = h.tenant_id
 		  WHERE h.hostname = ?
 		    AND h.revoked_at IS NULL
-		    AND t.revoked_at IS NULL`, canonical).Scan(&slug, &verifiedAt)
+		    AND t.revoked_at IS NULL`, canonical).Scan(&slug, &hStack, &verifiedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return RouteTarget{}, false
@@ -221,9 +224,16 @@ func (r *DBResolver) lookupMailDomain(db *sql.DB, canonical string) (RouteTarget
 				zap.String("tenant", slug))
 		}
 	}
+	// Nest under the hostname's bound stack; mail-only hostnames (no bound
+	// stack) fall back to the tenant-level `_mail`. BARE name — tenant is
+	// carried in RouteTarget.Tenant.
+	stack := "_mail"
+	if s := strings.TrimSpace(hStack.String); s != "" {
+		stack = s + "/_mail"
+	}
 	return RouteTarget{
 		Tenant:   slug,
-		Stack:    slug + "/_mail",
+		Stack:    stack,
 		Ingress:  "domain:" + canonical,
 		Verified: verifiedAt.Valid,
 	}, true
