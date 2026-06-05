@@ -159,8 +159,19 @@ func (o *ociSource) Fetch(ctx context.Context, destDir string) (int, error) {
 
 // --- publish-side helpers (shared by `txco package publish`) ----------------
 
+// excludedPackageDir reports whether an entry must never ship in a published
+// package layer: the VCS dir and the local build cache. Matched by base name so
+// it holds at any depth. This is the single source of truth for publish-time
+// exclusion — applied in tarGzDir, which every publish path funnels through.
+func excludedPackageDir(name string) bool {
+	return name == ".git" || name == ".txco"
+}
+
 // tarGzDir builds a gzip(tar) of the regular files under dir, with
-// slash-separated relative paths and no synthetic top directory.
+// slash-separated relative paths and no synthetic top directory. `.git` and
+// `.txco` are skipped wherever they appear, so neither the author's VCS history
+// nor the build cache rides along — and the rule holds whether we're packing
+// the author's own tree (the common path) or a prebuild staging copy.
 func tarGzDir(dir string) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
@@ -168,6 +179,12 @@ func tarGzDir(dir string) ([]byte, error) {
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if p != dir && excludedPackageDir(d.Name()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil // a `.git` gitlink file (submodule) or stray `.txco`
 		}
 		if d.IsDir() || !d.Type().IsRegular() {
 			return nil

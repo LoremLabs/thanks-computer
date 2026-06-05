@@ -111,9 +111,8 @@ Flags:
 			fmt.Fprintf(stderr, "package publish: stage: %v\n", err)
 			return 1
 		}
-		for _, d := range []string{".txco", ".git"} {
-			_ = os.RemoveAll(filepath.Join(staging, d)) // don't ship the build cache / VCS dir
-		}
+		// .git/.txco are excluded at pack time by tarGzDir, so no need to strip
+		// them from the staging copy here.
 		n, javyMissing, err := prebuildComputes(staging, abs, m.Operations.Bundled)
 		if err != nil {
 			fmt.Fprintf(stderr, "package publish: %v\n", err)
