@@ -433,9 +433,11 @@ func (pu *Unit) DriveDeferredResume(runID, stage string) {
 	rerr := pu.Resume(bg, runID, stage)
 	if tracer != nil {
 		rStatus := "ok"
+		rReason := ""
 		var final []byte
 		if rerr != nil {
 			rStatus = "error"
+			rReason = "deferred resume failed: " + rerr.Error()
 		} else if res, ok, _ := pu.Runs.ReadResult(bg, runID); ok {
 			final = res
 		}
@@ -443,7 +445,7 @@ func (pu *Unit) DriveDeferredResume(runID, stage string) {
 		// admin scoping filters on); fuel/bytes are best-effort from the
 		// stored result envelope.
 		trace.EmitUsage(tracer, FuelUsedFromEnvelope(string(final)), len(final), runTenant)
-		tracer.End(rStatus, final)
+		tracer.End(rStatus, rReason, final)
 	}
 	if rerr != nil {
 		pu.Logger.Error("deferred resume failed",

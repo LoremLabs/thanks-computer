@@ -468,7 +468,7 @@ func TestContinuationResumeIsTraced(t *testing.T) {
 	resCh := make(chan event.Payload, 1)
 	go func() { _ = pu.Run(octx, `{}`, "acme/100", resCh) }()
 	waitFor202(t, resCh)
-	otracer.End("ok", nil)
+	otracer.End("ok", "", nil)
 
 	if !hasStep(origRID, "0100-research") {
 		t.Fatalf("suspend trace missing the async barrier step (0300-research)")
@@ -497,7 +497,7 @@ func TestContinuationResumeIsTraced(t *testing.T) {
 		t.Fatalf("Resume: %v", err)
 	}
 	res, _, _ := pu.Runs.ReadResult(context.Background(), lk.RunID)
-	tracer.End("ok", res)
+	tracer.End("ok", "", res)
 
 	if _, err := os.Stat(filepath.Join(traceDir, "requests", rid, "timeline.jsonl")); err != nil {
 		t.Fatalf("resume not traced: %v", err)

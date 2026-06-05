@@ -30,7 +30,7 @@ func (r *recordingTracer) Event(ev trace.TimelineEvent) {
 	defer r.mu.Unlock()
 	r.events = append(r.events, ev)
 }
-func (r *recordingTracer) End(string, []byte) {}
+func (r *recordingTracer) End(string, string, []byte) {}
 
 func (r *recordingTracer) stepByOpName(name string) *trace.StepInfo {
 	r.mu.Lock()
@@ -145,5 +145,71 @@ func TestRunStripsOpDebugFromEnvelopeButKeepsInStepOutput(t *testing.T) {
 		if ev.Event == "op.debug" {
 			t.Errorf("unexpected op.debug timeline event — debug lives in step.Output, not as a separate event")
 		}
+	}
+}
+
+// blockingHandler signals once it is in-flight, then blocks until release
+// is closed (regardless of ctx) — so an abandoning ctx.Done() leaves its
+// op provably still in flight. After release it returns an error, taking
+// the best-effort drop path (no send on the unbuffered `responses`), so
+// the goroutine exits cleanly during test teardown.
+type blockingHandler struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (h blockingHandler) Route(_ context.Context, _ string, _, _ []byte) (event.Payload, error) {
+	close(h.started)
+	<-h.release
+	return event.Payload{}, context.Canceled
+}
+
+// TestRunFlushesInflightOpOnCancel proves Part B: when a request is
+// abandoned (ctx cancelled) while a sync op is still running, Run records
+// a "cancelled" step naming that op (so a stalled op is no longer
+// invisible) AND returns an enriched reason naming it (which becomes the
+// trace's top-level "why" in server.runWithTrace).
+func TestRunFlushesInflightOpOnCancel(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	h := blockingHandler{started: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { close(h.release) }) // unblock the leaked op goroutine after assertions
+	pu.Handle([]byte("txco://block-stub"), h)
+
+	if _, err := pu.Dbc.Db.Exec(
+		`INSERT INTO ops (stack, scope, name, txcl, mock_req, mock_res) VALUES (?, ?, ?, ?, '', '')`,
+		"cxltest", 0, "c", `EXEC "txco://block-stub"`,
+	); err != nil {
+		t.Fatalf("seed op: %v", err)
+	}
+
+	rt := &recordingTracer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = trace.WithContext(ctx, rt)
+	resCh := make(chan event.Payload, 1)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- pu.Run(ctx, `{}`, "cxltest/0", resCh) }()
+
+	<-h.started // the op has reached Route → it is dispatched + in-flight
+	cancel()    // abandon the request while the op is still running
+
+	err := <-runErr
+	if err == nil || !strings.Contains(err.Error(), "canceled while running") {
+		t.Fatalf("Run err = %v, want an enriched cancel reason", err)
+	}
+	if !strings.Contains(err.Error(), "cxltest/0") {
+		t.Errorf("reason should name the stalled op (cxltest/0): %v", err)
+	}
+
+	st := rt.stepByOpName("c")
+	if st == nil {
+		t.Fatalf("no step recorded for the in-flight op; recorded=%+v", rt.steps)
+	}
+	if st.Status != "cancelled" {
+		t.Errorf("step status = %q, want cancelled", st.Status)
+	}
+	if st.Error == "" {
+		t.Errorf("cancelled step has no reason")
 	}
 }

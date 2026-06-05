@@ -200,9 +200,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 
 func printUsage(w io.Writer) {
 	banner.PrintLogo(w)
-	var cyan, yellow, dim, bold, reset string
+	var cyan, magenta, yellow, dim, bold, reset string
 	if banner.IsTTY(w) {
 		cyan = "\x1b[36m"
+		magenta = "\x1b[35m"
 		yellow = "\x1b[33m"
 		dim = "\x1b[2m"
 		bold = "\x1b[1m"
@@ -216,6 +217,7 @@ func printUsage(w io.Writer) {
 	}
 	// Token painters — concatenate ANSI around a string. No-ops when not TTY.
 	heading := func(s string) string { return bold + cyan + s + reset }
+	category := func(s string) string { return bold + magenta + s + reset } // command group labels
 	cmdName := func(s string) string { return bold + s + reset }
 	example := func(s string) string { return cyan + s + reset }
 	comment := func(s string) string { return dim + s + reset }
@@ -227,6 +229,15 @@ func printUsage(w io.Writer) {
 	p("\n\n%s\n", heading("Usage:"))
 	p("  txco [flags]\n")
 	p("  txco <command> [flags]\n\n")
+
+	// "New here?" callout — a mini banner echoing the logo's boxes, nudging
+	// first-timers toward the guided demo. Width is derived from the text so
+	// the borders always line up (the colored command is zero-width ANSI).
+	intro, demoCmd := "New here? Try: ", "txco demo"
+	bar := strings.Repeat("─", len(intro)+len(demoCmd)+4)
+	p("  %s┌%s┐%s\n", yellow, bar, reset)
+	p("  %s│%s  %s%s  %s│%s\n", yellow, reset, intro, cmdName(demoCmd), yellow, reset)
+	p("  %s└%s┘%s\n\n", yellow, bar, reset)
 
 	p("%s\n", heading("Examples:"))
 	p("  %s\n", comment("# Open the admin web interface"))
@@ -246,47 +257,64 @@ func printUsage(w io.Writer) {
 	// trailing ANSI in the description doesn't disturb the column.
 	p("%s\n", heading("Available commands:"))
 	type row struct{ label, desc string }
-	rows := []row{
-		{"serve", muted("Run the chassis server")},
-		{"init <stack> [<dir>]", muted("Scaffold a local OPS/<stack>/.../ tree")},
-		{"apply [<dir>]", muted("Deploy the whole OPS/ tree (all stacks; create + activate a version)")},
-		{"diff [<dir>]", muted("Compare local OPS/ tree against a chassis admin endpoint")},
-		{"status [<dir>]", muted("Per-stack version drift between local and chassis (exit 1 on divergence)")},
-		{"pull <stack> [<dir>]", muted("Materialise a stack's active version into local OPS/")},
-		{"push <stack> [<dir>]", muted("Deploy one stack — create + activate (inverse of pull)")},
-		{"draft <stack> [<dir>]", muted("Create a draft version of one stack (stage; no activate)")},
-		{"activate <stack>", muted("Flip a stack's active version (defaults to most recent draft)")},
-		{"versions <stack>", muted("List versions for a stack with active marker")},
-		{"edit <stack> <path>", muted("Open $EDITOR on one file from a draft and PATCH the result back")},
-		{"dev", muted("Spawn apps + chassis, watch for changes (add --apply for startup push)")},
-		{"demo", muted("Boot a chassis and open the txcl demo in your browser")},
-		{"op <command>", muted("Author + build sandboxed op:// nano-ops (init/build/run/test)")},
-		{"install <source> --as <stack>", muted("Install a package into OPS/ (sales@v3, oci:, dir:, github:), then apply")},
-		{"package <command>", muted("Author + manage packages (init/validate/publish · list/upgrade/remove)")},
-		{"trace [<rid>]", muted("Render the execution trace for a request (use ") + hint("`txco trace last`") + muted(" for the most recent)")},
-		{"auth <command>", muted("Manage signing keys for the admin API")},
-		{"ui", muted("Open the chassis admin UI in your browser, signed in via your profile")},
-		{"login", muted("Sign in to the thanks-computer cloud")},
-		{"logout", muted("Sign out of the thanks-computer cloud")},
-		{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},
-		{"config <command>", muted("Alias namespace for profile / logout (gcloud/stripe-style)")},
-		{"completion <shell>", muted("Emit a shell completion script (use ") + hint("`txco completion bash|zsh|fish`") + muted(" for install steps)")},
-		{"version", muted("Print version info as JSON")},
-		{"update check", muted("Check for a newer txco CLI release on GitHub")},
-		{"upgrade", muted("Upgrade the txco CLI binary (self-update, or brew/source guidance)")},
-		{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
+	type group struct {
+		name string
+		rows []row
 	}
-	for _, r := range rows {
-		p("  %s   %s\n", padCmd(cmdName(r.label)), r.desc)
+	groups := []group{
+		{"Run", []row{
+			{"serve", muted("Run the chassis server")},
+			{"dev", muted("Spawn apps + chassis, watch for changes (add --apply for startup push)")},
+			{"demo", muted("Boot a chassis and open the txcl demo in your browser")},
+		}},
+		{"Author & deploy", []row{
+			{"init <stack> [<dir>]", muted("Scaffold a local OPS/<stack>/.../ tree")},
+			{"edit <stack> <path>", muted("Open $EDITOR on one file from a draft and PATCH the result back")},
+			{"draft <stack> [<dir>]", muted("Create a draft version of one stack (stage; no activate)")},
+			{"apply [<dir>]", muted("Deploy the whole OPS/ tree (all stacks; create + activate a version)")},
+			{"push <stack> [<dir>]", muted("Deploy one stack — create + activate (inverse of pull)")},
+			{"pull <stack> [<dir>]", muted("Materialise a stack's active version into local OPS/")},
+			{"activate <stack>", muted("Flip a stack's active version (defaults to most recent draft)")},
+			{"diff [<dir>]", muted("Compare local OPS/ tree against a chassis admin endpoint")},
+			{"status [<dir>]", muted("Per-stack version drift between local and chassis (exit 1 on divergence)")},
+			{"versions <stack>", muted("List versions for a stack with active marker")},
+		}},
+		{"Packages & ops", []row{
+			{"op <command>", muted("Author + build sandboxed op:// nano-ops (init/build/run/test)")},
+			{"install <source> --as <stack>", muted("Install a package into OPS/ (sales@v3, oci:, dir:, github:), then apply")},
+			{"package <command>", muted("Author + manage packages (init/validate/publish · list/upgrade/remove)")},
+		}},
+		{"Identity & access", []row{
+			{"auth <command>", muted("Manage signing keys for the admin API")},
+			{"ui", muted("Open the chassis admin UI in your browser, signed in via your profile")},
+			{"login", muted("Sign in to the thanks-computer cloud")},
+			{"logout", muted("Sign out of the thanks-computer cloud")},
+			{"config <command>", muted("Alias namespace for profile / logout (gcloud/stripe-style)")},
+		}},
+		{"Diagnose & connect", []row{
+			{"trace [<rid>]", muted("Render the execution trace for a request (use ") + hint("`txco trace last`") + muted(" for the most recent)")},
+			{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
+			{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},
+		}},
+		{"CLI", []row{
+			{"version", muted("Print version info")},
+			{"update check", muted("Check for a newer txco CLI release on GitHub")},
+			{"upgrade", muted("Upgrade the txco CLI binary (self-update, or brew/source guidance)")},
+			{"completion <shell>", muted("Emit a shell completion script (use ") + hint("`txco completion bash|zsh|fish`") + muted(" for install steps)")},
+		}},
+	}
+	// Each category is a magenta header; its commands indent one level under it.
+	for _, g := range groups {
+		p("\n  %s\n", category(g.name))
+		for _, r := range g.rows {
+			p("    %s   %s\n", padCmd(cmdName(r.label)), r.desc)
+		}
 	}
 
-	p("\n%s\n", heading("Common flags for apply/diff/status/trace:"))
+	p("\n%s\n", heading("Common flags:"))
 	flags := []row{
 		{"--profile NAME", muted("Signing profile (TXCO_PROFILE, then your active profile, then 'local')")},
-		{"--target NAME", muted("Target name from txco.yaml (default: 'dev')")},
-		{"--addr URL", muted("Admin endpoint (overrides target's chassis URL)")},
-		{"--user USER", muted("Basic auth user")},
-		{"--pass PASS", muted("Basic auth password")},
+		{"--json", muted("Emit output as JSON")},
 	}
 	for _, f := range flags {
 		p("  %s   %s\n", padCmd(cmdName(f.label)), f.desc)

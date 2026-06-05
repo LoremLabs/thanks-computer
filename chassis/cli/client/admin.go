@@ -1358,12 +1358,15 @@ type TraceResponse struct {
 	Tenant string `json:"tenant,omitempty"`
 	// Stack is the boot trampoline; Route is the first stage.jump's
 	// destination. See TraceSummary for the rationale.
-	Stack            string `json:"stack,omitempty"`
-	Route            string `json:"route,omitempty"`
-	StartedAt        string `json:"started_at,omitempty"`
-	FinishedAt       string `json:"finished_at,omitempty"`
-	DurationMs       *int64 `json:"duration_ms,omitempty"`
-	Status           string `json:"status"`
+	Stack      string `json:"stack,omitempty"`
+	Route      string `json:"route,omitempty"`
+	StartedAt  string `json:"started_at,omitempty"`
+	FinishedAt string `json:"finished_at,omitempty"`
+	DurationMs *int64 `json:"duration_ms,omitempty"`
+	Status     string `json:"status"`
+	// Error is the request-level reason a non-ok Status occurred (the
+	// pipeline error). Empty on success. Companion to Status.
+	Error            string `json:"error,omitempty"`
 	PayloadBytes     int64  `json:"payload_bytes,omitempty"`
 	PayloadTruncated bool   `json:"payload_truncated,omitempty"`
 	// Fuel is the per-request fuel consumed; BytesIn/BytesOut are the

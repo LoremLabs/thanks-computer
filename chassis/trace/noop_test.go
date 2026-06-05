@@ -31,7 +31,7 @@ func TestNoopSinkIsAZeroValue(t *testing.T) {
 		Status:     "ok",
 	})
 	tr.Event(TimelineEvent{Ts: time.Now(), Event: "ev", Fields: map[string]any{"k": "v"}})
-	tr.End("ok", []byte(`{}`))
+	tr.End("ok", "", []byte(`{}`))
 }
 
 // TestFromContextReturnsNoopWhenAbsent locks in that FromContext is
@@ -44,17 +44,17 @@ func TestFromContextReturnsNoopWhenAbsent(t *testing.T) {
 	// Must not panic.
 	tr.Step(StepInfo{})
 	tr.Event(TimelineEvent{})
-	tr.End("ok", nil)
+	tr.End("ok", "", nil)
 }
 
 func TestParseModeNormalizes(t *testing.T) {
 	cases := map[string]Mode{
-		"off":          ModeOff,
-		"summary":      ModeSummary,
-		"full":         ModeFull,
-		"":             ModeOff,
-		"unknown":      ModeOff, // typo falls back to off — never silently enable
-		"FULL":         ModeOff, // case-sensitive on purpose: match the YAML literal
+		"off":     ModeOff,
+		"summary": ModeSummary,
+		"full":    ModeFull,
+		"":        ModeOff,
+		"unknown": ModeOff, // typo falls back to off — never silently enable
+		"FULL":    ModeOff, // case-sensitive on purpose: match the YAML literal
 	}
 	for in, want := range cases {
 		if got := ParseMode(in); got != want {

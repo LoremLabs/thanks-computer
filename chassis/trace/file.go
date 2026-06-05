@@ -275,18 +275,24 @@ func (t *fileTracer) Event(ev TimelineEvent) {
 // End writes out.json at the request root (the final response after
 // all merges), appends request.end to the timeline, and closes the
 // timeline file. After End the tracer must not be used.
-func (t *fileTracer) End(status string, final []byte) {
+func (t *fileTracer) End(status, reason string, final []byte) {
 	finishedAt := time.Now()
 	if len(final) > 0 {
 		_ = writeFile(filepath.Join(t.dir, "out.json"), prettifyJSON(final))
 	}
+	fields := map[string]any{
+		"status":      status,
+		"duration_ms": finishedAt.Sub(t.startedAt).Milliseconds(),
+	}
+	// Only stamp a reason when there is one (mirrors `if info.Error != ""`
+	// on the step path) so the common ok request.end event stays unchanged.
+	if reason != "" {
+		fields["reason"] = reason
+	}
 	t.Event(TimelineEvent{
-		Ts:    finishedAt,
-		Event: "request.end",
-		Fields: map[string]any{
-			"status":      status,
-			"duration_ms": finishedAt.Sub(t.startedAt).Milliseconds(),
-		},
+		Ts:     finishedAt,
+		Event:  "request.end",
+		Fields: fields,
 	})
 	t.mu.Lock()
 	defer t.mu.Unlock()

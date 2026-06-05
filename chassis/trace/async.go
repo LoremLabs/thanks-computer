@@ -79,6 +79,7 @@ type asyncOp struct {
 	step   StepInfo
 	event  TimelineEvent
 	status string
+	reason string
 	final  []byte
 }
 
@@ -189,7 +190,7 @@ func (s *AsyncSink) run() {
 					s.flushWg.Add(1)
 					go func(tracer RequestTracer) {
 						defer s.flushWg.Done()
-						tracer.End("interrupted", nil)
+						tracer.End("interrupted", "trace interrupted (worker shutdown before End)", nil)
 					}(tt.tracer)
 				}
 				return
@@ -226,12 +227,12 @@ func (s *AsyncSink) run() {
 					// payload by value. Mirrors the stale-GC + drain paths;
 					// flushWg gates shutdown so Close waits for in-flight ends.
 					tracer := tt.tracer
-					status, final := op.status, op.final
+					status, reason, final := op.status, op.reason, op.final
 					delete(tracers, op.rid)
 					s.flushWg.Add(1)
 					go func() {
 						defer s.flushWg.Done()
-						tracer.End(status, final)
+						tracer.End(status, reason, final)
 					}()
 				}
 			}
@@ -248,7 +249,7 @@ func (s *AsyncSink) run() {
 					s.flushWg.Add(1)
 					go func() {
 						defer s.flushWg.Done()
-						tracer.End("stale", nil)
+						tracer.End("stale", "trace evicted (no End within stale TTL)", nil)
 					}()
 				}
 			}
@@ -302,9 +303,9 @@ func (t *asyncTracer) Event(ev TimelineEvent) {
 	t.sink.tryEnqueue(asyncOp{kind: opEvent, rid: t.rid, event: ev})
 }
 
-func (t *asyncTracer) End(status string, final []byte) {
+func (t *asyncTracer) End(status, reason string, final []byte) {
 	if cap := t.sink.opts.BodyCapBytes; cap > 0 && len(final) > cap {
 		final = final[:cap]
 	}
-	t.sink.tryEnqueue(asyncOp{kind: opEnd, rid: t.rid, status: status, final: final})
+	t.sink.tryEnqueue(asyncOp{kind: opEnd, rid: t.rid, status: status, reason: reason, final: final})
 }

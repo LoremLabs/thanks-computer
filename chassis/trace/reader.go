@@ -37,6 +37,11 @@ type Summary struct {
 	FinishedAt string
 	DurationMs *int64
 	Status     string
+	// Error is the request-level reason a non-ok status occurred (the
+	// pipeline error, e.g. "canceled while running test-stack/50 …").
+	// Empty on success. Companion to Status; lifted from the request.end
+	// timeline event (file backend) / set by the sink (NATS backend).
+	Error string
 }
 
 // Step is one op execution in the aggregated detail.
@@ -64,15 +69,18 @@ type Step struct {
 // which the admin layer composes from the run store — kept out of here
 // so the trace package doesn't depend on chassis/continuation).
 type RequestDetail struct {
-	RID              string
-	Src              string
-	Tenant           string
-	Stack            string
-	Route            string
-	StartedAt        string
-	FinishedAt       string
-	DurationMs       *int64
-	Status           string
+	RID        string
+	Src        string
+	Tenant     string
+	Stack      string
+	Route      string
+	StartedAt  string
+	FinishedAt string
+	DurationMs *int64
+	Status     string
+	// Error is the request-level reason for a non-ok Status (the pipeline
+	// error). Empty on success. See Summary.Error.
+	Error            string
 	PayloadBytes     int64
 	PayloadTruncated bool
 	// Fuel is the total per-request fuel consumed (the metering primitive);

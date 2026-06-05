@@ -63,7 +63,7 @@ func (t *recordingTracer) Event(ev TimelineEvent) {
 	t.sink.events = append(t.sink.events, ev)
 }
 
-func (t *recordingTracer) End(status string, final []byte) {
+func (t *recordingTracer) End(status, reason string, final []byte) {
 	t.sink.mu.Lock()
 	defer t.sink.mu.Unlock()
 	t.sink.ends = append(t.sink.ends, recordedEnd{status: status, final: final})
@@ -78,7 +78,7 @@ func TestAsyncSinkForwardsToBase(t *testing.T) {
 	tr := s.Begin(RequestInfo{RID: "r1", StartedAt: time.Now()})
 	tr.Step(StepInfo{Stack: "x", Scope: 1, Name: "a"})
 	tr.Event(TimelineEvent{Event: "noted"})
-	tr.End("ok", []byte(`{}`))
+	tr.End("ok", "", []byte(`{}`))
 
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -114,7 +114,7 @@ func TestAsyncSinkCapsBodies(t *testing.T) {
 		StartedAt: time.Now(),
 	})
 	tr.Step(StepInfo{Input: bigIn, Output: bigOut})
-	tr.End("ok", make([]byte, 200))
+	tr.End("ok", "", make([]byte, 200))
 
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -206,8 +206,8 @@ type slowTracer struct{ release chan struct{} }
 func (t *slowTracer) Step(StepInfo) {
 	<-t.release // block until test signals
 }
-func (t *slowTracer) Event(TimelineEvent)         {}
-func (t *slowTracer) End(string, []byte)          {}
+func (t *slowTracer) Event(TimelineEvent)        {}
+func (t *slowTracer) End(string, string, []byte) {}
 
 // TestAsyncSinkCloseDrains verifies that Close waits for in-flight
 // events to flush before returning. A reader observing the underlying
@@ -224,7 +224,7 @@ func TestAsyncSinkCloseDrains(t *testing.T) {
 		tr.Step(StepInfo{Stack: "x", Scope: i, Name: "s"})
 		tr.Event(TimelineEvent{Event: "ev"})
 	}
-	tr.End("ok", []byte(`{}`))
+	tr.End("ok", "", []byte(`{}`))
 
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -281,12 +281,12 @@ func TestAsyncSinkEndToEndWithFileSink(t *testing.T) {
 	tr.Step(StepInfo{
 		Stack: "svc", Scope: 100, Name: "op",
 		Operation: "http://x", Transport: "http",
-		Input:      []byte(`{"in":"more than 8 bytes here"}`),
-		Output:     []byte(`{"out":"also long enough"}`),
-		StartedAt:  time.Now(), FinishedAt: time.Now(),
+		Input:     []byte(`{"in":"more than 8 bytes here"}`),
+		Output:    []byte(`{"out":"also long enough"}`),
+		StartedAt: time.Now(), FinishedAt: time.Now(),
 		Status: "ok",
 	})
-	tr.End("ok", []byte(`{"final":"long final body"}`))
+	tr.End("ok", "", []byte(`{"final":"long final body"}`))
 
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)

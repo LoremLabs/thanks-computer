@@ -157,6 +157,11 @@ func readTimeline(reqDir string, d *RequestDetail) {
 			if v, ok := ev["status"].(string); ok && v != "" {
 				d.Status = v
 			}
+			// The request-level reason a non-ok status occurred. Written
+			// only when non-empty (file.go End), so absent on ok requests.
+			if v, ok := ev["reason"].(string); ok && v != "" {
+				d.Error = v
+			}
 			if v, ok := ev["duration_ms"].(float64); ok {
 				n := int64(v)
 				d.DurationMs = &n
@@ -480,6 +485,9 @@ func readListEntry(reqDir, rid string) Summary {
 				}
 				if v, ok := ev["status"].(string); ok && v != "" {
 					s.Status = v
+				}
+				if v, ok := ev["reason"].(string); ok && v != "" {
+					s.Error = v
 				}
 				if v, ok := ev["duration_ms"].(float64); ok {
 					n := int64(v)

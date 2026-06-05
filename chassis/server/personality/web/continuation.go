@@ -167,9 +167,11 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 	}
 	rerr := web.pu.Resume(rctx, lk.RunID, lk.Stage)
 	status := "ok"
+	reason := ""
 	var final []byte
 	if rerr != nil {
 		status = "error"
+		reason = rerr.Error()
 	} else if res, ok, _ := runs.ReadResult(rctx, lk.RunID); ok {
 		final = res
 	}
@@ -177,7 +179,7 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 	// scoping filters on) — the resume RequestInfo has no tenant; fuel/bytes
 	// are best-effort from the stored result envelope.
 	trace.EmitUsage(tracer, processor.FuelUsedFromEnvelope(string(final)), len(final), runTenant)
-	tracer.End(status, final)
+	tracer.End(status, reason, final)
 	if rerr != nil {
 		web.pu.Logger.Error("resume failed",
 			zap.String("run", lk.RunID), zap.String("stage", lk.Stage), zap.Error(rerr))

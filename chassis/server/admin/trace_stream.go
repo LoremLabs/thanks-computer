@@ -24,6 +24,7 @@ type traceStreamEvent struct {
 	FinishedAt       string `json:"finished_at,omitempty"`
 	DurationMs       *int64 `json:"duration_ms,omitempty"`
 	Status           string `json:"status"`
+	Error            string `json:"error,omitempty"`
 	PayloadBytes     int64  `json:"payload_bytes,omitempty"`
 	PayloadTruncated bool   `json:"payload_truncated,omitempty"`
 	// Fuel/BytesIn/BytesOut mirror the archive detail response
@@ -212,6 +213,7 @@ func closedTraceToWire(t trace.ClosedTrace) traceStreamEvent {
 		FinishedAt:       t.FinishedAt,
 		DurationMs:       t.DurationMs,
 		Status:           t.Status,
+		Error:            t.Error,
 		PayloadBytes:     t.PayloadBytes,
 		PayloadTruncated: t.PayloadTruncated,
 		Fuel:             t.Fuel,

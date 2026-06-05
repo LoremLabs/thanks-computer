@@ -21,6 +21,6 @@ func (NoopSink) Close(context.Context) error { return nil }
 // callers can compare for it if they need to short-circuit setup.
 type NoopTracer struct{}
 
-func (NoopTracer) Step(StepInfo)                     {}
-func (NoopTracer) Event(TimelineEvent)               {}
-func (NoopTracer) End(status string, final []byte)   {}
+func (NoopTracer) Step(StepInfo)                           {}
+func (NoopTracer) Event(TimelineEvent)                     {}
+func (NoopTracer) End(status, reason string, final []byte) {}

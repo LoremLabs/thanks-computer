@@ -593,7 +593,7 @@ func TestHandleTraceRequest_TenantIsolation(t *testing.T) {
 		StartedAt: time.Now(), Payload: []byte(`{}`),
 	})
 	tr.Event(trace.TimelineEvent{Ts: time.Now(), Event: "request.usage", Fields: map[string]any{"tenant": "prod-mankins"}})
-	tr.End("ok", []byte(`{}`))
+	tr.End("ok", "", []byte(`{}`))
 
 	c := newTestController(t, config.Config{Personalities: "admin", TraceDir: dir, TraceMode: "summary"})
 

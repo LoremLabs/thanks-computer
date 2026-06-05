@@ -180,6 +180,12 @@ func printSummary(w io.Writer, r *client.TraceResponse) {
 		dur = fmt.Sprintf("%dms", *r.DurationMs)
 	}
 	fmt.Fprintf(w, "  status   %-12s duration %s\n", r.Status, dur)
+	// The request-level "why" for a non-ok status — the pipeline error
+	// (e.g. "canceled while running test-stack/50 mcp+https://…"). Sits
+	// right under status so an `error` trace answers "what / why" inline.
+	if r.Error != "" {
+		fmt.Fprintf(w, "  reason   %s\n", r.Error)
+	}
 	if r.PayloadBytes > 0 {
 		trunc := ""
 		if r.PayloadTruncated {

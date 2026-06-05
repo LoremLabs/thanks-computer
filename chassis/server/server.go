@@ -605,8 +605,14 @@ func runWithTrace(
 	finalPayload, fuelUsed, err = runPipeline(ctx, pu, envelope, raw, stage, capture)
 
 	status := "ok"
+	reason := ""
 	if err != nil {
 		status = "error"
+		// The pipeline error is the request-level "why". processor.Run
+		// enriches the abandon/halt error with the stalled op (e.g.
+		// "canceled while running test-stack/50 mcp+https://…"), so this
+		// one line answers "why is it an error?" at the top of the trace.
+		reason = err.Error()
 	}
 	// Surface the per-request usage primitives (fuel, response size, resolved
 	// tenant) into the trace via the shared request.usage event so the admin
@@ -615,7 +621,7 @@ func runWithTrace(
 	// (not the `_sys` entry tenant) comes from the final envelope. Rides the
 	// generic timeline Event, written in every mode.
 	trace.EmitUsage(tracer, fuelUsed, len(finalPayload), processor.TenantFromEnvelope(string(finalPayload)))
-	tracer.End(status, finalPayload)
+	tracer.End(status, reason, finalPayload)
 	return finalPayload, fuelUsed, err
 }
 

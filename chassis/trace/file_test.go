@@ -70,7 +70,7 @@ func TestFileSinkFullModeLayout(t *testing.T) {
 		FinishedAt: start.Add(4 * time.Millisecond),
 		Status:     "ok",
 	})
-	tr.End("ok", []byte(`{"sorted_words":["hello","world"]}`))
+	tr.End("ok", "", []byte(`{"sorted_words":["hello","world"]}`))
 
 	reqDir := filepath.Join(dir, "requests", "req-001")
 
@@ -182,7 +182,7 @@ func TestFileSinkPrettifiesBodies(t *testing.T) {
 		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
-	tr.End("ok", compactFinal)
+	tr.End("ok", "", compactFinal)
 
 	reqDir := filepath.Join(dir, "requests", "pretty")
 
@@ -246,7 +246,7 @@ func TestFileSinkPrettifyToleratesNonJSON(t *testing.T) {
 		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
-	tr.End("ok", []byte(`{}`))
+	tr.End("ok", "", []byte(`{}`))
 
 	stepDirs, _ := os.ReadDir(filepath.Join(dir, "requests", "notjson", "steps"))
 	stepDir := filepath.Join(dir, "requests", "notjson", "steps", stepDirs[0].Name())
@@ -270,7 +270,7 @@ func TestFileSinkSummaryModeOmitsBytes(t *testing.T) {
 		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
-	tr.End("ok", []byte(`{}`))
+	tr.End("ok", "", []byte(`{}`))
 
 	stepDirs, _ := os.ReadDir(filepath.Join(dir, "requests", "summary", "steps"))
 	if len(stepDirs) != 1 {
@@ -321,7 +321,7 @@ func TestFileSinkConcurrentSteps(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	tr.End("ok", []byte(`{}`))
+	tr.End("ok", "", []byte(`{}`))
 
 	entries, _ := os.ReadDir(filepath.Join(dir, "requests", "concurrent", "steps"))
 	if len(entries) != N {
@@ -352,7 +352,7 @@ func TestFileSinkWritesAreAtomic(t *testing.T) {
 		StartedAt: now, FinishedAt: now,
 		Status: "ok",
 	})
-	tr.End("ok", []byte(`{"final":true}`))
+	tr.End("ok", "", []byte(`{"final":true}`))
 
 	// Walk the entire request dir and assert no .tmp-* files remain
 	// AND every JSON file parses cleanly (atomic rename never published
@@ -402,7 +402,7 @@ func TestRequestUsageTenantOverride(t *testing.T) {
 		Event:  "request.usage",
 		Fields: map[string]any{"tenant": "prod-mankins"},
 	})
-	tr.End("ok", []byte(`{"ok":true}`))
+	tr.End("ok", "", []byte(`{"ok":true}`))
 
 	rdr := &fileReader{dir: dir}
 	d, err := rdr.Get(context.Background(), "r-routed", false)
@@ -428,7 +428,7 @@ func TestListTenantFilter(t *testing.T) {
 	seed := func(rid, tenant string) {
 		tr := s.Begin(RequestInfo{RID: rid, Src: "http", Tenant: "_sys", Stack: "boot/0", StartedAt: time.Now(), Payload: []byte(`{}`)})
 		tr.Event(TimelineEvent{Ts: time.Now(), Event: "request.usage", Fields: map[string]any{"tenant": tenant}})
-		tr.End("ok", []byte(`{}`))
+		tr.End("ok", "", []byte(`{}`))
 	}
 	seed("r-a", "tenant-a")
 	seed("r-b", "tenant-b")
@@ -479,7 +479,7 @@ func TestRequestUsageRoundTrip(t *testing.T) {
 		Event:  "request.usage",
 		Fields: map[string]any{"fuel": int64(105), "bytes_out": 42},
 	})
-	tr.End("ok", []byte(`{"ok":true}`))
+	tr.End("ok", "", []byte(`{"ok":true}`))
 
 	rdr := &fileReader{dir: dir}
 	d, err := rdr.Get(context.Background(), "req-usage", false)
@@ -491,6 +491,61 @@ func TestRequestUsageRoundTrip(t *testing.T) {
 	}
 	if d.BytesOut != 42 {
 		t.Errorf("BytesOut=%d, want 42", d.BytesOut)
+	}
+}
+
+// TestRequestReasonRoundTrip asserts the request-level reason passed to
+// End() rides the request.end timeline event and is parsed back into
+// RequestDetail.Error — the "why is it an error?" the trace was missing.
+// An ok request carries no reason (the field is omitted), so it reads
+// back empty.
+func TestRequestReasonRoundTrip(t *testing.T) {
+	s, dir := newSink(t, ModeSummary)
+	const reason = "canceled while running test-stack/50 mcp+https://mcp.deepwiki.com/mcp#ask_question"
+
+	trErr := s.Begin(RequestInfo{RID: "req-err", Src: "http", Stack: "boot/0", StartedAt: time.Now(), Payload: []byte(`{}`)})
+	trErr.End("error", reason, nil)
+
+	trOk := s.Begin(RequestInfo{RID: "req-ok", Src: "http", Stack: "boot/0", StartedAt: time.Now(), Payload: []byte(`{}`)})
+	trOk.End("ok", "", []byte(`{"ok":true}`))
+
+	rdr := &fileReader{dir: dir}
+
+	dErr, err := rdr.Get(context.Background(), "req-err", false)
+	if err != nil {
+		t.Fatalf("Get req-err: %v", err)
+	}
+	if dErr.Status != "error" {
+		t.Errorf("Status=%q, want error", dErr.Status)
+	}
+	if dErr.Error != reason {
+		t.Errorf("Error=%q, want %q", dErr.Error, reason)
+	}
+
+	dOk, err := rdr.Get(context.Background(), "req-ok", false)
+	if err != nil {
+		t.Fatalf("Get req-ok: %v", err)
+	}
+	if dOk.Error != "" {
+		t.Errorf("ok request Error=%q, want empty (reason omitted on success)", dOk.Error)
+	}
+
+	// The list summary carries the reason too (readListEntry lifts it).
+	res, err := rdr.List(context.Background(), ListQuery{Limit: 50})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, su := range res.Traces {
+		switch su.RID {
+		case "req-err":
+			if su.Error != reason {
+				t.Errorf("summary req-err Error=%q, want %q", su.Error, reason)
+			}
+		case "req-ok":
+			if su.Error != "" {
+				t.Errorf("summary req-ok Error=%q, want empty", su.Error)
+			}
+		}
 	}
 }
 

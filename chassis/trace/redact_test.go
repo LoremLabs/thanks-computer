@@ -173,7 +173,7 @@ func (t *captureTracer) Event(ev TimelineEvent) {
 	r.events = append(r.events, ev)
 }
 
-func (t *captureTracer) End(status string, final []byte) {
+func (t *captureTracer) End(status, reason string, final []byte) {
 	t.sink.mu.Lock()
 	defer t.sink.mu.Unlock()
 	r := t.sink.requests[t.rid]
@@ -211,12 +211,12 @@ func TestRedactingSink_BeginPayloadRedacted(t *testing.T) {
 	wrapped := NewRedactingSink(inner, lookup)
 
 	rt := wrapped.Begin(RequestInfo{
-		RID:    "r1",
-		Tenant: "acme",
-		Stack:  "acme/support",
+		RID:     "r1",
+		Tenant:  "acme",
+		Stack:   "acme/support",
 		Payload: []byte(`{"user":{"email":"a@b.com"}}`),
 	})
-	rt.End("ok", []byte(`{"user":{"email":"a@b.com"}}`))
+	rt.End("ok", "", []byte(`{"user":{"email":"a@b.com"}}`))
 
 	r := inner.get("r1")
 	if r == nil {
@@ -241,21 +241,21 @@ func TestRedactingSink_StepInputOutputRedacted(t *testing.T) {
 	wrapped := NewRedactingSink(inner, lookup)
 
 	rt := wrapped.Begin(RequestInfo{
-		RID:    "r2",
-		Tenant: "acme",
-		Stack:  "acme/support",
+		RID:     "r2",
+		Tenant:  "acme",
+		Stack:   "acme/support",
 		Payload: []byte(`{"hi":"there"}`),
 	})
 	rt.Step(StepInfo{
-		Stack: "acme/support",
-		Scope: 100,
-		Name:  "classify",
-		Input: []byte(`{"req":{"token":"sek","attachments":["big"]}}`),
-		Output: []byte(`{"req":{"token":"sek2","other":"keep"}}`),
+		Stack:      "acme/support",
+		Scope:      100,
+		Name:       "classify",
+		Input:      []byte(`{"req":{"token":"sek","attachments":["big"]}}`),
+		Output:     []byte(`{"req":{"token":"sek2","other":"keep"}}`),
 		StartedAt:  time.Now(),
 		FinishedAt: time.Now(),
 	})
-	rt.End("ok", []byte(`{}`))
+	rt.End("ok", "", []byte(`{}`))
 
 	r := inner.get("r2")
 	if r == nil || len(r.steps) != 1 {
@@ -286,12 +286,12 @@ func TestRedactingSink_CrossTenantIsolation(t *testing.T) {
 
 	// Tenant beta — same stack name, different tenant. Should be untouched.
 	bt := wrapped.Begin(RequestInfo{
-		RID:    "rB",
-		Tenant: "beta",
-		Stack:  "beta/support",
+		RID:     "rB",
+		Tenant:  "beta",
+		Stack:   "beta/support",
 		Payload: []byte(`{"user":{"email":"b@beta.com"}}`),
 	})
-	bt.End("ok", []byte(`{"user":{"email":"b@beta.com"}}`))
+	bt.End("ok", "", []byte(`{"user":{"email":"b@beta.com"}}`))
 
 	rB := inner.get("rB")
 	if got := gjson.GetBytes(rB.info.Payload, "user.email").String(); got != "b@beta.com" {
@@ -312,12 +312,12 @@ func TestRedactingSink_CrossStackIsolation(t *testing.T) {
 	wrapped := NewRedactingSink(inner, lookup)
 
 	bt := wrapped.Begin(RequestInfo{
-		RID:    "rBill",
-		Tenant: "acme",
-		Stack:  "acme/billing",
+		RID:     "rBill",
+		Tenant:  "acme",
+		Stack:   "acme/billing",
 		Payload: []byte(`{"user":{"email":"a@acme.com"}}`),
 	})
-	bt.End("ok", []byte(`{"user":{"email":"a@acme.com"}}`))
+	bt.End("ok", "", []byte(`{"user":{"email":"a@acme.com"}}`))
 
 	rB := inner.get("rBill")
 	if got := gjson.GetBytes(rB.info.Payload, "user.email").String(); got != "a@acme.com" {
@@ -338,22 +338,22 @@ func TestRedactingSink_StackUnionAfterJump(t *testing.T) {
 	wrapped := NewRedactingSink(inner, lookup)
 
 	rt := wrapped.Begin(RequestInfo{
-		RID:    "rJ",
-		Tenant: "acme",
-		Stack:  "acme/support", // initial entry
+		RID:     "rJ",
+		Tenant:  "acme",
+		Stack:   "acme/support", // initial entry
 		Payload: []byte(`{"attachments":["a"],"user":{"email":"x@y"}}`),
 	})
 	// Step records that we entered acme/billing.
 	rt.Step(StepInfo{
-		Stack: "acme/billing",
-		Scope: 100,
-		Name:  "charge",
-		Input: []byte(`{"attachments":["a"],"user":{"email":"x@y"}}`),
-		Output: []byte(`{"attachments":["a"],"user":{"email":"x@y"}}`),
+		Stack:      "acme/billing",
+		Scope:      100,
+		Name:       "charge",
+		Input:      []byte(`{"attachments":["a"],"user":{"email":"x@y"}}`),
+		Output:     []byte(`{"attachments":["a"],"user":{"email":"x@y"}}`),
 		StartedAt:  time.Now(),
 		FinishedAt: time.Now(),
 	})
-	rt.End("ok", []byte(`{"attachments":["a"],"user":{"email":"x@y"}}`))
+	rt.End("ok", "", []byte(`{"attachments":["a"],"user":{"email":"x@y"}}`))
 
 	r := inner.get("rJ")
 	if gjson.GetBytes(r.final, "attachments").Exists() {
@@ -382,12 +382,12 @@ func TestRedactingSink_EmptyStackSkipped(t *testing.T) {
 	})
 	wrapped := NewRedactingSink(inner, lookup)
 	rt := wrapped.Begin(RequestInfo{
-		RID:    "rE",
-		Tenant: "acme",
-		Stack:  "",
+		RID:     "rE",
+		Tenant:  "acme",
+		Stack:   "",
 		Payload: []byte(`{"x":"y"}`),
 	})
-	rt.End("ok", []byte(`{"x":"y"}`))
+	rt.End("ok", "", []byte(`{"x":"y"}`))
 	r := inner.get("rE")
 	if got := gjson.GetBytes(r.info.Payload, "x").String(); got != "y" {
 		t.Fatalf("empty-stack should not redact: %s", r.info.Payload)

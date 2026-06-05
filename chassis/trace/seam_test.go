@@ -30,7 +30,7 @@ func TestSeamWriteThenRead(t *testing.T) {
 		Transport: "txcl", StartedAt: time.Now(), FinishedAt: time.Now(),
 		Status: "ok", Input: []byte(`{"in":1}`), Output: []byte(`{"out":1}`),
 	})
-	tr.End("ok", []byte(`{"done":true}`))
+	tr.End("ok", "", []byte(`{"done":true}`))
 	if err := sink.Close(ctx); err != nil {
 		t.Fatalf("sink close: %v", err)
 	}

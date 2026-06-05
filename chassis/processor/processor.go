@@ -595,9 +595,64 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	errCh := make(chan error, 1)
 	var meta string
 
+	// inflight tracks ops dispatched in THIS stage that haven't yet been
+	// merged. It is mutated only from this Run goroutine — populated in the
+	// dispatch loop below, drained in the `case op := <-responses` branch —
+	// so it needs no lock (the op goroutines never touch it). On an
+	// abandonment exit (ctx cancel/deadline, or a fatal HALT) we emit a
+	// trace step per still-registered op: a completed op records its own
+	// step inside Exec, but an op still running when the request is
+	// abandoned records NOTHING, so a slow op a client gave up on (e.g. a
+	// scanner-triggered mcp+https:// call) is invisible. Keyed by OpID
+	// (unique per op via operation.New); the `&op` sent on `responses`
+	// carries the same OpID. See [trace error-reason fix].
+	inflight := make(map[string]operation.Operation, len(ops))
+	flushInflight := func(status, reason string) {
+		if len(inflight) == 0 {
+			return
+		}
+		tr := trace.FromContext(ctx)
+		now := time.Now()
+		for _, op := range inflight {
+			exec := ""
+			if op.Resonator != nil {
+				exec = op.Resonator.Exec
+			}
+			// Zero-duration step: we only know the op was STILL RUNNING at
+			// abandonment, not when it started (start time lives in the op
+			// goroutine). Honest rather than guessed.
+			tr.Step(trace.StepInfo{
+				Stack:      op.Stack,
+				Scope:      op.Scope,
+				Name:       op.Name,
+				Operation:  exec,
+				Txcl:       op.Txcl,
+				Input:      []byte(op.Input),
+				StartedAt:  now,
+				FinishedAt: now,
+				Status:     status,
+				Error:      reason,
+			})
+		}
+	}
+	// inflightLabels renders still-registered ops as "stack/scope exec" for
+	// the request-level reason string (e.g. "test-stack/50 mcp+https://…").
+	inflightLabels := func() []string {
+		labels := make([]string, 0, len(inflight))
+		for _, op := range inflight {
+			exec := ""
+			if op.Resonator != nil {
+				exec = op.Resonator.Exec
+			}
+			labels = append(labels, op.Stack+"/"+strconv.Itoa(op.Scope)+" "+exec)
+		}
+		return labels
+	}
+
 	ctx, span6 := pu.Mc.Tracer.Start(ctx, `run`)
 	for _, op := range ops {
 		wg.Add(1)
+		inflight[op.OpID] = op
 
 		// actual stage
 		stage = op.Stack + "/" + strconv.Itoa(op.Scope)
@@ -822,6 +877,11 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	opsDone := false
 	// failRun halts the request: emit an error response and return the cause.
 	failRun := func(e error) error {
+		// A fatal HALT abandons any sibling ops still in flight. Record them
+		// as cancelled so the trace shows what was running when we gave up.
+		// (The failing op itself recorded its own error step inside Exec; it
+		// may get a duplicate cancelled step here — harmless diagnostic noise.)
+		flushInflight("cancelled", "halted: "+e.Error())
 		resCh <- event.Payload{Raw: string(failPayload(e.Error())), Type: event.ErrorStr}
 		span.End()
 		return e
@@ -849,6 +909,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// hits the opsDone branch and stops. Behavior is identical to
 			// the pre-refactor inline loop.
 		case op := <-responses:
+			delete(inflight, op.OpID)
 			pu.Logger.Debug("res", zap.String("response", op.Output))
 			if strings.Compare(op.Output, "{}") != 0 {
 				_, span7 := pu.Mc.Tracer.Start(ctx, `merge`)
@@ -862,12 +923,26 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// fmt.Println("merged\n" + resp + "\n")
 			wg.Done()
 		case <-ctx.Done():
+			// The request was abandoned (client disconnect, deadline, or
+			// cancel) while ops may still be running. Flush a step per
+			// still-in-flight op so the stalled op isn't invisible, and make
+			// the same op list the request-level reason (the returned error
+			// becomes the trace's top-level "why" in server.runWithTrace).
+			status, verb := "cancelled", "canceled"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				status, verb = "timeout", "deadline exceeded"
+			}
+			reason := verb
+			if labels := inflightLabels(); len(labels) > 0 {
+				reason = verb + " while running " + strings.Join(labels, ", ")
+			}
+			flushInflight(status, reason)
 			response := event.Payload{
 				Raw:  `{"err":"canceled"}`,
 				Type: event.ErrorStr,
 			}
 			resCh <- response
-			return errors.New("context canceled")
+			return errors.New(reason)
 		}
 	}
 }
@@ -1541,7 +1616,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 				zap.String("run", runID), zap.String("stage", stage),
 				zap.String("op", name), zap.Error(terr))
 			if tracer != nil {
-				tracer.End("error", nil)
+				tracer.End("error", "local-async: RecordTerminal failed: "+terr.Error(), nil)
 			}
 			return
 		}
@@ -1553,7 +1628,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		ss, sserr := pu.Runs.ReadStageSuspended(workCtx, runID, stage)
 		if sserr != nil {
 			if tracer != nil {
-				tracer.End("error", nil)
+				tracer.End("error", "local-async: ReadStageSuspended failed: "+sserr.Error(), nil)
 			}
 			return
 		}
@@ -1562,14 +1637,14 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			// Sibling ops still pending — partial completion. The
 			// other op's callback will drive resume.
 			if tracer != nil {
-				tracer.End("ok", nil)
+				tracer.End("ok", "", nil)
 			}
 			return
 		}
 		won, _ := pu.Runs.ClaimResume(workCtx, runID, stage)
 		if !won {
 			if tracer != nil {
-				tracer.End("ok", nil)
+				tracer.End("ok", "", nil)
 			}
 			return
 		}
@@ -1580,16 +1655,18 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		}
 		if tracer != nil {
 			rStatus := "ok"
+			rReason := ""
 			var final []byte
 			if rerr != nil {
 				rStatus = "error"
+				rReason = "local-async: Resume failed: " + rerr.Error()
 			} else if res, ok, _ := pu.Runs.ReadResult(workCtx, runID); ok {
 				final = res
 			}
 			// Attribute the resume trace to the run's stored tenant slug (what
 			// admin scoping filters on); fuel/bytes best-effort from final.
 			trace.EmitUsage(tracer, FuelUsedFromEnvelope(string(final)), len(final), runTenant)
-			tracer.End(rStatus, final)
+			tracer.End(rStatus, rReason, final)
 		}
 	}()
 }

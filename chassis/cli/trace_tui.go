@@ -1179,6 +1179,9 @@ func formatTraceHeader(r *client.TraceResponse, rid string) string {
 	}
 	fmt.Fprintf(&b, "  status   [%s]%-12s[-] duration %s\n",
 		statusColorName(r.Status), r.Status, dur)
+	if r.Error != "" {
+		fmt.Fprintf(&b, "  reason   %s\n", tview.Escape(r.Error))
+	}
 	if r.BytesIn > 0 || r.BytesOut > 0 {
 		fmt.Fprintf(&b, "  bytes    %s → %s\n", humanBytes(r.BytesIn), humanBytes(r.BytesOut))
 	}

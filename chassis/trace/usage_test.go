@@ -4,9 +4,9 @@ import "testing"
 
 type usageCapture struct{ events []TimelineEvent }
 
-func (c *usageCapture) Step(StepInfo)          {}
-func (c *usageCapture) Event(ev TimelineEvent) { c.events = append(c.events, ev) }
-func (c *usageCapture) End(string, []byte)     {}
+func (c *usageCapture) Step(StepInfo)              {}
+func (c *usageCapture) Event(ev TimelineEvent)     { c.events = append(c.events, ev) }
+func (c *usageCapture) End(string, string, []byte) {}
 
 // TestEmitUsage: the shared helper emits exactly one `request.usage` event
 // carrying the fuel/bytes_out/tenant the readers lift onto the trace. This is

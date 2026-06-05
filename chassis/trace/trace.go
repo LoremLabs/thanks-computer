@@ -141,10 +141,16 @@ type Sink interface {
 // RequestTracer is the per-request handle. Step / Event must be safe
 // for concurrent calls (parallel ops at the same scope fire from
 // different goroutines). End is called exactly once.
+//
+// reason carries a human-readable explanation of a non-ok status — the
+// pipeline error (e.g. "canceled while running test-stack/50 mcp+https://…")
+// — so a trace can answer "why is it an error?" at the request level. It
+// is "" on success. The request-level Status field has always been wired;
+// reason is its missing companion.
 type RequestTracer interface {
 	Step(info StepInfo)
 	Event(ev TimelineEvent)
-	End(status string, finalPayload []byte)
+	End(status, reason string, finalPayload []byte)
 }
 
 // EmitUsage records the per-request usage primitives — fuel, response size,

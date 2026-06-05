@@ -30,7 +30,7 @@ func (h Hints) Empty() bool { return len(h.Redact) == 0 && len(h.Omit) == 0 }
 //
 // Stack may be the empty string when an envelope hasn't been routed
 // (boot/% fallback, system paths); callers should treat that as
-// "lookup with stack=''" — the registry returns empty hints unless an
+// "lookup with stack=”" — the registry returns empty hints unless an
 // untenanted/unstacked rule explicitly declared something.
 type HintLookup func(tenant, stack string) Hints
 
@@ -187,7 +187,7 @@ func (t *redactingTracer) Event(ev TimelineEvent) {
 	t.inner.Event(ev)
 }
 
-func (t *redactingTracer) End(status string, finalPayload []byte) {
+func (t *redactingTracer) End(status, reason string, finalPayload []byte) {
 	finalPayload = ApplyHints(finalPayload, t.union())
-	t.inner.End(status, finalPayload)
+	t.inner.End(status, reason, finalPayload)
 }

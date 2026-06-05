@@ -375,7 +375,7 @@ func (pu *Unit) finishContinuableDetached(
 			zap.String("run", runID), zap.String("stage", stage),
 			zap.String("op", name), zap.Error(terr))
 		if tracer != nil {
-			tracer.End("error", nil)
+			tracer.End("error", "continuable: RecordTerminal failed: "+terr.Error(), nil)
 		}
 		return
 	}
@@ -383,7 +383,7 @@ func (pu *Unit) finishContinuableDetached(
 	ss, sserr := pu.Runs.ReadStageSuspended(workCtx, runID, stage)
 	if sserr != nil {
 		if tracer != nil {
-			tracer.End("error", nil)
+			tracer.End("error", "continuable: ReadStageSuspended failed: "+sserr.Error(), nil)
 		}
 		return
 	}
@@ -395,14 +395,14 @@ func (pu *Unit) finishContinuableDetached(
 		pu.Logger.Warn("continuable: post-terminal stage not resumable",
 			zap.String("run", runID), zap.String("stage", stage), zap.String("state", string(state)))
 		if tracer != nil {
-			tracer.End("ok", nil)
+			tracer.End("ok", "", nil)
 		}
 		return
 	}
 	won, _ := pu.Runs.ClaimResume(workCtx, runID, stage)
 	if !won {
 		if tracer != nil {
-			tracer.End("ok", nil)
+			tracer.End("ok", "", nil)
 		}
 		return
 	}
@@ -413,9 +413,11 @@ func (pu *Unit) finishContinuableDetached(
 	}
 	if tracer != nil {
 		rStatus := "ok"
+		rReason := ""
 		var final []byte
 		if rerr != nil {
 			rStatus = "error"
+			rReason = "continuable: Resume failed: " + rerr.Error()
 		} else if res, ok, _ := pu.Runs.ReadResult(workCtx, runID); ok {
 			final = res
 		}
@@ -423,6 +425,6 @@ func (pu *Unit) finishContinuableDetached(
 		// admin scoping filters on); fuel/bytes are best-effort from the
 		// stored result envelope (may be empty on this path).
 		trace.EmitUsage(tracer, FuelUsedFromEnvelope(string(final)), len(final), runTenant)
-		tracer.End(rStatus, final)
+		tracer.End(rStatus, rReason, final)
 	}
 }

@@ -115,6 +115,7 @@ type traceRequestResponse struct {
 	FinishedAt       string             `json:"finished_at,omitempty"`
 	DurationMs       *int64             `json:"duration_ms,omitempty"`
 	Status           string             `json:"status"`
+	Error            string             `json:"error,omitempty"`
 	PayloadBytes     int64              `json:"payload_bytes,omitempty"`
 	PayloadTruncated bool               `json:"payload_truncated,omitempty"`
 	Fuel             int64              `json:"fuel,omitempty"`
@@ -226,6 +227,7 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 		FinishedAt:       d.FinishedAt,
 		DurationMs:       d.DurationMs,
 		Status:           d.Status,
+		Error:            d.Error,
 		PayloadBytes:     d.PayloadBytes,
 		PayloadTruncated: d.PayloadTruncated,
 		Fuel:             d.Fuel,
