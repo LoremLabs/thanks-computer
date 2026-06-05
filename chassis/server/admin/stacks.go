@@ -1075,12 +1075,16 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 }
 
 // isMintableStack reports whether a stack should get an auto-minted
-// structured hostname. System stacks (boot*, _-prefixed like _sys/
-// _cron, and the continuation stack) never do — they're chassis
-// machinery, not tenant application stacks. Defensive: these don't
-// reach the versioned-activation path in practice.
+// structured (web) hostname. Any stack with a `_`-prefixed segment never
+// does — chassis system stacks (`_sys`, the continuation stack) AND
+// per-tenant convention handlers, whether at the root (`_cron`, `_mail`)
+// or NESTED under an app stack (`test-01/_mail`, `test-01/_cron`). Those
+// are mail/cron/system machinery, not web apps, so a web hostname for
+// them is meaningless (and confusing). The boot stack is excluded too.
 func isMintableStack(stack string) bool {
-	if stack == "" || strings.HasPrefix(stack, "_") {
+	// HasPrefix catches a `_`-prefixed root segment; Contains("/_")
+	// catches a `_`-prefixed nested segment (e.g. `test-01/_mail`).
+	if stack == "" || strings.HasPrefix(stack, "_") || strings.Contains(stack, "/_") {
 		return false
 	}
 	ls := strings.ToLower(stack)

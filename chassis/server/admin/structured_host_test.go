@@ -108,7 +108,10 @@ func TestActivateNoMintWhenSuffixEmpty(t *testing.T) {
 
 func TestIsMintableStack(t *testing.T) {
 	mintable := []string{"shop", "web", "website/canary", "a"}
-	skipped := []string{"", "_sys", "_cron", "boot", "boot/0", "BOOT/1", "txc-continuation"}
+	skipped := []string{"", "_sys", "_cron", "boot", "boot/0", "BOOT/1", "txc-continuation",
+		// nested `_`-prefixed convention handlers — a stack's mail/cron
+		// entry (test-01/_mail), not a web app, so no structured hostname.
+		"test-01/_mail", "test-01/_cron", "website/canary/_mail"}
 	for _, s := range mintable {
 		if !isMintableStack(s) {
 			t.Errorf("isMintableStack(%q)=false, want true", s)

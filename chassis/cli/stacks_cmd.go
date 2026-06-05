@@ -231,6 +231,15 @@ func loadLocalStackFiles(stackDir string) ([]client.StackFile, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		// Only this stack's OWN rules — `<scope>/<name>` (exactly one
+		// slash). A file under a deeper subdir (e.g. "_mail/0/accept.txcl"
+		// seen from the parent `test-01` dir) belongs to a NESTED stack
+		// that bundle.Walk groups separately; excluding it here keeps a
+		// parent stack's manifest from absorbing its children — otherwise
+		// adding a nested stack makes the parent read "edited since pull".
+		if strings.Count(rel, "/") != 1 {
+			return nil
+		}
 		base := filepath.Base(rel)
 		switch {
 		case strings.HasSuffix(base, ".txcl"):
