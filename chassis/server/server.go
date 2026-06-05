@@ -18,9 +18,9 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
-	"github.com/loremlabs/thanks-computer/chassis/bgservice"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
-	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter"    // registers the "openrouter" ai://chat backend
+	"github.com/loremlabs/thanks-computer/chassis/bgservice"
+	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter" // registers the "openrouter" ai://chat backend
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
 	_ "github.com/loremlabs/thanks-computer/chassis/compute/wazero" // registers the "wazero" engine
@@ -52,6 +52,7 @@ import (
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
+	mailmapp "github.com/loremlabs/thanks-computer/chassis/server/personality/mailmap"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
@@ -1084,6 +1085,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		adminCtrl,
 		sweep.NewController(ctx, pu),
 		lmtp.NewController(ctx, pu, mailResolver),
+		// mailmap: a Postfix tcp_table responder answering the edge MTA's
+		// relay_domains lookup against tenant_hostnames. Shares the SAME
+		// mailResolver as the LMTP head so an accept decision can never
+		// drift from a route decision. Off unless 'mailmap' is in
+		// --personalities AND --mailmap-listen-addrs is set.
+		mailmapp.NewController(ctx, pu, mailResolver),
 		dnsCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),

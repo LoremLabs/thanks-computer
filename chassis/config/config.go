@@ -132,7 +132,7 @@ type Config struct {
 	DeferredJoinSlack            string   `id:"deferred-join-slack" default:"60s" desc:"Flat pad added to a deferred-join op's runtime budget when computing the run's reap deadline, covering downstream synchronous scopes. (60s)"`
 	ComputeMaxMemoryMB           int      `id:"compute-max-memory-mb" default:"32" desc:"Per-invocation memory cap for a sandboxed compute (op://) in MB. (32)"`
 	ComputeMaxWall               string   `id:"compute-max-wall" default:"250ms" desc:"Per-invocation wall-clock cap for a sandboxed compute (op://); the guest is killed if it exceeds this. (250ms)"`
-	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns} (cron,tcp,web,admin). lmtp, sweep and dns are opt-in."`
+	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns,mailmap} (cron,tcp,web,admin)"`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
 	PromNamespace                string   `id:"prom-namespace" default:"txco" desc:"Set the Prometheus namespace (txco)"`
 	PromPeriod                   int      `id:"prom-period" default:"5" desc:"Set the Prometheus reporting period (5)"`
@@ -171,6 +171,8 @@ type Config struct {
 	LMTPRespTimeout              string   `id:"lmtp-resp-timeout" default:"30s" desc:"Pipeline response timeout (envelope dispatch → rule verdict) for an LMTP delivery. (30s)"`
 	LMTPHostname                 string   `id:"lmtp-hostname" default:"" desc:"Greeting hostname for the LMTP server. Empty (default) uses os.Hostname(). ()"`
 	LMTPDefaultHosts             []string `id:"lmtp-default-hosts" default:"" desc:"Comma list of hosts the chassis answers Strategy A on (tenant.stack[+mod]@<host> parses to <tenant>/<stack>). Empty (default) disables Strategy A. Multiple hosts allowed for operators running several MX-receiving names. ()"`
+	MailMapListenAddrs           []string `id:"mailmap-listen-addrs" default:"" desc:"Listen addresses for the mailmap head: a Postfix tcp_table(5) responder that answers the edge MTA's relay_domains lookup ('is <domain> an accepted mail domain?') against tenant_hostnames. Comma list of ':port'/'host:port'/'unix:/path'. Empty (default) disables the head even when 'mailmap' is in --personalities. Bind only where the co-located Postfix reaches it (e.g. the compose network); never a public interface — the responder is unauthenticated. ()"`
+	MailMapReadTimeout           string   `id:"mailmap-read-timeout" default:"5s" desc:"Per-request read timeout for the mailmap tcp_table responder. (5s)"`
 	TCPListenAddrs               []string `id:"tcp-listen-addrs" default:":5050" desc:"Listen addresses for the TCP head. Comma list of 'name=addr' or bare 'addr'. A named entry sets _txc.tcp.listener to that name for ingress routing (e.g. 'webhooks=:5050,iot=:5051'); a bare entry keeps the back-compat name 'default'. Every envelope also carries _txc.tcp.local.{ip,port} for rules that want to route on the raw bound port. (:5050)"`
 	TCPConnectRespTimeout        string   `id:"tcp-connect-resp-timeout" default:"3s" desc:"Time that backends must accept a new connection before dropping it. (3s)"`
 	TCPMaxIdleTimeout            string   `id:"tcp-max-idle-timeout" default:"5s" desc:"Max idle time between commands. May be set lower at runtime. (5s)"`

@@ -129,6 +129,45 @@ func (r *DBResolver) ResolveRecipient(rcpt, listener string) (RouteTarget, bool)
 	return RouteTarget{}, false
 }
 
+// AcceptMailDomain implements MailDomainAccepter with Strategy B layered
+// in — the same domain-acceptance decision as ResolveRecipient minus the
+// local-part (Strategy A) and listener-catch-all rules:
+//
+//  1. Inner YAML domain rules (operator @domain override + verified_domains).
+//  2. THIS resolver's tenant_hostnames lookup (DB-backed Strategy B).
+//
+// The mailmap head calls this to answer the edge Postfix's relay_domains
+// lookup. It honors the SAME verified/requireVerified gating as routing
+// (via lookupMailDomain), so Postfix only ACCEPTS mail for a domain the
+// chassis would actually ROUTE — no point accepting mail destined to
+// bounce at the LMTP head.
+func (r *DBResolver) AcceptMailDomain(domain string) (RouteTarget, bool) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return RouteTarget{}, false
+	}
+
+	// Rule 1: inner YAML domain rules.
+	inner, _ := r.inner.(*yamlResolver)
+	if inner != nil {
+		if t, ok := inner.AcceptMailDomain(domain); ok {
+			return t, true
+		}
+	}
+
+	// Rule 2: DB tenant_hostnames lookup.
+	canon, ok := canonicalizeHost(domain)
+	if !ok {
+		return RouteTarget{}, false
+	}
+	if db := r.dbFn(); db != nil {
+		if t, ok := r.lookupMailDomain(db, canon); ok {
+			return t, true
+		}
+	}
+	return RouteTarget{}, false
+}
+
 // lookupMailDomain is Strategy B's DB-backed half: query
 // `tenant_hostnames` for an exact (canonical) hostname match and
 // synthesize `<tenant>/_mail` as the route. The same authorization

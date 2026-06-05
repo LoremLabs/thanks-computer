@@ -106,6 +106,25 @@ type MailResolver interface {
 	ResolveRecipient(rcpt, listener string) (RouteTarget, bool)
 }
 
+// MailDomainAccepter is an optional add-on to MailResolver: a
+// domain-only acceptance check used by the mailmap head to answer the
+// edge Postfix's `relay_domains` lookup ("is this an accepted mail
+// domain?").
+//
+// Unlike ResolveRecipient it consults ONLY domain-keyed rules —
+// operator `@domain` overrides, YAML `verified_domains`, and the
+// DB-backed `tenant_hostnames` lookup. It deliberately omits Strategy A
+// (whose host is the chassis's own MX name, already a Postfix
+// `mydestination`) and the listener catch-all (a routing fallback, not a
+// statement that a domain is hosted — accepting on it would turn the
+// edge into an open relay).
+//
+// Callers type-assert a MailResolver to this; resolvers that don't
+// implement it simply don't participate in dynamic relay_domains.
+type MailDomainAccepter interface {
+	AcceptMailDomain(domain string) (RouteTarget, bool)
+}
+
 // File is the on-disk YAML schema v1 loads. It intentionally groups
 // routes by source (http/tcp/cron/lmtp) so per-source matching is a
 // single map lookup.
@@ -340,6 +359,32 @@ func (r *yamlResolver) resolveVerifiedDomainYAML(rcpt string) (RouteTarget, bool
 		Ingress:  "domain:" + domain,
 		Verified: true,
 	}, true
+}
+
+// AcceptMailDomain implements MailDomainAccepter for the YAML resolver:
+// a domain is accepted iff an operator `@domain` override (rule 2) or a
+// `verified_domains[<domain>]` entry (rule 4 YAML) exists. Strategy A
+// and the listener catch-all are intentionally NOT consulted — see the
+// MailDomainAccepter doc for why (open-relay safety).
+//
+// The domain is lowercased/trimmed to match the rcpt-side
+// canonicalization in ResolveRecipient.
+func (r *yamlResolver) AcceptMailDomain(domain string) (RouteTarget, bool) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return RouteTarget{}, false
+	}
+	if t, ok := r.file.Ingress.LMTP.Recipients["@"+domain]; ok {
+		return RouteTarget{Tenant: t.Tenant, Stack: t.Stack, Ingress: "@" + domain, Verified: true}, true
+	}
+	if t, ok := r.file.Ingress.LMTP.VerifiedDomains[domain]; ok {
+		stack := t.Stack
+		if stack == "" {
+			stack = t.Tenant + "/_mail"
+		}
+		return RouteTarget{Tenant: t.Tenant, Stack: stack, Ingress: "domain:" + domain, Verified: true}, true
+	}
+	return RouteTarget{}, false
 }
 
 // resolveListener covers rule 5 — the listener catch-all.
