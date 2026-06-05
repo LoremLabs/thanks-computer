@@ -171,7 +171,7 @@ type Config struct {
 	LMTPRespTimeout              string   `id:"lmtp-resp-timeout" default:"30s" desc:"Pipeline response timeout (envelope dispatch → rule verdict) for an LMTP delivery. (30s)"`
 	LMTPHostname                 string   `id:"lmtp-hostname" default:"" desc:"Greeting hostname for the LMTP server. Empty (default) uses os.Hostname(). ()"`
 	LMTPDefaultHosts             []string `id:"lmtp-default-hosts" default:"" desc:"Comma list of hosts the chassis answers Strategy A on (tenant.stack[+mod]@<host> parses to <tenant>/<stack>). Empty (default) disables Strategy A. Multiple hosts allowed for operators running several MX-receiving names. ()"`
-	TCPListenAddrs               []string `id:"tcp-listen-addrs" default:":5050" desc:"Listen addresses for TCP server Ex: :5050 (:5050)"`
+	TCPListenAddrs               []string `id:"tcp-listen-addrs" default:":5050" desc:"Listen addresses for the TCP head. Comma list of 'name=addr' or bare 'addr'. A named entry sets _txc.tcp.listener to that name for ingress routing (e.g. 'webhooks=:5050,iot=:5051'); a bare entry keeps the back-compat name 'default'. Every envelope also carries _txc.tcp.local.{ip,port} for rules that want to route on the raw bound port. (:5050)"`
 	TCPConnectRespTimeout        string   `id:"tcp-connect-resp-timeout" default:"3s" desc:"Time that backends must accept a new connection before dropping it. (3s)"`
 	TCPMaxIdleTimeout            string   `id:"tcp-max-idle-timeout" default:"5s" desc:"Max idle time between commands. May be set lower at runtime. (5s)"`
 	TCPRespTimeout               string   `id:"tcp-resp-timeout" default:"10s" desc:"Max time for us to respond to command. (10s)"`

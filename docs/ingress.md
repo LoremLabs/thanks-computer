@@ -74,7 +74,7 @@ For v1, matching is exact-string lookup keyed off the source:
 | Source (`_txc.src`) | Matched against | Field on envelope |
 |---|---|---|
 | `http` | HTTP Host header (with port if non-standard) | `_txc.web.req.host` |
-| `tcp`  | TCP listener name | `_txc.tcp.listener` |
+| `tcp`  | TCP listener name (from `--tcp-listen-addrs`, `name=addr` form; bare addrs use `default`) | `_txc.tcp.listener` |
 | `cron` | Cron job name | `_txc.cron.job` |
 | `lmtp` | Each RCPT TO independently — exact addr / `@domain` / Strategy A parse / verified domain / listener | per-rcpt; details in [`docs/lmtp.md`](lmtp.md) |
 
@@ -102,7 +102,6 @@ Deliberately deferred:
 
 - **Path-prefix matching** for HTTP. Captured in `RouteKey.Path` so the YAML shape stays the same when it lands.
 - **Header-based matching** for HTTP.
-- **TCP multi-listener config**. v1 has a single listener with hardcoded name `default`.
 - **TCP SNI / TLS termination**.
 - **Live reload**. Edit the YAML → restart the chassis. (Once the DB-backed resolver below exists, the YAML resolver will likely stay restart-only; mutation is the DB resolver's job.)
 

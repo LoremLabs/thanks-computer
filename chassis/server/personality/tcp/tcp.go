@@ -29,6 +29,38 @@ type TCPController struct {
 	wg       sync.WaitGroup
 }
 
+// acceptedConn pairs a freshly Accept()-ed connection with the
+// operator-given name of the listener it arrived on, so the
+// connection handler can stamp `_txc.tcp.listener` correctly when
+// the chassis is bound to multiple listeners.
+type acceptedConn struct {
+	conn net.Conn
+	name string
+}
+
+// parseTCPListenSpec splits one `--tcp-listen-addrs` entry into its
+// operator-chosen name and the address to bind. Form `name=addr`
+// picks the name; bare `addr` falls back to `"default"` so existing
+// configs keep stamping `_txc.tcp.listener = "default"` (and any
+// ingress YAML keyed on it keeps matching). Empty input returns
+// ("", "") so callers can drop blank entries (viper's CSV parsing
+// occasionally produces them).
+func parseTCPListenSpec(spec string) (name, addr string) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", ""
+	}
+	if i := strings.Index(spec, "="); i >= 0 {
+		name = strings.TrimSpace(spec[:i])
+		addr = strings.TrimSpace(spec[i+1:])
+		if name == "" {
+			name = "default"
+		}
+		return name, addr
+	}
+	return "default", spec
+}
+
 const MAX_MESSAGE_SIZE = units.MB * 10
 
 func NewController(ctx context.Context, pu *processor.Unit) *TCPController {
@@ -47,14 +79,31 @@ func (tcp *TCPController) Start() {
 	if strings.Contains(tcp.pu.Conf.Personalities, "tcp") {
 
 		go func() {
-			newConns := make(chan net.Conn)
+			newConns := make(chan acceptedConn)
 			var listeners []net.Listener
+			seenNames := map[string]string{} // name -> first addr (for collision warning)
 
 			// we start a controller per listen address
 			for i := range tcp.pu.Conf.TCPListenAddrs {
+				name, listen := parseTCPListenSpec(tcp.pu.Conf.TCPListenAddrs[i])
+				if listen == "" {
+					// Skip blank entries — viper's CSV parsing can yield
+					// `[""]` when the flag is set explicitly empty.
+					continue
+				}
 				tcp.wg.Add(1)
 
-				listen := tcp.pu.Conf.TCPListenAddrs[i]
+				if prev, dup := seenNames[name]; dup {
+					// Multiple listeners sharing a name still bind fine, but
+					// ingress can't tell their traffic apart. Most likely a
+					// config typo; warn loudly rather than failing.
+					tcp.pu.Logger.Warn("two tcp listeners share a name; ingress routing cannot distinguish them",
+						zap.String("name", name),
+						zap.String("first", prev),
+						zap.String("second", listen),
+						zap.String("hint", "use name=addr form, e.g. webhooks=:5050,iot=:5051"))
+				}
+				seenNames[name] = listen
 
 				// Pre-bind BEFORE logging "tcp controller started" so a
 				// port conflict surfaces with a clear, actionable error
@@ -66,16 +115,19 @@ func (tcp *TCPController) Start() {
 				if err != nil {
 					tcp.pu.Logger.Fatal("tcp port already in use (or otherwise unbindable)",
 						zap.String("listen", listen),
+						zap.String("name", name),
 						zap.String("err", err.Error()),
 						zap.String("hint", "lsof -iTCP"+listen+" -sTCP:LISTEN"))
 				}
 				listeners = append(listeners, l)
 				defer func() { _ = l.Close() }()
 
-				tcp.pu.Logger.Info("tcp controller started", zap.String("listen", listen))
+				tcp.pu.Logger.Info("tcp controller started",
+					zap.String("listen", listen),
+					zap.String("name", name))
 
 				// wait for connections. This is interupted when we terminate the listener
-				go func(l net.Listener) {
+				go func(l net.Listener, listen, name string) {
 					for {
 						c, err := l.Accept() // blocks
 						if err != nil {
@@ -83,26 +135,27 @@ func (tcp *TCPController) Start() {
 								tcp.pu.Logger.Warn("tcp listen error", zap.String("listen", listen), zap.Reflect("err", err.Error()))
 							}
 
-							newConns <- nil
+							newConns <- acceptedConn{}
 							break
 						}
-						newConns <- c
+						newConns <- acceptedConn{conn: c, name: name}
 					}
-				}(l)
+				}(l, listen, name)
 			}
 
 			for {
 				select {
-				case c := <-newConns:
-					// new connection or nil if acceptor is down, in which case we should
-					// do something (respawn, stop when everyone is down or just explode)
-					if c == nil {
+				case ac := <-newConns:
+					// new connection, or a zero-value struct if an acceptor
+					// is down — in the latter case we should do something
+					// (respawn, stop when everyone is down or just explode)
+					if ac.conn == nil {
 						tcp.wg.Done()
 						break
 					}
 
 					// create a handler for this connection
-					go func(conn net.Conn) {
+					go func(conn net.Conn, listenerName string) {
 						defer tcp.wg.Done()
 						defer func() { _ = conn.Close() }()
 						tcp.wg.Add(1)
@@ -113,10 +166,11 @@ func (tcp *TCPController) Start() {
 						payload, _ := sjson.Set("", "_txc.src", "tcp")
 						payload, _ = sjson.Set(payload, "_ts", now.Format(time.RFC3339))
 						payload, _ = sjson.Set(payload, "_txc.rid", rid)
-						// Listener name is what the ingress router keys on for TCP.
-						// v1 supports a single listener with the fixed name "default";
-						// multi-listener config arrives later.
-						payload, _ = sjson.Set(payload, "_txc.tcp.listener", "default")
+						// Listener name is what the ingress router keys on
+						// for TCP. Operator names come from `name=addr`
+						// entries in --tcp-listen-addrs; bare addresses keep
+						// the back-compat "default" name.
+						payload, _ = sjson.Set(payload, "_txc.tcp.listener", listenerName)
 						// Private-fields plumbing: same pattern as the web
 						// inlet — chassis config decides whether to stamp.
 						if tcp.pu.Conf.DebugPrivate {
@@ -125,6 +179,13 @@ func (tcp *TCPController) Start() {
 
 						if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 							payload, _ = sjson.Set(payload, "_txc.client.ip", addr.IP.String())
+						}
+						// Local addr (port and ip the client connected TO).
+						// Rules that want to route on the raw port without
+						// operator-side YAML can read these directly.
+						if la, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+							payload, _ = sjson.Set(payload, "_txc.tcp.local.ip", la.IP.String())
+							payload, _ = sjson.Set(payload, "_txc.tcp.local.port", la.Port)
 						}
 
 						if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
@@ -319,7 +380,7 @@ func (tcp *TCPController) Start() {
 						}
 						// TODO: unreachable code
 						//tcp.pu.Logger.Info("tcp handler closing")
-					}(c)
+					}(ac.conn, ac.name)
 
 				// case <-time.After(time.Minute):
 				// 		// timeout branch, no connection for a minute
@@ -335,11 +396,12 @@ func (tcp *TCPController) Start() {
 							}
 						}
 						// Don't return: accept goroutines below will see the
-						// closed listener and send nil into newConns; the
-						// newConns case calls wg.Done() per listener. Exiting
-						// here would block those sends. The outer goroutine
-						// effectively leaks until process exit, which is fine
-						// since Stop() blocks on wg, not on this goroutine.
+						// closed listener and send a zero-value acceptedConn
+						// into newConns; the newConns case calls wg.Done()
+						// per listener. Exiting here would block those sends.
+						// The outer goroutine effectively leaks until process
+						// exit, which is fine since Stop() blocks on wg, not
+						// on this goroutine.
 						//nolint:staticcheck // SA4011: break is dead but the alternative leaks accept goroutines
 						break
 					}
