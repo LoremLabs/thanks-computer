@@ -2,6 +2,7 @@ package static
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"io/fs"
 	"os"
@@ -32,6 +33,23 @@ type layer struct {
 
 func emptyLayer() layer { return layer{files: radix.New(), dirs: map[string]struct{}{}} }
 
+// metaEntry is a tenant FILES/ asset known only by its content hash; the
+// bytes are resolved lazily from the filecas store (kept out of memory).
+// The hash doubles as the strong ETag.
+type metaEntry struct {
+	hash  string // content sha256 hex
+	size  int64
+	ctype string // derived from the path extension
+}
+
+// tenantLayer is one (tenant, stack)'s FILES/ metadata: rel-path → entry,
+// plus the owned top-level dir names (same prefix-ownership semantics as
+// the inline layers).
+type tenantLayer struct {
+	files map[string]*metaEntry
+	dirs  map[string]struct{}
+}
+
 // Result is the outcome of a Lookup.
 //
 //	Found      → an exact file; serve Body (200) or 304 on ETag match.
@@ -41,7 +59,11 @@ func emptyLayer() layer { return layer{files: radix.New(), dirs: map[string]stru
 type Result struct {
 	Found bool
 	Owned bool
-	Body  []byte
+	Body  []byte // set for inline (operator) layers
+	// Hash is set for a tenant CAS entry instead of Body: the caller
+	// resolves the bytes from the filecas store by this content hash.
+	Hash  string
+	Size  int64
 	Ctype string
 	ETag  string
 }
@@ -56,9 +78,13 @@ type Index struct {
 	log  *zap.Logger
 
 	mu       sync.Mutex
-	perStack map[string]layer // stack -> its layer
+	perStack map[string]layer // stack -> its layer (disk workspace, inline bytes)
 	chassis  layer
 	embedded layer
+	// tenant FILES/ metadata from the runtime DB: slug -> stack -> layer.
+	// Bytes live in the filecas store, not here. Rebuilt by RebuildTenant
+	// on dbcache reload; nil until the first build (Lookup nil-safe).
+	tenant map[string]map[string]tenantLayer
 }
 
 // NewIndex builds the index immediately so the chassis serves correctly
@@ -107,29 +133,48 @@ func (ix *Index) Rebuild() {
 // Lookup resolves a request, layered first-match-wins for an exact
 // file, and otherwise reports whether the path is under a static-owned
 // directory prefix. Pure in-memory; no filesystem access.
-func (ix *Index) Lookup(stack, reqPath string) Result {
+func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 	rel := safeRel(reqPath)
 	if rel == "" {
 		return Result{}
 	}
 
 	ix.mu.Lock()
-	emb, ch, ps := ix.embedded, ix.chassis, ix.perStack
+	emb, ch, ps, tn := ix.embedded, ix.chassis, ix.perStack, ix.tenant
 	ix.mu.Unlock()
 
 	st := safeSeg(stack)
-	layers := make([]layer, 0, 3)
+
+	// Operator/inline layers first (disk workspace → chassis → embedded),
+	// highest precedence, returning bytes directly. An operator override of
+	// a tenant file still wins.
+	opLayers := make([]layer, 0, 3)
 	if st != "" {
 		if l, ok := ps[st]; ok {
-			layers = append(layers, l)
+			opLayers = append(opLayers, l)
 		}
 	}
-	layers = append(layers, ch, emb)
-
-	for _, l := range layers {
+	opLayers = append(opLayers, ch, emb)
+	for _, l := range opLayers {
 		if v, found := l.files.Get([]byte(rel)); found {
 			e := v.(*entry)
 			return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag}
+		}
+	}
+
+	// Tenant layer (metadata only; the caller resolves bytes by Hash). Keyed
+	// (slug, stack) so colliding stack names across tenants never merge.
+	var tl tenantLayer
+	haveTenant := false
+	if ten := safeSeg(tenant); ten != "" && st != "" {
+		if stacks, ok := tn[ten]; ok {
+			if l, ok := stacks[st]; ok {
+				tl, haveTenant = l, true
+				if me, ok := l.files[rel]; ok {
+					return Result{Found: true, Hash: me.hash, Size: me.size,
+						Ctype: me.ctype, ETag: `"` + me.hash + `"`}
+				}
+			}
 		}
 	}
 
@@ -137,13 +182,91 @@ func (ix *Index) Lookup(stack, reqPath string) Result {
 	// directory that exists in an applicable layer (the root / a bare
 	// top-level name is never prefix-owned — it needs an explicit file).
 	if seg, _, nested := strings.Cut(rel, "/"); nested {
-		for _, l := range layers {
+		for _, l := range opLayers {
 			if _, ok := l.dirs[seg]; ok {
+				return Result{Owned: true}
+			}
+		}
+		if haveTenant {
+			if _, ok := tl.dirs[seg]; ok {
 				return Result{Owned: true}
 			}
 		}
 	}
 	return Result{}
+}
+
+// RebuildTenant reloads the tenant FILES/ metadata layer (path → content
+// hash + size, no bytes) from the runtime DB and atomically swaps it in.
+// Modeled on admission.Rebuild: nil-safe, and it keeps the prior layer on
+// any error so a transient DB hiccup never blanks tenant serving. db is the
+// handle passed by dbcache.OnReload (or dbc.Snapshot() for the initial
+// build) — never capture dbc.Db.
+func (ix *Index) RebuildTenant(db *sql.DB) error {
+	if ix == nil || db == nil {
+		return nil
+	}
+	rows, err := db.Query(`
+		SELECT t.slug, s.name, f.path, f.content_hash, length(f.content) AS sz
+		  FROM stack_files f
+		  JOIN stacks  s ON s.active_version = f.version_id
+		  JOIN tenants t ON t.tenant_id = s.tenant_id
+		 WHERE f.path LIKE 'FILES/%' AND t.revoked_at IS NULL`)
+	if err != nil {
+		if ix.log != nil {
+			ix.log.Warn("static: tenant filecas index query failed", zap.Error(err))
+		}
+		return err // keep prior layer
+	}
+	defer rows.Close()
+
+	out := map[string]map[string]tenantLayer{}
+	for rows.Next() {
+		var slug, name, p, hash string
+		var sz int64
+		if err := rows.Scan(&slug, &name, &p, &hash, &sz); err != nil {
+			if ix.log != nil {
+				ix.log.Warn("static: tenant filecas index scan failed", zap.Error(err))
+			}
+			return err // keep prior layer
+		}
+		if hash == "" {
+			continue
+		}
+		rel := safeRel(strings.TrimPrefix(p, "FILES/"))
+		if rel == "" {
+			continue
+		}
+		sl, st := safeSeg(slug), safeSeg(name)
+		if sl == "" || st == "" {
+			continue
+		}
+		stacks := out[sl]
+		if stacks == nil {
+			stacks = map[string]tenantLayer{}
+			out[sl] = stacks
+		}
+		tl, ok := stacks[st]
+		if !ok {
+			tl = tenantLayer{files: map[string]*metaEntry{}, dirs: map[string]struct{}{}}
+			stacks[st] = tl
+		}
+		tl.files[rel] = &metaEntry{hash: hash, size: sz, ctype: contentType(rel, nil)}
+		if seg, _, nested := strings.Cut(rel, "/"); nested {
+			tl.dirs[seg] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		if ix.log != nil {
+			ix.log.Warn("static: tenant filecas index rows error", zap.Error(err))
+		}
+		return err // keep prior layer
+	}
+
+	ix.mu.Lock()
+	ix.tenant = out
+	ix.mu.Unlock()
+	return nil
 }
 
 func etagOf(b []byte) string {

@@ -151,6 +151,12 @@ type Config struct {
 	ContinuationStaleResumeAfter int      `id:"continuation-stale-resume-after" default:"600" desc:"Seconds a resume-claim may sit before the run is failed as resumer-stale (600)"`
 	ArtifactStore                string   `id:"artifact-store" default:"file" desc:"Snapshot/event artifact store backend: {file} (file)"`
 	ArtifactStoreFileDir         string   `id:"artifact-store-file-dir" default:"./chassis/data/artifacts" desc:"Root directory for the file artifact store (./chassis/data/artifacts)"`
+	FileCASStore                 string   `id:"filecas-store" default:"file" desc:"Tenant FILES/ content-addressed store backend: {file} (file). s3 is the fleet overlay seam."`
+	FileCASStoreFileDir          string   `id:"filecas-store-file-dir" default:"./chassis/data/filecas" desc:"Root directory for the file content-addressed store (./chassis/data/filecas)"`
+	FileCASStoreS3Bucket         string   `id:"filecas-store-s3-bucket" default:"" desc:"Reserved: S3-compatible filecas bucket (fleet overlay; unused in open core)"`
+	FileCASStoreS3Prefix         string   `id:"filecas-store-s3-prefix" default:"" desc:"Reserved: S3-compatible filecas key prefix (fleet overlay; unused in open core)"`
+	FileCASCacheBytes            int      `id:"filecas-cache-bytes" default:"67108864" desc:"In-memory LRU budget (bytes) fronting filecas Get (64MiB). 0 disables the cache."`
+	FileCASMaxFileBytes          int      `id:"filecas-max-file-bytes" default:"10485760" desc:"Max size of a single FILES/ asset served from the CAS (10MiB); larger is indexed but 404s on serve. Also the per-entry LRU guard."`
 	SnapshotBootstrapRef         string   `id:"snapshot-bootstrap-ref" default:"" desc:"If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap."`
 	FeedSource                   string   `id:"feed-source" default:"nop" desc:"Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged."`
 	FeedSourceFileDir            string   `id:"feed-source-file-dir" default:"./chassis/data/feed" desc:"Root directory for the file feed source (./chassis/data/feed)"`
@@ -272,6 +278,19 @@ func Load() (Config, error) {
 			}
 			if err = os.MkdirAll(config.ArtifactStoreFileDir, os.ModePerm); err != nil {
 				log.Fatalf("unable to make directory %s", config.ArtifactStoreFileDir)
+			}
+		}
+	}
+
+	// filecas store (tenant FILES/ content-addressed) — same idiom as artifact store
+	if config.FileCASStore == "file" {
+		if len(config.FileCASStoreFileDir) > 0 {
+			if strings.HasPrefix(config.FileCASStoreFileDir, ".") {
+				p, _ := os.Getwd()
+				config.FileCASStoreFileDir = filepath.Join(p, config.FileCASStoreFileDir)
+			}
+			if err = os.MkdirAll(config.FileCASStoreFileDir, os.ModePerm); err != nil {
+				log.Fatalf("unable to make directory %s", config.FileCASStoreFileDir)
 			}
 		}
 	}

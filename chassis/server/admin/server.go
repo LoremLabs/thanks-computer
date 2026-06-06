@@ -24,6 +24,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
+	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
@@ -56,6 +57,12 @@ type Controller struct {
 	// --feed-sink=nop the handlers skip the producer-side work
 	// entirely.
 	astore artifact.Store
+
+	// fcas is the content-addressed store for tenant FILES/ asset bytes.
+	// Set by SetFileCAS from chassis/server/server.go. Nil-safe: when
+	// unset, activation skips persisting FILES bytes (open-core embedders
+	// that don't configure a store).
+	fcas filecas.Store
 
 	// unsignedThrottle gates /auth/dev/enroll + /auth/invitations/consume
 	// against brute-force probing. Single shared instance so the
@@ -97,6 +104,10 @@ func NewController(ctx context.Context, pu *processor.Unit) *Controller {
 // chassis boot calls this after opening the artifact store; handlers
 // guard internally on FeedSink != nop before touching it.
 func (c *Controller) SetArtifactStore(s artifact.Store) { c.astore = s }
+
+// SetFileCAS wires the content-addressed store activation uses to persist
+// tenant FILES/ asset bytes. Nil-safe.
+func (c *Controller) SetFileCAS(s filecas.Store) { c.fcas = s }
 
 func (c *Controller) Start() {
 	if !strings.Contains(c.pu.Conf.Personalities, "admin") {

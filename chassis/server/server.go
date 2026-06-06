@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,8 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/feed"
 	_ "github.com/loremlabs/thanks-computer/chassis/feed/filesource" // registers the "file" backend
 	_ "github.com/loremlabs/thanks-computer/chassis/feed/nop"        // registers the "nop" backend
+	"github.com/loremlabs/thanks-computer/chassis/filecas"
+	_ "github.com/loremlabs/thanks-computer/chassis/filecas/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
@@ -393,11 +396,23 @@ func awaitTerminalState(ctx context.Context, runs *continuation.Runs, runID, sta
 //     request must NOT fall through to the app;
 //   - otherwise → "{}" (no _txc.web.res, no halt) so the request keeps
 //     flowing through scope 100 (route) / 1000 (404) as before.
-func staticResultBody(ix *static.Index, in []byte) string {
+func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store, in []byte) string {
 	reqPath := gjson.GetBytes(in, "_txc.web.req.url.path").String()
 	stack := gjson.GetBytes(in, "_txc.route.stack").String()
+	tenant := gjson.GetBytes(in, "_txc.route.tenant").String()
 
-	r := ix.Lookup(stack, reqPath)
+	// Privacy convention: any request-path segment beginning with "_" is a
+	// private asset (e.g. FILES/_mail/ templates) — indexed and readable by
+	// ops, but never served over HTTP. Fall through "{}" (NOT 404) so its
+	// existence doesn't leak. Runs before Lookup, so the Owned-prefix branch
+	// can't leak either. path.Clean resolves "/a/../_x" to its real segments.
+	for _, seg := range strings.Split(strings.Trim(path.Clean("/"+reqPath), "/"), "/") {
+		if seg != "" && seg[0] == '_' {
+			return "{}"
+		}
+	}
+
+	r := ix.Lookup(tenant, stack, reqPath)
 
 	// Terminal helper: every static answer halts the pipeline (same
 	// mechanism _sys/boot/1000/notfound.txcl relies on).
@@ -406,9 +421,9 @@ func staticResultBody(ix *static.Index, in []byte) string {
 		return env
 	}
 
-	switch {
-	case r.Found:
-		// Conditional GET: the client already has these exact bytes.
+	// Conditional GET applies to any Found result (inline or CAS) and is
+	// checked before fetching bytes — a 304 never touches the CAS/LRU.
+	if r.Found {
 		if inm := gjson.GetBytes(in, "_txc.web.req.headers.If-None-Match.0").String(); inm != "" &&
 			(inm == r.ETag || inm == "*") {
 			env := "{}"
@@ -416,13 +431,34 @@ func staticResultBody(ix *static.Index, in []byte) string {
 			env, _ = sjson.Set(env, "_txc.web.res.headers.etag.0", r.ETag)
 			return halt(env)
 		}
+	}
+
+	serve := func(body []byte) string {
 		env := "{}"
 		env, _ = sjson.Set(env, "_txc.web.res.status", 200)
 		env, _ = sjson.Set(env, "_txc.web.res.headers.content-type.0", r.Ctype)
 		env, _ = sjson.Set(env, "_txc.web.res.headers.cache-control.0", "public, max-age=3600")
 		env, _ = sjson.Set(env, "_txc.web.res.headers.etag.0", r.ETag)
-		env, _ = sjson.Set(env, "_txc.web.res.body", base64.StdEncoding.EncodeToString(r.Body))
+		env, _ = sjson.Set(env, "_txc.web.res.body", base64.StdEncoding.EncodeToString(body))
 		return halt(env)
+	}
+
+	switch {
+	case r.Found && r.Hash != "":
+		// Tenant CAS entry: resolve bytes lazily by content hash. A nil store
+		// or a missing/errored object falls through "{}" rather than hard-
+		// failing the page — the metadata index can briefly lead the CAS.
+		if fcas == nil {
+			return "{}"
+		}
+		body, err := fcas.Get(ctx, r.Hash)
+		if err != nil {
+			return "{}"
+		}
+		return serve(body)
+	case r.Found:
+		// Inline (operator) layer — bytes are already in the index.
+		return serve(r.Body)
 	case r.Owned:
 		// The directory prefix is static's; don't let the app see it.
 		env := "{}"
@@ -828,6 +864,30 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		zap.String("backend", astore.Name()),
 		zap.String("dir", conf.ArtifactStoreFileDir))
 
+	// filecas: content-addressed store for tenant FILES/ assets. The file
+	// backend self-registers via the blank import; the fleet uses the S3
+	// overlay backend. txco://static resolves tenant file bytes through it
+	// (lazily, behind an LRU); the metadata (path → hash) lives in the
+	// static index. Empty FileCASStore ⇒ nil ⇒ tenant assets fall through.
+	var fcas filecas.Store
+	if conf.FileCASStore != "" {
+		var fcerr error
+		fcas, fcerr = filecas.Open(conf.FileCASStore, filecas.StoreConfig{
+			FileDir:       conf.FileCASStoreFileDir,
+			S3Bucket:      conf.FileCASStoreS3Bucket,
+			S3Prefix:      conf.FileCASStoreS3Prefix,
+			CacheBytes:    int64(conf.FileCASCacheBytes),
+			MaxEntryBytes: int64(conf.FileCASMaxFileBytes),
+		})
+		if fcerr != nil {
+			cancel()
+			return ctx, nil, fcerr
+		}
+		logger.Info("filecas store loaded",
+			zap.String("backend", fcas.Name()),
+			zap.String("dir", conf.FileCASStoreFileDir))
+	}
+
 	// Control-event feed source. Default "nop" yields nothing, so the
 	// applier controller is inert and single-node behaviour is unchanged.
 	fsrc, ferr := feed.Open(conf.FeedSource, feed.SourceConfig{
@@ -1004,19 +1064,25 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// — never on the request path.
 	staticIndex := static.NewIndex(conf.SystemOpstacksDir, logger)
 	if dbc != nil {
+		// Initial tenant FILES/ metadata build (path → content hash) from the
+		// live snapshot; mirrors admission's Rebuild(dbc.Snapshot()).
+		if rerr := staticIndex.RebuildTenant(dbc.Snapshot()); rerr != nil {
+			logger.Warn("static tenant index initial build failed", zap.Error(rerr))
+		}
 		prevOnReload := dbc.OnReload
 		dbc.OnReload = func(db *sql.DB) error {
 			var err error
 			if prevOnReload != nil {
 				err = prevOnReload(db)
 			}
-			staticIndex.Rebuild()
+			staticIndex.Rebuild()             // operator/disk + embedded layers
+			_ = staticIndex.RebuildTenant(db) // tenant FILES/ metadata (hashes only)
 			return err
 		}
 	}
 	pu.Handle([]byte("txco://static"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
-			return event.Payload{Raw: staticResultBody(staticIndex, in), Type: event.JSON}, nil
+			return event.Payload{Raw: staticResultBody(ctx, staticIndex, fcas, in), Type: event.JSON}, nil
 		}))
 
 	// Computed-secret core ops. These consume cleartext from
@@ -1044,6 +1110,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// mutating handlers can publish event payloads when fleet-sync
 	// producer is enabled. Nil-safe; handlers gate on FeedSink != nop.
 	adminCtrl.SetArtifactStore(astore)
+	// Wire the filecas store so activation can persist FILES/ asset bytes
+	// content-addressed. Nil-safe (gated on a configured store).
+	adminCtrl.SetFileCAS(fcas)
 	// LMTP head needs a MailResolver for per-recipient routing. The
 	// data-plane resolver (`*DBResolver` wrapping the yamlResolver)
 	// implements MailResolver directly. Assigning through the

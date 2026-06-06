@@ -279,6 +279,15 @@ func validateStackFilePath(p string) error {
 			return fmt.Errorf("'.' and '..' segments are not allowed")
 		}
 	}
+	// FILES/** are tenant static assets served by txco://static (or read by
+	// _*-convention ops). Any extension is allowed — the segment/clean checks
+	// above already reject traversal and dotfiles; content-type is derived at
+	// serve time, not from the name. Their bytes are content-addressed in the
+	// filecas store on activation, not materialised into ops.
+	if strings.HasPrefix(p, "FILES/") {
+		return nil
+	}
+
 	switch {
 	case strings.HasSuffix(p, ".txcl"):
 		// The rule name is the .txcl stem after the leading "<scope>/"
@@ -945,6 +954,25 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	}
 	_ = frows.Close()
 
+	// Persist FILES/* asset bytes into the content-addressed store so the
+	// static serve path resolves them lazily by hash; .txcl / mock-* stay
+	// inline in ops. The store verifies sha256==hash and is create-if-absent
+	// (idempotent dedup). A failure aborts activation via the caller's
+	// rollback rather than half-publishing. Also fires on fleet apply
+	// (applier → ApplyStackVersion → here), so nodes self-populate their CAS
+	// from the still-inline content (Phase 1).
+	if c.fcas != nil {
+		for _, rf := range rawFiles {
+			if !strings.HasPrefix(rf.path, "FILES/") {
+				continue
+			}
+			h := sha256Hex(rf.content)
+			if err := c.fcas.Put(ctx, h, []byte(rf.content)); err != nil {
+				return currentActiveID, targetVersionID, &materialiseError{http.StatusServiceUnavailable, "filecas_put", map[string]any{"path": rf.path, "err": err.Error()}}
+			}
+		}
+	}
+
 	// Group by scope: collect rules + per-scope mocks, then emit one ops
 	// row per (scope, name) with the scope's mocks attached.
 	type scopeData struct {
@@ -962,6 +990,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		return sd
 	}
 	for _, rf := range rawFiles {
+		if strings.HasPrefix(rf.path, "FILES/") {
+			continue // static asset → filecas (above), not an ops row
+		}
 		pf, ok := parseStackPath(rf.path)
 		if !ok {
 			c.pu.Logger.Warn("activate: skipping unrecognised file path",

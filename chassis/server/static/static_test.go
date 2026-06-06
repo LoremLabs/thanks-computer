@@ -33,7 +33,7 @@ func newIdx(t *testing.T, root string) *Index {
 
 // Embedded favicon resolves with no workspace, with a strong ETag.
 func TestIndexEmbeddedFavicon(t *testing.T) {
-	r := newIdx(t, "").Lookup("", "/favicon.ico")
+	r := newIdx(t, "").Lookup("", "","/favicon.ico")
 	if !r.Found || len(r.Body) == 0 {
 		t.Fatalf("embedded favicon must resolve; %+v", r)
 	}
@@ -49,13 +49,13 @@ func TestIndexEmbeddedFavicon(t *testing.T) {
 // otherwise chassis-wide wins.
 func TestIndexLayerPrecedence(t *testing.T) {
 	ix := newIdx(t, workspace(t))
-	if r := ix.Lookup("hello-world", "/robots.txt"); !r.Found || string(r.Body) != "STACK-ROBOTS" {
+	if r := ix.Lookup("", "hello-world", "/robots.txt"); !r.Found || string(r.Body) != "STACK-ROBOTS" {
 		t.Fatalf("routed stack robots; %+v", r)
 	}
-	if r := ix.Lookup("", "/robots.txt"); !r.Found || string(r.Body) != "CHASSIS-ROBOTS" {
+	if r := ix.Lookup("", "","/robots.txt"); !r.Found || string(r.Body) != "CHASSIS-ROBOTS" {
 		t.Fatalf("unrouted → chassis robots; %+v", r)
 	}
-	if r := ix.Lookup("other", "/robots.txt"); !r.Found || string(r.Body) != "CHASSIS-ROBOTS" {
+	if r := ix.Lookup("", "other", "/robots.txt"); !r.Found || string(r.Body) != "CHASSIS-ROBOTS" {
 		t.Fatalf("stack w/o override → chassis; %+v", r)
 	}
 }
@@ -65,27 +65,27 @@ func TestIndexLayerPrecedence(t *testing.T) {
 func TestIndexDirectoryOwnership(t *testing.T) {
 	ix := newIdx(t, workspace(t))
 
-	if r := ix.Lookup("", "/assets/app.css"); !r.Found || string(r.Body) != "body{}" {
+	if r := ix.Lookup("", "","/assets/app.css"); !r.Found || string(r.Body) != "body{}" {
 		t.Fatalf("assets file must serve; %+v", r)
 	}
-	if r := ix.Lookup("", "/assets/missing.js"); r.Found || !r.Owned {
+	if r := ix.Lookup("", "","/assets/missing.js"); r.Found || !r.Owned {
 		t.Fatalf("miss under owned dir must be Owned (404), got %+v", r)
 	}
-	if r := ix.Lookup("", "/assets/deep/nope.png"); r.Found || !r.Owned {
+	if r := ix.Lookup("", "","/assets/deep/nope.png"); r.Found || !r.Owned {
 		t.Fatalf("deep miss under owned dir must be Owned; %+v", r)
 	}
 	// Top-level (no directory) is NEVER prefix-owned — needs an explicit
 	// file. A missing top-level path passes through.
-	if r := ix.Lookup("", "/nope.txt"); r.Found || r.Owned {
+	if r := ix.Lookup("", "","/nope.txt"); r.Found || r.Owned {
 		t.Fatalf("missing top-level must pass through; %+v", r)
 	}
-	if r := ix.Lookup("", "/"); r.Found || r.Owned {
+	if r := ix.Lookup("", "","/"); r.Found || r.Owned {
 		t.Fatalf("root must pass through; %+v", r)
 	}
 }
 
 func TestIndexNestedContentType(t *testing.T) {
-	if r := newIdx(t, workspace(t)).Lookup("", "/assets/app.css"); r.Ctype != "text/css; charset=utf-8" {
+	if r := newIdx(t, workspace(t)).Lookup("", "","/assets/app.css"); r.Ctype != "text/css; charset=utf-8" {
 		t.Fatalf("content-type=%q", r.Ctype)
 	}
 }
@@ -127,14 +127,14 @@ func TestIndexRejectsTraversal(t *testing.T) {
 	for _, p := range []string{
 		"", "/..", "/../FILES/robots.txt", "/.hidden", "//etc/passwd",
 	} {
-		if r := ix.Lookup("", p); r.Found || r.Owned {
+		if r := ix.Lookup("", "",p); r.Found || r.Owned {
 			t.Fatalf("unsafe %q must not resolve; %+v", p, r)
 		}
 	}
 	// `..` is normalized (rooted path.Clean) — it can't escape, so this
 	// resolves to the in-root /robots.txt, which is correct HTTP path
 	// normalization, not a traversal.
-	if r := ix.Lookup("", "/assets/../../robots.txt"); !r.Found || string(r.Body) != "CHASSIS-ROBOTS" {
+	if r := ix.Lookup("", "","/assets/../../robots.txt"); !r.Found || string(r.Body) != "CHASSIS-ROBOTS" {
 		t.Fatalf("normalized path should resolve to /robots.txt; %+v", r)
 	}
 }
@@ -152,10 +152,10 @@ func TestIndexOversizeSkipped(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	ix := newIdx(t, root)
-	if r := ix.Lookup("", "/big.bin"); r.Found {
+	if r := ix.Lookup("", "","/big.bin"); r.Found {
 		t.Fatal("over-cap file must be skipped")
 	}
-	if r := ix.Lookup("", "/ok.txt"); !r.Found || string(r.Body) != "ok" {
+	if r := ix.Lookup("", "","/ok.txt"); !r.Found || string(r.Body) != "ok" {
 		t.Fatalf("within-cap sibling must serve; %+v", r)
 	}
 }
@@ -166,14 +166,14 @@ func TestIndexRebuild(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	ix := newIdx(t, root)
-	if r := ix.Lookup("", "/late.txt"); r.Found {
+	if r := ix.Lookup("", "","/late.txt"); r.Found {
 		t.Fatal("not created yet")
 	}
 	if err := os.WriteFile(filepath.Join(root, "FILES", "late.txt"), []byte("late"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	ix.Rebuild()
-	if r := ix.Lookup("", "/late.txt"); !r.Found || string(r.Body) != "late" {
+	if r := ix.Lookup("", "","/late.txt"); !r.Found || string(r.Body) != "late" {
 		t.Fatalf("Rebuild must pick up new file; %+v", r)
 	}
 }
