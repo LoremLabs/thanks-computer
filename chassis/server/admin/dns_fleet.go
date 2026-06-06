@@ -41,6 +41,9 @@ import (
 // Control-plane only (the caller gates on the 'admin' personality +
 // --structured-dns-self). No-op when the zone already exists.
 func (c *Controller) EnsureStructuredSuffixZone(ctx context.Context) error {
+	if c.tenants == nil || c.pu == nil || c.pu.RuntimeDB == nil {
+		return errors.New("structured-suffix zone: store not initialized (call after Start)")
+	}
 	suffix := normalizeSuffix(c.pu.Conf.StructuredHostSuffix)
 	if suffix == "" {
 		return nil
@@ -102,6 +105,9 @@ func (c *Controller) EnsureStructuredSuffixZone(ctx context.Context) error {
 // plane nodes sign with it and the dns head publishes its per-host records.
 // Control-plane only. Returns the number of hosts newly keyed.
 func (c *Controller) BackfillStructuredHostDKIM(ctx context.Context) (int, error) {
+	if c.tenants == nil || c.pu == nil || c.pu.RuntimeDB == nil {
+		return 0, errors.New("dkim backfill: store not initialized (call after Start)")
+	}
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
 		`SELECT hostname FROM tenant_hostnames
 		  WHERE created_by = ? AND revoked_at IS NULL AND dkim_private_pem = ''`,

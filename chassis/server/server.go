@@ -1131,27 +1131,6 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Wire the filecas store so activation can persist FILES/ asset bytes
 	// content-addressed. Nil-safe (gated on a configured store).
 	adminCtrl.SetFileCAS(fcas)
-	// Self-serve the structured-host suffix's DNS: seed (idempotent) the
-	// system-owned wildcard zone for --structured-host-suffix so the chassis is
-	// authoritative for e.g. stacks.thanks.computer. Control-plane only (admin
-	// personality) + opt-in (--structured-dns-self), run BEFORE controllers
-	// start so the dns head's initial snapshot includes it (the method reloads
-	// the mirror after the write). Data-plane nodes skip it and get the zone via
-	// fleet-sync.
-	if conf.StructuredDNSSelf && strings.TrimSpace(conf.StructuredHostSuffix) != "" &&
-		strings.Contains(conf.Personalities, "admin") {
-		if err := adminCtrl.EnsureStructuredSuffixZone(ctx); err != nil {
-			logger.Error("seed structured-suffix DNS zone failed", zap.Error(err))
-		}
-		// Backfill per-host DKIM keys for structured hosts minted before the
-		// 0017 key columns existed, so they sign + publish like freshly-minted
-		// ones. Idempotent (only keyless rows) → a no-op once the fleet is keyed.
-		if n, err := adminCtrl.BackfillStructuredHostDKIM(ctx); err != nil {
-			logger.Error("backfill structured-host DKIM keys failed", zap.Error(err))
-		} else if n > 0 {
-			logger.Info("backfilled per-host DKIM keys", zap.Int("count", n))
-		}
-	}
 	// LMTP head needs a MailResolver for per-recipient routing. The
 	// data-plane resolver (`*DBResolver` wrapping the yamlResolver)
 	// implements MailResolver directly. Assigning through the
@@ -1231,6 +1210,27 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Start all controllers.
 	for _, c := range controllers {
 		c.Start()
+	}
+
+	// Self-serve the structured-host suffix's DNS: seed (idempotent) the
+	// system-owned wildcard zone for --structured-host-suffix so the chassis is
+	// authoritative for e.g. stacks.thanks.computer, and backfill per-host DKIM
+	// keys for structured hosts minted before the 0017 columns. Runs AFTER
+	// Start() — the admin controller's tenants store and the dns head's OnReload
+	// are wired there; EnsureStructuredSuffixZone / Backfill reload the mirror,
+	// so the dns snapshot rebuilds with the zone + per-host records. Control-
+	// plane only (admin personality) + opt-in (--structured-dns-self); data-
+	// plane nodes skip it and pick up the zone via fleet-sync.
+	if conf.StructuredDNSSelf && strings.TrimSpace(conf.StructuredHostSuffix) != "" &&
+		strings.Contains(conf.Personalities, "admin") {
+		if err := adminCtrl.EnsureStructuredSuffixZone(ctx); err != nil {
+			logger.Error("seed structured-suffix DNS zone failed", zap.Error(err))
+		}
+		if n, err := adminCtrl.BackfillStructuredHostDKIM(ctx); err != nil {
+			logger.Error("backfill structured-host DKIM keys failed", zap.Error(err))
+		} else if n > 0 {
+			logger.Info("backfilled per-host DKIM keys", zap.Int("count", n))
+		}
 	}
 
 	// Bundled TLS: with the dns head's initial zone snapshot now built,
