@@ -24,6 +24,7 @@ type stackDrift struct {
 	Note      string // "in sync" / "chassis ahead by 2 …" / "chassis rolled back N …" / "no local state recorded — run `txco pull <stack>`"
 	URL       string // reachable stack URL, e.g. "https://app.acme.com" (empty when none/unknown)
 	DevURL    string // reachable URL on the local `txco dev` chassis (empty when no dev run is known)
+	MailPath  string // inbound mail pattern for _mail stacks, e.g. "*@acme.com" (empty otherwise)
 	Divergent bool
 }
 
@@ -110,20 +111,47 @@ func decorateStackURLs(ctx context.Context, c *client.Client, drifts []stackDrif
 	if err != nil {
 		return
 	}
+	// best[stack] = the preferred hostname bound to that stack. Key "" holds
+	// the best mail-only hostname (h.Stack==""), used for the bare _mail
+	// stack's inbound path — it is never used as an HTTP URL (guarded below).
 	best := map[string]client.Hostname{}
 	for _, h := range hosts {
-		if h.Stack == "" || h.RevokedAt != "" {
-			continue // unattached or revoked — not a usable stack URL
+		if h.RevokedAt != "" {
+			continue // revoked — not usable
 		}
 		if cur, ok := best[h.Stack]; !ok || betterHostname(h, cur) {
 			best[h.Stack] = h
 		}
 	}
 	for i := range drifts {
-		if h, ok := best[drifts[i].Stack]; ok {
+		if h, ok := best[drifts[i].Stack]; ok && drifts[i].Stack != "" {
 			drifts[i].URL = "https://" + h.Hostname
 		}
+		// Inbound mail path for _mail-type stacks. Strategy-B routing sends
+		// *@<verified-domain> to <hostname.stack>/_mail (nested) or, for a
+		// mail-only domain (h.Stack==""), to <tenant>/_mail. So a stack
+		// "X/_mail" is reachable at *@<host> for hostnames bound to "X"; the
+		// bare "_mail" stack catches the mail-only domains.
+		if parent, isMail := mailParent(drifts[i].Stack); isMail {
+			if h, ok := best[parent]; ok {
+				drifts[i].MailPath = "*@" + h.Hostname
+			}
+		}
 	}
+}
+
+// mailParent reports whether stack is a _mail-type stack and, if so, the
+// HTTP/parent stack whose verified hostnames deliver mail to it.
+// "web/_mail" → "web"; the bare "_mail" → "" (the tenant's mail-only
+// domains). Anything else → ("", false).
+func mailParent(stack string) (parent string, isMail bool) {
+	if stack == "_mail" {
+		return "", true
+	}
+	if strings.HasSuffix(stack, "/_mail") {
+		return strings.TrimSuffix(stack, "/_mail"), true
+	}
+	return "", false
 }
 
 // betterHostname reports whether a should be preferred over b as the
@@ -167,6 +195,7 @@ type stackDriftJSON struct {
 	Local     string `json:"local"`
 	URL       string `json:"url,omitempty"`
 	DevURL    string `json:"dev_url,omitempty"`
+	MailPath  string `json:"mail_path,omitempty"`
 	Note      string `json:"note"`
 	Divergent bool   `json:"divergent"`
 }
@@ -177,7 +206,8 @@ func driftsToJSON(drifts []stackDrift) []stackDriftJSON {
 	for _, d := range drifts {
 		out = append(out, stackDriftJSON{
 			Stack: d.Stack, Remote: d.Remote, Local: d.Local,
-			URL: d.URL, DevURL: d.DevURL, Note: d.Note, Divergent: d.Divergent,
+			URL: d.URL, DevURL: d.DevURL, MailPath: d.MailPath,
+			Note: d.Note, Divergent: d.Divergent,
 		})
 	}
 	return out
@@ -267,14 +297,21 @@ func printDriftTable(w io.Writer, drifts []stackDrift) bool {
 		if d.DevURL != "" {
 			devSeg = "  dev=" + cyan + d.DevURL + reset
 		}
+		// Trailing mail= segment: the inbound *@host pattern for _mail
+		// stacks. Like dev=, it's appended after the note (unaligned), so
+		// it never disturbs the column math.
+		mailSeg := ""
+		if d.MailPath != "" {
+			mailSeg = "  mail=" + cyan + d.MailPath + reset
+		}
 
-		fmt.Fprintf(w, "%s%s%s%s%s%s  remote=%s  local=%s%s  %s→ %s%s%s\n",
+		fmt.Fprintf(w, "%s%s%s%s%s%s  remote=%s  local=%s%s  %s→ %s%s%s%s\n",
 			markerC, marker, reset,
 			bold, padRight(d.Stack, nameW), reset,
 			padRight(d.Remote, remoteW),
 			padRight(d.Local, localW),
 			urlSeg,
-			noteC, d.Note, reset, devSeg)
+			noteC, d.Note, reset, devSeg, mailSeg)
 	}
 	return any
 }
