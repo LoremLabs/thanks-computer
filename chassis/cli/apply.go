@@ -291,6 +291,12 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	results := make([]deployResult, 0, len(stacks))
 	for _, stack := range sortedKeys(stacks) {
 		files := opsToFiles(stacks[stack])
+		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
+		if aerr != nil {
+			fmt.Fprintf(stderr, "%s: %s: collect FILES/: %v\n", cmd, stack, aerr)
+			return 1
+		}
+		files = append(files, assets...)
 		versionNumber, err := c.CreateDraft(ctx, stack, "active")
 		if err != nil {
 			// Name the EFFECTIVE endpoint actually dialed — i.e.
@@ -438,6 +444,59 @@ func opsToFiles(ops []bundle.Op) []client.StackFile {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
+}
+
+// collectFileAssets walks <stackDir>/FILES/** and returns one StackFile per
+// asset, path-prefixed "FILES/<rel>" (slash-separated). These are the
+// tenant's static assets — served by txco://static / content-addressed in
+// the filecas store on activation — which the resonator bundle (opsToFiles)
+// does not carry. Callers append the result to opsToFiles output so apply /
+// dev publish assets alongside rules. Dotfiles/dotdirs and irregular files
+// (symlinks) are skipped (mirrors the static index's "."-prefix exclusion
+// and collectStackFiles). An absent FILES/ dir yields nil, no error.
+//
+// NOTE: content travels as a JSON/TEXT string, so non-UTF-8 binary assets
+// can be mangled on this path (the documented dev/inline limitation — the
+// fleet S3 path carries raw bytes). Keep workspace FILES/ textual until the
+// stack_files column is BLOB.
+func collectFileAssets(stackDir string) ([]client.StackFile, error) {
+	filesDir := filepath.Join(stackDir, "FILES")
+	info, err := os.Stat(filesDir)
+	if err != nil || !info.IsDir() {
+		return nil, nil // no FILES/ → nothing to collect
+	}
+	var out []client.StackFile
+	walkErr := filepath.WalkDir(filesDir, func(p string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			if p != filesDir && strings.HasPrefix(filepath.Base(p), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() || strings.HasPrefix(filepath.Base(p), ".") {
+			return nil
+		}
+		rel, rerr := filepath.Rel(stackDir, p) // → "FILES/<...>"
+		if rerr != nil {
+			return rerr
+		}
+		content, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		out = append(out, client.StackFile{
+			Path:    filepath.ToSlash(rel),
+			Content: string(content),
+		})
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return out, nil
 }
 
 // localManifestHash mirrors the chassis-side hash at

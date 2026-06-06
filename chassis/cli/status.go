@@ -87,6 +87,17 @@ Flags:
 	if len(drifts) > 0 {
 		decorateStackURLs(context.Background(), c, drifts)
 	}
+	// Surface the local `txco dev` URL when one was recorded for this
+	// workspace (dev writes .txco/dev/urls.json after apply). status targets
+	// the remote chassis, so this is the only way it learns the dev
+	// hostname — a random per-stack structured host. Best-effort.
+	if devURLs := readDevURLs(dir); len(devURLs) > 0 {
+		for i := range drifts {
+			if u, ok := devURLs[drifts[i].Stack]; ok {
+				drifts[i].DevURL = u
+			}
+		}
+	}
 
 	if *jsonOut {
 		return emitStatusJSON(stdout, stderr, drifts)

@@ -23,6 +23,7 @@ type stackDrift struct {
 	Local     string // "v14 (clean)" / "v14 (edited since pull)" / "untracked"
 	Note      string // "in sync" / "chassis ahead by 2 …" / "chassis rolled back N …" / "no local state recorded — run `txco pull <stack>`"
 	URL       string // reachable stack URL, e.g. "https://app.acme.com" (empty when none/unknown)
+	DevURL    string // reachable URL on the local `txco dev` chassis (empty when no dev run is known)
 	Divergent bool
 }
 
@@ -165,6 +166,7 @@ type stackDriftJSON struct {
 	Remote    string `json:"remote"`
 	Local     string `json:"local"`
 	URL       string `json:"url,omitempty"`
+	DevURL    string `json:"dev_url,omitempty"`
 	Note      string `json:"note"`
 	Divergent bool   `json:"divergent"`
 }
@@ -175,7 +177,7 @@ func driftsToJSON(drifts []stackDrift) []stackDriftJSON {
 	for _, d := range drifts {
 		out = append(out, stackDriftJSON{
 			Stack: d.Stack, Remote: d.Remote, Local: d.Local,
-			URL: d.URL, Note: d.Note, Divergent: d.Divergent,
+			URL: d.URL, DevURL: d.DevURL, Note: d.Note, Divergent: d.Divergent,
 		})
 	}
 	return out
@@ -257,13 +259,22 @@ func printDriftTable(w io.Writer, drifts []stackDrift) bool {
 			urlSeg = "  " + colored + strings.Repeat(" ", pad)
 		}
 
-		fmt.Fprintf(w, "%s%s%s%s%s%s  remote=%s  local=%s%s  %s→ %s%s\n",
+		// Trailing dev= segment: the reachable URL on the local `txco dev`
+		// chassis (from .txco/dev/urls.json). Appended after the note,
+		// unaligned, so it never disturbs the column math and is absent on
+		// non-dev/`txco diff` rows.
+		devSeg := ""
+		if d.DevURL != "" {
+			devSeg = "  dev=" + cyan + d.DevURL + reset
+		}
+
+		fmt.Fprintf(w, "%s%s%s%s%s%s  remote=%s  local=%s%s  %s→ %s%s%s\n",
 			markerC, marker, reset,
 			bold, padRight(d.Stack, nameW), reset,
 			padRight(d.Remote, remoteW),
 			padRight(d.Local, localW),
 			urlSeg,
-			noteC, d.Note, reset)
+			noteC, d.Note, reset, devSeg)
 	}
 	return any
 }

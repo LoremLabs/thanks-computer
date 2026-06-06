@@ -291,6 +291,10 @@ Flags:
 		fmt.Fprintf(stdout, "[txco] chassis state preserved (run `txco apply` to push local OPS/, or `txco dev --apply` to push on startup)\n")
 	}
 
+	// Resolve + record each stack's reachable dev URL (structured hostname +
+	// web port) so they're visible here and to a separate `txco status`.
+	recordDevURLs(ctx, resolved, dir, webURL, stdout)
+
 	// 5b. Optional: spawn the admin-ui Vite dev server. Non-fatal —
 	// if anything's missing (admin-ui/, node_modules, package manager,
 	// port) we print a clear note and continue. The chassis still
@@ -445,6 +449,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 	skipped := 0
 	for _, stack := range sortedKeys(stacks) {
 		files := opsToFiles(stacks[stack])
+		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
+		if aerr != nil {
+			return fmt.Errorf("%s: collect FILES/: %w", stack, aerr)
+		}
+		files = append(files, assets...)
 		localHash := localManifestHash(files)
 
 		// Fast paths against the chassis's current active version:
@@ -555,6 +564,52 @@ func newDevWatchState() *devWatchState {
 	return &devWatchState{drafts: map[string]int64{}}
 }
 
+// recordDevURLs queries the dev chassis for each stack's structured
+// hostname, writes stack→URL to .txco/dev/urls.json (so a separate
+// `txco status` can surface the dev URL), and prints the reachable URLs.
+// Best-effort: every failure is non-fatal — the URLs are a convenience.
+// No-op without a spawned chassis (webURL == "").
+func recordDevURLs(ctx context.Context, resolved ResolvedTarget, dir, webURL string, stdout io.Writer) {
+	if webURL == "" {
+		return
+	}
+	c := client.New(resolved.AsClientTarget())
+	hosts, err := c.ListHostnames(ctx, false)
+	if err != nil {
+		return
+	}
+	best := map[string]client.Hostname{}
+	for _, h := range hosts {
+		if h.Stack == "" || h.RevokedAt != "" {
+			continue
+		}
+		if cur, ok := best[h.Stack]; !ok || betterHostname(h, cur) {
+			best[h.Stack] = h
+		}
+	}
+	urls := map[string]string{}
+	for stack, h := range best {
+		if u := devStackURL(webURL, h.Hostname); u != "" {
+			urls[stack] = u
+		}
+	}
+	if len(urls) == 0 {
+		return
+	}
+	if err := writeDevURLs(dir, urls); err != nil {
+		fmt.Fprintf(stdout, "[txco] warn: record dev urls: %v\n", err)
+	}
+	stacks := make([]string, 0, len(urls))
+	for s := range urls {
+		stacks = append(stacks, s)
+	}
+	sort.Strings(stacks)
+	fmt.Fprintln(stdout, "[txco] stack URLs (this dev chassis):")
+	for _, s := range stacks {
+		fmt.Fprintf(stdout, "[txco]   %s → %s\n", s, urls[s])
+	}
+}
+
 // devApplyToDraft is the watcher's push path. It maintains one
 // sticky draft per stack and PUTs the latest file set to it on every
 // fire — no activation. If the tracked draft has been activated out
@@ -589,6 +644,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 	defer state.mu.Unlock()
 	for _, stack := range sortedKeys(stacks) {
 		files := opsToFiles(stacks[stack])
+		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
+		if aerr != nil {
+			return fmt.Errorf("%s: collect FILES/: %w", stack, aerr)
+		}
+		files = append(files, assets...)
 		if n, ok := state.drafts[stack]; ok {
 			if _, err := c.PutDraftFiles(ctx, stack, n, files); err == nil {
 				fmt.Fprintf(stdout, "[watch] %s v%d updated (%d files)\n", stack, n, len(files))
@@ -697,6 +757,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	repoDir := filepath.Join(devDir, "repo")
 	continuationsDir := filepath.Join(devDir, "continuations")
 	artifactsDir := filepath.Join(devDir, "artifacts")
+	filecasDir := filepath.Join(devDir, "filecas")
 	feedDir := filepath.Join(devDir, "feed")
 	secretKeyPath := filepath.Join(devDir, "secrets", "txco-master.key")
 
@@ -715,6 +776,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		"TXCO_REPOSTORE_FILE_DIR=" + repoDir,
 		"TXCO_CONTINUATION_STORE_FILE_DIR=" + continuationsDir,
 		"TXCO_ARTIFACT_STORE_FILE_DIR=" + artifactsDir,
+		"TXCO_FILECAS_STORE_FILE_DIR=" + filecasDir,
 		"TXCO_FEED_SOURCE_FILE_DIR=" + feedDir,
 		"TXCO_SECRET_MASTER_KEY=" + secretKeyPath,
 	}
