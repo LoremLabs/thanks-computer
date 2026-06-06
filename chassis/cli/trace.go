@@ -37,6 +37,7 @@ func runTrace(args []string, stdout, stderr io.Writer) int {
 	user := fs.String("user", "", "basic auth user (overrides the target's user)")
 	pass := fs.String("pass", "", "basic auth password (overrides the target's pass)")
 	profile := fs.String("profile", "", fmt.Sprintf("signing profile (TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
+	tenant := fs.String("tenant", "", "tenant slug to read traces from (TXCO_TENANT, then the profile's default tenant)")
 	asJSON := fs.Bool("json", false, "print the aggregate JSON response as-is")
 	verbose := fs.BoolP("verbose", "v", false, "include in/out payloads (requires --trace-mode=full)")
 	step := fs.String("step", "", "drill into a single step (e.g. \"100\" or \"100-hello\")")
@@ -73,6 +74,13 @@ Flags:
 	}
 
 	t := resolveTarget(dir, *target, *addr, *user, *pass, *profile)
+	// Scope trace reads to a tenant the caller actually belongs to — the
+	// same resolution every other tenant-scoped command uses (--tenant,
+	// then TXCO_TENANT, then the active profile's default_tenant). Without
+	// this the client falls back to the seeded "default" tenant, where a
+	// non-super-admin has no membership → 403 capability_denied even though
+	// they can read traces in their own tenant.
+	t.Tenant = resolveTenant(*tenant, *profile)
 	c := client.New(t)
 	// Trace reads are tenant-scoped by default (the caller's membership caps
 	// apply, like every other CLI command). A super-admin should see every
