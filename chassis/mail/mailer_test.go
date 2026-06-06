@@ -26,7 +26,7 @@ var testDKIMPriv, testDKIMPub = func() (string, string) {
 
 const testDDL = `
 CREATE TABLE tenants (tenant_id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT, created_at TEXT NOT NULL, revoked_at TEXT);
-CREATE TABLE tenant_hostnames (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, tenant_id TEXT NOT NULL, stack TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT, revoked_at TEXT, verified_at TEXT);
+CREATE TABLE tenant_hostnames (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, tenant_id TEXT NOT NULL, stack TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT, revoked_at TEXT, verified_at TEXT, dkim_selector TEXT NOT NULL DEFAULT '', dkim_private_pem TEXT NOT NULL DEFAULT '', dkim_public_b64 TEXT NOT NULL DEFAULT '');
 CREATE TABLE mail_campaign_sends (tenant_id TEXT NOT NULL, campaign TEXT NOT NULL, recipient TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'claimed', message_id TEXT NOT NULL DEFAULT '', sent_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (tenant_id, campaign, recipient));
 CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, origin TEXT NOT NULL, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT NOT NULL DEFAULT 'pattern', created_at TEXT NOT NULL, created_by TEXT, updated_at TEXT NOT NULL, revoked_at TEXT, dkim_selector TEXT NOT NULL DEFAULT '', dkim_private_pem TEXT NOT NULL DEFAULT '', dkim_public_b64 TEXT NOT NULL DEFAULT '');`
 
@@ -68,15 +68,22 @@ func newTestDB(t *testing.T) *sql.DB {
 	}
 	mustExec(t, db, `INSERT INTO tenants VALUES('tnt_acme','acme','acme','t',NULL)`)
 	// acme.com: verified. unv.acme.com: unverified. gone.acme.com: revoked.
-	mustExec(t, db, `INSERT INTO tenant_hostnames VALUES('h1','acme.com','tnt_acme','web','t','op',NULL,'2026-01-01T00:00:00Z')`)
-	mustExec(t, db, `INSERT INTO tenant_hostnames VALUES('h2','unv.acme.com','tnt_acme','web','t','op',NULL,NULL)`)
-	mustExec(t, db, `INSERT INTO tenant_hostnames VALUES('h3','gone.acme.com','tnt_acme','web','t','op','2026-02-01T00:00:00Z','2026-01-01T00:00:00Z')`)
+	hn := `INSERT INTO tenant_hostnames(id,hostname,tenant_id,stack,created_at,created_by,revoked_at,verified_at) VALUES`
+	mustExec(t, db, hn+`('h1','acme.com','tnt_acme','web','t','op',NULL,'2026-01-01T00:00:00Z')`)
+	mustExec(t, db, hn+`('h2','unv.acme.com','tnt_acme','web','t','op',NULL,NULL)`)
+	mustExec(t, db, hn+`('h3','gone.acme.com','tnt_acme','web','t','op','2026-02-01T00:00:00Z','2026-01-01T00:00:00Z')`)
 	// zoned.example: acme serves DNS for it (active zone) but has NO verified
 	// hostname row — DNS delegation alone makes it a valid sender domain. Carries
 	// a DKIM key so the signing path is exercised.
 	if _, err := db.Exec(`INSERT INTO dns_zones(id,tenant_id,origin,mname,rname,created_at,updated_at,dkim_selector,dkim_private_pem,dkim_public_b64)
 		VALUES('dz1','tnt_acme','zoned.example','ns1','h','t','t','txco',?,?)`, testDKIMPriv, testDKIMPub); err != nil {
 		t.Fatalf("seed zone: %v", err)
+	}
+	// A chassis-minted structured host with its OWN per-host DKIM key — signs
+	// d=<host> (reputation isolation), independent of any dns_zones key.
+	if _, err := db.Exec(`INSERT INTO tenant_hostnames(id,hostname,tenant_id,stack,created_at,created_by,verified_at,dkim_selector,dkim_private_pem,dkim_public_b64)
+		VALUES('h4','web-abc.struct.example','tnt_acme','web','t','system:structured-host','t','txco',?,?)`, testDKIMPriv, testDKIMPub); err != nil {
+		t.Fatalf("seed structured host: %v", err)
 	}
 	return db
 }
@@ -305,6 +312,26 @@ func TestSendDKIMSigns(t *testing.T) {
 	}
 	if !strings.Contains(msg, "d=zoned.example") || !strings.Contains(msg, "s=txco") {
 		t.Fatalf("DKIM-Signature d=/s= wrong:\n%s", msg)
+	}
+}
+
+func TestSendDKIMSignsPerHostStructuredHost(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	// from a structured host with its own per-host key → d=<host>, not a zone.
+	in := env(t, map[string]any{
+		"to": "x@example.com", "subject": "Hi", "body": "<p>hi</p>", "from": "ooo@web-abc.struct.example",
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatal(err)
+	}
+	if len(sub.calls) != 1 {
+		t.Fatalf("calls=%d want 1", len(sub.calls))
+	}
+	msg := string(sub.calls[0].msg)
+	if !strings.Contains(msg, "DKIM-Signature:") || !strings.Contains(msg, "d=web-abc.struct.example") {
+		t.Fatalf("per-host signing wrong (want d=<host>):\n%s", msg)
 	}
 }
 

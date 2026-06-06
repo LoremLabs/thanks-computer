@@ -62,7 +62,10 @@ CREATE TABLE tenant_hostnames (
 	created_at  TEXT NOT NULL,
 	created_by  TEXT,
 	revoked_at  TEXT,
-	verified_at TEXT
+	verified_at TEXT,
+	dkim_selector    TEXT NOT NULL DEFAULT '',
+	dkim_private_pem TEXT NOT NULL DEFAULT '',
+	dkim_public_b64  TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX tenant_hostnames_active_hostname_idx
     ON tenant_hostnames(hostname)

@@ -36,7 +36,10 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 			created_at  TEXT NOT NULL,
 			created_by  TEXT,
 			revoked_at  TEXT,
-			verified_at TEXT
+			verified_at TEXT,
+			dkim_selector    TEXT NOT NULL DEFAULT '',
+			dkim_private_pem TEXT NOT NULL DEFAULT '',
+			dkim_public_b64  TEXT NOT NULL DEFAULT ''
 		);
 		CREATE UNIQUE INDEX tenant_hostnames_active_hostname_idx
 		    ON tenant_hostnames(hostname)
@@ -208,9 +211,9 @@ func TestCreateHostnameRoundTrip(t *testing.T) {
 	mustCreateTenant(t, s, "tnt_a", "alpha")
 
 	got, err := s.CreateHostname(ctx, Hostname{
-		Hostname: "Foo.Local",
-		TenantID: "tnt_a",
-		Stack:    "alpha/web",
+		Hostname:  "Foo.Local",
+		TenantID:  "tnt_a",
+		Stack:     "alpha/web",
 		CreatedBy: "actor_admin",
 	})
 	if err != nil {

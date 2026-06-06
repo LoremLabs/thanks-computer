@@ -179,6 +179,19 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 			for _, rr := range synthesize(z, eff, stacks) {
 				z.add(rr)
 			}
+			// Default-suffix zone: per-structured-host DKIM/DMARC TXT
+			// (reputation isolation — each host signs d=<host> with its own
+			// key). Exact owners, so they win over the wildcard from
+			// synthesize(). One filtered query per reload (see scale note).
+			if eff.StructuredSuffix != "" && z.origin == eff.StructuredSuffix {
+				stTTL := eff.TTL
+				if stTTL == 0 {
+					stTTL = z.defaultTTL
+				}
+				for _, rr := range perHostMailRRs(db, z.origin, stTTL, logger) {
+					z.add(rr)
+				}
+			}
 		}
 
 		// Materialized records: in pattern mode the FIRST record for a
@@ -367,6 +380,26 @@ func (s *ZoneSnapshot) Lookup(q dns.Question) (answer, ns []dns.RR, rcode int) {
 		return nil, []dns.RR{z.soa}, dns.RcodeSuccess
 	}
 	if z.names[qname] {
+		return nil, []dns.RR{z.soa}, dns.RcodeSuccess
+	}
+	// RFC 4592 wildcard: the queried name has no exact node, so synthesize from
+	// the zone's `*.<origin>` RRset if present (the default-suffix zone's
+	// wildcard A/MX/SPF). Answers carry the QUERIED name as owner — copy the
+	// stored RR; never mutate the shared snapshot. Exact per-host/apex records
+	// are matched above, so they always win. (Simplification: we don't model a
+	// closer-encloser below an existing non-wildcard node — such queries don't
+	// arise for structured hosts.)
+	if byType, ok := z.rr["*."+z.originFQDN]; ok {
+		if rrs := byType[q.Qtype]; len(rrs) > 0 {
+			out := make([]dns.RR, 0, len(rrs))
+			for _, rr := range rrs {
+				cp := dns.Copy(rr)
+				cp.Header().Name = qname
+				out = append(out, cp)
+			}
+			return out, nil, dns.RcodeSuccess
+		}
+		// Wildcard owner exists but not this type → NODATA.
 		return nil, []dns.RR{z.soa}, dns.RcodeSuccess
 	}
 	return nil, []dns.RR{z.soa}, dns.RcodeNameError

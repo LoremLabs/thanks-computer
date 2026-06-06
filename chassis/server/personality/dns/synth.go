@@ -7,10 +7,56 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
+
+// perHostMailRRs builds the per-structured-host DKIM + DMARC TXT records for
+// the default-suffix zone (origin): each chassis-minted host under the suffix
+// gets its OWN `<selector>._domainkey.<host>` (public key) + `_dmarc.<host>`,
+// so sending reputation is isolated per host. These are EXACT owners, so they
+// win over the zone's wildcard. Best-effort: a query/scan error logs and
+// yields what it has (the wildcard A/MX/SPF still serve). One filtered query
+// per snapshot build — fine at tens–hundreds of hosts (see plan scale note).
+func perHostMailRRs(db *sql.DB, origin string, ttl uint32, logger *zap.Logger) []dns.RR {
+	rows, err := db.Query(
+		`SELECT hostname, dkim_selector, dkim_public_b64 FROM tenant_hostnames
+		  WHERE created_by = ? AND revoked_at IS NULL AND dkim_public_b64 != ''
+		    AND hostname LIKE '%.' || ?`,
+		tenants.SystemStructuredHostCreatedBy, origin)
+	if err != nil {
+		logger.Warn("dns: per-host mail records query failed",
+			zap.String("zone", origin), zap.Error(err))
+		return nil
+	}
+	defer rows.Close()
+	var out []dns.RR
+	for rows.Next() {
+		var host, sel, pub string
+		if err := rows.Scan(&host, &sel, &pub); err != nil {
+			logger.Warn("dns: per-host mail record scan failed",
+				zap.String("zone", origin), zap.Error(err))
+			return out
+		}
+		host = strings.ToLower(strings.TrimSuffix(host, "."))
+		if sel == "" {
+			sel = tenants.DKIMSelector
+		}
+		if rr := mkTXT(dns.Fqdn(sel+"._domainkey."+host), ttl, "v=DKIM1; k=rsa; p="+pub); rr != nil {
+			out = append(out, rr)
+		}
+		if rr := mkTXT(dns.Fqdn("_dmarc."+host), ttl, "v=DMARC1; p=none"); rr != nil {
+			out = append(out, rr)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("dns: per-host mail records iterate failed",
+			zap.String("zone", origin), zap.Error(err))
+	}
+	return out
+}
 
 // SynthConfig parameterizes the synthesized record pattern for
 // delegated (pattern-mode) zones. Empty fields disable the
@@ -28,6 +74,12 @@ type SynthConfig struct {
 	// dns_records TXT (first-match-clears).
 	SPFOverride string // "" → auto-derive from EdgeIPs + mx
 	DMARC       string // e.g. "v=DMARC1; p=none"
+	// StructuredSuffix is the platform's default structured-host suffix
+	// (TXCO_STRUCTURED_HOST_SUFFIX), bare (no leading dot), e.g.
+	// "stacks.thanks.computer". When a served zone's origin equals it, the
+	// zone is the default-suffix zone and gets a WILDCARD RRset (so every
+	// <stack>-<rand>.<suffix> resolves) instead of per-stack records.
+	StructuredSuffix string
 }
 
 // SynthConfigFrom builds a SynthConfig from chassis config. Single
@@ -50,6 +102,8 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 		TTL:         uint32(ttl),
 		SPFOverride: strings.TrimSpace(conf.DNSSPF),
 		DMARC:       strings.TrimSpace(conf.DNSDMARC),
+		StructuredSuffix: strings.ToLower(strings.TrimSuffix(
+			strings.TrimPrefix(strings.TrimSpace(conf.StructuredHostSuffix), "."), ".")),
 	}
 }
 
@@ -98,10 +152,12 @@ func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
 		MXHost:      s.MXHost,
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
-		// dns_settings carries no mail-auth columns; keep the flag values so
-		// SPF/DMARC stay configured even when an operator sets a settings row.
-		SPFOverride: flagDefaults.SPFOverride,
-		DMARC:       flagDefaults.DMARC,
+		// dns_settings carries no mail-auth/suffix columns; keep the flag
+		// values so SPF/DMARC + the structured suffix stay configured even when
+		// an operator sets a settings row.
+		SPFOverride:      flagDefaults.SPFOverride,
+		DMARC:            flagDefaults.DMARC,
+		StructuredSuffix: flagDefaults.StructuredSuffix,
 	}
 }
 
@@ -160,6 +216,24 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 		if rr := mkTXT(owner, ttl, "v=DKIM1; k=rsa; p="+z.dkimPubB64); rr != nil {
 			out = append(out, rr)
 		}
+	}
+
+	// Default-suffix zone (the platform's structured-host suffix): a WILDCARD
+	// RRset so every <stack>-<rand>.<suffix> resolves + can send. A/MX are
+	// shared infra; SPF is the shared egress IP (per-host reputation isolation
+	// is via per-host DKIM — those records are added from the structured-host
+	// rows in BuildSnapshot, not here). Skip the per-stack loop: the random
+	// structured labels aren't StackLabels.
+	if cfg.StructuredSuffix != "" && z.origin == cfg.StructuredSuffix {
+		wild := dns.Fqdn("*." + z.origin)
+		out = append(out, mkAddrs(wild, ttl, cfg.EdgeIPs)...)
+		if rr := mkMX(wild, ttl, cfg.MXPriority, cfg.MXHost); rr != nil {
+			out = append(out, rr)
+		}
+		if rr := mkTXT(wild, ttl, effectiveSPF(cfg)); rr != nil {
+			out = append(out, rr)
+		}
+		return out
 	}
 
 	// Per active stack: <label>.<origin> A/AAAA + MX.

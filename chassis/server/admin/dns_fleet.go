@@ -22,7 +22,9 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -30,6 +32,173 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
+
+// EnsureStructuredSuffixZone idempotently creates the system-owned zone for the
+// configured structured-host suffix (e.g. stacks.thanks.computer), making the
+// chassis authoritative for it: synth emits a WILDCARD A/MX/SPF when a zone's
+// origin == the suffix, and per-host DKIM/DMARC come from the structured-host
+// rows. Reuses the zone create + fleet-publish + dbcache-reload path.
+// Control-plane only (the caller gates on the 'admin' personality +
+// --structured-dns-self). No-op when the zone already exists.
+func (c *Controller) EnsureStructuredSuffixZone(ctx context.Context) error {
+	suffix := normalizeSuffix(c.pu.Conf.StructuredHostSuffix)
+	if suffix == "" {
+		return nil
+	}
+	canon, ok := tenants.CanonicalizeHost(suffix)
+	if !ok || !tenants.IsValidHostname(canon) {
+		return fmt.Errorf("structured-suffix zone: invalid suffix %q", suffix)
+	}
+	if _, err := c.tenants.LookupActiveZone(ctx, tenants.SystemTenantID, canon); err == nil {
+		return nil // already seeded
+	} else if !errors.Is(err, tenants.ErrNotFound) {
+		return err
+	}
+	ns := firstNameserver(c.pu.Conf.DNSNameservers)
+	if ns == "" {
+		return fmt.Errorf("structured-suffix zone: --dns-nameservers required to seed %q", canon)
+	}
+	z := tenants.DNSZone{
+		ID:        tenants.NewZoneID(),
+		TenantID:  tenants.SystemTenantID,
+		Origin:    canon,
+		MName:     ns,
+		RName:     "hostmaster." + canon,
+		Mode:      "pattern",
+		CreatedBy: "system:structured-suffix",
+	}
+	tx, err := c.pu.RuntimeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := c.tenants.CreateZoneTx(ctx, tx, z); err != nil {
+		if errors.Is(err, tenants.ErrZoneExists) {
+			return nil
+		}
+		return err
+	}
+	if c.fleetEnabled() {
+		persisted, gerr := tenants.GetZoneByIDTx(ctx, tx, z.ID)
+		if gerr != nil {
+			return gerr
+		}
+		if err := c.fleetPublishZone(ctx, tx, persisted); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	c.pu.Logger.Info("seeded structured-suffix DNS zone", zap.String("origin", canon))
+	return c.pu.Dbc.Reload()
+}
+
+// BackfillStructuredHostDKIM mints a per-host DKIM keypair for every active
+// chassis-minted structured host that predates the per-host key columns (0017)
+// — created_by = structured-host with an empty key. Idempotent: hosts that
+// already have a key are skipped, so re-running (e.g. every boot) is a cheap
+// no-op once the fleet is keyed. Each updated row is fleet-published so data-
+// plane nodes sign with it and the dns head publishes its per-host records.
+// Control-plane only. Returns the number of hosts newly keyed.
+func (c *Controller) BackfillStructuredHostDKIM(ctx context.Context) (int, error) {
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
+		`SELECT hostname FROM tenant_hostnames
+		  WHERE created_by = ? AND revoked_at IS NULL AND dkim_private_pem = ''`,
+		tenants.SystemStructuredHostCreatedBy)
+	if err != nil {
+		return 0, err
+	}
+	var hosts []string
+	for rows.Next() {
+		var h string
+		if serr := rows.Scan(&h); serr != nil {
+			rows.Close()
+			return 0, serr
+		}
+		hosts = append(hosts, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	keyed := 0
+	for _, hostname := range hosts {
+		h, lerr := c.tenants.LookupActiveHostname(ctx, hostname)
+		if lerr != nil {
+			c.pu.Logger.Warn("dkim backfill: load host failed",
+				zap.String("hostname", hostname), zap.Error(lerr))
+			continue
+		}
+		if h.DKIMPrivatePEM != "" {
+			continue // raced — already keyed
+		}
+		priv, pub, gerr := tenants.GenerateDKIM()
+		if gerr != nil {
+			return keyed, gerr
+		}
+		h.DKIMSelector, h.DKIMPrivatePEM, h.DKIMPublicB64 = tenants.DKIMSelector, priv, pub
+
+		var ref, sum string
+		if c.fleetEnabled() {
+			r, s, ferr := c.fleetUploadHostnameUpsert(ctx, h)
+			if ferr != nil {
+				return keyed, ferr
+			}
+			ref, sum = r, s
+		}
+		tx, terr := c.pu.RuntimeDB.BeginTx(ctx, nil)
+		if terr != nil {
+			return keyed, terr
+		}
+		if _, uerr := tx.ExecContext(ctx,
+			`UPDATE tenant_hostnames SET dkim_selector = ?, dkim_private_pem = ?, dkim_public_b64 = ?
+			  WHERE id = ?`,
+			h.DKIMSelector, h.DKIMPrivatePEM, h.DKIMPublicB64, h.ID); uerr != nil {
+			_ = tx.Rollback()
+			return keyed, uerr
+		}
+		if c.fleetEnabled() {
+			if _, qerr := c.fleetQueueEvent(ctx, tx,
+				controlevent.TypeHostnameBound, h.TenantID, "", 0, 0, ref, sum); qerr != nil {
+				_ = tx.Rollback()
+				return keyed, qerr
+			}
+		}
+		if cerr := tx.Commit(); cerr != nil {
+			return keyed, cerr
+		}
+		keyed++
+	}
+	if keyed > 0 {
+		c.pu.Logger.Info("backfilled per-host DKIM keys for structured hosts", zap.Int("count", keyed))
+		if rerr := c.pu.Dbc.Reload(); rerr != nil {
+			return keyed, rerr
+		}
+	}
+	return keyed, nil
+}
+
+// normalizeSuffix lowercases + strips a leading "." and trailing "." from the
+// structured-host suffix so it can be compared to a canonical zone origin.
+func normalizeSuffix(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.TrimSuffix(strings.TrimPrefix(s, "."), ".")
+}
+
+// firstNameserver returns the first configured DNS nameserver (handling the
+// comma-CSV-in-one-element env quirk), or "".
+func firstNameserver(in []string) string {
+	for _, e := range in {
+		for _, p := range strings.Split(e, ",") {
+			if t := strings.TrimSpace(p); t != "" {
+				return t
+			}
+		}
+	}
+	return ""
+}
 
 // zoneHostTSLayout matches the RFC3339-UTC text the tenant_hostnames row
 // serializer (hostnameToRow) emits, so a minted-then-published row round-trips

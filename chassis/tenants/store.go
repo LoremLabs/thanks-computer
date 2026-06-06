@@ -46,6 +46,13 @@ type Hostname struct {
 	CreatedBy  string
 	RevokedAt  *time.Time
 	VerifiedAt *time.Time
+	// Per-host DKIM material (0017), set only on chassis-minted structured
+	// hosts (created_by = SystemStructuredHostCreatedBy). Empty for custom
+	// domains (which use their dns_zones key). Carried by the loaders + the
+	// fleet row builder so per-host signing/publishing stays consistent.
+	DKIMSelector   string
+	DKIMPrivatePEM string
+	DKIMPublicB64  string
 }
 
 // Challenge mirrors a tenant_hostname_challenges row — the proof-of-
@@ -270,13 +277,13 @@ func (s *Store) ListHostnames(ctx context.Context, tenantID string, includeRevok
 	var query string
 	if includeRevoked {
 		query = `SELECT id, hostname, tenant_id, stack, created_at,
-		                COALESCE(created_by, ''), revoked_at, verified_at
+		                COALESCE(created_by, ''), revoked_at, verified_at, dkim_selector, dkim_private_pem, dkim_public_b64
 		           FROM tenant_hostnames
 		          WHERE tenant_id = ?
 		          ORDER BY created_at DESC`
 	} else {
 		query = `SELECT id, hostname, tenant_id, stack, created_at,
-		                COALESCE(created_by, ''), revoked_at, verified_at
+		                COALESCE(created_by, ''), revoked_at, verified_at, dkim_selector, dkim_private_pem, dkim_public_b64
 		           FROM tenant_hostnames
 		          WHERE tenant_id = ? AND revoked_at IS NULL
 		          ORDER BY hostname`
@@ -358,13 +365,13 @@ func (s *Store) LookupActiveHostname(ctx context.Context, hostname string) (Host
 	}
 	row := s.DB.QueryRowContext(ctx,
 		`SELECT id, hostname, tenant_id, stack, created_at,
-		        COALESCE(created_by, ''), revoked_at, verified_at
+		        COALESCE(created_by, ''), revoked_at, verified_at, dkim_selector, dkim_private_pem, dkim_public_b64
 		   FROM tenant_hostnames
 		  WHERE hostname = ? AND revoked_at IS NULL`, canon)
 	var h Hostname
 	var revoked, verified sql.NullString
 	var created string
-	if err := row.Scan(&h.ID, &h.Hostname, &h.TenantID, &h.Stack, &created, &h.CreatedBy, &revoked, &verified); err != nil {
+	if err := row.Scan(&h.ID, &h.Hostname, &h.TenantID, &h.Stack, &created, &h.CreatedBy, &revoked, &verified, &h.DKIMSelector, &h.DKIMPrivatePEM, &h.DKIMPublicB64); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Hostname{}, ErrNotFound
 		}
@@ -386,7 +393,7 @@ func scanHostname(rows *sql.Rows) (Hostname, error) {
 	var h Hostname
 	var revoked, verified sql.NullString
 	var created string
-	if err := rows.Scan(&h.ID, &h.Hostname, &h.TenantID, &h.Stack, &created, &h.CreatedBy, &revoked, &verified); err != nil {
+	if err := rows.Scan(&h.ID, &h.Hostname, &h.TenantID, &h.Stack, &created, &h.CreatedBy, &revoked, &verified, &h.DKIMSelector, &h.DKIMPrivatePEM, &h.DKIMPublicB64); err != nil {
 		return Hostname{}, err
 	}
 	h.CreatedAt = parseTime(created)

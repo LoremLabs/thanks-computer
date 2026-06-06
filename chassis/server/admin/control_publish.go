@@ -200,6 +200,11 @@ func hostnameToRow(h tenants.Hostname) map[string]any {
 		"tenant_id":  h.TenantID,
 		"stack":      h.Stack,
 		"created_at": h.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		// Per-host DKIM (0017) — NOT NULL DEFAULT '', so always carried; a later
+		// upsert must not blank a structured host's key on data-plane nodes.
+		"dkim_selector":    h.DKIMSelector,
+		"dkim_private_pem": h.DKIMPrivatePEM,
+		"dkim_public_b64":  h.DKIMPublicB64,
 	}
 	if h.CreatedBy != "" {
 		row["created_by"] = h.CreatedBy

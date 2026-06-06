@@ -1,12 +1,55 @@
 package admin
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
+
+// TestBackfillStructuredHostDKIM: a structured host minted before the 0017 key
+// columns (simulated by clearing its key) gets one from the backfill, and a
+// second run is a no-op.
+func TestBackfillStructuredHostDKIM(t *testing.T) {
+	c := newTestController(t, config.Config{
+		Personalities:        "admin",
+		StructuredHostSuffix: ".localhost",
+	})
+	v := callCreateDraft(t, c, "shop", "")
+	callPutFiles(t, c, "shop", v, []stackFile{
+		{Path: "100/main.txcl", Content: `EXEC "http://x/y"`},
+	})
+	callActivate(t, c, "shop", v)
+	_, host := systemHostRow(t, c, "shop")
+
+	// Simulate a pre-0017 (keyless) structured host.
+	if _, err := c.pu.RuntimeDB.Exec(
+		`UPDATE tenant_hostnames SET dkim_selector='', dkim_private_pem='', dkim_public_b64='' WHERE hostname = ?`,
+		host); err != nil {
+		t.Fatalf("clear key: %v", err)
+	}
+
+	n, err := c.BackfillStructuredHostDKIM(context.Background())
+	if err != nil || n != 1 {
+		t.Fatalf("backfill: n=%d err=%v want 1", n, err)
+	}
+	var sel, priv, pub string
+	if err := c.pu.RuntimeDB.QueryRow(
+		`SELECT dkim_selector, dkim_private_pem, dkim_public_b64 FROM tenant_hostnames WHERE hostname = ?`,
+		host).Scan(&sel, &priv, &pub); err != nil {
+		t.Fatalf("read host: %v", err)
+	}
+	if sel != tenants.DKIMSelector || priv == "" || pub == "" {
+		t.Fatalf("host not keyed: sel=%q privLen=%d pubLen=%d", sel, len(priv), len(pub))
+	}
+
+	// Idempotent: nothing left to key.
+	if n2, err := c.BackfillStructuredHostDKIM(context.Background()); err != nil || n2 != 0 {
+		t.Fatalf("second backfill: n=%d err=%v want 0", n2, err)
+	}
+}
 
 func TestStructuredURLSchemeDerivation(t *testing.T) {
 	host := "shop-ab2cd3.localhost"

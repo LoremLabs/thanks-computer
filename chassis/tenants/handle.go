@@ -144,6 +144,15 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 		return "", err
 	}
 
+	// Per-host DKIM keypair: each structured host signs `d=<host>` with its OWN
+	// key, and the dns head publishes `txco._domainkey.<host>` — so sending
+	// reputation is isolated per host (one bad stack can't poison the shared
+	// suffix). Generated once here; reused across label-collision retries.
+	priv, pub, gerr := GenerateDKIM()
+	if gerr != nil {
+		return "", gerr
+	}
+
 	for attempt := 0; attempt < ensureMintRetries; attempt++ {
 		canon, ok := CanonicalizeHost(MintHandle(stack) + suffix)
 		if !ok || !IsValidHostname(canon) {
@@ -154,9 +163,11 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 		id := "thn_" + hxid.New().String()
 		_, ierr := tx.ExecContext(ctx,
 			`INSERT INTO tenant_hostnames
-			     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			id, canon, tenantID, stack, now, SystemStructuredHostCreatedBy, now)
+			     (id, hostname, tenant_id, stack, created_at, created_by, verified_at,
+			      dkim_selector, dkim_private_pem, dkim_public_b64)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, canon, tenantID, stack, now, SystemStructuredHostCreatedBy, now,
+			DKIMSelector, priv, pub)
 		if ierr == nil {
 			return canon, nil
 		}

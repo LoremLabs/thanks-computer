@@ -83,6 +83,60 @@ func patCfg() SynthConfig {
 	}
 }
 
+func TestSynthesisWildcardSuffix(t *testing.T) {
+	db := newTestDB(t)
+	seedPatternZone(t, db, patTenant, "stacks.example.com", fixedTS)
+	// A structured host with its own per-host DKIM public key.
+	if _, err := db.Exec(`INSERT INTO tenant_hostnames
+		(id, hostname, tenant_id, stack, created_at, created_by, verified_at, dkim_selector, dkim_public_b64)
+		VALUES ('h_x','web-x.stacks.example.com', ?, 'web', ?, 'system:structured-host', ?, 'txco', 'PUBKEYB64')`,
+		patTenant, fixedTS, fixedTS); err != nil {
+		t.Fatalf("seed structured host: %v", err)
+	}
+	cfg := patCfg()
+	cfg.StructuredSuffix = "stacks.example.com"
+	cfg.DMARC = "v=DMARC1; p=none"
+	snap := buildOrDie(t, db, cfg)
+
+	t.Run("wildcard A carries the queried name", func(t *testing.T) {
+		a, _, rc := snap.Lookup(q("foo-rand.stacks.example.com.", dns.TypeA))
+		if rc != dns.RcodeSuccess || len(a) != 1 || a[0].(*dns.A).A.String() != "203.0.113.10" {
+			t.Fatalf("wildcard A: rc=%d %v", rc, a)
+		}
+		if a[0].Header().Name != "foo-rand.stacks.example.com." {
+			t.Fatalf("owner must be the queried name, got %s", a[0].Header().Name)
+		}
+	})
+	t.Run("wildcard MX + SPF", func(t *testing.T) {
+		mx, _, _ := snap.Lookup(q("foo-rand.stacks.example.com.", dns.TypeMX))
+		if len(mx) != 1 || mx[0].(*dns.MX).Mx != "mx.txco.io." {
+			t.Fatalf("wildcard MX: %v", mx)
+		}
+		txt, _, _ := snap.Lookup(q("foo-rand.stacks.example.com.", dns.TypeTXT))
+		if len(txt) != 1 || !strings.Contains(strings.Join(txt[0].(*dns.TXT).Txt, ""), "v=spf1") {
+			t.Fatalf("wildcard SPF: %v", txt)
+		}
+	})
+	t.Run("multi-label name still wildcards", func(t *testing.T) {
+		if a, _, rc := snap.Lookup(q("a.b.stacks.example.com.", dns.TypeA)); rc != dns.RcodeSuccess || len(a) != 1 {
+			t.Fatalf("multi-label A: rc=%d %v", rc, a)
+		}
+	})
+	t.Run("per-host DKIM is exact (wins over wildcard)", func(t *testing.T) {
+		txt, _, rc := snap.Lookup(q("txco._domainkey.web-x.stacks.example.com.", dns.TypeTXT))
+		if rc != dns.RcodeSuccess || len(txt) != 1 ||
+			strings.Join(txt[0].(*dns.TXT).Txt, "") != "v=DKIM1; k=rsa; p=PUBKEYB64" {
+			t.Fatalf("per-host DKIM: rc=%d %v", rc, txt)
+		}
+	})
+	t.Run("per-host DMARC", func(t *testing.T) {
+		txt, _, _ := snap.Lookup(q("_dmarc.web-x.stacks.example.com.", dns.TypeTXT))
+		if len(txt) != 1 || strings.Join(txt[0].(*dns.TXT).Txt, "") != "v=DMARC1; p=none" {
+			t.Fatalf("per-host DMARC: %v", txt)
+		}
+	})
+}
+
 func TestSynthesisDKIM(t *testing.T) {
 	db := newTestDB(t)
 	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
