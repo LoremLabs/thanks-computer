@@ -15,9 +15,10 @@ import (
 // ErrNoRelay is returned by the op when no relay is configured.
 var ErrNoRelay = errors.New("sendmail: no mail relay configured (set --mail-relay-addr / TXCO_MAIL_RELAY_ADDR)")
 
-// SubmitFunc hands one rendered RFC 5322 message to the relay for
-// `from`→`to`. Injectable so tests can substitute a fake.
-type SubmitFunc func(ctx context.Context, from, to string, msg []byte) error
+// SubmitFunc hands one rendered RFC 5322 message to the relay for `from` →
+// `rcpts` (the envelope recipients: the To recipient plus any Cc/Bcc).
+// Injectable so tests can substitute a fake.
+type SubmitFunc func(ctx context.Context, from string, rcpts []string, msg []byte) error
 
 // makeSMTPSubmit builds the production submit. The relay is trusted infra on
 // the private net (no auth — restricted by source network, same posture as
@@ -28,9 +29,9 @@ type SubmitFunc func(ctx context.Context, from, to string, msg []byte) error
 // encryption, not auth.
 func makeSMTPSubmit(cfg Config) SubmitFunc {
 	if cfg.RelayAddr == "" {
-		return func(context.Context, string, string, []byte) error { return ErrNoRelay }
+		return func(context.Context, string, []string, []byte) error { return ErrNoRelay }
 	}
-	return func(ctx context.Context, from, to string, msg []byte) error {
+	return func(ctx context.Context, from string, rcpts []string, msg []byte) error {
 		host, _, _ := net.SplitHostPort(cfg.RelayAddr)
 		var c *smtp.Client
 		if cfg.RelayTLS == "starttls" {
@@ -52,7 +53,7 @@ func makeSMTPSubmit(cfg Config) SubmitFunc {
 		}
 		defer c.Close()
 		// SendMail auto-greets (Mail → hello), so no explicit EHLO needed.
-		if err := c.SendMail(from, []string{to}, bytes.NewReader(msg)); err != nil {
+		if err := c.SendMail(from, rcpts, bytes.NewReader(msg)); err != nil {
 			return fmt.Errorf("submit to %s: %w", cfg.RelayAddr, err)
 		}
 		return c.Quit()

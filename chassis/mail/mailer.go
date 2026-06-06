@@ -139,6 +139,18 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 	}
 	now := m.now().UTC().Format(time.RFC3339)
 
+	// Cc (visible header) + Bcc (envelope-only): flat address lists added to
+	// every per-recipient message. The common single-To case is one message
+	// plus these extra envelope recipients.
+	cc := parseAddrList(s.Get("cc"))
+	extraRcpts := make([]string, 0, 4)
+	for _, a := range cc {
+		extraRcpts = append(extraRcpts, a.Address)
+	}
+	for _, a := range parseAddrList(s.Get("bcc")) {
+		extraRcpts = append(extraRcpts, a.Address)
+	}
+
 	var results []recipResult
 	var sent, skipped, failed int
 	for _, r := range recips {
@@ -177,13 +189,14 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 			}
 			if rerr == nil {
 				text := htmlToText(bodyHTML)
-				msg, msgID, merr := composeMIME(*fromAddr, r.addr, subj, full, text, fromDomain)
+				msg, msgID, merr := composeMIME(*fromAddr, r.addr, cc, subj, full, text, fromDomain)
 				if merr != nil {
 					rerr = merr
 				} else {
 					// DKIM-sign (per-domain key) before handing to the relay.
 					msg = m.dkimSign(ctx, fromDomain, msg)
-					if serr := m.submit(ctx, fromAddr.Address, r.addr.Address, msg); serr != nil {
+					rcpts := append([]string{r.addr.Address}, extraRcpts...)
+					if serr := m.submit(ctx, fromAddr.Address, rcpts, msg); serr != nil {
 						rerr = serr
 					} else {
 						// Delivered.
@@ -252,6 +265,31 @@ func parseRecipients(to gjson.Result, shared map[string]any) []recipient {
 		}
 	case to.Type == gjson.String && to.String() != "":
 		out = add(out, to.String(), "")
+	}
+	return out
+}
+
+// parseAddrList parses a `cc`/`bcc` value (a string or an array of address
+// strings) into mail.Addresses, skipping anything unparseable. These are flat
+// lists (no per-recipient vars): Cc becomes a visible header, Bcc is
+// envelope-only.
+func parseAddrList(v gjson.Result) []mail.Address {
+	var out []mail.Address
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s == "" {
+			return
+		}
+		if a, err := mail.ParseAddress(s); err == nil {
+			out = append(out, *a)
+		}
+	}
+	switch {
+	case v.IsArray():
+		for _, el := range v.Array() {
+			add(el.String())
+		}
+	case v.Type == gjson.String:
+		add(v.String())
 	}
 	return out
 }

@@ -32,20 +32,22 @@ CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, origin TEX
 
 type fakeSubmit struct {
 	calls []struct {
-		from, to string
-		msg      []byte
+		from  string
+		rcpts []string
+		msg   []byte
 	}
 	err error
 }
 
-func (f *fakeSubmit) fn(_ context.Context, from, to string, msg []byte) error {
+func (f *fakeSubmit) fn(_ context.Context, from string, rcpts []string, msg []byte) error {
 	if f.err != nil {
 		return f.err
 	}
 	f.calls = append(f.calls, struct {
-		from, to string
-		msg      []byte
-	}{from, to, msg})
+		from  string
+		rcpts []string
+		msg   []byte
+	}{from, rcpts, msg})
 	return nil
 }
 
@@ -144,14 +146,48 @@ func TestSendCommonCase(t *testing.T) {
 		t.Fatalf("submit calls=%d want 1", len(sub.calls))
 	}
 	c := sub.calls[0]
-	if c.from != "noreply@acme.com" || c.to != "matt@example.com" {
-		t.Fatalf("submit from/to = %q/%q", c.from, c.to)
+	if c.from != "noreply@acme.com" || len(c.rcpts) != 1 || c.rcpts[0] != "matt@example.com" {
+		t.Fatalf("submit from/rcpts = %q/%v", c.from, c.rcpts)
 	}
 	if !strings.Contains(string(c.msg), "Welcome") || !strings.Contains(string(c.msg), "Thanks for signing up") {
 		t.Fatalf("message missing subject/body:\n%s", c.msg)
 	}
 	if len(u.events) != 1 || u.events[0].Src != "sendmail" || !u.events[0].Billable || u.events[0].Tenant != "acme" {
 		t.Fatalf("usage events = %+v", u.events)
+	}
+}
+
+func TestSendCcBcc(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	in := env(t, map[string]any{
+		"to": "matt@example.com", "cc": "audit@example.org", "bcc": "hidden@example.net",
+		"subject": "Hi", "body": "b", "from": "noreply@acme.com",
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatal(err)
+	}
+	if len(sub.calls) != 1 {
+		t.Fatalf("calls=%d want 1", len(sub.calls))
+	}
+	c := sub.calls[0]
+	// Envelope recipients = To + Cc + Bcc.
+	want := map[string]bool{"matt@example.com": true, "audit@example.org": true, "hidden@example.net": true}
+	if len(c.rcpts) != 3 {
+		t.Fatalf("rcpts=%v want 3 (to+cc+bcc)", c.rcpts)
+	}
+	for _, r := range c.rcpts {
+		if !want[r] {
+			t.Fatalf("unexpected rcpt %q in %v", r, c.rcpts)
+		}
+	}
+	msg := string(c.msg)
+	if !strings.Contains(msg, "audit@example.org") {
+		t.Fatalf("Cc must be a visible header:\n%s", msg)
+	}
+	if strings.Contains(msg, "hidden@example.net") {
+		t.Fatalf("Bcc must NOT appear in headers (envelope-only):\n%s", msg)
 	}
 }
 
@@ -257,7 +293,7 @@ func TestSendArrayFanout(t *testing.T) {
 	if gjson.Get(p.Raw, "_sendmail.result.sent").Int() != 1 || gjson.Get(p.Raw, "_sendmail.result.skipped").Int() != 1 {
 		t.Fatalf("want sent=1 skipped=1; raw=%s", p.Raw)
 	}
-	if len(sub.calls) != 1 || sub.calls[0].to != "b@example.com" {
+	if len(sub.calls) != 1 || len(sub.calls[0].rcpts) == 0 || sub.calls[0].rcpts[0] != "b@example.com" {
 		t.Fatalf("only b should send; calls=%+v", sub.calls)
 	}
 	// Per-recipient vars override: Bob, not Friend.

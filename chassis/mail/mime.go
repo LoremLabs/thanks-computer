@@ -14,7 +14,7 @@ import (
 // addresses (display name + bare address). enmime does not auto-add a
 // Message-ID, so the one set here is the only one; Postfix stamps Date and
 // (if absent) a Received-derived id. msgIDDomain is the From domain.
-func composeMIME(from, to mail.Address, subject, htmlBody, textBody, msgIDDomain string) (msg []byte, messageID string, err error) {
+func composeMIME(from, to mail.Address, cc []mail.Address, subject, htmlBody, textBody, msgIDDomain string) (msg []byte, messageID string, err error) {
 	messageID = "<" + hxid.New().String() + "@" + msgIDDomain + ">"
 	b := enmime.Builder().
 		From(from.Name, from.Address).
@@ -25,6 +25,9 @@ func composeMIME(from, to mail.Address, subject, htmlBody, textBody, msgIDDomain
 		Header("Message-ID", messageID).
 		Header("Auto-Submitted", "auto-generated").
 		Header("X-Auto-Response-Suppress", "OOF, AutoReply")
+	for _, a := range cc {
+		b = b.CC(a.Name, a.Address) // visible Cc header (Bcc is envelope-only, never a header)
+	}
 	part, berr := b.Build()
 	if berr != nil {
 		return nil, "", berr
