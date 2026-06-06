@@ -966,6 +966,11 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 			if !strings.HasPrefix(rf.path, "FILES/") {
 				continue
 			}
+			if rf.content == "" {
+				// Fingerprint-only row (fleet data-plane apply): the bytes
+				// already live in the shared CAS — nothing to put from here.
+				continue
+			}
 			h := sha256Hex(rf.content)
 			if err := c.fcas.Put(ctx, h, []byte(rf.content)); err != nil {
 				return currentActiveID, targetVersionID, &materialiseError{http.StatusServiceUnavailable, "filecas_put", map[string]any{"path": rf.path, "err": err.Error()}}

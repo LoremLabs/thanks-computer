@@ -27,6 +27,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
@@ -70,7 +71,7 @@ func (c *Controller) readStackFilesForArtifact(
 	ctx context.Context, tenantID, stackName string, versionNumber int64,
 ) ([]controlevent.StackArtifactFile, error) {
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
-		SELECT sf.path, sf.content
+		SELECT sf.path, sf.content, sf.content_hash
 		  FROM stack_files sf
 		  JOIN stack_versions sv ON sf.version_id = sv.version_id
 		  JOIN stacks s          ON sv.stack_id = s.stack_id
@@ -85,11 +86,28 @@ func (c *Controller) readStackFilesForArtifact(
 	defer rows.Close()
 	var out []controlevent.StackArtifactFile
 	for rows.Next() {
-		var f controlevent.StackArtifactFile
-		if err := rows.Scan(&f.Path, &f.Content); err != nil {
+		var path, content, hash string
+		if err := rows.Scan(&path, &content, &hash); err != nil {
 			return nil, err
 		}
-		out = append(out, f)
+		// FILES/** static assets travel as a fingerprint, not bytes: ensure
+		// the bytes are in the shared CAS, then ship only ContentHash so
+		// data-plane nodes resolve them lazily (and never inline them).
+		// Rule/fixture files stay inline. Single-node deployments never call
+		// this (gated on FeedSink != nop), so the file/disk CAS is fine there.
+		if strings.HasPrefix(path, "FILES/") {
+			if hash == "" {
+				hash = sha256Hex(content)
+			}
+			if c.fcas != nil {
+				if err := c.fcas.Put(ctx, hash, []byte(content)); err != nil {
+					return nil, fmt.Errorf("filecas put %s: %w", path, err)
+				}
+			}
+			out = append(out, controlevent.StackArtifactFile{Path: path, ContentHash: hash})
+			continue
+		}
+		out = append(out, controlevent.StackArtifactFile{Path: path, Content: content})
 	}
 	return out, rows.Err()
 }

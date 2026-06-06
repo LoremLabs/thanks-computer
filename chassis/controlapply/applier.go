@@ -404,9 +404,20 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 		return fmt.Errorf("clear files: %w", err)
 	}
 	for _, f := range art.Files {
+		content := f.Content
+		hash := f.ContentHash
+		if strings.HasPrefix(f.Path, "FILES/") && hash != "" {
+			// Fingerprint-only FILES/ asset: the bytes live in the shared
+			// content-addressed store, so don't inline them here — keeps the
+			// node's in-memory runtime DB free of tenant file bytes. The
+			// static serve path resolves them lazily by content_hash.
+			content = ""
+		} else if hash == "" {
+			hash = sha256Hex([]byte(content))
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO stack_files (version_id, path, content, content_hash) VALUES (?, ?, ?, ?)`,
-			versionID, f.Path, f.Content, sha256Hex([]byte(f.Content))); err != nil {
+			versionID, f.Path, content, hash); err != nil {
 			return fmt.Errorf("insert file %s: %w", f.Path, err)
 		}
 	}

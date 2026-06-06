@@ -18,12 +18,20 @@ type StackActivatedArtifact struct {
 	Files    []StackArtifactFile `json:"files"`
 }
 
-// StackArtifactFile is one (path, content) pair in a
-// StackActivatedArtifact. Path is "<scope>/<name>.txcl" plus the
-// well-known "mock-request.json" / "mock-response.json".
+// StackArtifactFile is one file of a StackActivatedArtifact. Path is
+// "<scope>/<name>.txcl", the well-known "mock-request.json" /
+// "mock-response.json", or a "FILES/**" static asset.
+//
+// Rule/fixture files carry their bytes inline in Content. FILES/** static
+// assets instead carry only ContentHash (the sha256 fingerprint): their
+// bytes live in the shared content-addressed store (filecas), so the event
+// stays small and data-plane nodes never inline tenant file bytes into the
+// in-memory runtime DB. Both fields are omitempty so old (all-inline) and
+// new (fingerprint) events parse in either direction.
 type StackArtifactFile struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path        string `json:"path"`
+	Content     string `json:"content,omitempty"`
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // RowsArtifact is the payload for the generic row event types
