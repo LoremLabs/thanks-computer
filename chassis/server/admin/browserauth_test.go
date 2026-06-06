@@ -271,6 +271,69 @@ func TestExchangeHappy(t *testing.T) {
 	}
 }
 
+// TestExchangeRevokesPriorSessionOnSwitch: when the browser exchanges a
+// new bootstrap token while still holding a prior session cookie (the
+// `txco ui` as a different identity case), the prior session is revoked
+// — so the current user is actually logged out, not left with a second
+// valid session — and a fresh session is established for the new actor.
+func TestExchangeRevokesPriorSessionOnSwitch(t *testing.T) {
+	c, srv := browserAuthTestServer(t, auth.ModeBoth)
+	seedTenantActor(t, c, "actor_a", "tnt_default", "default", []string{"opstack:*:read"})
+	seedTenantActor(t, c, "actor_b", "tnt_default", "default", []string{"opstack:*:read"})
+
+	// User A logs in.
+	tokenA := mintBootstrap(t, c, "actor_a", "tnt_default", []string{"opstack:*:read"})
+	cookieA := exchangeForCookie(t, srv.URL, tokenA)
+
+	// `txco ui` as B: the browser exchanges B's token while still
+	// carrying A's cookie (credentials: same-origin).
+	tokenB := mintBootstrap(t, c, "actor_b", "tnt_default", []string{"opstack:*:read"})
+	resp := postJSON(t, srv.URL+"/auth/browser/exchange",
+		exchangeRequest{Token: tokenB}, cookieA)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("switch exchange: %d body=%s", resp.StatusCode, string(body))
+	}
+	var cookieB *http.Cookie
+	for _, ck := range resp.Cookies() {
+		if ck.Name == auth.SessionCookieName {
+			cookieB = ck
+		}
+	}
+	if cookieB == nil {
+		t.Fatal("no new session cookie on switch")
+	}
+	if cookieB.Value == cookieA.Value {
+		t.Fatal("new session cookie equals the prior one; expected a fresh session")
+	}
+
+	// A's prior session is revoked server-side (asserted via the registry
+	// so it holds regardless of auth-mode fallbacks).
+	priorA, err := c.registry.GetSession(context.Background(), cookieA.Value)
+	if err != nil {
+		t.Fatalf("GetSession(prior): %v", err)
+	}
+	if priorA.IsValid(time.Now().UTC()) {
+		t.Errorf("prior session still valid after switch; want revoked")
+	}
+
+	// B's new session is live and resolves to actor_b.
+	bAfter := getWithCookie(t, srv.URL+"/auth/browser/session", cookieB)
+	defer bAfter.Body.Close()
+	if bAfter.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(bAfter.Body)
+		t.Fatalf("new session GET: %d body=%s", bAfter.StatusCode, string(body))
+	}
+	var info sessionInfoResponse
+	if err := json.NewDecoder(bAfter.Body).Decode(&info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if info.ActorID != "actor_b" {
+		t.Errorf("switched actor = %q, want actor_b", info.ActorID)
+	}
+}
+
 // TestExchangeInvalidToken: 404 + no session row.
 func TestExchangeInvalidToken(t *testing.T) {
 	_, srv := browserAuthTestServer(t, auth.ModeBoth)

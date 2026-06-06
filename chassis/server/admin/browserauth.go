@@ -231,6 +231,26 @@ func (c *Controller) handleBrowserExchange(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Replace, don't stack. If the browser arrived holding a prior
+	// session cookie, revoke that session now so `txco ui` as a different
+	// identity actually logs the current user out instead of leaving a
+	// second valid session behind. Best-effort + idempotent: a revoke
+	// failure must not block establishing the new session, and we never
+	// revoke the session we just minted (defensive id check). Done after
+	// CreateSession so the old session only dies once its replacement
+	// exists.
+	if prior, perr := r.Cookie(auth.SessionCookieName); perr == nil {
+		if pv := strings.TrimSpace(prior.Value); pv != "" && pv != sess.SessionID {
+			if rerr := c.registry.RevokeSession(r.Context(), pv, sess.ActorID); rerr != nil {
+				c.pu.Logger.Warn("browser exchange: revoke prior session failed",
+					zap.String("prior_session", pv), zap.Error(rerr))
+			} else {
+				c.pu.Logger.Info("browser exchange: revoked prior session on switch",
+					zap.String("prior_session", pv), zap.String("new_session", sess.SessionID))
+			}
+		}
+	}
+
 	http.SetCookie(w, c.sessionCookie(r, sess.SessionID, sessionDefaultTTL))
 
 	c.pu.Logger.Info("browser session minted",

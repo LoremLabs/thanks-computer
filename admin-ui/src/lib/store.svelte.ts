@@ -783,6 +783,19 @@ function createStore() {
         }
     }
 
+    // loadAuthedData (re)loads everything the authed admin view needs for
+    // the CURRENT session: tenants, then ops for the selected tenant, plus
+    // the best-effort trace-duration + secrets warmups. Called at boot and
+    // after a browser-auth token exchange — so switching identities via
+    // `txco ui` repaints the whole view as the new actor instead of
+    // stranding the previous user's tenants/ops on screen.
+    async function loadAuthedData() {
+        await refreshTenants()
+        await refresh()
+        refreshLastDurations()
+        refreshSecrets()
+    }
+
     // tryExchange POSTs the bootstrap token to /auth/browser/exchange.
     // On success the cookie is set and refreshSession populates the
     // store; on failure loginError is surfaced inline.
@@ -811,6 +824,15 @@ function createStore() {
             }
         } finally {
             state.loginPending = false
+        }
+        // Repaint the admin view for whatever session we now hold — the
+        // new identity on success, or the prior (still-valid) one if the
+        // exchange failed. App.svelte defers its initial load to us while
+        // loginPending is set, so this is the single load point on the
+        // deep-link path and is what makes `txco ui` as a different user
+        // actually switch the on-screen identity AND its tenants/ops.
+        if (isAuthed(state.session)) {
+            await loadAuthedData()
         }
     }
 
@@ -1203,6 +1225,7 @@ function createStore() {
         ensureDiff,
         ensureVersionLoaded,
         getCachedTrace,
+        loadAuthedData,
         patchDraftFile,
         patchMockFile,
         probeDemoMode,

@@ -55,18 +55,16 @@
             // so the deep-link flow works on a clean reload (not just
             // hashchange).
             store.syncFromHash()
-            if (isAuthed(store.state.session)) {
-                await store.refreshTenants()
-                await store.refresh()
-                // Best-effort: pull recent-trace durations in the
-                // background so the box view can annotate ops with
-                // "last execution" timings. Silently no-ops if the
-                // trace endpoints aren't reachable.
-                store.refreshLastDurations()
-                // Best-effort: warm the secrets list so the tab is
-                // populated on first click. No-ops (sets the
-                // unavailable flag) if the feature is opted out.
-                store.refreshSecrets()
+            // If syncFromHash kicked off a browser-auth token exchange
+            // (#login?t=…), loginPending is set synchronously — defer the
+            // initial data load to tryExchange so the view loads as the
+            // POST-exchange identity. Without this an already-logged-in
+            // browser would load the previous user's tenants/ops here and
+            // `txco ui` as a different user would look like a no-op. The
+            // load itself (tenants → ops + best-effort trace/secret warmups)
+            // now lives in store.loadAuthedData, shared with tryExchange.
+            if (!store.state.loginPending && isAuthed(store.state.session)) {
+                await store.loadAuthedData()
             }
         })()
         const onHash = () => store.syncFromHash()
