@@ -83,6 +83,33 @@ func patCfg() SynthConfig {
 	}
 }
 
+func TestSynthesisDKIM(t *testing.T) {
+	db := newTestDB(t)
+	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+	if _, err := db.Exec(`UPDATE dns_zones SET dkim_selector='txco', dkim_public_b64='PUBKEYB64'
+		WHERE origin='pat.example.com'`); err != nil {
+		t.Fatalf("set dkim key: %v", err)
+	}
+	snap := buildOrDie(t, db, patCfg())
+	txt, _, rc := snap.Lookup(q("txco._domainkey.pat.example.com.", dns.TypeTXT))
+	if rc != dns.RcodeSuccess || len(txt) != 1 {
+		t.Fatalf("DKIM TXT: rc=%d n=%d", rc, len(txt))
+	}
+	if got := strings.Join(txt[0].(*dns.TXT).Txt, ""); got != "v=DKIM1; k=rsa; p=PUBKEYB64" {
+		t.Fatalf("DKIM TXT = %q", got)
+	}
+}
+
+// A pattern zone with no DKIM key (the default) publishes no _domainkey TXT.
+func TestSynthesisNoDKIMWithoutKey(t *testing.T) {
+	db := newTestDB(t)
+	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+	snap := buildOrDie(t, db, patCfg())
+	if _, _, rc := snap.Lookup(q("txco._domainkey.pat.example.com.", dns.TypeTXT)); rc != dns.RcodeNameError {
+		t.Fatalf("keyless zone leaked a DKIM record: rc=%d", rc)
+	}
+}
+
 func TestSynthesisPattern(t *testing.T) {
 	db := newTestDB(t)
 	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)

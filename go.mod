@@ -7,6 +7,7 @@ require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/bep/debounce v1.2.0
 	github.com/caddyserver/certmagic v0.25.3
+	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-smtp v0.24.0
 	github.com/evanw/esbuild v0.28.0
 	github.com/gdamore/tcell/v2 v2.8.1

@@ -29,7 +29,10 @@ func newDNSStore(t *testing.T) (*Store, *sql.DB) {
 			created_at  TEXT NOT NULL,
 			created_by  TEXT,
 			updated_at  TEXT NOT NULL,
-			revoked_at  TEXT
+			revoked_at  TEXT,
+			dkim_selector    TEXT NOT NULL DEFAULT '',
+			dkim_private_pem TEXT NOT NULL DEFAULT '',
+			dkim_public_b64  TEXT NOT NULL DEFAULT ''
 		);
 		CREATE UNIQUE INDEX dns_zones_active_origin_idx
 		    ON dns_zones(origin) WHERE revoked_at IS NULL;

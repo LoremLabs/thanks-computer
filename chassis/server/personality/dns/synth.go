@@ -151,6 +151,17 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 		}
 	}
 
+	// DKIM public key (per-domain, 0016). Published whenever the zone has a
+	// key — the matching private key signs outbound in the sendmail op. Owner
+	// is <selector>._domainkey.<origin>; the value can exceed 255 bytes, so
+	// mkTXT chunks it.
+	if z.dkimSelector != "" && z.dkimPubB64 != "" {
+		owner := dns.Fqdn(z.dkimSelector + "._domainkey." + z.origin)
+		if rr := mkTXT(owner, ttl, "v=DKIM1; k=rsa; p="+z.dkimPubB64); rr != nil {
+			out = append(out, rr)
+		}
+	}
+
 	// Per active stack: <label>.<origin> A/AAAA + MX.
 	for _, s := range stacks {
 		if !isSynthesizableStack(s.name) {

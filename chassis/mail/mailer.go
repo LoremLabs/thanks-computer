@@ -180,17 +180,21 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 				msg, msgID, merr := composeMIME(*fromAddr, r.addr, subj, full, text, fromDomain)
 				if merr != nil {
 					rerr = merr
-				} else if serr := m.submit(ctx, fromAddr.Address, r.addr.Address, msg); serr != nil {
-					rerr = serr
 				} else {
-					// Delivered.
-					if campaign != "" {
-						_ = m.markCampaignSent(ctx, tenant, campaign, r.norm, msgID, now)
+					// DKIM-sign (per-domain key) before handing to the relay.
+					msg = m.dkimSign(ctx, fromDomain, msg)
+					if serr := m.submit(ctx, fromAddr.Address, r.addr.Address, msg); serr != nil {
+						rerr = serr
+					} else {
+						// Delivered.
+						if campaign != "" {
+							_ = m.markCampaignSent(ctx, tenant, campaign, r.norm, msgID, now)
+						}
+						m.emitUsage(rid, tenant, stack)
+						sent++
+						results = append(results, recipResult{To: r.addr.Address, Status: "sent", MessageID: msgID})
+						continue
 					}
-					m.emitUsage(rid, tenant, stack)
-					sent++
-					results = append(results, recipResult{To: r.addr.Address, Status: "sent", MessageID: msgID})
-					continue
 				}
 			}
 		}

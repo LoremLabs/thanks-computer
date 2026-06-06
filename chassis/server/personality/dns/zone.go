@@ -37,6 +37,9 @@ type zone struct {
 	defaultTTL uint32
 	serial     uint32
 
+	dkimSelector string // DKIM selector for the zone's published key (0016)
+	dkimPubB64   string // base64 PKIX DER public key → <selector>._domainkey TXT
+
 	// rr indexes answers by lowercased owner FQDN → qtype → RRs. The
 	// synthesized SOA is included under TypeSOA at the apex so SOA
 	// queries answer from the snapshot like any other type.
@@ -69,7 +72,8 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 	}
 	zrows, err := db.Query(`SELECT id, tenant_id, origin, mname, rname,
 	                               refresh, retry, expire, minimum,
-	                               default_ttl, mode, updated_at
+	                               default_ttl, mode, updated_at,
+	                               dkim_selector, dkim_public_b64
 	                          FROM dns_zones
 	                         WHERE revoked_at IS NULL`)
 	if err != nil {
@@ -80,12 +84,14 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 		refresh, retry, expire, minimum    uint32
 		defaultTTL                         uint32
 		mode, updatedAt                    string
+		dkimSelector, dkimPubB64           string
 	}
 	var zoneRows []zoneRow
 	for zrows.Next() {
 		var z zoneRow
 		if err := zrows.Scan(&z.id, &z.tenantID, &z.origin, &z.mname, &z.rname,
-			&z.refresh, &z.retry, &z.expire, &z.minimum, &z.defaultTTL, &z.mode, &z.updatedAt); err != nil {
+			&z.refresh, &z.retry, &z.expire, &z.minimum, &z.defaultTTL, &z.mode, &z.updatedAt,
+			&z.dkimSelector, &z.dkimPubB64); err != nil {
 			zrows.Close()
 			return nil, fmt.Errorf("dns: scan zone: %w", err)
 		}
@@ -114,12 +120,14 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 	for _, zr := range zoneRows {
 		origin := strings.ToLower(strings.TrimSuffix(zr.origin, "."))
 		z := &zone{
-			tenantID:   zr.tenantID,
-			origin:     origin,
-			originFQDN: dns.Fqdn(origin),
-			defaultTTL: zr.defaultTTL,
-			rr:         map[string]map[uint16][]dns.RR{},
-			names:      map[string]bool{},
+			tenantID:     zr.tenantID,
+			origin:       origin,
+			originFQDN:   dns.Fqdn(origin),
+			defaultTTL:   zr.defaultTTL,
+			dkimSelector: zr.dkimSelector,
+			dkimPubB64:   zr.dkimPubB64,
+			rr:           map[string]map[uint16][]dns.RR{},
+			names:        map[string]bool{},
 		}
 		// The apex always exists (it carries SOA + NS).
 		z.names[z.originFQDN] = true

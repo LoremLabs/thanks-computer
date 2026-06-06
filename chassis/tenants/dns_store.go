@@ -158,6 +158,12 @@ type DNSZone struct {
 	CreatedBy  string
 	UpdatedAt  string
 	RevokedAt  string
+	// Per-domain DKIM material (0016), generated once on the control plane at
+	// CreateZoneTx and fleet-synced on this row. Populated by GetZoneByIDTx
+	// (for the producer); ListZones/LookupActiveZone leave them zero.
+	DKIMSelector   string
+	DKIMPrivatePEM string
+	DKIMPublicB64  string
 }
 
 // DNSRecord is one override/extra record within a zone.
@@ -330,6 +336,18 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 		return errors.New("tenants: zone mode must be 'pattern' or 'manual'")
 	}
 	zoneSOADefaults(&z)
+	// Mint a per-domain DKIM keypair once, here on the control plane, so the
+	// public key the DNS head publishes and the private key any node signs
+	// with come from the SAME material (fleet-synced on this row). A caller
+	// may pre-supply the key (tests); otherwise generate. Skipped for manual
+	// zones — DKIM is for the synthesized mail pattern.
+	if z.DKIMPrivatePEM == "" && z.Mode != "manual" {
+		priv, pub, gerr := GenerateDKIM()
+		if gerr != nil {
+			return gerr
+		}
+		z.DKIMSelector, z.DKIMPrivatePEM, z.DKIMPublicB64 = DKIMSelector, priv, pub
+	}
 	now := z.CreatedAt
 	if now == "" {
 		now = time.Now().UTC().Format(time.RFC3339)
@@ -341,10 +359,12 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO dns_zones
 		     (id, tenant_id, origin, mname, rname, refresh, retry, expire,
-		      minimum, default_ttl, mode, created_at, created_by, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		      minimum, default_ttl, mode, created_at, created_by, updated_at,
+		      dkim_selector, dkim_private_pem, dkim_public_b64)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		z.ID, z.TenantID, canon, z.MName, z.RName, z.Refresh, z.Retry, z.Expire,
-		z.Minimum, z.DefaultTTL, z.Mode, now, createdByArg, now)
+		z.Minimum, z.DefaultTTL, z.Mode, now, createdByArg, now,
+		z.DKIMSelector, z.DKIMPrivatePEM, z.DKIMPublicB64)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrZoneExists
@@ -392,11 +412,13 @@ func GetZoneByIDTx(ctx context.Context, tx *sql.Tx, id string) (DNSZone, error) 
 	err := tx.QueryRowContext(ctx,
 		`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		        minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
-		        updated_at, COALESCE(revoked_at, '')
+		        updated_at, COALESCE(revoked_at, ''),
+		        dkim_selector, dkim_private_pem, dkim_public_b64
 		   FROM dns_zones
 		  WHERE id = ?`, id).Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
 		&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
-		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt)
+		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt,
+		&z.DKIMSelector, &z.DKIMPrivatePEM, &z.DKIMPublicB64)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DNSZone{}, ErrNotFound
 	}

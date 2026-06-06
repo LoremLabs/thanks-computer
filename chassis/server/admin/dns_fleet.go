@@ -175,6 +175,11 @@ func zoneToRow(z tenants.DNSZone) map[string]any {
 		"mode":        z.Mode,
 		"created_at":  z.CreatedAt,
 		"updated_at":  z.UpdatedAt,
+		// DKIM material (0016) — NOT NULL DEFAULT '', so always carried; a
+		// later upsert must not blank it out on data-plane nodes.
+		"dkim_selector":    z.DKIMSelector,
+		"dkim_private_pem": z.DKIMPrivatePEM,
+		"dkim_public_b64":  z.DKIMPublicB64,
 	}
 	if z.CreatedBy != "" {
 		row["created_by"] = z.CreatedBy
