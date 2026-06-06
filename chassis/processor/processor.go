@@ -213,6 +213,12 @@ func tenantScope(ctx context.Context) string {
 	return ""
 }
 
+// TenantScope exposes the pinned request tenant slug to bundled ops outside
+// this package (e.g. txco://sendmail's From-domain anti-spoof check). It is
+// the trusted, immutable tenant pinned at first Run — NOT the mutable
+// `_txc.tenant` envelope field, which a mid-pipeline op could overwrite.
+func TenantScope(ctx context.Context) string { return tenantScope(ctx) }
+
 // tenantExists reports whether a non-revoked tenant with this slug
 // exists in the opstack snapshot. Used to validate a boot re-tenant
 // target before rebinding the pin.

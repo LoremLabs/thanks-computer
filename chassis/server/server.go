@@ -44,6 +44,7 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/filecas/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
+	"github.com/loremlabs/thanks-computer/chassis/mail"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
 	"github.com/loremlabs/thanks-computer/chassis/ops"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
@@ -1103,6 +1104,23 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// as the HTTP response" pattern without an external service.
 	pu.Handle([]byte("txco://copy"), event.OpsHandlerFunc(ops.Copy))
 	pu.Handle([]byte("txco://web-render"), event.OpsHandlerFunc(ops.WebRender))
+
+	// `txco://sendmail`: render + submit an outbound email from the
+	// `_sendmail` envelope contract a rule assembled. Struct-based op (needs
+	// the real runtime DB for the campaign guard + From-domain check, the
+	// usage sink, and the relay config). The closure passes the PINNED tenant
+	// (processor.TenantScope) — the From-domain anti-spoof check must not
+	// trust the mutable `_txc.tenant` envelope field.
+	mailer := mail.NewMailer(pu.RuntimeDB, pu.Usage, logger, mail.Config{
+		RelayAddr:     conf.MailRelayAddr,
+		RelayTLS:      conf.MailRelayTLS,
+		DialTimeout:   time.Duration(conf.MailDialTimeoutMS) * time.Millisecond,
+		MaxRecipients: conf.MailMaxRecipients,
+	})
+	pu.Handle([]byte("txco://sendmail"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return mailer.Send(ctx, processor.TenantScope(ctx), in)
+		}))
 
 	// start controllers
 	adminCtrl := admin.NewController(ctx, pu)

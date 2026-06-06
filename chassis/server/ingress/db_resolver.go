@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
 
 // DBResolver wraps an inner Resolver (typically a yamlResolver) with a
@@ -203,6 +205,18 @@ func (r *DBResolver) lookupMailDomain(db *sql.DB, canonical string) (RouteTarget
 		    AND t.revoked_at IS NULL`, canonical).Scan(&slug, &hStack, &verifiedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		// No tenant_hostnames row. Fall back to DNS-zone coverage: if we
+		// serve authoritative DNS for this domain (apex or subdomain), that
+		// delegation is itself proof of control — route mail to the owning
+		// tenant's <tenant>/_mail, verified. Longest-zone-match inside.
+		if zslug, zok, zerr := tenants.TenantForMailZone(ctx, db, canonical); zerr == nil && zok {
+			return RouteTarget{
+				Tenant:   zslug,
+				Stack:    "_mail",
+				Ingress:  "zone:" + canonical,
+				Verified: true,
+			}, true
+		}
 		return RouteTarget{}, false
 	case err != nil:
 		r.logger.Warn("ingress db mail lookup failed",

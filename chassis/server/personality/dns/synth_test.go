@@ -2,10 +2,45 @@ package dns
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
 )
+
+func TestSynthesisMailAuth(t *testing.T) {
+	db := newTestDB(t)
+	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+	cfg := patCfg()
+	cfg.DMARC = "v=DMARC1; p=none"
+	snap := buildOrDie(t, db, cfg)
+
+	t.Run("apex SPF auto-derived from edge IPs + mx", func(t *testing.T) {
+		txt, _, rc := snap.Lookup(q("pat.example.com.", dns.TypeTXT))
+		if rc != dns.RcodeSuccess || len(txt) != 1 {
+			t.Fatalf("apex TXT: rc=%d n=%d", rc, len(txt))
+		}
+		if got := strings.Join(txt[0].(*dns.TXT).Txt, ""); got != "v=spf1 ip4:203.0.113.10 mx ~all" {
+			t.Fatalf("SPF = %q", got)
+		}
+	})
+	t.Run("DMARC at _dmarc", func(t *testing.T) {
+		txt, _, rc := snap.Lookup(q("_dmarc.pat.example.com.", dns.TypeTXT))
+		if rc != dns.RcodeSuccess || len(txt) != 1 ||
+			strings.Join(txt[0].(*dns.TXT).Txt, "") != "v=DMARC1; p=none" {
+			t.Fatalf("DMARC: rc=%d %v", rc, txt)
+		}
+	})
+	t.Run("no MX host → no SPF/DMARC", func(t *testing.T) {
+		c2 := patCfg()
+		c2.MXHost = ""
+		c2.DMARC = "v=DMARC1; p=none"
+		snap2 := buildOrDie(t, db, c2)
+		if txt, _, _ := snap2.Lookup(q("pat.example.com.", dns.TypeTXT)); len(txt) != 0 {
+			t.Fatalf("SPF emitted without MX: %v", txt)
+		}
+	})
+}
 
 const patTenant = "tnt_pat"
 

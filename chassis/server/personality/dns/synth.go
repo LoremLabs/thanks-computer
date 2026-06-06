@@ -22,6 +22,12 @@ type SynthConfig struct {
 	MXHost      string   // MX target hostname (the LMTP head's public name)
 	MXPriority  uint16
 	TTL         uint32 // TTL for synthesized records (falls back to the zone default if 0)
+	// Mail-auth TXT at the apex, emitted alongside the MX (i.e. only when
+	// MXHost is set). SPFOverride replaces the auto-derived SPF; DMARC is the
+	// full policy string. Both overridable per-zone by a materialized
+	// dns_records TXT (first-match-clears).
+	SPFOverride string // "" → auto-derive from EdgeIPs + mx
+	DMARC       string // e.g. "v=DMARC1; p=none"
 }
 
 // SynthConfigFrom builds a SynthConfig from chassis config. Single
@@ -42,6 +48,8 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 		MXHost:      strings.TrimSpace(conf.DNSMXHost),
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
+		SPFOverride: strings.TrimSpace(conf.DNSSPF),
+		DMARC:       strings.TrimSpace(conf.DNSDMARC),
 	}
 }
 
@@ -90,6 +98,10 @@ func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
 		MXHost:      s.MXHost,
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
+		// dns_settings carries no mail-auth columns; keep the flag values so
+		// SPF/DMARC stay configured even when an operator sets a settings row.
+		SPFOverride: flagDefaults.SPFOverride,
+		DMARC:       flagDefaults.DMARC,
 	}
 }
 
@@ -124,6 +136,19 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 	out = append(out, mkAddrs(z.originFQDN, ttl, cfg.EdgeIPs)...)
 	if rr := mkMX(z.originFQDN, ttl, cfg.MXPriority, cfg.MXHost); rr != nil {
 		out = append(out, rr)
+	}
+
+	// Apex mail-auth TXT (SPF + DMARC), emitted alongside the MX (mail
+	// enabled). SPF is softfail (~all) so it never hard-rejects a tenant's
+	// other senders; DMARC defaults to p=none (monitor). Both are overridable
+	// by a materialized dns_records TXT at the same owner (first-match-clears).
+	if strings.TrimSpace(cfg.MXHost) != "" {
+		if rr := mkTXT(z.originFQDN, ttl, effectiveSPF(cfg)); rr != nil {
+			out = append(out, rr)
+		}
+		if rr := mkTXT(dns.Fqdn("_dmarc."+z.origin), ttl, cfg.DMARC); rr != nil {
+			out = append(out, rr)
+		}
 	}
 
 	// Per active stack: <label>.<origin> A/AAAA + MX.
@@ -165,6 +190,64 @@ func mkMX(owner string, ttl uint32, pref uint16, host string) dns.RR {
 		Preference: pref,
 		Mx:         dns.Fqdn(host),
 	}
+}
+
+// mkTXT builds a TXT record, splitting values over 255 bytes into the
+// multiple character-strings DNS requires (DKIM public keys in B2 exceed
+// 255; SPF/DMARC don't, but the chunking is harmless).
+func mkTXT(owner string, ttl uint32, value string) dns.RR {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &dns.TXT{
+		Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: ttl},
+		Txt: chunk255(value),
+	}
+}
+
+func chunk255(s string) []string {
+	const max = 255
+	if len(s) <= max {
+		return []string{s}
+	}
+	var out []string
+	for len(s) > max {
+		out = append(out, s[:max])
+		s = s[max:]
+	}
+	if len(s) > 0 {
+		out = append(out, s)
+	}
+	return out
+}
+
+// effectiveSPF returns the apex SPF value: the operator override if set,
+// else an auto-derived record authorizing the edge IPs + the MX host, with
+// a ~all softfail so a tenant's other senders aren't hard-failed.
+func effectiveSPF(cfg SynthConfig) string {
+	if s := strings.TrimSpace(cfg.SPFOverride); s != "" {
+		return s
+	}
+	var mechs []string
+	for _, raw := range cfg.EdgeIPs {
+		ip := net.ParseIP(strings.TrimSpace(raw))
+		if ip == nil {
+			continue
+		}
+		if v4 := ip.To4(); v4 != nil {
+			mechs = append(mechs, "ip4:"+v4.String())
+		} else {
+			mechs = append(mechs, "ip6:"+ip.String())
+		}
+	}
+	if strings.TrimSpace(cfg.MXHost) != "" {
+		mechs = append(mechs, "mx")
+	}
+	if len(mechs) == 0 {
+		return ""
+	}
+	return "v=spf1 " + strings.Join(mechs, " ") + " ~all"
 }
 
 func mkAddrs(owner string, ttl uint32, ips []string) []dns.RR {

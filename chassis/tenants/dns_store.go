@@ -48,6 +48,58 @@ func ActivePatternZoneOriginTx(ctx context.Context, tx *sql.Tx, tenantID string)
 	return origin, origin != "", nil
 }
 
+// DomainCoveredByZone reports whether `domain` (apex or any subdomain) falls
+// under an active dns_zones row for tenant `slug`. Being authoritative for a
+// domain's DNS (NS delegated to us) IS proof of control, so this counts as
+// verified — no separate challenge needed. Package-level (takes *sql.DB) so
+// the mail op and the ingress resolver can both call it. Reads, never the
+// hot-path snapshot.
+func DomainCoveredByZone(ctx context.Context, db *sql.DB, slug, domain string) (bool, error) {
+	canon, ok := CanonicalizeHost(domain)
+	if !ok || slug == "" {
+		return false, nil
+	}
+	var one int
+	err := db.QueryRowContext(ctx,
+		`SELECT 1 FROM dns_zones z
+		   JOIN tenants t ON t.tenant_id = z.tenant_id
+		  WHERE t.slug = ? AND t.revoked_at IS NULL AND z.revoked_at IS NULL
+		    AND (z.origin = ? OR ? LIKE '%.' || z.origin)
+		  LIMIT 1`, slug, canon, canon).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// TenantForMailZone returns the slug of the tenant whose active zone covers
+// `domain` (apex or subdomain), choosing the MOST SPECIFIC zone when several
+// match (longest origin wins, so sub.example.com beats example.com). Used by
+// the ingress resolver as a fallback when no tenant_hostnames row exists:
+// "we serve DNS for it" ⟹ route mail to <slug>/_mail.
+func TenantForMailZone(ctx context.Context, db *sql.DB, domain string) (slug string, ok bool, err error) {
+	canon, cok := CanonicalizeHost(domain)
+	if !cok {
+		return "", false, nil
+	}
+	err = db.QueryRowContext(ctx,
+		`SELECT t.slug FROM dns_zones z
+		   JOIN tenants t ON t.tenant_id = z.tenant_id
+		  WHERE z.revoked_at IS NULL AND t.revoked_at IS NULL
+		    AND (z.origin = ? OR ? LIKE '%.' || z.origin)
+		  ORDER BY length(z.origin) DESC LIMIT 1`, canon, canon).Scan(&slug)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return slug, true, nil
+}
+
 // EnsureZoneHostnameTx makes sure (tenantID, stack) has an active
 // routing hostname at `<StackLabel(stack)>.<origin>` — the SAME label
 // the dns head synthesizes, so the resolved name and the HTTP/mail
