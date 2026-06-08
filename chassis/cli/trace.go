@@ -216,12 +216,16 @@ func printSteps(w io.Writer, steps []client.TraceStep) {
 		fmt.Fprintln(w, "  -")
 		return
 	}
-	fmt.Fprintf(w, "  %-16s %-16s %-40s %-8s %6s   %s\n",
-		"step", "name", "operation", "status", "dur", "in→out")
+	// Columns: stack, step, operation, … . `step` is `<scope>-<name>`, which
+	// already carries the op name, so a separate name column would be
+	// redundant — that slot shows `stack` instead, making cross-stack jumps
+	// (e.g. _sys/boot → a tenant stack after txco://route's goto) visible.
+	fmt.Fprintf(w, "  %-16s %-18s %-40s %-8s %6s   %s\n",
+		"stack", "step", "operation", "status", "dur", "in→out")
 	for _, s := range steps {
-		fmt.Fprintf(w, "  %-16s %-16s %-40s %-8s %5dms  %s→%s\n",
+		fmt.Fprintf(w, "  %-16s %-18s %-40s %-8s %5dms  %s→%s\n",
+			truncate(s.Stack, 16),
 			stepLabel(s),
-			truncate(s.Name, 16),
 			truncate(s.Operation, 40),
 			truncate(s.Status, 8),
 			s.DurationMs,

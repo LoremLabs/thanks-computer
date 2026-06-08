@@ -388,9 +388,13 @@ func fillTracesTable(table *tview.Table, traces []client.TraceSummary) {
 }
 
 // fillStepsTable lays out the step list with the same column shape as
-// the plain renderer: step, name, operation, status, dur, in→out.
+// the plain renderer: stack, step, operation, status, dur, in→out. The
+// stack column makes cross-stack jumps visible — e.g. _sys/boot ops
+// (detect/static/route) vs a tenant stack's ops after txco://route's
+// goto. The redundant name column is dropped: `step` is `<scope>-<name>`,
+// which already carries the name.
 func fillStepsTable(table *tview.Table, steps []client.TraceStep) {
-	headers := []string{"step", "name", "operation", "status", "dur", "in→out"}
+	headers := []string{"stack", "step", "operation", "status", "dur", "in→out"}
 	for i, h := range headers {
 		table.SetCell(0, i,
 			tview.NewTableCell(h).
@@ -400,8 +404,8 @@ func fillStepsTable(table *tview.Table, steps []client.TraceStep) {
 	}
 	for i, s := range steps {
 		row := i + 1
-		table.SetCell(row, 0, tview.NewTableCell(stepLabel(s)))
-		table.SetCell(row, 1, tview.NewTableCell(s.Name))
+		table.SetCell(row, 0, tview.NewTableCell(s.Stack))
+		table.SetCell(row, 1, tview.NewTableCell(stepLabel(s)))
 		table.SetCell(row, 2, tview.NewTableCell(truncate(s.Operation, 50)))
 		table.SetCell(row, 3, tview.NewTableCell(s.Status).
 			SetTextColor(statusColor(s.Status)))
