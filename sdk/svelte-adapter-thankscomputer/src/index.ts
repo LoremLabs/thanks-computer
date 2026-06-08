@@ -1,5 +1,5 @@
 import type { Adapter, Builder } from "@sveltejs/kit";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -23,7 +23,13 @@ export interface AdapterOptions {
    * hard reload of `/some/route` 404s. Default: `true`.
    */
   fallbackOp?: boolean;
-  /** txcl scope for the generated fallback op. Default: `100`. */
+  /**
+   * txcl scope for the generated fallback op. Default: `1000`. The fallback is
+   * a catch-all that halts, so it must run LAST — after `txco://route` and any
+   * ops you add to this stack (APIs, redirects). A low scope would swallow
+   * extension-less requests (`/api/x`) before your own handlers see them. 1000
+   * matches the house last-resort convention (`_sys/boot/1000` notfound).
+   */
   fallbackScope?: number;
   /**
    * Run `txco apply` (in the current directory) after writing the build, to
@@ -47,7 +53,7 @@ export default function adapter(options: AdapterOptions = {}): Adapter {
     out = "OPS/web",
     fallback = "index.html",
     fallbackOp = true,
-    fallbackScope = 100,
+    fallbackScope = 1000,
     apply = false,
     precompress = false,
   } = options;
@@ -131,17 +137,33 @@ function writeFallbackOp(
   fallbackName: string,
 ): void {
   const b64 = readFileSync(fallbackPath).toString("base64");
+
+  // Remove any stale spa-fallback op from a previous build at a different
+  // scope, so exactly one exists. Otherwise a leftover at a lower scope would
+  // fire first and halt — silently defeating the current fallbackScope.
+  if (existsSync(out)) {
+    for (const entry of readdirSync(out, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const stale = join(out, entry.name, "spa-fallback.txcl");
+      if (existsSync(stale)) rmSync(stale);
+    }
+  }
+
   const opDir = join(out, String(scope));
   builder.mkdirp(opDir);
   const opPath = join(opDir, "spa-fallback.txcl");
 
-  // The WHEN fires only for navigations with no file extension, after
-  // txco://static (boot/50) has already served and halted any real file.
+  // The WHEN fires only for navigations with no file extension. This op lives
+  // at a high (last-resort) scope so it runs AFTER txco://route and any other
+  // ops in this stack — and halts — so it never swallows an extension-less
+  // request that an earlier-scope handler (e.g. an API) should answer.
   const txcl = `# ${NAME} — SPA fallback (generated; do not edit by hand).
 #
 # txco://static serves real files (assets, ${fallbackName}) at boot/50 and falls
-# through for extension-less paths (client routes and "/"). This op serves the
-# SvelteKit shell for those so a hard reload or deep link renders the app.
+# through for extension-less paths (client routes and "/"). This op — a catch-all
+# at the stack's last scope — serves the SvelteKit shell for those so a hard
+# reload or deep link renders the app. Being last + halting means it only fires
+# for requests nothing else (static, your own ops) handled.
 #
 # @web.res.body is base64-encoded ${fallbackName} (the web inlet decodes it).
 # Regenerated on every \`vite build\` — it embeds content-hashed asset URLs.
