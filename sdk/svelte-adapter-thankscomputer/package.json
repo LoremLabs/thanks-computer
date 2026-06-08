@@ -1,0 +1,48 @@
+{
+  "name": "@txco/svelte-adapter-thankscomputer",
+  "version": "0.1.0",
+  "description": "SvelteKit adapter that deploys a static build to thanks.computer (txco): writes your app into a stack's FILES/ and generates the SPA-fallback op, served by txco://static.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "keywords": [
+    "svelte",
+    "sveltekit",
+    "svelte-adapter",
+    "adapter",
+    "txco",
+    "thanks-computer",
+    "static",
+    "spa"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LoremLabs/thanks-computer.git",
+    "directory": "sdk/svelte-adapter-thankscomputer"
+  },
+  "homepage": "https://github.com/LoremLabs/thanks-computer/tree/master/sdk/svelte-adapter-thankscomputer#readme",
+  "bugs": "https://github.com/LoremLabs/thanks-computer/issues",
+  "files": ["dist", "src", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "peerDependencies": {
+    "@sveltejs/kit": "^2.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/kit": "^2.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}
