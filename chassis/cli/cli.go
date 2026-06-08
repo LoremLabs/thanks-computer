@@ -21,6 +21,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/cloud"
 	opcli "github.com/loremlabs/thanks-computer/chassis/cli/op"
+	"github.com/loremlabs/thanks-computer/chassis/clientcmd"
 )
 
 // BuildInfo carries the ldflag-injected build identity (set in
@@ -174,10 +175,15 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 	case "version", "--version", "-v":
 		return runVersion(stdout), true
 	default:
-		// Unknown built-in → first try a local external plugin `txco-<cmd>`
+		// Unknown built-in → first an overlay-registered client command
+		// (chassis/clientcmd; the cloud overlay's blank import populates it,
+		// open core registers none), then a local external plugin `txco-<cmd>`
 		// (git/kubectl convention), then the zero-install path: forward it to
 		// the connected chassis's /v1/cli (a silent signed request that the
 		// server either runs or 404s). Built-ins above always win.
+		if h, ok := clientcmd.Lookup(cmd); ok {
+			return runClientCmd(h, rest, stdout, stderr), true
+		}
 		if status, ok := execPlugin(cmd, rest, stdout, stderr); ok {
 			return status, true
 		}

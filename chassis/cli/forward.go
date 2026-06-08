@@ -23,6 +23,7 @@ var forwardGlobalFlags = map[string]bool{
 	"user":    true,
 	"pass":    true,
 	"dir":     true,
+	"tenant":  true,
 }
 
 // splitForwardFlags pulls the reserved global flags out of args — in both

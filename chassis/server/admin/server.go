@@ -27,6 +27,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
+	"github.com/loremlabs/thanks-computer/chassis/serverext"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
@@ -234,6 +235,14 @@ func (c *Controller) Start() {
 	r.Handle("/auth/browser/exchange",
 		throttled(http.HandlerFunc(c.handleBrowserExchange))).Methods(http.MethodPost)
 
+	// Overlay-supplied PUBLIC routes (no auth middleware) — e.g. a webhook
+	// verified by a third-party signature. Mounted BEFORE the "/" catch-all
+	// subrouter below so gorilla/mux (registration-order match) reaches them.
+	// Open core registers none; the cloud overlay's blank import does.
+	for _, m := range serverext.PublicMounters() {
+		m(r)
+	}
+
 	// Everything else goes through the auth middleware.
 	protected := r.PathPrefix("/").Subrouter()
 	protected.Use(func(next http.Handler) http.Handler {
@@ -314,6 +323,11 @@ func (c *Controller) Start() {
 	// the tenant.
 	tenantR := protected.PathPrefix("/v1/tenants/{tenant}").Subrouter()
 	tenantR.Use(c.resolveTenantMiddleware)
+	// Overlay-supplied TENANT-scoped routes (auth + tenant resolver already
+	// applied; handlers read auth.FromContext). Open core registers none.
+	for _, m := range serverext.TenantMounters() {
+		m(tenantR)
+	}
 	tenantR.HandleFunc("/ops", c.handleListOps).Methods(http.MethodGet)
 	tenantR.HandleFunc("/auth/actors", c.handleListActors).Methods(http.MethodGet)
 	tenantR.HandleFunc("/auth/actors/{actorID}/revoke", c.handleRevokeActor).Methods(http.MethodPost)

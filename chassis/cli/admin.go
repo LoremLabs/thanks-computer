@@ -11,6 +11,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
+	"github.com/loremlabs/thanks-computer/chassis/clientcmd"
 )
 
 // runAdmin dispatches `txco admin <subcommand>` — operator-facing chassis
@@ -29,6 +30,13 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 		printAdminUsage(stdout)
 		return 0
 	default:
+		// An overlay may extend `admin` with its own operator subcommands
+		// (chassis/clientcmd admin registry) — e.g. the cloud overlay's
+		// `admin credits`. Open core registers none, so a self-hosted chassis
+		// falls straight through to the unknown-subcommand error.
+		if h, ok := clientcmd.LookupAdmin(args[0]); ok {
+			return runClientCmd(h, args[1:], stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "admin: unknown subcommand %q\n\n", args[0])
 		printAdminUsage(stderr)
 		return 2
