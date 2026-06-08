@@ -148,9 +148,9 @@ func (s *lmtpSession) LMTPData(r io.Reader, status smtp.StatusCollector) error {
 	// one via @domain wildcard) would split into separate envelopes
 	// instead of batching.
 	type groupKey struct{ tenant, stack string }
-	groups := map[groupKey][]int{}         // groupKey → []index_into_slots
-	groupMeta := map[groupKey]slot{}       // groupKey → first slot (for Ingress + Verified exemplar)
-	var groupOrder []groupKey              // preserves first-seen order for sequential dispatch
+	groups := map[groupKey][]int{}   // groupKey → []index_into_slots
+	groupMeta := map[groupKey]slot{} // groupKey → first slot (for Ingress + Verified exemplar)
+	var groupOrder []groupKey        // preserves first-seen order for sequential dispatch
 	for i, sl := range slots {
 		if !sl.routed {
 			continue
@@ -338,6 +338,10 @@ func (s *lmtpSession) dispatchGroup(
 	msgJSON, _ = sjson.Set(msgJSON, "raw",
 		base64.StdEncoding.EncodeToString(body))
 	payload, _ = sjson.SetRaw(payload, "_txc.lmtp.msg", msgJSON)
+
+	// Bounce / DSN detector for stacks to halt on before auto-replying
+	// (`WHEN @lmtp.is_bounce`). Null reverse-path or a delivery-status report.
+	payload, _ = sjson.Set(payload, "_txc.lmtp.is_bounce", bounceDetected(s.mailFrom, msgJSON))
 
 	// Connection metadata.
 	payload, _ = sjson.Set(payload, "_txc.lmtp.client.helo", s.conn.Hostname())

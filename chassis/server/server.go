@@ -1116,6 +1116,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		RelayTLS:      conf.MailRelayTLS,
 		DialTimeout:   time.Duration(conf.MailDialTimeoutMS) * time.Millisecond,
 		MaxRecipients: conf.MailMaxRecipients,
+		RateLimits:    conf.MailRateLimits,
 	})
 	pu.Handle([]byte("txco://sendmail"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {

@@ -31,6 +31,7 @@ type Config struct {
 	RelayTLS      string // "none" | "starttls"
 	DialTimeout   time.Duration
 	MaxRecipients int
+	RateLimits    string // per-tenant send caps, e.g. "100/2m,200/4h"; empty disables
 }
 
 // Mailer is the txco://sendmail handler with its injected deps. db is the
@@ -45,7 +46,8 @@ type Mailer struct {
 	maxRecipients int
 	now           func() time.Time
 	submit        SubmitFunc
-	relayOK       bool // a relay is configured
+	relayOK       bool         // a relay is configured
+	rl            *rateLimiter // per-tenant, per-node send caps; nil = disabled
 }
 
 // NewMailer builds a Mailer. db must be the real runtime DB (e.g.
@@ -63,6 +65,7 @@ func NewMailer(db *sql.DB, u usage.Sink, log *zap.Logger, cfg Config) *Mailer {
 		now:           time.Now,
 		submit:        makeSMTPSubmit(cfg),
 		relayOK:       cfg.RelayAddr != "",
+		rl:            newRateLimiter(parseRateRules(cfg.RateLimits)),
 	}
 }
 
@@ -151,12 +154,44 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 		extraRcpts = append(extraRcpts, a.Address)
 	}
 
+	// Reply-To (dedicated, ergonomic) + a denylisted map of extra headers.
+	// Both are shared across every per-recipient message. The denylist keeps
+	// the structural / signing / loop-guard headers sendmail owns off-limits.
+	replyTo := sanitizeHeaderValue(s.Get("reply_to").String())
+	extraHeaders := parseHeaders(s.Get("headers"))
+
+	// Envelope MAIL FROM (becomes Return-Path). Defaults to the header From, so
+	// bounces come back where they're visible. Set `_sendmail.envelope_from =
+	// "<>"` (or "") for a null reverse-path — the RFC 3834 posture for
+	// auto-replies: a bounce of the reply is itself discarded (no loops), and
+	// it's still DMARC-aligned via DKIM (SPF just doesn't apply to a null
+	// sender). A real address routes bounces elsewhere (its domain needs SPF or
+	// deliverability suffers).
+	envFrom := fromAddr.Address
+	if ef := s.Get("envelope_from"); ef.Exists() {
+		if v := strings.TrimSpace(ef.String()); v == "" || v == "<>" {
+			envFrom = ""
+		} else if a, perr := mail.ParseAddress(v); perr == nil {
+			envFrom = a.Address
+		}
+	}
+
 	var results []recipResult
 	var sent, skipped, failed int
 	for _, r := range recips {
 		if !r.parseOK {
 			failed++
 			results = append(results, recipResult{To: r.raw, Status: "error", Reason: "invalid_address"})
+			continue
+		}
+		// Per-tenant, per-node send cap (runaway-loop safety valve). Checked
+		// BEFORE the campaign claim so a throttled recipient leaves no claim to
+		// release, and counted only when allowed. Throttled recipients are
+		// skipped (no usage); the reason distinguishes a retry-later throttle
+		// from a permanent campaign dedup.
+		if m.rl != nil && !m.rl.allow(tenant, m.now()) {
+			skipped++
+			results = append(results, recipResult{To: r.addr.Address, Status: "skipped", Reason: "rate_limited"})
 			continue
 		}
 		// Campaign at-most-once claim (per recipient).
@@ -189,14 +224,14 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 			}
 			if rerr == nil {
 				text := htmlToText(bodyHTML)
-				msg, msgID, merr := composeMIME(*fromAddr, r.addr, cc, subj, full, text, fromDomain)
+				msg, msgID, merr := composeMIME(*fromAddr, r.addr, cc, replyTo, extraHeaders, subj, full, text, fromDomain)
 				if merr != nil {
 					rerr = merr
 				} else {
 					// DKIM-sign (per-domain key) before handing to the relay.
 					msg = m.dkimSign(ctx, fromDomain, msg)
 					rcpts := append([]string{r.addr.Address}, extraRcpts...)
-					if serr := m.submit(ctx, fromAddr.Address, rcpts, msg); serr != nil {
+					if serr := m.submit(ctx, envFrom, rcpts, msg); serr != nil {
 						rerr = serr
 					} else {
 						// Delivered.
@@ -290,6 +325,53 @@ func parseAddrList(v gjson.Result) []mail.Address {
 		}
 	case v.Type == gjson.String:
 		add(v.String())
+	}
+	return out
+}
+
+// protectedHeaders are the headers sendmail owns — structural, signing,
+// envelope, or loop-guard. A user-supplied `headers` map (and `reply_to`) can
+// never set these: overriding them would break the MIME structure, invalidate
+// the DKIM signature, or defeat the auto-reply loop guards. Matched
+// case-insensitively.
+var protectedHeaders = map[string]bool{
+	"from": true, "to": true, "cc": true, "bcc": true, "sender": true,
+	"reply-to":     true, // use the dedicated _sendmail.reply_to field
+	"subject":      true,
+	"date":         true,
+	"message-id":   true,
+	"mime-version": true, "content-type": true,
+	"content-transfer-encoding": true, "content-disposition": true,
+	"auto-submitted": true, "x-auto-response-suppress": true,
+	"dkim-signature": true, "received": true, "return-path": true,
+}
+
+// sanitizeHeaderValue trims and strips CR/LF so a value can't smuggle in extra
+// header lines (header injection).
+func sanitizeHeaderValue(v string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(strings.TrimSpace(v))
+}
+
+// parseHeaders reads the `headers` object ({name: value}) into a sanitized map,
+// dropping protected, malformed, or empty entries. The MIME writer canonicalizes
+// names; we just reject anything with structural chars in the name.
+func parseHeaders(v gjson.Result) map[string]string {
+	if !v.IsObject() {
+		return nil
+	}
+	out := map[string]string{}
+	v.ForEach(func(k, val gjson.Result) bool {
+		name := strings.TrimSpace(k.String())
+		if name == "" || strings.ContainsAny(name, "\r\n: ") || protectedHeaders[strings.ToLower(name)] {
+			return true
+		}
+		if value := sanitizeHeaderValue(val.String()); value != "" {
+			out[name] = value
+		}
+		return true
+	})
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

@@ -17,6 +17,28 @@ func crlf(s string) string {
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
+func TestBounceDetected(t *testing.T) {
+	cases := []struct {
+		name    string
+		from    string
+		msgJSON string
+		want    bool
+	}{
+		{"null reverse-path", "", `{}`, true},
+		{"whitespace-only from is null", "   ", `{}`, true},
+		{"normal mail", "alice@example.com", `{"headers":{"content-type":["text/plain"]}}`, false},
+		{"dsn with non-null sender", "mailer-daemon@example.com",
+			`{"headers":{"content-type":["multipart/report; report-type=delivery-status; boundary=xyz"]}}`, true},
+		{"multipart/report without delivery-status is not a bounce", "x@example.com",
+			`{"headers":{"content-type":["multipart/report; report-type=disposition-notification"]}}`, false},
+	}
+	for _, c := range cases {
+		if got := bounceDetected(c.from, c.msgJSON); got != c.want {
+			t.Errorf("%s: bounceDetected(%q, ...) = %v, want %v", c.name, c.from, got, c.want)
+		}
+	}
+}
+
 const fixturePlainText = `From: Alice <alice@example.com>
 To: support@your.tenant
 Subject: wifi keeps dropping

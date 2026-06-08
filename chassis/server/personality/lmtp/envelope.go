@@ -11,8 +11,25 @@ import (
 	"time"
 
 	"github.com/jhillyerd/enmime"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// bounceDetected reports whether an inbound message is a bounce / auto-generated
+// DSN, so a stack can halt before replying and avoid mail loops. Surfaced as
+// `_txc.lmtp.is_bounce` (read it as `@lmtp.is_bounce`). Two signals:
+//   - a null reverse-path (empty SMTP MAIL FROM) — the RFC 5321 marker every
+//     compliant sender stamps on bounces and auto-responses; the primary, most
+//     reliable check (and what the OOO guard's `@lmtp.mail.from != ""` keys on).
+//   - a formal delivery-status report (Content-Type: multipart/report;
+//     report-type=delivery-status) — catches a DSN sent with a non-null sender.
+func bounceDetected(mailFrom, msgJSON string) bool {
+	if strings.TrimSpace(mailFrom) == "" {
+		return true
+	}
+	ct := strings.ToLower(gjson.Get(msgJSON, "headers.content-type").String())
+	return strings.Contains(ct, "multipart/report") && strings.Contains(ct, "delivery-status")
+}
 
 // parseMessage takes RFC 5322 bytes and returns a JSON object suitable
 // for `sjson.SetRaw` under `_txc.lmtp.msg`. Populates:

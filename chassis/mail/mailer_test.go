@@ -191,6 +191,94 @@ func TestSendCcBcc(t *testing.T) {
 	}
 }
 
+func TestSendReplyToAndHeaders(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	in := env(t, map[string]any{
+		"to": "matt@example.com", "subject": "Hi", "body": "b", "from": "noreply@acme.com",
+		"reply_to": "support@acme.com",
+		"headers": map[string]any{
+			"X-Campaign":       "spring",
+			"List-Unsubscribe": "<mailto:unsub@acme.com>",
+			"From":             "evil@bad.com", // protected → ignored
+			"Subject":          "hijacked",     // protected → ignored
+		},
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatal(err)
+	}
+	msg := string(sub.calls[0].msg)
+	if !strings.Contains(msg, "Reply-To: support@acme.com") {
+		t.Fatalf("Reply-To missing:\n%s", msg)
+	}
+	if !strings.Contains(msg, "X-Campaign: spring") || !strings.Contains(msg, "List-Unsubscribe: <mailto:unsub@acme.com>") {
+		t.Fatalf("custom headers missing:\n%s", msg)
+	}
+	// Protected headers can't be overridden; the real From/Subject survive.
+	if strings.Contains(msg, "evil@bad.com") || strings.Contains(msg, "hijacked") {
+		t.Fatalf("a protected header was overridden:\n%s", msg)
+	}
+	if !strings.Contains(msg, "noreply@acme.com") || !strings.Contains(msg, "Subject: Hi") {
+		t.Fatalf("real From/Subject not intact:\n%s", msg)
+	}
+}
+
+func TestSendEnvelopeFrom(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	base := map[string]any{"to": "x@example.com", "subject": "Hi", "body": "b", "from": "noreply@acme.com"}
+
+	// Default → envelope MAIL FROM = the header From.
+	if _, err := m.Send(context.Background(), "acme", env(t, base)); err != nil {
+		t.Fatal(err)
+	}
+	if sub.calls[0].from != "noreply@acme.com" {
+		t.Fatalf("default envelope should be From; got %q", sub.calls[0].from)
+	}
+
+	// envelope_from "<>" → null reverse-path (RFC 3834 auto-reply posture).
+	withNull := map[string]any{"to": "x@example.com", "subject": "Hi", "body": "b",
+		"from": "noreply@acme.com", "envelope_from": "<>"}
+	if _, err := m.Send(context.Background(), "acme", env(t, withNull)); err != nil {
+		t.Fatal(err)
+	}
+	if sub.calls[1].from != "" {
+		t.Fatalf("envelope_from=<> should null the reverse-path; got %q", sub.calls[1].from)
+	}
+}
+
+func TestSendRateLimited(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	m.rl = newRateLimiter(parseRateRules("1/1h")) // cap = 1 send/hour/tenant
+	fixed := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return fixed }
+
+	// First send → allowed.
+	p1, err := m.Send(context.Background(), "acme",
+		env(t, map[string]any{"to": "a@example.com", "subject": "Hi", "body": "b", "from": "noreply@acme.com"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gjson.Get(p1.Raw, "_sendmail.result.sent").Int() != 1 {
+		t.Fatalf("first send should send=1: %s", p1.Raw)
+	}
+
+	// Second send (different recipient → not campaign dedup) → throttled.
+	p2, _ := m.Send(context.Background(), "acme",
+		env(t, map[string]any{"to": "b@example.com", "subject": "Hi", "body": "b", "from": "noreply@acme.com"}))
+	if gjson.Get(p2.Raw, "_sendmail.result.skipped").Int() != 1 ||
+		gjson.Get(p2.Raw, "_sendmail.result.recipients.0.reason").String() != "rate_limited" {
+		t.Fatalf("second send should be rate_limited: %s", p2.Raw)
+	}
+	if len(sub.calls) != 1 {
+		t.Fatalf("throttled send must not submit; calls=%d", len(sub.calls))
+	}
+}
+
 func TestSendRequiresFields(t *testing.T) {
 	db := newTestDB(t)
 	m := newTestMailer(t, db, &fakeSubmit{}, &fakeUsage{})
