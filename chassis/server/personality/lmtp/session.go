@@ -355,9 +355,6 @@ func (s *lmtpSession) dispatchGroup(
 	if meta.hasScore {
 		payload, _ = sjson.Set(payload, "_txc.mail.spam.score", meta.score)
 	}
-	if len(meta.symbols) > 0 {
-		payload, _ = sjson.Set(payload, "_txc.mail.rspamd.symbols", meta.symbols)
-	}
 	if meta.spf != "" {
 		payload, _ = sjson.Set(payload, "_txc.mail.auth.spf", meta.spf)
 	}

@@ -78,20 +78,18 @@ func (b spamBands) verdict(score float64) string {
 // `@mail.*` in txcl) so tenant _mail stacks can make their own policy
 // decisions; the chassis only supplies the facts.
 type mailMeta struct {
-	available bool     // any Rspamd header present (false ⇒ Rspamd down/skipped — mail still flowed)
-	score     float64  // raw Rspamd score
-	hasScore  bool     // a numeric score was found
-	verdict   string   // clean | suspicious | spam | unknown
-	symbols   []string // Rspamd symbol names
-	spf       string   // pass | fail | softfail | neutral | none | temperror | permerror | ""
+	available bool    // any Rspamd header present (false ⇒ Rspamd down/skipped — mail still flowed)
+	score     float64 // raw Rspamd score
+	hasScore  bool    // a numeric score was found
+	verdict   string  // clean | suspicious | spam | unknown
+	spf       string  // pass | fail | softfail | neutral | none | temperror | permerror | ""
 	dkim      string
 	dmarc     string
 }
 
 var (
 	// X-Spamd-Result: "default: False [2.50 / 15.00]; SYM1(0.0)[..], SYM2(..)..."
-	spamdScoreRe  = regexp.MustCompile(`\[\s*(-?\d+(?:\.\d+)?)\s*/`)
-	spamdSymbolRe = regexp.MustCompile(`([A-Z][A-Z0-9_]+)\(`)
+	spamdScoreRe = regexp.MustCompile(`\[\s*(-?\d+(?:\.\d+)?)\s*/`)
 	// Authentication-Results: "... ; spf=pass ...; dkim=pass ...; dmarc=pass ..."
 	arSPFRe   = regexp.MustCompile(`(?i)\bspf=([a-z]+)`)
 	arDKIMRe  = regexp.MustCompile(`(?i)\bdkim=([a-z]+)`)
@@ -138,13 +136,6 @@ func parseMailHeaders(msgJSON string, bands spamBands) mailMeta {
 		if sm := spamdScoreRe.FindStringSubmatch(res); len(sm) == 2 {
 			if f, err := strconv.ParseFloat(sm[1], 64); err == nil {
 				m.score, m.hasScore = f, true
-			}
-		}
-		seen := map[string]bool{}
-		for _, sm := range spamdSymbolRe.FindAllStringSubmatch(res, -1) {
-			if name := sm[1]; !seen[name] {
-				seen[name] = true
-				m.symbols = append(m.symbols, name)
 			}
 		}
 	}

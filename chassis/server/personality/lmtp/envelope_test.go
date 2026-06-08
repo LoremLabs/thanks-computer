@@ -60,7 +60,7 @@ func TestParseSpamBands(t *testing.T) {
 func TestParseMailHeaders(t *testing.T) {
 	bands := parseSpamBands("suspicious=5,spam=10")
 
-	t.Run("rspamd clean with auth + symbols", func(t *testing.T) {
+	t.Run("rspamd clean with auth", func(t *testing.T) {
 		msg := `{"headers":{` +
 			`"x-spamd-result":["default: False [2.50 / 15.00]; R_SPF_ALLOW(-0.20)[], DKIM_TRACE(0.00)[], DMARC_POLICY_ALLOW(-0.50)[]"],` +
 			`"authentication-results":["mx.thanks.computer; spf=pass smtp.mailfrom=a@x.test; dkim=pass header.d=x.test; dmarc=pass"]}}`
@@ -70,9 +70,6 @@ func TestParseMailHeaders(t *testing.T) {
 		}
 		if m.spf != "pass" || m.dkim != "pass" || m.dmarc != "pass" {
 			t.Fatalf("auth: %+v", m)
-		}
-		if strings.Join(m.symbols, ",") != "R_SPF_ALLOW,DKIM_TRACE,DMARC_POLICY_ALLOW" {
-			t.Fatalf("symbols: %v", m.symbols)
 		}
 	})
 
