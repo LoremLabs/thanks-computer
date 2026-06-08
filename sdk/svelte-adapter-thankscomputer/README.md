@@ -52,9 +52,12 @@ would silently fail to load. Setting `appDir` to a non-underscore name (`app`,
   pages into `<out>/FILES/`, plus a SPA fallback page (default `index.html`).
 - `txco://static` (the boot stack, scope 50) serves any real file under `FILES/`
   for the routed tenant — with content-type, a content-hash ETag, and 304s.
-- Extension-less requests (`/`, `/dashboard`, …) have no matching file, so static
-  falls through. The generated `spa-fallback.txcl` op then serves the app shell
-  for them, so deep links and reloads render correctly.
+- `txco://static` also does `try_files` resolution: `/` → `index.html`, `/about` →
+  `about.html`, `/blog` → `blog/index.html`. So **prerendered** routes and the
+  homepage serve their own HTML directly.
+- A genuinely **client-rendered** route (no prerendered file) has nothing to
+  resolve, so static falls through and the generated `spa-fallback.txcl` op serves
+  the app shell — deep links and reloads still render correctly.
 
 ## Options
 
@@ -69,10 +72,12 @@ would silently fail to load. Setting `appDir` to a non-underscore name (`app`,
 
 ## Limitations (v1)
 
-- **SPA mode first.** The fallback op serves a single shell for all client
-  routes. Fully **prerendered** multi-page sites need directory-index resolution
-  in `txco://static` (planned) — until then, extension-less prerendered routes
-  fall back to the shell rather than their own HTML.
+- **SPA *and* prerendered both work.** `txco://static` resolves clean URLs and
+  directory indexes (`/about` → `about.html`, `/blog` → `blog/index.html`, `/` →
+  `index.html`), so prerendered routes serve their own HTML; the fallback op covers
+  any remaining client-rendered routes. One edge: the fallback's `WHEN` matches
+  extension-less paths, so a client route that ends in a dot-suffix (e.g. `/v1.2`)
+  isn't caught — rare, and prerendering or an explicit op handles it.
 - **Per-file size.** Assets are capped (10 MiB on the fleet path); typical
   SvelteKit chunks are far under this. A single very large asset needs a CDN.
 - **Whole-stack deploy.** Each `txco apply` replaces the stack version; unchanged

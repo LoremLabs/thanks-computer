@@ -1,6 +1,6 @@
 {
   "name": "@txco/svelte-adapter-thankscomputer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SvelteKit adapter that deploys a static build to thanks.computer (txco): writes your app into a stack's FILES/ and generates the SPA-fallback op, served by txco://static.",
   "license": "MIT",
   "type": "module",
