@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
 
@@ -134,6 +135,74 @@ func TestActivateMintsStructuredHostname(t *testing.T) {
 	n2, host2 := systemHostRow(t, c, "shop")
 	if n2 != 1 || host2 != host {
 		t.Fatalf("re-activate: count=%d host=%q; want idempotent reuse of %q", n2, host2, host)
+	}
+}
+
+// TestActivatePublishesStructuredHostname: with the fleet producer enabled,
+// activating a stack must enqueue a hostname.bound control event for the
+// auto-minted structured host. Without it the host stays on the control-plane
+// node and every data-plane node 404s the stack's URL (the bug this fixes).
+func TestActivatePublishesStructuredHostname(t *testing.T) {
+	c := newTestController(t, config.Config{
+		Personalities:        "admin",
+		StructuredHostSuffix: ".localhost",
+		FeedSink:             "file",
+	})
+	withAStore(t, c) // fleetEnabled() also needs an artifact store
+	v := callCreateDraft(t, c, "shop", "")
+	callPutFiles(t, c, "shop", v, []stackFile{
+		{Path: "100/main.txcl", Content: `EXEC "http://x/y"`},
+	})
+	callActivate(t, c, "shop", v)
+
+	// The structured host was minted on the control-plane path...
+	if n, host := systemHostRow(t, c, "shop"); n != 1 {
+		t.Fatalf("after activate: %d structured host rows (%q), want 1", n, host)
+	}
+
+	// ...and a hostname.bound event was queued so the fleet learns it.
+	var bound int
+	if err := c.pu.RuntimeDB.QueryRow(
+		`SELECT count(*) FROM control_events_outbox WHERE event_type = ? AND tenant_id = ?`,
+		controlevent.TypeHostnameBound, testTenant).Scan(&bound); err != nil {
+		t.Fatalf("outbox query: %v", err)
+	}
+	if bound != 1 {
+		t.Fatalf("hostname.bound outbox rows = %d, want 1 (structured host not propagated to the fleet)", bound)
+	}
+}
+
+// TestApplyStackVersionDoesNotMint: the data-plane applier path
+// (ApplyStackVersion → materialiseStackVersion with mintHosts=false) must NOT
+// mint its own structured host. MintHandle is random, so a per-node mint would
+// diverge and the stack's URL would 404 on every node but the one that minted
+// it; the canonical host arrives via a hostname.bound event instead. The suffix
+// is configured here precisely to prove the data-plane path still skips minting.
+func TestApplyStackVersionDoesNotMint(t *testing.T) {
+	c := newTestController(t, config.Config{
+		Personalities:        "admin",
+		StructuredHostSuffix: ".localhost",
+	})
+	v := callCreateDraft(t, c, "shop", "")
+	callPutFiles(t, c, "shop", v, []stackFile{
+		{Path: "100/main.txcl", Content: `EXEC "http://x/y"`},
+	})
+
+	ctx := context.Background()
+	tx, err := c.pu.RuntimeDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := c.ApplyStackVersion(ctx, tx, testTenant, "shop", v, "2026-06-08T00:00:00.000Z"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("ApplyStackVersion: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if n, host := systemHostRow(t, c, "shop"); n != 0 {
+		t.Fatalf("data-plane apply minted %d host row(s) (%q); want 0", n, host)
 	}
 }
 

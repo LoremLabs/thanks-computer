@@ -894,8 +894,16 @@ func (e *materialiseError) Error() string { return e.code }
 // reload. Failures are returned as *materialiseError so callers can preserve
 // the original status/code/detail. Returns (priorActiveVersionID,
 // targetVersionID).
+//
+// mintHosts gates the auto-mint of a routing hostname: true on the
+// control-plane admin path (handleActivateStack), where the canonical host is
+// minted once here and then fleet-published; false on the data-plane applier
+// (ApplyStackVersion). The data plane must NOT re-mint — MintHandle is random,
+// so every node would diverge to its own hostname and the stack's URL would
+// 404 on all but the minting node. Data-plane nodes receive the canonical host
+// via a separate hostname.bound control event instead.
 func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
-	tenantID, stackName string, versionNumber int64, now string,
+	tenantID, stackName string, versionNumber int64, now string, mintHosts bool,
 ) (sql.NullInt64, int64, error) {
 
 	stackID, currentActiveID, err := c.lookupStack(ctx, tx, tenantID, stackName)
@@ -1075,12 +1083,15 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// stack is wired under that zone (`stack-name.<origin>`, resolved by
 	// our dns head — internal docs/todo-dns-authority.md); otherwise it
 	// falls back to the global structured-host suffix
-	// (internal docs/todo-structured-stack-hostnames.md). One site here
-	// covers both the admin handler and the fleet ApplyStackVersion path,
-	// and rides this same tx so the row is atomic with the version flip.
-	// Skips system stacks. A mint failure must NEVER fail an activation —
-	// log and continue; the convenience hostname is secondary to the deploy.
-	if isMintableStack(stackName) {
+	// (internal docs/todo-structured-stack-hostnames.md). It rides this
+	// same tx so the row is atomic with the version flip. Skips system
+	// stacks. A mint failure must NEVER fail an activation — log and
+	// continue; the convenience hostname is secondary to the deploy.
+	//
+	// mintHosts is the control-plane gate: only the admin handler mints
+	// (then fleet-publishes the row); the data-plane applier passes false
+	// so it never mints a divergent random host (see the func doc).
+	if mintHosts && isMintableStack(stackName) {
 		origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID)
 		if zerr != nil {
 			// A zone-lookup failure must never skip the structured-host
@@ -1164,7 +1175,11 @@ func structuredURL(r *http.Request, host, webAddr string) string {
 // HTTP-only status/code/detail is collapsed to a plain error.
 func (c *Controller) ApplyStackVersion(ctx context.Context, tx *sql.Tx,
 	tenantID, stack string, version int64, now string) error {
-	if _, _, err := c.materialiseStackVersion(ctx, tx, tenantID, stack, version, now); err != nil {
+	// mintHosts=false: the data-plane applier must not mint its own routing
+	// hostname (MintHandle is random → divergent per node). The canonical
+	// host is minted once on the control plane and arrives as a separate
+	// hostname.bound event.
+	if _, _, err := c.materialiseStackVersion(ctx, tx, tenantID, stack, version, now, false); err != nil {
 		return err
 	}
 	return nil
@@ -1266,7 +1281,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 	}()
 
 	currentActiveID, targetVersionID, merr := c.materialiseStackVersion(
-		r.Context(), tx, ac.TenantID, name, req.VersionNumber, now)
+		r.Context(), tx, ac.TenantID, name, req.VersionNumber, now, true)
 	if merr != nil {
 		var me *materialiseError
 		if errors.As(merr, &me) {
@@ -1310,6 +1325,16 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		// ship the row so it can route + cert the host. See dns_fleet.go.
 		if qerr := c.queueZoneHostnameUpserts(r.Context(), tx, ac.TenantID, name); qerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "fleet_zone_hostname",
+				map[string]any{"err": qerr.Error()})
+			return
+		}
+		// Same for the auto-minted structured-host-suffix routing host
+		// (<stack>-<rand>.<suffix>). materialiseStackVersion minted it in this
+		// tx; without shipping the row, only the control-plane node could route
+		// the structured URL — every data-plane node 404s it (they no longer
+		// re-mint, post mintHosts gate). See queueStructuredHostnameUpserts.
+		if qerr := c.queueStructuredHostnameUpserts(r.Context(), tx, ac.TenantID, name); qerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "fleet_structured_hostname",
 				map[string]any{"err": qerr.Error()})
 			return
 		}

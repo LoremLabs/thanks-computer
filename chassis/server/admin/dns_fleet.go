@@ -331,6 +331,91 @@ func (c *Controller) queueZoneHostnameUpserts(ctx context.Context, tx *sql.Tx, t
 	return nil
 }
 
+// queueStructuredHostnameUpserts ships the auto-minted structured-host-suffix
+// routing host(s) (created_by = system:structured-host) the same way
+// queueZoneHostnameUpserts ships delegated-zone hosts: a tenant_hostnames
+// RowsArtifact (upsert) + a hostname.bound event, inside the activation tx.
+// Without it, the host minted on the control plane never reaches data-plane
+// nodes, so they 404 the `<stack>-<rand>.<suffix>` URL — the mint is now
+// control-plane-only (materialiseStackVersion's mintHosts gate).
+//
+// Unlike the zone projection, this carries the per-host DKIM columns. A
+// structured host signs `d=<host>` with its own key, and the consumer applies
+// rows with INSERT OR REPLACE (upsertRow), which would blank any omitted
+// NOT-NULL-DEFAULT-” column. Mirrors hostnameToRow's column set so the key
+// survives on data-plane nodes.
+func (c *Controller) queueStructuredHostnameUpserts(ctx context.Context, tx *sql.Tx, tenantID, stack string) error {
+	if !c.fleetEnabled() {
+		return nil
+	}
+	q := `SELECT id, hostname, tenant_id, stack, created_at, created_by, verified_at,
+	             dkim_selector, dkim_private_pem, dkim_public_b64
+	        FROM tenant_hostnames
+	       WHERE tenant_id = ? AND created_by = ? AND revoked_at IS NULL`
+	args := []any{tenantID, tenants.SystemStructuredHostCreatedBy}
+	if stack != "" {
+		q += ` AND stack = ?`
+		args = append(args, stack)
+	}
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	type hostRow struct {
+		id, hostname, tenantID, stack, createdAt, createdBy string
+		dkimSelector, dkimPrivatePEM, dkimPublicB64         string
+		verifiedAt                                          sql.NullString
+	}
+	var collected []hostRow
+	for rows.Next() {
+		var h hostRow
+		if err := rows.Scan(&h.id, &h.hostname, &h.tenantID, &h.stack,
+			&h.createdAt, &h.createdBy, &h.verifiedAt,
+			&h.dkimSelector, &h.dkimPrivatePEM, &h.dkimPublicB64); err != nil {
+			rows.Close()
+			return err
+		}
+		collected = append(collected, h)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, h := range collected {
+		row := map[string]any{
+			"id":               h.id,
+			"hostname":         h.hostname,
+			"tenant_id":        h.tenantID,
+			"stack":            h.stack,
+			"created_at":       h.createdAt,
+			"created_by":       h.createdBy,
+			"dkim_selector":    h.dkimSelector,
+			"dkim_private_pem": h.dkimPrivatePEM,
+			"dkim_public_b64":  h.dkimPublicB64,
+		}
+		if h.verifiedAt.Valid && h.verifiedAt.String != "" {
+			row["verified_at"] = h.verifiedAt.String
+		}
+		art := controlevent.RowsArtifact{
+			DB:    "runtime",
+			Table: "tenant_hostnames",
+			Op:    "upsert",
+			Rows:  []map[string]any{row},
+		}
+		ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/tenant_hostnames/%s", h.id), art)
+		if err != nil {
+			return fmt.Errorf("upload structured hostname %s: %w", h.id, err)
+		}
+		if _, err := c.fleetQueueEvent(ctx, tx,
+			controlevent.TypeHostnameBound, h.tenantID, "", 0, 0, ref, sum); err != nil {
+			return fmt.Errorf("queue structured hostname %s: %w", h.id, err)
+		}
+	}
+	return nil
+}
+
 // zoneToRow projects a DNSZone onto the JSON-row shape the consumer's
 // applyRows upserts into dns_zones (INSERT OR REPLACE; the partial-unique on
 // active origin dedups). All NOT-NULL columns are always present; created_by /
