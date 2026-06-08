@@ -343,6 +343,31 @@ func (s *lmtpSession) dispatchGroup(
 	// (`WHEN @lmtp.is_bounce`). Null reverse-path or a delivery-status report.
 	payload, _ = sjson.Set(payload, "_txc.lmtp.is_bounce", bounceDetected(s.mailFrom, msgJSON))
 
+	// Inbound spam/auth facts from the upstream Rspamd milter's headers,
+	// normalized under `_txc.mail.*` (read as `@mail.*`). Phase 1 is
+	// annotate-only: the chassis supplies facts; tenant _mail stacks decide
+	// policy in txcl. When Rspamd added no headers (down/skipped), available is
+	// false and verdict is "unknown" — mail still flows (milter accepts).
+	meta := parseMailHeaders(msgJSON, s.ctrl.spamBands)
+	payload, _ = sjson.Set(payload, "_txc.mail.spam.source", "rspamd")
+	payload, _ = sjson.Set(payload, "_txc.mail.spam.available", meta.available)
+	payload, _ = sjson.Set(payload, "_txc.mail.spam.verdict", meta.verdict)
+	if meta.hasScore {
+		payload, _ = sjson.Set(payload, "_txc.mail.spam.score", meta.score)
+	}
+	if len(meta.symbols) > 0 {
+		payload, _ = sjson.Set(payload, "_txc.mail.rspamd.symbols", meta.symbols)
+	}
+	if meta.spf != "" {
+		payload, _ = sjson.Set(payload, "_txc.mail.auth.spf", meta.spf)
+	}
+	if meta.dkim != "" {
+		payload, _ = sjson.Set(payload, "_txc.mail.auth.dkim", meta.dkim)
+	}
+	if meta.dmarc != "" {
+		payload, _ = sjson.Set(payload, "_txc.mail.auth.dmarc", meta.dmarc)
+	}
+
 	// Connection metadata.
 	payload, _ = sjson.Set(payload, "_txc.lmtp.client.helo", s.conn.Hostname())
 	if addr := s.conn.Conn().RemoteAddr(); addr != nil {

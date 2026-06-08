@@ -49,6 +49,7 @@ type LMTPController struct {
 	listeners []net.Listener
 	shutdown  chan bool
 	wg        sync.WaitGroup
+	spamBands spamBands // score→verdict bands for _txc.mail.spam.verdict (parsed once)
 }
 
 // boundAddrs returns the actual network addresses each listener is
@@ -75,10 +76,11 @@ func (l *LMTPController) boundAddrs() []string {
 // RCPT TO then default-denies (550) for lack of any opted-in stack.
 func NewController(ctx context.Context, pu *processor.Unit, resolver ingress.MailResolver) *LMTPController {
 	return &LMTPController{
-		ctx:      ctx,
-		pu:       pu,
-		resolver: resolver,
-		shutdown: make(chan bool),
+		ctx:       ctx,
+		pu:        pu,
+		resolver:  resolver,
+		shutdown:  make(chan bool),
+		spamBands: parseSpamBands(pu.Conf.MailSpamThresholds),
 	}
 }
 
