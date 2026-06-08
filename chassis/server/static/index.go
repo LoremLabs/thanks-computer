@@ -130,14 +130,24 @@ func (ix *Index) Rebuild() {
 	ix.mu.Unlock()
 }
 
-// Lookup resolves a request, layered first-match-wins for an exact
-// file, and otherwise reports whether the path is under a static-owned
-// directory prefix. Pure in-memory; no filesystem access.
+// Lookup resolves a request to a static file, layered first-match-wins,
+// with try_files-style fallback so prerendered routes serve their own
+// HTML for the extension-less URL a browser actually requests:
+//
+//	exact            /assets/x.css → assets/x.css
+//	clean URL        /about        → about.html
+//	directory index  /blog         → blog/index.html
+//	root             /             → index.html
+//
+// A path whose last segment already has an extension only probes the
+// exact match (so /app.js never tries app.js.html or app.js/index.html).
+// Backward-compatible: a path with no matching file still misses and, if
+// it sits under a static-owned directory, reports Owned (→ 404) so the op
+// answers 404 rather than leaking to app routing; a bare top-level miss
+// passes through. Mirrors nginx try_files / Caddy / the layout
+// adapter-static emits. Pure in-memory; no filesystem access.
 func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 	rel := safeRel(reqPath)
-	if rel == "" {
-		return Result{}
-	}
 
 	ix.mu.Lock()
 	emb, ch, ps, tn := ix.embedded, ix.chassis, ix.perStack, ix.tenant
@@ -155,12 +165,6 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 		}
 	}
 	opLayers = append(opLayers, ch, emb)
-	for _, l := range opLayers {
-		if v, found := l.files.Get([]byte(rel)); found {
-			e := v.(*entry)
-			return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag}
-		}
-	}
 
 	// Tenant layer (metadata only; the caller resolves bytes by Hash). Keyed
 	// (slug, stack) so colliding stack names across tenants never merge.
@@ -170,17 +174,20 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 		if stacks, ok := tn[ten]; ok {
 			if l, ok := stacks[st]; ok {
 				tl, haveTenant = l, true
-				if me, ok := l.files[rel]; ok {
-					return Result{Found: true, Hash: me.hash, Size: me.size,
-						Ctype: me.ctype, ETag: `"` + me.hash + `"`}
-				}
 			}
 		}
 	}
 
-	// No exact file. Static owns it only if the request is under a
-	// directory that exists in an applicable layer (the root / a bare
-	// top-level name is never prefix-owned — it needs an explicit file).
+	// try_files: exact, then .html, then /index.html (and root → index.html).
+	for _, cand := range indexCandidates(rel) {
+		if r, ok := lookupExact(cand, opLayers, tl, haveTenant); ok {
+			return r
+		}
+	}
+
+	// No file resolved. Static owns the path only if it's under a directory
+	// that exists in an applicable layer (the root / a bare top-level name is
+	// never prefix-owned). Checked on the original rel, not a candidate.
 	if seg, _, nested := strings.Cut(rel, "/"); nested {
 		for _, l := range opLayers {
 			if _, ok := l.dirs[seg]; ok {
@@ -194,6 +201,50 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 		}
 	}
 	return Result{}
+}
+
+// lookupExact resolves a single candidate path across the operator/inline
+// layers (bytes inline) then the tenant layer (bytes resolved by content
+// hash downstream). Returns (_, false) on miss.
+func lookupExact(rel string, opLayers []layer, tl tenantLayer, haveTenant bool) (Result, bool) {
+	if rel == "" {
+		return Result{}, false
+	}
+	for _, l := range opLayers {
+		if v, found := l.files.Get([]byte(rel)); found {
+			e := v.(*entry)
+			return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag}, true
+		}
+	}
+	if haveTenant {
+		if me, ok := tl.files[rel]; ok {
+			return Result{Found: true, Hash: me.hash, Size: me.size,
+				Ctype: me.ctype, ETag: `"` + me.hash + `"`}, true
+		}
+	}
+	return Result{}, false
+}
+
+// indexCandidates returns the try_files probe order for a request path:
+// exact, then a clean-URL ".html" sibling, then a "/index.html" directory
+// index. Root ("") → "index.html". A path whose last segment already has
+// an extension only probes the exact match — so a missing asset like
+// "/app/x.js" stays a miss (→ Owned 404 under its dir) instead of
+// resolving to a stray "x.js/index.html".
+func indexCandidates(rel string) []string {
+	if rel == "" {
+		return []string{"index.html"}
+	}
+	if lastSegHasDot(rel) {
+		return []string{rel}
+	}
+	return []string{rel, rel + ".html", rel + "/index.html"}
+}
+
+// lastSegHasDot reports whether rel's final path segment contains a "."
+// (i.e. it looks like a file with an extension).
+func lastSegHasDot(rel string) bool {
+	return strings.LastIndexByte(rel, '.') > strings.LastIndexByte(rel, '/')
 }
 
 // RebuildTenant reloads the tenant FILES/ metadata layer (path → content

@@ -84,6 +84,60 @@ func TestIndexDirectoryOwnership(t *testing.T) {
 	}
 }
 
+// try_files: prerendered routes serve their own HTML for the
+// extension-less URL the browser requests, root resolves index.html, and
+// genuine misses still pass through / 404-under-owned-dir as before.
+func TestIndexTryFiles(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel, body string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	mk("FILES/index.html", "<root>")
+	mk("FILES/about.html", "<about>")             // clean URL
+	mk("FILES/blog/index.html", "<blog>")         // directory index
+	mk("FILES/docs.html", "<docs-clean>")         // precedence: .html wins…
+	mk("FILES/docs/index.html", "<docs-dir>")     // …over /index.html
+	mk("FILES/app/immutable/x.js", "JS")          // hashed asset (has ext)
+	ix := newIdx(t, root)
+
+	served := []struct{ path, body string }{
+		{"/", "<root>"},                      // root → index.html
+		{"/about", "<about>"},                // clean URL → about.html
+		{"/about/", "<about>"},               // trailing slash normalizes the same
+		{"/blog", "<blog>"},                  // → blog/index.html
+		{"/blog/", "<blog>"},                 // → blog/index.html
+		{"/docs", "<docs-clean>"},            // .html beats /index.html
+		{"/app/immutable/x.js", "JS"},        // exact asset
+		{"/index.html", "<root>"},            // explicit file still serves
+		{"/about.html", "<about>"},           // explicit .html still serves
+	}
+	for _, c := range served {
+		if r := ix.Lookup("", "", c.path); !r.Found || string(r.Body) != c.body {
+			t.Errorf("%s: want %q, got Found=%v body=%q owned=%v", c.path, c.body, r.Found, string(r.Body), r.Owned)
+		}
+	}
+
+	// A resolved clean-URL serves with the target file's content-type.
+	if r := ix.Lookup("", "", "/about"); r.Ctype != "text/html; charset=utf-8" {
+		t.Errorf("/about content-type=%q, want text/html", r.Ctype)
+	}
+
+	// Misses: an extension-less top-level miss passes through (SPA-fallback
+	// territory); a miss under an owned dir is still Owned (404).
+	if r := ix.Lookup("", "", "/no-such-route"); r.Found || r.Owned {
+		t.Errorf("extension-less miss must pass through; %+v", r)
+	}
+	if r := ix.Lookup("", "", "/app/immutable/missing.js"); r.Found || !r.Owned {
+		t.Errorf("missing asset under owned dir must be Owned (404); %+v", r)
+	}
+}
+
 func TestIndexNestedContentType(t *testing.T) {
 	if r := newIdx(t, workspace(t)).Lookup("", "","/assets/app.css"); r.Ctype != "text/css; charset=utf-8" {
 		t.Fatalf("content-type=%q", r.Ctype)
