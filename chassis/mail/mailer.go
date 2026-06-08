@@ -97,6 +97,7 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 	body := s.Get("body").String()
 	fromRaw := s.Get("from").String()
 	campaign := s.Get("campaign").String()
+	textTmpl := s.Get("text").String() // explicit plaintext part; else derived from the HTML body
 	if subject == "" || body == "" || fromRaw == "" {
 		return errResult("missing_field", "_sendmail requires subject, body, and from"),
 			fmt.Errorf("sendmail: missing required field (subject/body/from)")
@@ -223,11 +224,20 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 				full, rerr = renderDefault(subj, bh, "")
 			}
 			if rerr == nil {
+				// Explicit _sendmail.text wins (rendered per-recipient, newlines
+				// preserved); otherwise derive a faithful plaintext from the body.
 				text := htmlToText(bodyHTML)
+				if textTmpl != "" {
+					if rendered, terr := renderText(textTmpl, r.vars); terr != nil {
+						rerr = terr
+					} else if strings.TrimSpace(rendered) != "" {
+						text = rendered
+					}
+				}
 				msg, msgID, merr := composeMIME(*fromAddr, r.addr, cc, replyTo, extraHeaders, subj, full, text, fromDomain)
 				if merr != nil {
 					rerr = merr
-				} else {
+				} else if rerr == nil {
 					// DKIM-sign (per-domain key) before handing to the relay.
 					msg = m.dkimSign(ctx, fromDomain, msg)
 					rcpts := append([]string{r.addr.Address}, extraRcpts...)

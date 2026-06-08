@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	texttemplate "text/template"
+
+	"github.com/jaytaylor/html2text"
 )
 
 // defaultShellSrc is the bundled default email template — a responsive,
@@ -54,6 +56,22 @@ func renderSubject(subjectSrc string, vars map[string]any) (string, error) {
 	return strings.TrimSpace(strings.ReplaceAll(buf.String(), "\n", " ")), nil
 }
 
+// renderText renders an explicit plaintext body (_sendmail.text) as a
+// text/template over the recipient's vars — like renderSubject but PRESERVING
+// newlines (it's a multi-line body, not a single-line subject) and without
+// auto-escaping (plaintext). Missing keys render empty.
+func renderText(src string, vars map[string]any) (string, error) {
+	t, err := texttemplate.New("text").Option("missingkey=zero").Parse(src)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, vars); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
 // renderBody renders the body as an html/template over the recipient's
 // vars: the body's literal HTML is preserved, but interpolated var values
 // ({{.name}}) are contextually auto-escaped. (The body itself is trusted
@@ -96,11 +114,23 @@ var (
 	brRe     = regexp.MustCompile(`(?i)<br\s*/?>`)
 )
 
-// htmlToText derives a plaintext alternative from rendered HTML: drop
-// <style>/<script>, turn <br> into newlines, strip remaining tags, collapse
-// whitespace. Good enough for the text/plain MIME part; a richer converter
-// is a later refinement.
+// htmlToText derives a plaintext alternative from rendered HTML using a real
+// HTML parser (jaytaylor/html2text): it decodes entities (&amp;, &#8212;),
+// keeps links as "text <url>", and formats lists / headings / tables — far more
+// faithful than tag-stripping. On a parse error or empty output it falls back
+// to regexHTMLToText so the text/plain MIME part is never empty.
 func htmlToText(html string) string {
+	if out, err := html2text.FromString(html, html2text.Options{}); err == nil {
+		if t := strings.TrimSpace(out); t != "" {
+			return t
+		}
+	}
+	return regexHTMLToText(html)
+}
+
+// regexHTMLToText is the dependency-free fallback: drop <style>/<script>, turn
+// <br> into newlines, strip remaining tags, collapse whitespace.
+func regexHTMLToText(html string) string {
 	s := styleRe.ReplaceAllString(html, "")
 	s = scriptRe.ReplaceAllString(s, "")
 	s = brRe.ReplaceAllString(s, "\n")

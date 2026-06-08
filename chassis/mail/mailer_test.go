@@ -279,6 +279,27 @@ func TestSendRateLimited(t *testing.T) {
 	}
 }
 
+func TestSendExplicitTextOverride(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	in := env(t, map[string]any{
+		"to": "x@example.com", "subject": "Hi", "from": "noreply@acme.com",
+		"body": "<p>HTML body &amp; stuff</p>",
+		"text": "Plain {{.name}} & co <not escaped>",
+		"vars": map[string]any{"name": "Bob"},
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatal(err)
+	}
+	msg := string(sub.calls[0].msg)
+	// Explicit text is the plaintext part: var-rendered ({{.name}}→Bob) and
+	// NOT HTML-escaped (text/template, so `&`/`<`/`>` stay literal).
+	if !strings.Contains(msg, "Plain Bob & co <not escaped>") {
+		t.Fatalf("explicit _sendmail.text override (var-rendered, unescaped) missing:\n%s", msg)
+	}
+}
+
 func TestSendRequiresFields(t *testing.T) {
 	db := newTestDB(t)
 	m := newTestMailer(t, db, &fakeSubmit{}, &fakeUsage{})
@@ -488,6 +509,25 @@ func TestRenderAndCompose(t *testing.T) {
 	}
 	if txt := htmlToText(full); strings.Contains(txt, "<") {
 		t.Fatalf("htmlToText left tags: %q", txt)
+	}
+}
+
+func TestHTMLToTextFidelity(t *testing.T) {
+	out := htmlToText(`<p>A &amp; B &#8212; <a href="https://x.test">link</a></p><ul><li>one</li><li>two</li></ul>`)
+	if strings.Contains(out, "<") {
+		t.Fatalf("tags left: %q", out)
+	}
+	// Entities decoded, link URL preserved, list items present.
+	for _, want := range []string{"A & B", "—", "https://x.test", "one", "two"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in derived text:\n%s", want, out)
+		}
+	}
+}
+
+func TestHTMLToTextEmpty(t *testing.T) {
+	if got := htmlToText(""); got != "" {
+		t.Fatalf("empty html should yield empty text, got %q", got)
 	}
 }
 
