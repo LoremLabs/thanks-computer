@@ -2,10 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,6 +17,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/manifest"
 	computeapi "github.com/loremlabs/thanks-computer/chassis/cli/op"
+	"github.com/loremlabs/thanks-computer/chassis/cli/op/javybin"
 	"github.com/loremlabs/thanks-computer/chassis/cli/sign"
 	"github.com/loremlabs/thanks-computer/chassis/cli/source"
 	"github.com/loremlabs/thanks-computer/chassis/compute/javyplugin"
@@ -179,8 +180,15 @@ func signPublished(ref source.ParsedRef, digest, keyPath string, stdout, stderr 
 // whether javy was missing (→ caller ships source-only). Overridable in tests so
 // the publish→install round-trip stays hermetic without a real toolchain.
 var prebuildComputes = func(stagingDir, srcDir string, bundled []manifest.BundledOp) (n int, javyMissing bool, err error) {
-	if _, lerr := exec.LookPath("javy"); lerr != nil {
-		return 0, true, nil
+	// Resolve (auto-downloads + caches the pinned toolchain) so publish
+	// prebuilds wasm without a hand-installed javy. Offline / unsupported
+	// platform → ErrUnavailable: ship source-only rather than failing the
+	// publish. BuildFile below reuses the resolved binary.
+	if _, lerr := javybin.Resolve(context.Background(), os.Stderr); lerr != nil {
+		if errors.Is(lerr, javybin.ErrUnavailable) {
+			return 0, true, nil
+		}
+		return 0, false, lerr
 	}
 	cacheRoot, err := os.MkdirTemp("", "txco-prebuild-cache-*")
 	if err != nil {

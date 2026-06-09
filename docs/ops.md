@@ -141,10 +141,13 @@ Under the hood the build *dynamically links* against a shared QuickJS engine
 (Javy): each op compiles to just its own bytecode — roughly a kilobyte — rather
 than a self-contained ~1.25 MB module that embeds the whole engine. The engine
 ships once with the chassis and is shared by every op, so adding a nano-op costs
-kilobytes, not megabytes. Authoring this is automatic; you only need a matching
-`javy` on PATH to build. (Requires the event loop, text-encoding, and stream IO,
-which the shared engine provides — so `async`/`await`, `TextEncoder`, and the
-stdin→stdout envelope all work as written.)
+kilobytes, not megabytes. Authoring this is automatic, and so is the toolchain:
+the build needs a matching `javy`, which TxCo auto-fetches (the pinned release,
+checksum-verified) into `~/.config/txco/tools/` on first build and caches there —
+no manual install. (Set `TXCO_JAVY=/path/to/javy` to use your own, or
+`TXCO_JAVY_NO_DOWNLOAD=1` to forbid the fetch on air-gapped hosts.) The shared
+engine provides the event loop, text-encoding, and stream IO — so `async`/`await`,
+`TextEncoder`, and the stdin→stdout envelope all work as written.
 
 ---
 

@@ -1107,8 +1107,9 @@ export interface BuildOpResult {
 // wasm artifact and returns the `compute://sha256/…` ref to splice into
 // the op's txcl in place of `op://<name>`. Same toolchain `txco apply`
 // uses (esbuild + javy); identical source skips javy on repeat thanks to
-// the server-side wasm cache. javy must be on PATH — surfaces as a
-// structured "compile_unavailable" error.
+// the server-side wasm cache. The javy toolchain is auto-fetched on first
+// build; if it can't be obtained (offline / unsupported platform) the build
+// surfaces a structured "compile_unavailable" error with an install hint.
 export async function buildDemoOp(
     source: string,
     lang: 'js' | 'ts' | 'mjs' = 'js'

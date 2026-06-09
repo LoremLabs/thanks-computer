@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/op"
+	"github.com/loremlabs/thanks-computer/chassis/cli/op/javybin"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
 	"github.com/loremlabs/thanks-computer/chassis/demo"
@@ -248,10 +250,11 @@ func (c *Controller) handleDemoBuildOp(w http.ResponseWriter, r *http.Request) {
 	built, err := op.BuildFile(entryPath, workspaceRoot)
 	if err != nil {
 		code := "compile_error"
-		// dispatch.go formats this exact phrase when exec.LookPath("javy")
-		// returns ErrNotFound — surface it distinctly so the UI can show
-		// the install hint instead of a generic compile message.
-		if strings.Contains(err.Error(), "javy not found on PATH") {
+		// BuildFile auto-installs the pinned javy on first use; an
+		// ErrUnavailable means even that fell through (offline / unsupported
+		// platform). Surface it distinctly so the UI shows the install hint
+		// instead of a generic compile message.
+		if errors.Is(err, javybin.ErrUnavailable) {
 			code = "compile_unavailable"
 		}
 		writeJSONError(w, http.StatusUnprocessableEntity, code,

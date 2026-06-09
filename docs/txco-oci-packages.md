@@ -82,7 +82,8 @@ Rules reference operations as `op://NAME`. Each ref resolves one of two ways:
   At `txco apply`, the ref becomes `compute://sha256/<digest>`:
   - if the package shipped a prebuilt `<name>.wasm` (see §10), apply uses it directly — **no
     `javy` needed**, and the digest is identical for every consumer (fixed at publish);
-  - otherwise apply builds `<name>.js` → wasm locally (**needs `javy` on PATH**).
+  - otherwise apply builds `<name>.js` → wasm locally, **auto-fetching the pinned `javy`
+    toolchain on first build** (cached in `~/.config/txco/tools/`; no manual install).
 - **required** — an external endpoint with no colocated compute. List it under
   `operations.required`. On install, TxCo **prints** a `txco.yaml` `operations:` stub for
   you to paste and fill in (it never edits `txco.yaml`, to avoid clobbering your comments).
@@ -208,16 +209,17 @@ txco package publish --to oci://ghcr.io/you/sales:3.0.0 ./packages/sales
 Publish validates, packs the tree into a single-layer OCI artifact, pushes it, and prints
 the resolved digest. Tags are convenience; the digest is truth.
 
-**Prebuilt wasm.** If `javy` is on your PATH, publish auto-builds each bundled compute
-(`<name>.js` → `<name>.wasm`) into the published artifact — your source tree stays `.js`-only
-(the build happens in a staging copy; nothing to commit). Consumers then `apply` with **no
+**Prebuilt wasm.** Publish auto-builds each bundled compute (`<name>.js` → `<name>.wasm`)
+into the published artifact — fetching the pinned `javy` toolchain automatically if it isn't
+already present (cached in `~/.config/txco/tools/`). Your source tree stays `.js`-only (the
+build happens in a staging copy; nothing to commit). Consumers then `apply` with **no
 toolchain**, and every consumer gets the identical `compute://sha256/<digest>` (the digest is
 fixed at publish, not recomputed per machine). The `.js` source still ships alongside, for
 transparency and as a build-from-source fallback (§4).
 
-- `--no-prebuild` ships source-only (consumers build at apply, needing `javy`).
-- If `javy` is absent at publish, it's a heads-up, not a failure — the package ships
-  source-only.
+- `--no-prebuild` ships source-only (consumers build at apply, auto-fetching `javy` then).
+- If `javy` can't be obtained at publish (offline with `TXCO_JAVY_NO_DOWNLOAD`, or an
+  unsupported platform), it's a heads-up, not a failure — the package ships source-only.
 - The wasm is dynamically linked against the chassis's vendored javy plugin; publish names the
   plugin version it built against. A chassis with an incompatible plugin reports it at apply.
 - The wasm rides inside the package layer, so an ed25519 signature (§11) covers it too.

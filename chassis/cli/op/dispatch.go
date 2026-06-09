@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/cli/op/javybin"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/javyplugin"
 	_ "github.com/loremlabs/thanks-computer/chassis/compute/wazero" // run locally on the real engine
@@ -253,8 +254,12 @@ func BuildFile(entryPath, workspaceRoot string) (Built, error) {
 	wasm, rerr := os.ReadFile(wasmPath)
 	if rerr != nil {
 		// Cache miss → compile via javy (cwd=cacheDir; relative entry + out).
-		if _, lerr := exec.LookPath("javy"); lerr != nil {
-			return Built{}, fmt.Errorf("javy not found on PATH; install it from github.com/bytecodealliance/javy/releases")
+		// Resolve auto-downloads + caches the pinned toolchain on first use so
+		// users never install it by hand; an ErrUnavailable here means even
+		// that fell through (offline, unsupported platform).
+		javyBin, lerr := javybin.Resolve(context.Background(), os.Stderr)
+		if lerr != nil {
+			return Built{}, lerr
 		}
 		// Dynamic linking: emit just this op's bytecode (~1 KB) linked against the
 		// shared QuickJS plugin, instead of a self-contained ~1.25 MB module. The
@@ -274,7 +279,7 @@ func BuildFile(entryPath, workspaceRoot string) (Built, error) {
 			return Built{}, werr
 		}
 		var jstderr bytes.Buffer
-		cmd := exec.Command("javy", "build", entryRel,
+		cmd := exec.Command(javyBin, "build", entryRel,
 			"-C", "dynamic", "-C", "plugin="+pluginPath, "-C", "source=omitted",
 			"-o", key+".wasm")
 		cmd.Dir = cacheDir

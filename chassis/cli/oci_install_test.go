@@ -27,6 +27,13 @@ func TestPackagePublishInstallRoundTrip(t *testing.T) {
 		t.Skipf("example package not found: %v", err)
 	}
 
+	// Keep this round trip network-free and deterministic: an isolated home
+	// (no pre-cached toolchain) plus disabled auto-download means the op-build
+	// path finds no javy, so publish ships the bundled computes source-only —
+	// the path this test asserts — instead of fetching/using a toolchain.
+	t.Setenv("TXCO_HOME", t.TempDir())
+	t.Setenv("TXCO_JAVY_NO_DOWNLOAD", "1")
+
 	store, err := oci.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

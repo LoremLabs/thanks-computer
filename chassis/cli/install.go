@@ -314,7 +314,10 @@ func warnBundledComputes(m *manifest.Manifest, stagingDir string, w io.Writer) {
 	if needBuild == 0 {
 		return
 	}
+	// `txco apply` builds these from source via op.BuildFile, which
+	// auto-fetches the pinned javy toolchain on first use — so this is just
+	// a heads-up (a one-time ~11 MB download may happen), not a prerequisite.
 	if _, err := exec.LookPath("javy"); err != nil {
-		fmt.Fprintf(w, "  note: ships %d bundled compute(s) without prebuilt wasm; `txco apply` needs `javy` on PATH to build them.\n", needBuild)
+		fmt.Fprintf(w, "  note: ships %d bundled compute(s) without prebuilt wasm; `txco apply` will compile them, fetching the javy toolchain automatically on first build.\n", needBuild)
 	}
 }

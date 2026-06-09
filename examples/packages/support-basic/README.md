@@ -15,8 +15,8 @@ manifest at the root. It is the same shape `bundle.Walk` reads, so install is ju
 ## op:// resolution — bundled vs required
 
 - **Bundled** (`op://classify`): the colocated [`classify.js`](./OPS/support/0100_TRIAGE/classify.js)
-  travels with the package and is built to wasm at `txco apply` time (needs `javy` on
-  PATH). Nothing to wire.
+  travels with the package and is built to wasm at `txco apply` time (TxCo auto-fetches the
+  `javy` toolchain on first build — no manual install). Nothing to wire.
 - **Required** (`op://AUDIT`, `op://NOTIFY`): external endpoints. `txco install` prints a
   `txco.yaml` `operations:` stub for you to fill in. See
   [`examples/txco.yaml.example`](./examples/txco.yaml.example).
