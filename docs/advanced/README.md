@@ -31,7 +31,8 @@ failure modes.
   [web](./protocols/web.md), [lmtp](./protocols/lmtp.md) (mail in),
   [sendmail](./protocols/sendmail.md) (mail out),
   [cron](./protocols/cron.md), [tcp](./protocols/tcp.md),
-  [mcp](./protocols/mcp.md).
+  [mcp](./protocols/mcp.md), [dns](./protocols/dns.md) (delegated
+  zones).
 
 ## For rule authors
 

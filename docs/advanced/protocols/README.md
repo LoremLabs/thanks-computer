@@ -17,6 +17,7 @@ symmetric: rules dispatch out over HTTP, MCP, or SMTP.
 | Cron | in (time as a channel) | [cron.md](./cron.md) |
 | TCP | in (line-delimited JSON) | [tcp.md](./tcp.md) |
 | MCP (agent tools) | out (in: see page) | [mcp.md](./mcp.md) |
+| DNS | authoritative answers for delegated zones | [dns.md](./dns.md) |
 
 Before any rule fires, the **router** decides which tenant and stack
 an event belongs to — hostname bindings in the DB (live, no restart)

@@ -16,7 +16,7 @@ if [[ ! -x chassis/bin/txco ]]; then
   GOWORK=off make build
 fi
 
-# TCP default :5050 (macOS holds :5000 for AirPlay/ControlCenter)
+# TCP default :5050 
 echo "[start] chassis listening: web :8080  tcp :5050"
 exec ./chassis/bin/txco serve \
   --env=dev \

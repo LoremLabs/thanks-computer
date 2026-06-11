@@ -39,7 +39,9 @@ curl -s http://localhost:8080/hello | jq
 ```
 
 Your rules are just files, so they version like code: review them in
-pull requests, apply them from CI against `:8081`.
+pull requests, apply them from CI against `:8081`. Complete, runnable
+workspaces to copy from live in [`examples/`](../examples/) — an
+inbound support mailbox, a Stripe enrichment flow, and more.
 
 ## Locked by default, in one step
 
@@ -87,3 +89,8 @@ surface ([serve.md](./advanced/serve.md)), the
 [ingress routing](./advanced/protocols/routing.md), inbound mail via
 [LMTP](./advanced/protocols/lmtp.md), and the
 [secret-store runbook](./advanced/runbook-secret-store.md).
+
+Self-hosting is one of two paths: the same stacks run unchanged on the
+hosted cloud, where the fleet — scaling, custom domains, instant
+rollback — is managed for you
+([overview](./overview.md#where-its-going)).

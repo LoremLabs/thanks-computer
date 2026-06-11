@@ -22,7 +22,7 @@ Per-inlet request data:
 | Inlet | Namespace highlights |
 |---|---|
 | web | `@web.req.method`, `@web.req.url.{path,hostname,port,full,query.<k>.0,query.raw}`, `@web.req.headers.<name>.0` (arrays), `@web.req.cookies.*`, `@web.req.body` (base64), `@web.req.host`, `@web.req.proto` |
-| lmtp | `@lmtp.rcpt[]`, `@lmtp.msg.{from,headers.*,body,attachments[]}`, `@lmtp.listener`; spam verdict under `@mail.spam.{score,verdict}` when an upstream Rspamd stamped it |
+| lmtp | `@lmtp.rcpt[]`, `@lmtp.msg.{subject,text,html,from[].addr,to[],headers.*,attachments[],raw}` (`text`/`html` are the parsed bodies; `raw` is the b64 original), `@lmtp.listener`; spam verdict under `@mail.spam.{score,verdict}` when an upstream Rspamd stamped it |
 | cron | `@cron.job`, `@cron.tenant` |
 | tcp | `@tcp.listener`, `@tcp.{local,remote}.{ip,port}` |
 

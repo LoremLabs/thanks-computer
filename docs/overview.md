@@ -35,8 +35,9 @@ share.
 ## How it works
 
 Work is broken into small steps called **operations**, organized into an **op
-stack**. Each operation is gated by a **resonator** — a few lines of
-[TXCL](./txcl.md) saying when it should fire and what it should do:
+stack**. Each operation is gated by a **resonator** — its firing condition, a
+few lines of [TXCL](./txcl.md): like a tuning fork, it rings only when the
+right kind of event passes by, and says what to do when it does:
 
 ```txcl
 WHEN @web.req.url.path == "/invoice"
@@ -59,9 +60,10 @@ document.
 ## What makes it different
 
 - **Every protocol, one flow.** Web, email, cron, TCP, and MCP
-  ingress all land in the same envelope and the same rules. The same stack
-  that answers `https://ops.example.com` answers `support@ops.example.com`
-  and answers an AI agent's tool call.
+  ingress all land in the same **envelope** — the JSON document that carries
+  the event and its context — and the same rules. The same stack that answers
+  `https://ops.example.com` answers `support@ops.example.com` and answers an
+  AI agent's tool call.
 - **Decisions are visible.** Logic lives in readable text files, not YAML
   sidecars or buried application code. Every flow leaves a full trace you can
   replay step by step — debuggable for computers and AI alike.
@@ -73,7 +75,7 @@ document.
   later, exactly once, surviving restarts.
 - **Nothing to deploy.** One static binary is the whole chassis. Small logic
   runs as sandboxed Wasm on the chassis itself: no containers, no cold
-  starts, safe multi-tenant isolation by default.
+  starts, safe [multi-tenant isolation](./tenants.md) by default.
 - **Any language, plain JSON.** An operation is any HTTP service that reads
   JSON and returns JSON — if you can write a handler, you can write an op.
 
@@ -83,11 +85,14 @@ Op stacks are made to travel. A stack is a versioned, signed artifact —
 distributable through standard OCI registries — so a working department
 (invoicing, triage, onboarding) becomes something you install, not rebuild.
 A growing fleet runtime adds custom domains, instant rollback, and a control
-plane, so `ops.yourcompany.com` becomes programmable operational authority:
-every channel into your business — mail, web, agents — arriving at rules you
-wrote, can read, and can trust.
+plane, so `ops.yourcompany.com` becomes programmable operational authority.
+Delegate the subdomain and [its DNS is handled](./domains.md) — mail records,
+reputation keys, TLS — with every channel into your business (mail, web,
+agents) arriving at rules you wrote, can read, and can trust.
 
-The open-source chassis is complete on its own (Mozilla Public License 2.0);
-the hosted service layers on top without forking it.
+**One platform, two ways to run it.** Self-host the chassis — open source
+(Mozilla Public License 2.0), complete on its own, on your infrastructure.
+Or let our cloud run the fleet for you. Same stacks, same rules, nothing
+forked — `txco apply` targets either.
 
 **Try it in two minutes:** [Quickstart](./quickstart.md) · `txco demo`

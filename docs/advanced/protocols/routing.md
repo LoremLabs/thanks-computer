@@ -119,4 +119,4 @@ The `Resolver` interface in `chassis/server/ingress/router.go` is the seam; the 
 
 ## Relationship to auth
 
-`_txc.tenant` is the same tenant the admin API scopes by: admin endpoints live under `/v1/tenants/{tenant}/…`, and tenant membership (who may mutate a tenant's stacks and hostnames) is managed via the members endpoints. See [admin-api.md](../admin-api.md).
+`_txc.tenant` is the same tenant the admin API scopes by: admin endpoints live under `/v1/tenants/{tenant}/…`, and tenant membership (who may mutate a tenant's stacks and hostnames) is managed via the members endpoints. The full isolation model — what's tenant-scoped, pinning, memberships — is [tenants.md](../../tenants.md); the API detail is [admin-api.md](../admin-api.md).

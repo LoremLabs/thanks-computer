@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/fleet-sync-smoke.sh
 #
-# End-to-end operational smoke for the P1 fleet-sync producer +
+# End-to-end operational smoke for the fleet-sync producer +
 # consumer pipeline. Cold-boots a single chassis configured as both
 # producer (feed-sink=file) AND consumer (feed-source=file) against
 # the same shared directory — the self-loop proves every leg of the
@@ -18,11 +18,6 @@
 #   6. Applier polls the feed → fetches the artifact → applies → marks
 #      applied_events. The chassis's own event flows back through it,
 #      idempotently (applied_events guard).
-#
-# What this does NOT cover: the JetStream-backed Sink/Source (P2,
-# lives in the service overlay) and the remaining mutation hooks
-# (P5: tenant.created, hostname.*, actor/key/membership.changed).
-# Those are exercised by their own integration tests when shipped.
 #
 # Usage:
 #   scripts/fleet-sync-smoke.sh          # build txco + run
@@ -381,8 +376,3 @@ echo "  • applier consumes the file Source → fetches artifact → applies"
 echo "  • cursor + applied_events advance in lockstep"
 echo "  • idempotent replay (applied_events guard catches re-delivery)"
 echo
-echo "Not in scope here (covered elsewhere):"
-echo "  • JetStream-backed Sink/Source — P2, service overlay"
-echo "  • Two-chassis fan-in across a real broker — P4"
-echo "  • Auth-row sync (actor/key/membership.changed) — deferred while"
-echo "    auth.db runs on shared Postgres (no fleet sync needed)"

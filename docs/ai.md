@@ -9,7 +9,7 @@ One rule puts a model in the flow:
 
 ```txcl
 WHEN @src == "lmtp"
-WITH prompt  = "Classify this support mail: {{@lmtp.msg.body}}",
+WITH prompt  = "Classify this support mail: {{@lmtp.msg.text}}",
      system  = "You answer with one word: billing, technical, or other.",
      model   = "openai/gpt-4o-mini",
      intent  = "classify_support_ticket"
@@ -23,7 +23,7 @@ route; it just answers, like every other op.
 ## Prompts read the document
 
 `{{@path}}` markers in `prompt` and `system` are filled from the
-envelope — `{{@web.req.body}}`, `{{@lmtp.msg.headers.subject}}` —
+envelope — `{{@web.req.body}}`, `{{@lmtp.msg.subject}}` —
 JSON-escaped automatically so values splice into the prompt without
 breaking it. Missing paths render empty rather than failing. For a
 computed scratch value, use `SET PRE` (sets a field on *this op's input

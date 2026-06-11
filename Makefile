@@ -57,9 +57,6 @@ ui:
 		echo "==> pnpm run build (continuation-ui)..."; \
 		(cd continuation-ui && pnpm run build) || exit $$?; \
 	fi
-	# demo-ui was merged into admin-ui as the #demo route (the
-	# standalone SPA + its embed at chassis/server/demo/ui/ are gone).
-	# Nothing more to build here.
 
 # Build the txco binary locally (chassis/bin/txco) after refreshing the
 # embedded UI bundle. `make build SKIP_UI=1` bypasses the UI step.

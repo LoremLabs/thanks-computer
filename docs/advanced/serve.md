@@ -13,8 +13,9 @@ and is embedded in database filenames.
 
 `--personalities` selects which heads the chassis boots. Default:
 `cron,tcp,web,admin`. Opt-in: `lmtp` (inbound mail — see
-[lmtp.md](./protocols/lmtp.md)) and `dns` (authoritative DNS, required for the
-built-in ACME TLS path).
+[lmtp.md](./protocols/lmtp.md)) and `dns` (authoritative DNS for
+delegated zones, required for the built-in ACME TLS path — see
+[dns.md](./protocols/dns.md)).
 
 | Head  | Flag                 | Default | Notes                                                                  |
 | ----- | -------------------- | ------- | ---------------------------------------------------------------------- |

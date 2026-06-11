@@ -408,4 +408,4 @@ The rule still SELECTs / EXECs against the full envelope; only what hits disk is
 ## See also
 
 - [`docs/ingress.md`](routing.md) — the ingress router this builds on.
-- [`examples/inbound-support-mailbox/`](../examples/inbound-support-mailbox/) — worked example: route `support@…` to a classification + ticketing pipeline.
+- [`examples/inbound-support-mailbox/`](../../../examples/inbound-support-mailbox/) — worked example: route `support@…` to a classification + ticketing pipeline.

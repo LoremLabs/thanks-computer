@@ -27,8 +27,8 @@ channels — three beats of the same [arc](./arcs.md) — no glue code.
 ## Routing: which rules see the event
 
 Before any rule fires, the ingress router answers two questions: which
-**tenant** does this event belong to, and which **op stack** should it
-enter? It matches on the channel's natural key — the HTTP `Host`
+**[tenant](./tenants.md)** does this event belong to, and which
+**op stack** should it enter? It matches on the channel's natural key — the HTTP `Host`
 header, the mail recipient, the cron job name — and stamps the answer
 onto the envelope as `@tenant` and `@stack`.
 
@@ -53,7 +53,9 @@ a standard Postfix, so a message becomes a normal event with recipient,
 subject, headers, body, and attachments readable by any rule. Each
 recipient routes independently to its own tenant and stack:
 `support@acme.example` can enter a different flow than
-`billing@acme.example`.
+`billing@acme.example`. And getting the address is one NS delegation —
+the chassis can run a subdomain's DNS and synthesize the mail records
+itself ([Domains](./domains.md)).
 
 ## AI agents speak it too
 

@@ -289,11 +289,3 @@ echo "  • cold-boot auto-mints master key (visible log + 'back this up' notice
 echo "  • admin API: tenant create, secret create"
 echo "  • reveal-never on create/list/show (zero bytes of cleartext anywhere)"
 echo "  • immutable-name: PATCH with 'name' field → 400 name_immutable"
-echo
-echo "Not in scope (covered by go test):"
-echo "  • txcl rule with WITH secrets.* → outbound HTTP with overlaid header"
-echo "    → chassis/processor/secrets_e2e_test.go::TestSecretsEndToEnd"
-echo "  • secret_store_unavailable when MK is empty"
-echo "    → chassis/server/admin/secret_endpoints_test.go::TestSecretsStoreUnavailable"
-echo "  • crypto round-trip / anti-swap AAD binding"
-echo "    → chassis/secrets/{crypto,store,master_key,resolver}_test.go"

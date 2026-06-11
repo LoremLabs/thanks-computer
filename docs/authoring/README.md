@@ -26,7 +26,8 @@ my-workspace/
 ```
 
 Scope directories sort the flow (`0100` before `0200`; leading zeros
-are cosmetic), and stacks whose names start with `_` are system/local
+are cosmetic) — a *scope* is simply a step's address on disk. Stacks
+whose names start with `_` are system/local
 (`_cron`, `_sys/…`) — loaded by the chassis, not pushed by apply.
 
 ## The loop

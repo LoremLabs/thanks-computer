@@ -2,6 +2,10 @@
 
 _Thanks, Computer_ is a distributed runtime for coordinating business logic across systems, services, humans, and time.
 
+New here? The **[guided docs](docs/README.md)** walk from overview to a
+working stack — including a [2-minute quickstart](docs/quickstart.md) and an
+[end-to-end tutorial](docs/tutorial.md).
+
 Where an operating system coordinates processes on a single machine, TxCo coordinates operations across an event flow:
 
 ```

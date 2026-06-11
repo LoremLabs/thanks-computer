@@ -11,13 +11,9 @@ quarter's objective. The script doesn't know why it runs. The person —
 or the AI — doing the task gets the *what* with the *why* stripped off.
 
 Thanks, Computer's answer is to make intent data. A **saga** is a
-mission that spans many arcs, the way an arc spans many events:
-
-| Level     | What it is                        | Lives for        |
-| --------- | --------------------------------- | ---------------- |
-| **Saga**  | A mission — *why* this matters    | quarters, years  |
-| **Arc**   | A matter — *what* we're resolving | days, weeks      |
-| **Event** | A beat — *now*, one thing happening | milliseconds–days |
+mission that spans many arcs, the way an arc spans many events — the
+top rung of the ladder the [overview](./overview.md) introduced
+(saga: *why*, quarters; arc: *what*, weeks; event: *now*).
 
 Because every operation reads the same shared document, the why rides
 along with the what. Stamp the saga onto arcs as they open:
