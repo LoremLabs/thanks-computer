@@ -1,8 +1,23 @@
 # Thanks, Computer — Documentation
 
-_Thanks, Computer (TxCo) runs parts of your business as small, readable
+_Thanks, Computer (TxCo) runs parts of your work as small, readable
 rules: events arrive from any protocol, matching operations fire in
 parallel, and their JSON outputs merge into one answer._
+
+```
+          event (JSON)
+               │
+  step 1  ┌────┼────┐
+          ▼    ▼    ▼
+        ┌───┐┌───┐┌───┐
+        │op ││op ││op │     run in parallel
+        └─┬─┘└─┬─┘└─┬─┘
+         {a}  {b}  {c}      each returns JSON
+          └────┼────┘
+             merge          event now has a, b, c
+               │
+  step 2      ...
+```
 
 Read in order, or jump to what you need:
 
@@ -20,9 +35,24 @@ Read in order, or jump to what you need:
    and what it contributes.
 7. **[Ingress](./ingress.md)** — every protocol, one flow: web, email,
    cron, TCP, and AI agents.
-8. **[Trace](./trace.md)** — see exactly what a flow did, after the
-   fact.
-9. **[Packages](./packages.md)** — share a working department; install
-   someone else's.
-10. **[Running a chassis](./running.md)** — `txco serve` and the
+8. **[Continuations](./continuations.md)** — built for waiting: how an
+   operation suspends a flow and calls back to resume it.
+9. **[AI](./ai.md)** — `ai://chat`: a model as an operation, prompts
+   that read the document, structured output.
+10. **[Trace](./trace.md)** — see exactly what a flow did, after the
+    fact.
+11. **[Schemas](./schemas.md)** — optionally write down the shape a
+    stack reads and writes, for humans and machines.
+12. **[Packages](./packages.md)** — share a working department; install
+    someone else's.
+13. **[Running a chassis](./running.md)** — `txco serve` and the
     author–apply loop, on your own machine.
+
+Building stacks day to day? The **[authoring guides](./authoring/README.md)**
+cover the workspace layout, the `txco dev` loop, mocks, and nano-ops.
+
+Operating in production? The **[advanced references](./advanced/README.md)**
+hold the fact-level detail: the full flag surface, the admin API, the
+[per-protocol pages](./advanced/protocols/README.md) (web, mail in/out,
+cron, TCP, MCP, routing), secrets, trace internals, and the complete
+TXCL reference.

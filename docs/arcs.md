@@ -60,11 +60,3 @@ The ladder continues upward, too: arcs can belong to a **saga** — the
 longer mission a matter serves — so the *why* travels with the work.
 See [Sagas](./sagas.md).
 
-## Where this is today
-
-The beats are fully real: multi-channel [ingress](./ingress.md),
-resonance, merge, and traces ship now. Tying beats into one arc is
-yours to do — carry a correlating key (a ticket id, an order number) in
-the event, and rules match on it like any other field. Making the arc
-itself first-class — *list my open arcs, show me this one's story so
-far, what is it waiting on* — is where the platform is headed.

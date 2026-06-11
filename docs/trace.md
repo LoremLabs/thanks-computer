@@ -8,7 +8,8 @@ Every flow can leave a complete, browsable record: the envelope that
 arrived, every operation that fired, what each received and returned,
 how long it took, and the final response. No rerun, no debug logging,
 no print statements — the answer to "what did this request do?" is
-sitting on disk.
+sitting on disk. Each flow is one beat of an [arc](./arcs.md); read
+its traces together and you have the arc's story so far.
 
 ```sh
 txco trace          # recent flows: rid, source, route, duration

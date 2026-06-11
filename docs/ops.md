@@ -6,7 +6,8 @@ can take. ([Overview](./overview.md))_
 
 An operation is the unit of work. The contract is always the same — the
 event arrives as JSON, the operation returns JSON, and what it returns
-deep-merges into the flow. Each operation is gated by a **resonator**
+deep-merges into the shared document, advancing the [arc](./arcs.md)
+the event belongs to. Each operation is gated by a **resonator**
 (its [TXCL](./txcl.md) rule), so it only runs when its condition
 matches. The three shapes differ only in *where the work happens*:
 
@@ -75,3 +76,9 @@ All three shapes speak the same JSON-merge contract. A step can begin
 life as a resonator-only stub, become a nano-op when it needs logic,
 and later point at a full service — without touching the rules around
 it.
+
+Beyond these three: `EXEC "ai://chat"` puts [an AI model in the
+flow](./ai.md), `EXEC "mcp+https://…"` calls
+[an agent tool](./advanced/protocols/mcp.md), and `txco://` names a
+[chassis builtin](./advanced/builtins.md) — static files, outbound
+email, HMAC, and more.

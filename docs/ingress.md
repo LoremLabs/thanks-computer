@@ -22,7 +22,7 @@ unless it asks.
 So a support flow can read like a sentence: *when mail arrives for
 `support@`, classify it; when the web form posts, enter the same flow;
 every morning at nine, sweep what's still open.* One stack, three
-channels, no glue code.
+channels — three beats of the same [arc](./arcs.md) — no glue code.
 
 ## Routing: which rules see the event
 
@@ -62,3 +62,9 @@ themselves as tools that agents like Claude invoke (ingress), and a
 rule can call an external MCP tool with `EXEC "mcp+https://…"`
 (egress). An agent becomes one more participant in the flow — entering
 through the same envelope, leaving the same trace.
+
+---
+
+Per-channel facts — request/response mapping, timeouts, flags — live
+in the [protocol references](./advanced/protocols/README.md), one page
+per channel.

@@ -4,8 +4,9 @@ _In Thanks, Computer, a stack of rules can run a part of a business —
 this page covers packaging a working stack so others can install it.
 ([Overview](./overview.md))_
 
-A working department — support triage, invoicing, onboarding — is just
-a tree of rule files plus the nano-ops they reference. A **package**
+A working department — support triage, invoicing, onboarding — is a
+playbook for [arcs](./arcs.md) of a kind: a tree of rule files plus
+the nano-ops they reference. A **package**
 makes that tree shareable: versioned, optionally signed, distributable
 from a public GitHub repo (zero infrastructure) or any OCI registry
 (the same registries that already hold your container images).
@@ -40,6 +41,10 @@ txco package init my-dept     # scaffold
 txco package validate         # check the tree + manifest
 txco package publish --to ghcr.io/you/my-dept --sign
 ```
+
+Good practice: include a `schema.json` describing what your stack reads
+and writes, so installers know what to wire — see
+[Schemas](./schemas.md).
 
 Signing uses an ed25519 key (`txco package key generate`);
 `txco package inspect <ref> --provenance` verifies it before you

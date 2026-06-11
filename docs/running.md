@@ -78,3 +78,12 @@ There is no reveal command — to inspect a value, you rotate it.
 
 Add `--trace-mode=full` to record every flow's complete story — see
 [Trace](./trace.md).
+
+## Going deeper
+
+The [advanced references](./advanced/README.md) cover the full flag
+surface ([serve.md](./advanced/serve.md)), the
+[admin API](./advanced/admin-api.md), multi-tenant
+[ingress routing](./advanced/protocols/routing.md), inbound mail via
+[LMTP](./advanced/protocols/lmtp.md), and the
+[secret-store runbook](./advanced/runbook-secret-store.md).

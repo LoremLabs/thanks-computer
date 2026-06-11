@@ -1,7 +1,7 @@
 # TXCL — the rule language
 
 _In Thanks, Computer, every [operation](./ops.md) is gated by a rule
-written in TXCL — a few readable lines saying when it fires and what it
+written in TXCL — a few readable lines saying when it resonates and what it
 contributes to the flow. ([Overview](./overview.md))_
 
 The smallest rule is one line:
@@ -48,7 +48,7 @@ back into the event.
 
 ## The seven clauses
 
-A resonator has up to seven clauses — all optional, always in this
+A resonator has up to seven clauses — all optional, evaluated in this
 order:
 
 | Clause     | What it does                                                    |
@@ -83,6 +83,12 @@ and `@goto = "billing/0"` jumps to another stack.
 Values are literals or function calls: `&uuid()`, `&now("rfc3339")`,
 `&json(...)`, `&b64decode(...)` — inline, pure computation without
 dispatching anything.
+
+## Private by convention
+
+The last step's context becomes the output. Output hides any part of the 
+context document that starts with an `_` by convention. Thus, `_shh` is private
+and `hi` is returned in the answer.
 
 ## That's most of it
 

@@ -1,6 +1,6 @@
 # Quickstart
 
-_Thanks, Computer (TxCo) runs parts of your business as small, readable
+_Thanks, Computer (TxCo) runs parts of your work as small, readable
 rules: events arrive from any protocol, matching operations fire in
 parallel, and their JSON outputs merge into one answer.
 ([Overview](./overview.md))_
@@ -29,7 +29,7 @@ Zero config: this boots a throwaway local chassis and opens a demo in your
 browser — author rules, fire events, and inspect the full trace of each flow
 without leaving the page.
 
-## 3. The model
+## 3. The mental model
 
 An event is a JSON document flowing through **steps**. At each step, every
 matching **operation** runs in parallel; each returns JSON; the outputs merge
@@ -75,3 +75,5 @@ EMIT .greeting = "Hello from the chassis!"
 - [TXCL](./txcl.md) — the full rule language
 - [Running a chassis](./running.md) — `txco serve` and the author–apply
   loop, when you're ready to run your own
+- [Arcs](./arcs.md) & [Sagas](./sagas.md) — the matters your rules manage,
+  and the missions those matters serve

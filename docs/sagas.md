@@ -25,8 +25,8 @@ along with the what. Stamp the saga onto arcs as they open:
 ```txcl
 WHEN @stack == "support/dispute"
 SET .saga.name = "q3-retention",
-    .saga.goal = "keep churn under 2%"
-    .saga.metric.churn_target = 2
+    .saga.goal = "keep churn under 2%",
+    .saga.metric.churn_target = 2,
     .saga.metric.current_churn = 2.7
 ```
 
