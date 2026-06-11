@@ -50,7 +50,15 @@ deep-merges into the shared document, which carries the flow to the next step.
 Operations execute only when their conditions match — nothing runs that
 doesn't need to. An operation can be no code at all (the rule itself shapes
 the flow), any HTTP service in any language, sandboxed JavaScript running on
-the chassis, or an external AI tool.
+the chassis, or an external AI tool. A stack of those steps is the whole
+department:
+
+```stack
+invoices
+100 extract
+200 enrich audit
+300 archive
+```
 
 Because the event is shared external memory — not parameters threaded through
 call chains — humans and AI work the same matter together: an AI op drafts, a

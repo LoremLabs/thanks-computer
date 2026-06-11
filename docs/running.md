@@ -76,11 +76,6 @@ EXEC "https://api.example.com/enrich"
 
 There is no reveal command — to inspect a value, you rotate it.
 
-## When you want to see everything
-
-Add `--trace-mode=full` to record every flow's complete story — see
-[Trace](./trace.md).
-
 ## Going deeper
 
 The [advanced references](./advanced/README.md) cover the full flag

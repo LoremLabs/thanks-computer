@@ -18,6 +18,17 @@ OPS/support/
 ```
 
 The numbered directories are the **steps** of the flow, in order.
+As a flow, it looks like this — one box per operation, with the two
+`0300` rules side by side because rules at the same step run (or
+resonate) in parallel:
+
+```stack
+support
+0100 draft
+0200 approve
+0300 send declined
+```
+
 Every rule below is shown in full.
 
 ## Step 1 — AI drafts, with the mission attached

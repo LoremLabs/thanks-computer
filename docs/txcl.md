@@ -36,6 +36,15 @@ doesn't call the VIP handler — it just emits `.tier = "vip"`, and at
 the next step the VIP handler's resonator picks it up. Steps chain by
 resonance, not by wiring.
 
+That's the shape it creates — handlers sitting in parallel at a step,
+the previous step's conclusion deciding which one rings:
+
+```stack
+orders
+100 classify
+200 vip standard
+```
+
 A condition plus a dispatch is a working integration:
 
 ```txcl

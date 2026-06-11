@@ -30,6 +30,14 @@ are cosmetic) — a *scope* is simply a step's address on disk. Stacks
 whose names start with `_` are system/local
 (`_cron`, `_sys/…`) — loaded by the chassis, not pushed by apply.
 
+That tree *is* the flow. The chassis sees it as:
+
+```stack
+support
+0100 classify
+0200 notify
+```
+
 ## The loop
 
 ```sh

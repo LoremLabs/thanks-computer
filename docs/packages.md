@@ -36,6 +36,14 @@ support-basic/
     0200_NOTIFY/notify.txcl    # EXEC "op://NOTIFY"    (you supply this one)
 ```
 
+What you're installing, as a flow:
+
+```stack
+support-basic
+0100 classify
+0200 notify
+```
+
 ```sh
 txco package init my-dept     # scaffold
 txco package validate         # check the tree + manifest
