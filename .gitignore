@@ -9,6 +9,11 @@ chassis/data/tmp/
 chassis/data/logs/
 chassis/data/secrets/
 
+# A chassis booted from the repo root scaffolds the embedded _sys system
+# stacks into ./OPS/ (see chassis/sysops/scaffold.go). Root-anchored so
+# OPS/ trees in examples/ or packages stay trackable.
+/OPS/
+
 # Example workspaces spin up a local chassis on `txco dev`; its runtime
 # data (SQLite DBs, kv, logs) must never be committed. The rules above are
 # root-anchored and don't reach into examples/, so cover that path too.
@@ -35,3 +40,5 @@ chassis/server/admin/ui/dist/*
 # into dist/ on every build so go:embed works before the first build.
 chassis/server/continuation/ui/dist/*
 !chassis/server/continuation/ui/dist/.gitkeep
+.txco/
+*.wasm
