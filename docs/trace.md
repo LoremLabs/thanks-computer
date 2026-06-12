@@ -11,6 +11,8 @@ no print statements — the answer to "what did this request do?" is
 sitting on disk. Each flow is one beat of an [arc](./arcs.md); read
 its traces together and you have the arc's story so far.
 
+<img width="1155" height="737" alt="image" src="https://github.com/user-attachments/assets/e6bb68e0-a2f6-4e2d-ba3c-b10a27a8fbc8" />
+
 ```sh
 txco trace          # recent flows: rid, source, route, duration
 txco trace last     # step-by-step table for the most recent flow
@@ -21,6 +23,9 @@ Two operations that ran at the same step show up side by side — the
 trace makes parallelism visible. The same explorer lives in the
 chassis's web UI, and `txco demo` opens with tracing on, so the
 feedback loop while learning is: fire an event, read its trace.
+
+<img width="394" height="209" alt="image" src="https://github.com/user-attachments/assets/85e908e1-7ea6-4f17-ae6d-89e9a7de21b6" />
+
 
 ## Dial in how much is kept
 
