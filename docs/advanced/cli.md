@@ -4,6 +4,8 @@ _The complete command surface, grouped by what you're doing. Every
 command supports `--help` for full flags; common deploy flags
 (`--target`, `--tenant`, `--json`) repeat across the family._
 
+<img width="625" height="630" alt="image" src="https://github.com/user-attachments/assets/a1355625-98a4-461d-a446-d43688f14b2f" />
+
 ## Run & develop
 
 | Command | What it does |
