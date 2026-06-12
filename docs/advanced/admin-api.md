@@ -5,6 +5,8 @@ network surface that mutates chassis state — rules, tenants, hostnames,
 actors. It also serves the admin UI at `/admin/`. Front it with TLS via
 your reverse proxy of choice.
 
+<img width="1437" height="785" alt="image" src="https://github.com/user-attachments/assets/6e7a0d0c-0aa5-4a04-9caf-c436720a0a8e" />
+
 The `txco` CLI is the normal client (`txco apply`, `txco auth …`).
 Direct API use is supported for CI and custom tooling. Endpoints are
 **tenant-scoped**: resources live under `/v1/tenants/{tenant}/…`.
