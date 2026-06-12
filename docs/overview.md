@@ -1,3 +1,5 @@
+<!-- nav: Overview -->
+
 # Thanks, Computer
 
 **Computational continuity for your work.**
@@ -12,7 +14,7 @@ it. The work moves; the why stays behind.
 intent should travel with the work. Events arrive from
 anywhere — a web request, an inbound email, a cron tick, an AI agent. Every
 rule that resonates fires: invoking your services, running code, asking an AI
-model, or pausing while a human weighs in. The results merge into one shared
+model, or pausing while a manager weighs in. The results merge into one shared
 document, and that document — the what, still carrying its why — is the
 answer.
 

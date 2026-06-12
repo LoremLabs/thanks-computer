@@ -1,3 +1,5 @@
+<!-- nav: Package reference -->
+
 # TxCo Packages
 
 A **package** lets you share an operational "department" — a stack of `.txcl` ops — and

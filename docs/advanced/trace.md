@@ -1,3 +1,5 @@
+<!-- nav: Trace internals -->
+
 # Trace logs
 
 _For debugging what a flow actually did, after the fact — no rerun, no debug logging._

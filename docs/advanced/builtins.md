@@ -1,3 +1,5 @@
+<!-- nav: Builtins -->
+
 # EXEC schemes and `txco://` builtins
 
 _Everything an `EXEC` can point at, including the complete registry of

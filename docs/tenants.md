@@ -73,8 +73,4 @@ attributing the attempts to the tenant for the record. `resume` lifts
 it. Deleting is a soft revoke: routing and cron stop, history and audit
 rows remain.
 
-Two honest footnotes for operators: outbound-mail rate limits are
-tracked per node (a runaway-loop valve, not fleet-wide accounting),
-and hostname-ownership verification is permissive by default — set
-`--require-hostname-verification` in production so unverified bindings
-don't route.
+Outbound-mail rate limits are tracked per node (a runaway-loop valve, not fleet-wide accounting), and hostname-ownership verification is permissive by default — set `--require-hostname-verification` in production so unverified bindings don't route.

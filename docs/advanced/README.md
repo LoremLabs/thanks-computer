@@ -1,3 +1,5 @@
+<!-- nav: Operator index -->
+
 # Advanced — operator references
 
 Fact-level documentation for running and operating a chassis. The

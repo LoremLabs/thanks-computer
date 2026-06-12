@@ -49,7 +49,7 @@ instead, and your next step's rules can resonate on that.
 
 ## Keys, costs, and accounting
 
-- **Secrets come from the [secret store](./running.md).** The backend
+- **Secrets come from the [secret store](./advanced/runbook-secret-store.md).** The backend
   declares what it needs (the OpenRouter backend:
   `OPENROUTER_KEY`); the chassis materializes it per tenant. On a dev
   machine, an environment variable works as fallback

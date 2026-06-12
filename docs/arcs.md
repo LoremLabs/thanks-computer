@@ -59,4 +59,3 @@ story.
 The ladder continues upward, too: arcs can belong to a **saga** — the
 longer mission a matter serves — so the *why* travels with the work.
 See [Sagas](./sagas.md).
-

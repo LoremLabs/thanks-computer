@@ -1,3 +1,5 @@
+<!-- nav: TXCL reference -->
+
 # TXCL
 
 The Thanks Computer Language (TXCL) is a domain specific language which controls when our operators will execute and what they will contribute to the next step in the flow. 

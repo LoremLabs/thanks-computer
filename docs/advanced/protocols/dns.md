@@ -70,12 +70,3 @@ under `--cert-storage-path` (default `./chassis/data/certs`). A front
 proxy can instead ask `GET /_txco/tls-ask?domain=<sni>` to gate
 on-demand issuance against verified hostnames.
 
-## The mail path, honestly
-
-The zone's MX points at `--dns-mx-host` — your mail edge (a Postfix),
-which you run and which hands accepted mail to the chassis over
-[LMTP](./lmtp.md). Inbound addresses route via the verified-hostname
-path to the tenant's `_mail` stack. The chassis is the authoritative
-nameserver and the destination MTA's brain — not a public port-25
-listener.
-

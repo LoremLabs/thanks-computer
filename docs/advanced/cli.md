@@ -59,7 +59,7 @@ The CLI verbs map onto that flow:
 | `txco auth profiles` / `profile {use,show,remove}` | Named identities (AWS-style); also aliased under `txco config` |
 | `txco auth tenants` / `tenant {create,members,grant,revoke}` | Tenant management |
 | `txco auth tenant hostnames {add,attach,verify,challenge,list,remove}` | Hostname bindings ([ingress.md](./protocols/routing.md)) |
-| `txco auth tenant secrets {set,generate,list,show,describe,rotate,revoke}` | Secret store ([runbook](./runbook-secret-store.md)) |
+| `txco auth tenant secrets {set,generate,list,show,describe,rotate,revoke}` | Secret store ([runbook](./runbook-secret-store)) |
 | `txco auth login` (alias `txco ui`) | Mint a signed browser session, open the admin UI |
 | `txco auth sessions {list,revoke}` / `logout` | Browser sessions / stop signing |
 | `txco login` / `logout` / `cloud {…}` | **Cloud** account OAuth — distinct from `auth login`, which targets your own chassis |
