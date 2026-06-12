@@ -12,6 +12,9 @@ and resumes exactly once when the answer arrives. Waiting is most of an
 [arc's](./arcs.md) life; continuations are how the chassis waits
 without burning a connection, a thread, or a restart.
 
+<img width="735" height="429" alt="image" src="https://github.com/user-attachments/assets/90047385-091a-4f08-8330-2857961f2337" />
+
+
 ## The shape
 
 One directive turns a normal HTTP operation into a long-running one:
