@@ -30,6 +30,9 @@ Zero config: this boots a throwaway local **chassis** — the TxCo runtime,
 one binary — and opens a demo in your browser. Author rules, fire events,
 and inspect the full trace of each flow without leaving the page.
 
+<img width="1437" height="782" alt="image" src="https://github.com/user-attachments/assets/696fce36-17ae-4609-807d-723450a3c6bc" />
+
+
 ## 3. The mental model
 
 An event is a JSON document flowing through **steps**. At each step, every
