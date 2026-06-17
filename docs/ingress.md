@@ -13,11 +13,11 @@ unless it asks.
 
 | Channel  | Arrives as                          | Envelope says                  |
 | -------- | ----------------------------------- | ------------------------------ |
-| Web      | HTTP request on `:8080`             | `@src = "http"`, `@web.req.*`  |
-| Email    | Inbound mail via LMTP (behind Postfix) | `@src = "lmtp"`, `@lmtp.*`  |
+| Web      | HTTP request                        | `@src = "http"`, `@web.req.*`  |
+| Email    | Inbound mail via LMTP                  | `@src = "lmtp"`, `@lmtp.*`  |
 | Cron     | A scheduled tick                    | `@src = "cron"`                |
-| TCP      | Line-delimited JSON on `:5050`      | `@src = "tcp"`                 |
-| AI agents | An MCP tool call                   | rules exposed as tools         |
+| TCP      | Line-delimited JSON                 | `@src = "tcp"`                 |
+| MCP      | An MCP tool call                   | rules exposed as tools         |
 
 So a support flow can read like a sentence: *when mail arrives for
 `support@`, classify it; when the web form posts, enter the same flow;

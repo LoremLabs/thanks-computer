@@ -2,38 +2,23 @@
 
 # Thanks, Computer
 
-**Computational continuity for your work.**
+## Long-term goals. Everyday decisions. 
 
-Most software forgets.
 
-A ticket doesn't know the objective it serves. An AI agent doesn't know why
-it's acting. An approval request arrives stripped of the context that created
-it. The work moves; the why stays behind.
+Thanks, Computer is a runtime for **building systems that remember**—an _intelligence matrix_ in which people, software, AI, and automated processes cooperate through shared context, memory, and goals.
 
-[Thanks, Computer](https://www.thanks.computer/) (TxCo) is built the opposite way, believing that context, memory, and 
-intent should travel with the work. Events arrive from
-anywhere — a web request, an inbound email, a cron tick, an AI agent. Every
-rule that resonates fires: invoking your services, running code, asking an AI
-model, or pausing while a manager weighs in. The results merge into one shared
-document, and that document — the what, still carrying its why — is the
-answer.
+By composing small, reusable _stacks_, you can build systems that remember what they’re trying to accomplish and carry that understanding across emails, web requests, schedules, approvals, and AI interactions.
 
-That continuity holds across every timescale of your work:
+> Your LLM has context. Why shouldn't your work? 
 
-| Level                  | What it is                          | Lives for         |
-| ---------------------- | ----------------------------------- | ----------------- |
-| **[Saga](./sagas.md)** | A mission — *why* this matters      | quarters, years   |
-| **[Arc](./arcs.md)**   | A matter — *what* we're resolving   | days, weeks       |
-| **Event**              | A beat — *now*, one thing happening | milliseconds–days |
+### Put your goals to work:
 
-Because every operation reads the same shared document, a participant three steps downstream — human or AI — still knows what matters and why. Use TxCo to run support, approvals, grants, or reporting — each as a small stack of plain-text rules that call your APIs or AI to move your work forward.
-
-Underneath is a simple view: operational software isn't an application, it's
-coordination — between systems, services, people, and time. Today that
-coordination hides in glue code, queues, and inboxes. TxCo makes it a
-first-class, inspectable artifact: a flow you can read, version, trace, and
-share.
-
+- qualify sales opportunities against your ideal customer profile
+- prioritize customer success work around retention
+- guide partnership pipelines with strategic priorities
+- keep fundraising and business development efforts in context
+- give AI workflows the company context behind the task
+      
 ## How it works
 
 Work is broken into small steps called **operations**, organized into an **op
@@ -42,67 +27,46 @@ few lines of [TXCL](./txcl.md): like a tuning fork, it rings only when the
 right kind of event passes by, and says what to do when it does:
 
 ```txcl
-WHEN @web.req.url.path == "/invoice"
-EXEC "op://extract-invoice"
-EMIT .processed_at = &now("rfc3339")
+WHEN @web.req.url.path == "/opportunity"
+EXEC "https://api.example.com/enrich-opportunity"
+EMIT .qualified_at = &now("rfc3339")
 ```
 
 Everything at the same step runs in parallel; each operation's output
 deep-merges into the shared document, which carries the flow to the next step.
-Operations execute only when their conditions match — nothing runs that
-doesn't need to. An operation can be no code at all (the rule itself shapes
-the flow), any HTTP service in any language, sandboxed JavaScript running on
-the chassis, or an external AI tool. A stack of those steps is the whole
-department:
+
 
 ```stack
-invoices
-100 extract
-200 enrich audit
-300 archive
+opportunities
+
+50 get_mission get_okrs
+100 enrich
+200 score review
+250 assign
+300 followup
 ```
 
-Because the event is shared external memory — not parameters threaded through
-call chains — humans and AI work the same matter together: an AI op drafts, a
-human op approves, a service op ships, all reading and writing the same
-document.
+Because the event is shared external memory — not parameters threaded through call chains — humans, AI, and services can collaborate on the same work: an AI operation drafts, a human operation approves, a service operation ships, all reading and writing the same context document.
 
-## What makes it different
+## Composable by design
 
-- **Every protocol, one flow.** Web, email, cron, TCP, and MCP
-  ingress all land in the same **envelope** — the JSON document that carries
-  the event and its context — and the same rules. The same stack that answers
-  `https://ops.example.com` answers `support@ops.example.com` and answers an
-  AI agent's tool call.
-- **Decisions are visible.** Logic lives in readable text files, not YAML
-  sidecars or buried application code. Every flow leaves a full trace you can
-  replay step by step — debuggable for computers and AI alike.
-- **The why travels with the work.** Stamp an arc with the saga it serves and
-  the objective rides in the envelope — services, AI, and humans all decide
-  in context, instead of working from a goal they never met.
+You can think of operations as being black boxes. They receive JSON, emit JSON, and **can be written in any language**. Emails, web requests, AI tool calls, and schedules all become events interacting in the same intelligence matrix.
+
+A stack's operations may span many systems, but its behavior remains visible:
+
+- **Visible decisions:** Replay every flow step-by-step.
+- **The why travels with the work.** Context stays attached as work moves.
 - **Built for waiting.** [Continuations](./continuations.md) let an operation
   suspend — for a slow model, a webhook, a human reviewer — and resume days
-  later, exactly once, surviving restarts.
-- **Nothing to deploy.** One static binary is the whole chassis. Small logic
-  runs as sandboxed Wasm on the chassis itself: no containers, no cold
-  starts, safe [multi-tenant isolation](./tenants.md) by default.
-- **Any language, plain JSON.** An operation is any HTTP service that reads
-  JSON and returns JSON — if you can write a handler, you can write an op.
+  later, exactly once, surviving restarts. 
+- **Any language, plain JSON.** Read JSON, write JSON.
 
-## Where it's going
+## Run anywhere
 
-Op stacks are made to travel. A stack is a versioned, signed artifact —
-distributable through standard OCI registries — so a working department
-(invoicing, triage, onboarding) becomes something you install, not rebuild.
-A growing fleet runtime adds custom domains, instant rollback, and a control
-plane, so `ops.yourcompany.com` becomes programmable operational authority.
-Delegate the subdomain and [its DNS is handled](./domains.md) — mail records,
-reputation keys, TLS — with every channel into your business (mail, web,
-agents) arriving at rules you wrote, can read, and can trust.
+You can self-host the open source chassis on your infrastructure, or let our cloud run the matrix fleet for you. Same stacks, same rules — the CLI `txco apply` targets either.
 
-**One platform, two ways to run it.** Self-host the chassis — open source
-(Mozilla Public License 2.0), complete on its own, on your infrastructure.
-Or let our cloud run the fleet for you. Same stacks, same rules, nothing
-forked — `txco apply` targets either.
+**Try it in two minutes:** [Quickstart](./quickstart.md) 
 
-**Try it in two minutes:** [Quickstart](./quickstart.md) · `txco demo`
+```bash
+txco demo
+```
