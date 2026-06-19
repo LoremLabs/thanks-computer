@@ -46,6 +46,7 @@ func TestFleetResyncReemitsTenantState(t *testing.T) {
 		`INSERT INTO stack_versions (version_id, stack_id, version_number, status, created_by, created_at)
 		 VALUES (1,'stk_r',1,'superseded','test','2026-06-02T00:00:00Z')`,
 		`INSERT INTO stack_files (version_id, path, content) VALUES (1,'100/x.txcl','NOOP')`,
+		`INSERT INTO cron_settings (tenant_id, timezone, updated_at) VALUES ('tnt_resync','Asia/Tokyo','2026-06-02T00:00:00Z')`,
 	} {
 		if _, err := c.pu.RuntimeDB.Exec(stmt); err != nil {
 			t.Fatalf("seed: %v\n%s", err, stmt)
@@ -70,9 +71,12 @@ func TestFleetResyncReemitsTenantState(t *testing.T) {
 	if resp.Events.TenantCreated != 1 || resp.Events.HostnameBound != 1 || resp.Events.StackActivated != 1 {
 		t.Fatalf("counts = %+v, want 1/1/1", resp.Events)
 	}
+	if resp.Events.CronSettingsUpserted != 1 {
+		t.Fatalf("cron_settings_upserted = %d, want 1", resp.Events.CronSettingsUpserted)
+	}
 
 	// One outbox row of each type for the tenant.
-	for _, et := range []string{"tenant.created", "hostname.bound", "stack.activated"} {
+	for _, et := range []string{"tenant.created", "hostname.bound", "stack.activated", "cron.settings.upserted"} {
 		var n int
 		if err := c.pu.RuntimeDB.QueryRow(
 			`SELECT count(*) FROM control_events_outbox WHERE event_type = ? AND tenant_id = ?`,

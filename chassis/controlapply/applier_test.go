@@ -31,6 +31,7 @@ CREATE TABLE stack_files (version_id INTEGER, path TEXT, content TEXT, content_h
 CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INTEGER, name TEXT, txcl TEXT, mock_req TEXT, mock_res TEXT);
 CREATE TABLE applied_events (event_id TEXT PRIMARY KEY, control_version INTEGER NOT NULL, applied_at TEXT NOT NULL);
 CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT, origin TEXT, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT, created_at TEXT, created_by TEXT, updated_at TEXT, revoked_at TEXT);
+CREATE TABLE cron_settings (tenant_id TEXT PRIMARY KEY, timezone TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, updated_by TEXT);
 INSERT INTO tenants VALUES ('tnt_a','a');
 `
 
@@ -227,6 +228,55 @@ func TestDNSZoneUpsertLandsOnNode(t *testing.T) {
 	}
 	if revoked == "" {
 		t.Fatal("zone not revoked on node after revoke event")
+	}
+}
+
+func TestCronSettingsUpsertLandsOnNode(t *testing.T) {
+	h := newHarness(t)
+	rows := RowsArtifact{DB: "runtime", Table: "cron_settings", Op: "upsert",
+		Rows: []map[string]any{{
+			"tenant_id": "tnt_a", "timezone": "Asia/Tokyo",
+			"updated_at": "2026-06-04T00:00:00Z", "updated_by": "act_1",
+		}}}
+	data, _ := json.Marshal(rows)
+	_ = h.astore.Put(context.Background(), "rows/cron_settings/tnt_a", data, []byte(`{}`))
+	h.putEvent(t, "e1.json", controlevent.Event{
+		EventID: "evt-cron-1",
+		Type:    controlevent.TypeCronSettingsUpserted, ArtifactRef: "rows/cron_settings/tnt_a",
+		Checksum: "sha256:" + sha256Hex(data), ControlVersion: 5,
+	})
+	h.c.pollOnce(context.Background())
+
+	var tz string
+	if err := h.db.QueryRow(`SELECT timezone FROM cron_settings WHERE tenant_id='tnt_a'`).Scan(&tz); err != nil {
+		t.Fatalf("cron_settings row not applied on node: %v", err)
+	}
+	if tz != "Asia/Tokyo" {
+		t.Fatalf("cron timezone applied wrong: %q", tz)
+	}
+	if h.cursor(t) != 5 {
+		t.Fatalf("cursor=%d want 5", h.cursor(t))
+	}
+
+	// Clearing the timezone arrives as an upsert with timezone='' → back to UTC.
+	clr := RowsArtifact{DB: "runtime", Table: "cron_settings", Op: "upsert",
+		Rows: []map[string]any{{
+			"tenant_id": "tnt_a", "timezone": "",
+			"updated_at": "2026-06-04T01:00:00Z",
+		}}}
+	cdata, _ := json.Marshal(clr)
+	_ = h.astore.Put(context.Background(), "rows/cron_settings/tnt_a-clr", cdata, []byte(`{}`))
+	h.putEvent(t, "e2.json", controlevent.Event{
+		EventID: "evt-cron-2",
+		Type:    controlevent.TypeCronSettingsUpserted, ArtifactRef: "rows/cron_settings/tnt_a-clr",
+		Checksum: "sha256:" + sha256Hex(cdata), ControlVersion: 6,
+	})
+	h.c.pollOnce(context.Background())
+	if err := h.db.QueryRow(`SELECT timezone FROM cron_settings WHERE tenant_id='tnt_a'`).Scan(&tz); err != nil {
+		t.Fatalf("read cleared tz: %v", err)
+	}
+	if tz != "" {
+		t.Fatalf("timezone not cleared on node: %q", tz)
 	}
 }
 

@@ -1,6 +1,6 @@
-# Nano-ops — the `op://` lifecycle
+# Nano-ops — Run operations at the edge
 
-_Small, pure logic that runs sandboxed on the chassis — no service to
+_Small, pure logic via JavaScript that runs sandboxed on the chassis — no service to
 deploy._
 
 ```sh
@@ -13,7 +13,7 @@ txco apply                                        # build + upload happen automa
 The handler is a function of the event:
 
 ```js
-import { op } from "@txco/op";
+import { op } from "@txco/op"; // helper library imports txco functions
 
 export default op(async ({ input, env, secrets, log }) => {
   return { tier: input.amount > 1000 ? "vip" : "standard" };
@@ -39,6 +39,15 @@ What the tooling handles for you:
   memory and wall-clock capped per call
   ([runtime reference](../advanced/serve.md)).
 
-Full handler API (`ctx` fields, helper subpaths
+## Important restrictions when choosing nano-ops
+
+Nano-ops are not meant for running large operations requiring IO, but instead as a way to have a richer language
+available for processing and manipulating operation state in the lowest runtime latency possible. This means
+that you won't compile a node app with a full `node_modules` included. It also means that many functions that node
+includes, like `fetch` won't be available to the nano-op.
+
+
+## See also
+Full txco handler API: (`ctx` fields, helper subpaths
 `@txco/op/{envelope,schema,crypto,codec}`): the
 [`sdk/op` README](../../sdk/op/README.md).

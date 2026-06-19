@@ -1,8 +1,7 @@
-# AI in the flow — `ai://chat`
+# AI Operations — Using `EXEC ai://chat`
 
-_In Thanks, Computer, an AI model is just another [operation](./ops.md):
-gated by a resonator, reading the shared document, merging its answer
-back._
+_In [Thanks, Computer](https://www.thanks.computer), an AI model is just another [operation](./ops.md):
+gated by a resonator, reading the shared document, merging its answer back._
 
 One rule puts a model in the flow:
 

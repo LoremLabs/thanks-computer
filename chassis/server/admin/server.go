@@ -329,6 +329,10 @@ func (c *Controller) Start() {
 		m(tenantR)
 	}
 	tenantR.HandleFunc("/ops", c.handleListOps).Methods(http.MethodGet)
+	// Per-tenant cron timezone (txco cron config show|set). Localizes the
+	// tenant's @cron.* wall-clock fields; @cron.bucket stays UTC.
+	tenantR.HandleFunc("/cron/config", c.handleGetCronConfig).Methods(http.MethodGet)
+	tenantR.HandleFunc("/cron/config", c.handlePutCronConfig).Methods(http.MethodPut)
 	tenantR.HandleFunc("/auth/actors", c.handleListActors).Methods(http.MethodGet)
 	tenantR.HandleFunc("/auth/actors/{actorID}/revoke", c.handleRevokeActor).Methods(http.MethodPost)
 	tenantR.HandleFunc("/auth/members", c.handleListTenantMembers).Methods(http.MethodGet)

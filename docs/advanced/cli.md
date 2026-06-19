@@ -79,6 +79,7 @@ The CLI verbs map onto that flow:
 | `txco admin tenant {suspend,resume}` | Tenant kill switch (super-admin) |
 | `txco snapshot {export,restore,publish}` | Runtime-DB snapshots for fleet bootstrap |
 | `txco dns {zone,record,config,render}` | Delegated DNS zones (requires the `dns` personality) |
+| `txco cron config {show,set}` | The tenant's cron timezone — `set timezone <IANA zone>` localizes `@cron.*` (default UTC) |
 | `txco version` / `update check` / `upgrade` | Version info / check / self-update |
 | `txco completion <shell>` | bash/zsh/fish completion script |
 | `txco plugin` | List external `txco-<name>` plugins (kubectl convention) |

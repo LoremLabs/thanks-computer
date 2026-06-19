@@ -209,6 +209,12 @@ CREATE TABLE dns_zones (
 	updated_at  TEXT NOT NULL,
 	revoked_at  TEXT
 );
+CREATE TABLE cron_settings (
+	tenant_id  TEXT PRIMARY KEY,
+	timezone   TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL,
+	updated_by TEXT
+);
 CREATE TABLE oidc_subjects (
 	issuer     TEXT NOT NULL,
 	subject    TEXT NOT NULL,

@@ -188,6 +188,17 @@ var dnsChildren = []node{
 	},
 }
 
+// cronChildren mirrors chassis/cli/cron.go.
+var cronChildren = []node{
+	{
+		Name: "config", Desc: "Per-tenant cron timezone",
+		Children: []node{
+			{Name: "show", Desc: "Show the cron timezone"},
+			{Name: "set", Desc: "Set the cron timezone"},
+		},
+	},
+}
+
 // snapshotChildren mirrors chassis/cli/snapshot.go.
 var snapshotChildren = []node{
 	{Name: "export", Desc: "Export a chassis-state snapshot"},
@@ -266,6 +277,7 @@ var cliCommandTree = []node{
 	{Name: "mcp", Desc: "MCP subcommands", Children: mcpChildren},
 	{Name: "config", Desc: "Config shortcuts (alias namespace for auth)", Children: configChildren},
 	{Name: "dns", Desc: "DNS zone + record management", Children: dnsChildren},
+	{Name: "cron", Desc: "Cron subcommands (timezone config)", Children: cronChildren},
 	{Name: "admin", Desc: "Operator-facing chassis maintenance", Children: adminChildren},
 	{Name: "completion", Desc: "Emit shell completion script (bash|zsh|fish)"},
 	{Name: "help", Desc: "Show top-level help"},
@@ -559,7 +571,7 @@ func candidateNames(children []node) []string {
 // `name[description]`. Descriptions are sanitized via sanitizeDesc
 // (backticks → apostrophes — backticks inside the double-quoted entry
 // would trigger zsh command substitution at script-load time, which
-// hit us with `Alias for `package list``). Right-square-brackets are
+// hit us with `Alias for `package list“). Right-square-brackets are
 // escaped so the parser doesn't think the description ended early.
 func zshValue(n node) string {
 	desc := sanitizeDesc(n.Desc)

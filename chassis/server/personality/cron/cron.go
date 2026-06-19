@@ -175,13 +175,14 @@ func spreadOffset(slug string, period int) time.Duration {
 // _ts + modN buckets) is frozen here at tick time, BEFORE any spread delay —
 // so a tenant's WHEN sees the tick instant, not the delayed dispatch instant.
 func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick uint64, period int) {
-	// Stamp every wall-clock field in UTC, not the chassis box's local zone,
-	// so `WHEN @cron.hour == N` means the same instant on every node. Authors
-	// targeting a local wall-clock convert with &tz (e.g.
-	// &tz("Asia/Tokyo", "hour", 9) → the UTC hour of 09:00 Tokyo today). The
-	// bucket below is already UTC.
+	// Wall-clock cron fields are stamped per recipient (stampCronClock).
+	// They default to UTC — the same instant on every node, so
+	// `WHEN @cron.hour == N` is unambiguous — but a tenant can set a
+	// timezone (cron_settings, via `txco cron config set timezone …`) and
+	// its fields are then localized to that zone. The @cron.bucket dedup key
+	// stays UTC regardless, so fleet cron dedup is unaffected. Per-rule
+	// overrides use &tz (e.g. &tz("Asia/Tokyo", "hour", 9)).
 	now = now.UTC()
-	min := now.Minute()
 	// Canonical bucket at SECOND resolution (RFC3339), aligned to the
 	// period grid. Second resolution (not minute) so sub-minute periods get
 	// distinct buckets — the NATS path uses this as the Nats-Msg-Id dedup
@@ -189,26 +190,15 @@ func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick 
 	// in a minute into one. At the default 60s period the seconds are :00.
 	bucket := now.Truncate(time.Duration(period) * time.Second).UTC().Format(time.RFC3339)
 
-	// Base payload with the wall-clock fields a stack's visible txcl WHEN
-	// can compare (txcl has no arithmetic/time funcs, so the useful mod
-	// buckets are precomputed here — mechanism only).
+	// Tenant-independent base; the wall-clock fields (which carry the
+	// timezone) are stamped per recipient below.
 	base, _ := sjson.Set("", "_txc.src", "cron")
 	base, _ = sjson.Set(base, "_ts", now.Format(time.RFC3339))
 	// The canonical wall-clock bucket this tick belongs to — the fleet
 	// dedup key, also stamped here so every cron trace carries it (group
 	// traces by tenant+bucket to see exactly one fire per bucket).
 	base, _ = sjson.Set(base, "_txc.cron.bucket", bucket)
-	base, _ = sjson.Set(base, "_txc.cron.minute", min)
-	base, _ = sjson.Set(base, "_txc.cron.hour", now.Hour())
-	base, _ = sjson.Set(base, "_txc.cron.dom", now.Day())
-	base, _ = sjson.Set(base, "_txc.cron.dow", int(now.Weekday())) // Sun=0
-	base, _ = sjson.Set(base, "_txc.cron.month", int(now.Month()))
-	base, _ = sjson.Set(base, "_txc.cron.year", now.Year())
 	base, _ = sjson.Set(base, "_txc.cron.tick", tick)
-	base, _ = sjson.Set(base, "_txc.cron.mod5", min%5)
-	base, _ = sjson.Set(base, "_txc.cron.mod10", min%10)
-	base, _ = sjson.Set(base, "_txc.cron.mod15", min%15)
-	base, _ = sjson.Set(base, "_txc.cron.mod30", min%30)
 	if cc.pu.Conf.DebugPrivate {
 		base, _ = sjson.Set(base, "_txc.flag_private", true)
 	}
@@ -216,19 +206,23 @@ func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick 
 	// A system-wide tick keyed by job name "default" (no tenant, no
 	// spread), for scheduled work hooked in _sys/boot or routed by a
 	// "default" cron-job ingress binding. Enabled with --cron-system-tick;
-	// the per-tenant fan-out below runs regardless.
+	// the per-tenant fan-out below runs regardless. Always UTC.
 	if cc.pu.Conf.CronSystemTick {
 		def, _ := sjson.Set(base, "_txc.cron.job", "default")
+		def = stampCronClock(def, now)
 		cc.enqueue(ctx, cronq.Job{Job: "default", Bucket: bucket, MaxTime: period, Payload: def})
 	}
 
 	// Fan-out: one tick per tenant that opted in by authoring a `_cron`
 	// stack, smeared across the period by its deterministic offset.
 	// detectTenantBody routes `src=cron`+`cron.tenant` to that tenant's
-	// `_cron/0` (the sanctioned _sys→tenant re-tenant path).
+	// `_cron/0` (the sanctioned _sys→tenant re-tenant path). Each tenant's
+	// wall-clock is localized to its configured timezone (UTC when unset).
+	tzBySlug := cc.cronTimezones()
 	for _, slug := range cc.subscribers() {
 		p, _ := sjson.Set(base, "_txc.cron.tenant", slug)
 		p, _ = sjson.Set(p, "_txc.cron.job", "_cron")
+		p = stampCronClock(p, now.In(cc.location(tzBySlug[slug])))
 		job := cronq.Job{Tenant: slug, Job: "_cron", Bucket: bucket, MaxTime: period, Payload: p}
 
 		delay := spreadOffset(slug, period)
@@ -248,6 +242,89 @@ func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick 
 			}
 		}(job, delay)
 	}
+}
+
+// stampCronClock sets the wall-clock cron fields from t (already in the
+// target location): hour/minute/dom/dow/month/year + the precomputed minute
+// mod buckets (txcl has no arithmetic, so mod5/10/15/30 are stamped here —
+// mechanism only). UTC vs local is entirely the caller's choice of t's zone.
+func stampCronClock(payload string, t time.Time) string {
+	min := t.Minute()
+	payload, _ = sjson.Set(payload, "_txc.cron.minute", min)
+	payload, _ = sjson.Set(payload, "_txc.cron.hour", t.Hour())
+	payload, _ = sjson.Set(payload, "_txc.cron.dom", t.Day())
+	payload, _ = sjson.Set(payload, "_txc.cron.dow", int(t.Weekday())) // Sun=0
+	payload, _ = sjson.Set(payload, "_txc.cron.month", int(t.Month()))
+	payload, _ = sjson.Set(payload, "_txc.cron.year", t.Year())
+	payload, _ = sjson.Set(payload, "_txc.cron.mod5", min%5)
+	payload, _ = sjson.Set(payload, "_txc.cron.mod10", min%10)
+	payload, _ = sjson.Set(payload, "_txc.cron.mod15", min%15)
+	payload, _ = sjson.Set(payload, "_txc.cron.mod30", min%30)
+	return payload
+}
+
+// cronTimezones returns slug→IANA-timezone for tenants that set one in
+// cron_settings, read from the local dbcache snapshot. Tolerant: a missing
+// table (a snapshot predating the migration, or a minimal test DB) or any
+// query error yields an empty map — the head then stamps UTC for everyone.
+func (cc *CronController) cronTimezones() map[string]string {
+	if cc.pu.Dbc == nil {
+		return nil
+	}
+	cc.pu.Dbc.Mu.Lock()
+	snap := cc.pu.Dbc.Db
+	cc.pu.Dbc.Mu.Unlock()
+	if snap == nil {
+		return nil
+	}
+	rows, err := snap.QueryContext(cc.ctx,
+		`SELECT t.slug, cs.timezone
+		   FROM cron_settings cs
+		   JOIN tenants t ON t.tenant_id = cs.tenant_id
+		  WHERE cs.timezone != '' AND t.revoked_at IS NULL`)
+	if err != nil {
+		return nil // table absent or query failed → everyone UTC
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var slug, tz string
+		if err := rows.Scan(&slug, &tz); err != nil {
+			return out
+		}
+		if slug != "" && tz != "" {
+			out[slug] = tz
+		}
+	}
+	return out
+}
+
+// cronLocCache memoizes IANA-zone → *time.Location. LoadLocation parses
+// zoneinfo on each call; the cache keeps that off the per-tick path. The tz
+// database is embedded in the binary (cmd/txco imports time/tzdata) so
+// lookups work on minimal images.
+var cronLocCache sync.Map
+
+// location resolves an IANA zone name to a *time.Location (cached). Empty or
+// unknown → UTC (the zone is validated at set time, so an unknown name here
+// is defensive). A cached value is returned without re-parsing.
+func (cc *CronController) location(name string) *time.Location {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return time.UTC
+	}
+	if v, ok := cronLocCache.Load(name); ok {
+		return v.(*time.Location)
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		if cc.pu.Logger != nil {
+			cc.pu.Logger.Warn("cron: unknown timezone; stamping UTC", zap.String("tz", name))
+		}
+		loc = time.UTC
+	}
+	cronLocCache.Store(name, loc)
+	return loc
 }
 
 // enqueue submits a job to the queue, logging a non-shutdown failure.

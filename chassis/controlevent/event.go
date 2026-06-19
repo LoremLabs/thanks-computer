@@ -48,6 +48,10 @@ const (
 	// itself and (with the dns personality) can serve the zone — see
 	// internal docs/todo-dns-authority.md §9 fleet note.
 	TypeDNSZoneUpserted = "dns.zone.upserted"
+	// TypeCronSettingsUpserted carries a cron_settings row (RowsArtifact,
+	// op=upsert; clearing a timezone is an upsert with timezone=''). Lets every
+	// node localize a tenant's @cron.* wall-clock fields consistently.
+	TypeCronSettingsUpserted = "cron.settings.upserted"
 )
 
 var knownTypes = map[string]bool{
@@ -56,7 +60,7 @@ var knownTypes = map[string]bool{
 	TypeHostnameRevoked: true, TypeActorChanged: true,
 	TypeKeyChanged: true, TypeMembershipChanged: true,
 	TypeEntitlementUpdated: true, TypeSystemOpstack: true,
-	TypeDNSZoneUpserted: true,
+	TypeDNSZoneUpserted: true, TypeCronSettingsUpserted: true,
 }
 
 // Event is the control-plane event contract.

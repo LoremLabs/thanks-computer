@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	_ "time/tzdata" // embed zoneinfo so the timezone test resolves zones on minimal CI
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/tidwall/gjson"
@@ -314,6 +315,76 @@ func TestScheduleTickBucketAndFanout(t *testing.T) {
 	}
 	if !tenants["acme"] || !tenants["beta"] || len(tenants) != 2 {
 		t.Errorf("tenant fan-out = %v, want {acme, beta}", tenants)
+	}
+}
+
+// TestScheduleTickTenantTimezone: a tenant with a cron_settings timezone gets
+// its @cron.* wall-clock fields localized to that zone; a tenant without one
+// stays UTC. The @cron.bucket dedup key stays UTC for both.
+func TestScheduleTickTenantTimezone(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, q := range []string{
+		`CREATE TABLE tenants (tenant_id TEXT PRIMARY KEY, slug TEXT, revoked_at TEXT)`,
+		`CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INT, name TEXT)`,
+		`CREATE TABLE cron_settings (tenant_id TEXT PRIMARY KEY, timezone TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, updated_by TEXT)`,
+		`INSERT INTO tenants VALUES ('tnt_acme','acme',NULL),('tnt_beta','beta',NULL)`,
+		`INSERT INTO ops VALUES ('tnt_acme','_cron',100,'a'),('tnt_beta','_cron',100,'b')`,
+		`INSERT INTO cron_settings VALUES ('tnt_acme','Asia/Tokyo','2026-06-02T00:00:00Z',NULL)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+
+	rq := &recordingQueue{}
+	cc := NewController(context.Background(), &processor.Unit{
+		Conf:   config.Config{Personalities: "cron"},
+		Logger: zap.NewNop(),
+		Dbc:    &dbcache.DbCache{Db: db, Source: db},
+	}, rq)
+
+	// 15:24 UTC = 00:24 the NEXT day in Tokyo (UTC+9) — exercises a date roll.
+	now := time.Date(2026, 6, 2, 15, 24, 37, 0, time.UTC)
+	cc.scheduleTick(context.Background(), now, 7, 1) // period=1 → no spread → synchronous
+
+	byTenant := map[string]cronq.Job{}
+	for _, j := range rq.snapshot() {
+		byTenant[j.Tenant] = j
+	}
+	acme, ok := byTenant["acme"]
+	if !ok {
+		t.Fatalf("no acme job; got %+v", byTenant)
+	}
+	beta, ok := byTenant["beta"]
+	if !ok {
+		t.Fatalf("no beta job; got %+v", byTenant)
+	}
+
+	// acme localized to Tokyo: 00:24 on Jun 3.
+	if h := gjson.Get(acme.Payload, "_txc.cron.hour").Int(); h != 0 {
+		t.Errorf("acme hour = %d, want 0 (00:24 Tokyo)", h)
+	}
+	if m := gjson.Get(acme.Payload, "_txc.cron.minute").Int(); m != 24 {
+		t.Errorf("acme minute = %d, want 24", m)
+	}
+	if d := gjson.Get(acme.Payload, "_txc.cron.dom").Int(); d != 3 {
+		t.Errorf("acme dom = %d, want 3 (rolled to Jun 3 in Tokyo)", d)
+	}
+	// beta has no timezone → UTC: 15:24.
+	if h := gjson.Get(beta.Payload, "_txc.cron.hour").Int(); h != 15 {
+		t.Errorf("beta hour = %d, want 15 (UTC)", h)
+	}
+	// The dedup bucket stays UTC for both, regardless of timezone.
+	const wantBucket = "2026-06-02T15:24:37Z"
+	if b := gjson.Get(acme.Payload, "_txc.cron.bucket").String(); b != wantBucket {
+		t.Errorf("acme bucket = %q, want %q (UTC)", b, wantBucket)
+	}
+	if b := gjson.Get(beta.Payload, "_txc.cron.bucket").String(); b != wantBucket {
+		t.Errorf("beta bucket = %q, want %q (UTC)", b, wantBucket)
 	}
 }
 

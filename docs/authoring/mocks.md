@@ -9,7 +9,7 @@ is written, and lets a caller swap real ops for fixtures per request._
 Drop two files next to a rule; `txco apply` attaches them to every
 rule in that scope:
 
-```
+```yaml
 OPS/support/0100_TRIAGE/
   classify.txcl
   mock-request.json     # the input this op expects — documentation + test input

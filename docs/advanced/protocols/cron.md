@@ -25,24 +25,34 @@ WHEN @cron.hour == 9 && @cron.minute == 0     # every day at 09:00 UTC
 EXEC "https://ops.example.com/morning-sweep"
 ```
 
-To target a local wall-clock instead, convert with
-[`&tz(zone, "hour"|"minute", h)`](../txcl/txcl.md#generators--time) — it
-returns the UTC hour (or minute) of `h:00` in an IANA zone today, DST-aware:
+**Set a timezone for the tenant.** Most cron runs in one zone — set it once
+and every `@cron.*` field for this tenant's `_cron` stack is localized to it,
+so the rule above (`@cron.hour == 9`) fires at 09:00 *there*. No per-rule
+syntax:
 
-```txcl
-WHEN @cron.hour == &tz("Asia/Tokyo", "hour", 9) && @cron.minute == 0   # 09:00 in Tokyo
-EXEC "https://ops.example.com/morning-sweep"
+```sh
+txco cron config set timezone Asia/Tokyo   # @cron.* now in Tokyo wall-clock
+txco cron config show                      # → cron timezone: Asia/Tokyo
+txco cron config set timezone ""           # clear, back to UTC
 ```
 
-Zones with a fractional offset need both fields — the `"minute"` form carries
-the offset's minutes (India's `Asia/Kolkata` is `+05:30`, so 09:00 IST is
-03:30 UTC):
+Fractional offsets work too: with `Asia/Kolkata` (`+05:30`), `@cron.hour == 9
+&& @cron.minute == 0` fires at 09:00 IST. The `@cron.bucket` dedup key stays
+UTC, so fleet scheduling is unaffected.
+
+**Per-rule override.** To target a zone in a single rule — handy when one
+stack mixes zones — leave the tenant on UTC and convert inline with
+[`&tz(zone, "hour"|"minute", h [, m])`](../txcl/txcl.md#generators--time),
+which maps a local time to the UTC `@cron.*` value (DST-aware):
 
 ```txcl
 WHEN @cron.hour == &tz("Asia/Kolkata", "hour", 9)
   && @cron.minute == &tz("Asia/Kolkata", "minute", 9)            # 09:00 in India
 EXEC "https://ops.example.com/morning-sweep"
 ```
+
+`&tz` assumes `@cron.*` is UTC, so use it *or* a tenant timezone — not both (a
+tenant timezone already localizes the fields, which would double-convert).
 
 | Field | Meaning |
 |---|---|

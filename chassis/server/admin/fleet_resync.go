@@ -39,10 +39,11 @@ type fleetResyncRequest struct {
 }
 
 type fleetResyncCounts struct {
-	TenantCreated   int `json:"tenant_created"`
-	HostnameBound   int `json:"hostname_bound"`
-	StackActivated  int `json:"stack_activated"`
-	DNSZoneUpserted int `json:"dns_zone_upserted"`
+	TenantCreated        int `json:"tenant_created"`
+	HostnameBound        int `json:"hostname_bound"`
+	StackActivated       int `json:"stack_activated"`
+	DNSZoneUpserted      int `json:"dns_zone_upserted"`
+	CronSettingsUpserted int `json:"cron_settings_upserted"`
 }
 
 type fleetResyncResponse struct {
@@ -147,6 +148,7 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 		zap.Int("tenant_created", counts.TenantCreated),
 		zap.Int("hostname_bound", counts.HostnameBound),
 		zap.Int("dns_zone_upserted", counts.DNSZoneUpserted),
+		zap.Int("cron_settings_upserted", counts.CronSettingsUpserted),
 		zap.Int("stack_activated", counts.StackActivated))
 
 	writeJSON(w, http.StatusOK, fleetResyncResponse{
@@ -212,6 +214,20 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 			}
 			pending = append(pending, resyncEvent{eventType: controlevent.TypeDNSZoneUpserted, tenantID: t.TenantID, ref: zRef, sum: zSum})
 			counts.DNSZoneUpserted++
+		}
+
+		// cron.settings.upserted — the tenant's cron timezone, so a resynced
+		// node localizes @cron.* consistently. Re-published verbatim (incl. its
+		// updated_at) so the row matches what the admin node holds.
+		if cs, ok, cerr := tenants.LoadCronSettings(ctx, c.pu.RuntimeDB, t.TenantID); cerr != nil {
+			return nil, counts, fmt.Errorf("tenant %s cron settings: %w", t.TenantID, cerr)
+		} else if ok {
+			cRef, cSum, cuerr := c.fleetUploadCronSettingsUpsert(ctx, t.TenantID, cs.Timezone, cs.UpdatedAt, cs.UpdatedBy)
+			if cuerr != nil {
+				return nil, counts, fmt.Errorf("tenant %s cron settings upload: %w", t.TenantID, cuerr)
+			}
+			pending = append(pending, resyncEvent{eventType: controlevent.TypeCronSettingsUpserted, tenantID: t.TenantID, ref: cRef, sum: cSum})
+			counts.CronSettingsUpserted++
 		}
 
 		// stack.activated for each stack with an active version. active_version

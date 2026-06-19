@@ -33,6 +33,7 @@ var tableWhitelist = map[string]map[string]bool{
 		"tenant_hostnames":     true,
 		"tenant_runtime_state": true, // designed-not-shipped; skipped if absent
 		"dns_zones":            true, // delegated-zone state; lets a data-plane node re-derive routing hosts + (with the dns head) serve the zone
+		"cron_settings":        true, // per-tenant cron timezone; lets every node localize @cron.* consistently
 	},
 	dbAuth: {
 		"actors":            true,
