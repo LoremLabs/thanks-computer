@@ -51,8 +51,3 @@ Read in order, or jump to what you need:
 Building stacks day to day? The **[authoring guides](./authoring/README.md)**
 cover the workspace layout, the `txco dev` loop, mocks, and nano-ops.
 
-Operating in production? The **[advanced references](./advanced/README.md)**
-hold the fact-level detail: the full flag surface, the admin API, the
-[per-protocol pages](./advanced/protocols/README.md) (web, mail in/out,
-cron, TCP, MCP, routing), secrets, trace internals, and the complete
-TXCL reference.

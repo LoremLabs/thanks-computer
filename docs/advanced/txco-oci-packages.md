@@ -1,4 +1,4 @@
-<!-- nav: Reference -->
+<!-- nav: TxCo Packages -->
 
 # TxCo Packages
 

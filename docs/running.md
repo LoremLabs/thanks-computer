@@ -1,12 +1,11 @@
-# Running a chassis
+# Production Deploys
 
-_Thanks, Computer runs your rules on a **chassis** — a single binary
-that listens on every channel and executes your stacks. This page is
-the loop for running one yourself; for a throwaway playground, use
-`txco demo` from the [quickstart](./quickstart.md) instead.
-([Overview](./overview.md))_
+You can self-host a [Thanks, Computer](https://www.thanks.computer) runtime ("the chassis"), or
+use the hosted cloud service.
 
-One command boots the whole thing:
+## Self Hosting
+
+You can start a TxCo chassis with:
 
 ```sh
 txco serve
@@ -17,75 +16,23 @@ When it prints `-ready-`, it's listening: `:8080` for web events,
 No database to provision, no containers — state lives in local files
 next to the binary.
 
-## The author–apply loop
 
-Rules live in your workspace as plain files under `OPS/`, one folder
-per stack:
+## Enroll your keys
 
-```sh
-mkdir ~/my-stack && cd ~/my-stack
-txco init hello                  # scaffolds OPS/hello/100/resonator.txcl
-# …edit the rule…
-txco apply                       # parses OPS/ and pushes it to the chassis
-```
+Production chassis auth uses signed requests. Every admin call carries an ed25519 signature, with replay protection built in.
 
-`apply` is idempotent — it reports what changed and skips what didn't.
-`txco dev` wraps the loop (serve + watch + apply on save) into one
-command. Then bind a hostname to the stack so events route to it:
-
-```sh
-txco auth tenant hostnames add localhost --stack hello
-curl -s http://localhost:8080/hello | jq
-```
-
-Your rules are just files, so they version like code: review them in
-pull requests, apply them from CI against `:8081`. Complete, runnable
-workspaces to copy from live in [`examples/`](../examples/) — an
-inbound support mailbox, a Stripe enrichment flow, and more.
-
-## Locked by default, in one step
-
-Production chassis auth is signed requests (RFC 9421) — every admin
-call carries an ed25519 signature, with replay protection built in.
 Enrolling is one command on a fresh chassis:
 
+:::note
+On first boot you validate yourself as an admin by entering a code from the logs. 
+
+Subsequent auth uses public key signatures. 
+
+:::
+
+
 ```sh
-txco auth bootstrap-local    # one-time: enrol your signing key
+txco auth bootstrap-local    # one-time: enroll your signing key
 txco auth login              # opens the admin UI, authenticated
 ```
 
-The admin UI shows your stacks, tenants, and [traces](./visibility.md)
-against the live chassis.
-
-## Secrets stay out of your rules
-
-The chassis has a built-in encrypted secret store, so credentials never
-appear in rule files:
-
-```sh
-txco auth tenant secrets set API_KEY
-```
-
-A rule references the name, and the chassis splices the value in at
-dispatch:
-
-```txcl
-WITH secrets.headers.authorization.secret = "API_KEY"
-EXEC "https://api.example.com/enrich"
-```
-
-There is no reveal command — to inspect a value, you rotate it.
-
-## Going deeper
-
-The [advanced references](./advanced/README.md) cover the full flag
-surface ([serve.md](./advanced/serve.md)), the
-[admin API](./advanced/admin-api.md), multi-tenant
-[ingress routing](./routing.md), inbound mail via
-[LMTP](./advanced/protocols/lmtp.md), and the
-[secret-store runbook](./advanced/runbook-secret-store.md).
-
-Self-hosting is one of two paths: the same stacks run unchanged on the
-hosted cloud, where the fleet — scaling, custom domains, instant
-rollback — is managed for you
-([overview](./overview.md#where-its-going)).

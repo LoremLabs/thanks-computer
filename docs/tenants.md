@@ -1,30 +1,15 @@
-# Tenants — one chassis, many isolated worlds
+# Tenants — Multi-tenant by default
 
-_In Thanks, Computer, every piece of state belongs to a **tenant** —
-an isolation boundary for stacks, domains, secrets, people, and usage.
-This page is the model, and how to set it up. ([Overview](./overview.md))_
-
-You've been using it all along: a fresh chassis seeds a tenant named
-`default`, and everything in the [quickstart](./quickstart.md) ran
-inside it. That's the design — isolation isn't a feature you turn on
-later, it's how the chassis thinks. A single team can ignore tenancy
-entirely; the moment you host a second team, a client, or a product,
+A single team can ignore tenancy entirely; the moment you host a second team, a client, or a product,
 the walls are already there.
 
-## What lives inside a tenant
+:::tip
+Multi-tenant documentation applies for those running their own self-hosted chassis. 
 
-Everything, keyed at the database row:
+End users who use a hosted Thanks, Computer cloud service benefit from multi-tenancy, but do not need to do anything to configure it.
 
-| Resource | The boundary |
-|---|---|
-| Stacks & rules | A stack name is unique *per tenant*; tenant A's rules never fire for tenant B's events |
-| Hostnames & [domains](./advanced/protocols/dns.md) | Hostname bindings, delegated DNS zones, and DKIM keys are tenant rows — one tenant's claim 409s another's |
-| [Secrets](./running.md) | Scoped `(tenant, stack, name)`; materialization can't cross the line |
-| [Traces](./visibility.md) | Tenant-attributed; the admin API only serves them under `/v1/tenants/{slug}/…` |
-| [Cron](./advanced/protocols/cron.md) | Each tenant with a `_cron` stack gets its own tick envelope |
-| Usage & [fuel](./advanced/fuel.md) | Every request's spend is attributed to its tenant — the quota/billing dimension |
-| Outbound [mail](./advanced/protocols/sendmail.md) | Per-tenant rate limits, and the from-domain must be *that tenant's* verified hostname |
-| People | Actors hold *per-tenant* memberships with per-tenant capabilities |
+:::
+
 
 ## How an event gets its tenant — and keeps it
 
@@ -74,3 +59,18 @@ it. Deleting is a soft revoke: routing and cron stop, history and audit
 rows remain.
 
 Outbound-mail rate limits are tracked per node (a runaway-loop valve, not fleet-wide accounting), and hostname-ownership verification is permissive by default — set `--require-hostname-verification` in production so unverified bindings don't route.
+
+## What lives inside a tenant
+
+Everything, keyed at the database row:
+
+| Resource | The boundary |
+|---|---|
+| Stacks & rules | A stack name is unique *per tenant*; tenant A's rules never fire for tenant B's events |
+| Hostnames & [domains](./advanced/protocols/dns.md) | Hostname bindings, delegated DNS zones, and DKIM keys are tenant rows — one tenant's claim 409s another's |
+| [Secrets](./running.md) | Scoped `(tenant, stack, name)`; materialization can't cross the line |
+| [Traces](./visibility.md) | Tenant-attributed; the admin API only serves them under `/v1/tenants/{slug}/…` |
+| [Cron](./advanced/protocols/cron.md) | Each tenant with a `_cron` stack gets its own tick envelope |
+| Usage & [fuel](./advanced/fuel.md) | Every request's spend is attributed to its tenant — the quota/billing dimension |
+| Outbound [mail](./advanced/protocols/sendmail.md) | Per-tenant rate limits, and the from-domain must be *that tenant's* verified hostname |
+| People | Actors hold *per-tenant* memberships with per-tenant capabilities |

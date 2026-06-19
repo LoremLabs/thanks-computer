@@ -1,4 +1,4 @@
-# CLI reference — `txco`
+# CLI — The `txco` command
 
 _The complete command surface, grouped by what you're doing. Every
 command supports `--help` for full flags; common deploy flags
@@ -18,7 +18,7 @@ command supports `--help` for full flags; common deploy flags
 
 ## Deploy & versions
 
-Stacks change through versioned drafts ([admin-api.md](./admin-api.md)).
+Stacks change through versioned drafts ([admin-api](./admin-api.md)).
 The CLI verbs map onto that flow:
 
 | Command | What it does |
@@ -46,20 +46,20 @@ The CLI verbs map onto that flow:
 
 `txco install <ref> --as <stack>`, `txco package
 {init,validate,inspect,pull,publish,key,list,upgrade,remove}` — see
-[txco-oci-packages.md](./txco-oci-packages.md).
+[packages](./txco-oci-packages.md).
 
 ## Identity & access
 
 | Command | What it does |
 |---|---|
-| `txco auth bootstrap-local` | First-run: generate a key + enroll it ([admin-api.md](./admin-api.md)) |
+| `txco auth bootstrap-local` | First-run: generate a key + enroll it ([admin-api](./admin-api.md)) |
 | `txco auth init` / `enroll` / `rotate-key` / `revoke-key` / `revoke-actor` | Key lifecycle |
 | `txco auth whoami` (alias `txco whoami`) | What the chassis thinks you are |
 | `txco auth invite` / `invitations` / `revoke-invitation` / `accept --token …` | Teammate onboarding |
 | `txco auth profiles` / `profile {use,show,remove}` | Named identities (AWS-style); also aliased under `txco config` |
 | `txco auth tenants` / `tenant {create,members,grant,revoke}` | Tenant management |
-| `txco auth tenant hostnames {add,attach,verify,challenge,list,remove}` | Hostname bindings ([ingress.md](../routing.md)) |
-| `txco auth tenant secrets {set,generate,list,show,describe,rotate,revoke}` | Secret store ([runbook](./runbook-secret-store.md)) |
+| `txco auth tenant hostnames {add,attach,verify,challenge,list,remove}` | Hostname bindings ([ingress](../routing.md)) |
+| `txco auth tenant secrets {set,generate,list,show,describe,rotate,revoke}` | ([Secret store](./runbook-secret-store.md)) |
 | `txco auth login` (alias `txco ui`) | Mint a signed browser session, open the admin UI |
 | `txco auth sessions {list,revoke}` / `logout` | Browser sessions / stop signing |
 | `txco login` / `logout` / `cloud {…}` | **Cloud** account OAuth — distinct from `auth login`, which targets your own chassis |
@@ -68,8 +68,8 @@ The CLI verbs map onto that flow:
 
 | Command | What it does |
 |---|---|
-| `txco trace [rid\|last]` | Step-by-step trace explorer ([trace.md](./trace.md)); bare `txco trace` is interactive |
-| `txco mcp doctor <url>` | Probe an MCP server: handshake + tool list ([mcp.md](./protocols/mcp.md)) |
+| `txco trace [rid\|last]` | Step-by-step trace explorer ([trace](./trace.md)); bare `txco trace` is interactive |
+| `txco mcp doctor <url>` | Probe an MCP server: handshake + tool list ([mcp](./protocols/mcp.md)) |
 
 ## Operator & misc
 

@@ -1,8 +1,6 @@
-# Packages — share a department
+# Share Stacks 
 
-_In Thanks, Computer, a stack of rules can run a part of a business —
-this page covers packaging a working stack so others can install it.
-([Overview](./overview.md))_
+In [Thanks, Computer](https://www.thanks.computer) you can share and use stacks others have published.
 
 A working department — support triage, invoicing, onboarding — is a
 playbook for a kind of work: a tree of rule files plus
@@ -23,20 +21,21 @@ what you're about to run — rules are text, not a black box — fill in
 the package's declared external requirements (e.g. *your* notify
 endpoint), and deploy with the same `txco apply` you always use.
 
-## Authoring one
+## Bundling your package
 
 A package is an `OPS/`-shaped tree plus a manifest:
 
 ```
 support-basic/
   txco.package.yaml            # identity, version, exports
-  OPS/support/
-    0100_TRIAGE/classify.txcl  # EXEC "op://classify"  (bundled nano-op)
-    0100_TRIAGE/classify.js    #   ships with the package
-    0200_NOTIFY/notify.txcl    # EXEC "op://NOTIFY"    (you supply this one)
+  OPS/support/                 # Your op stack here
+    0100_TRIAGE/classify.txcl  
+    0100_TRIAGE/classify.js    
+    0200_NOTIFY/notify.txcl
+    schema.json                # good practice, but optional
 ```
 
-What you're installing, as a flow:
+What you're installing, as your op stack:
 
 ```stack
 support-basic
@@ -45,23 +44,18 @@ support-basic
 ```
 
 ```sh
-txco package init my-dept     # scaffold
 txco package validate         # check the tree + manifest
-txco package publish --to ghcr.io/you/my-dept --sign
+txco package publish --to ghcr.io/username/support-basic --sign
 ```
 
-Good practice: include a `schema.json` describing what your stack reads
-and writes, so installers know what to wire — see
-[Schemas](./schemas.md).
 
-Signing uses an ed25519 key (`txco package key generate`);
-`txco package inspect <ref> --provenance` verifies it before you
-install.
+## Installing your shared package
 
-## Why this matters
+Others can then install your op stack with:
 
-Most operational knowledge is trapped in one company's glue code. A
-package turns "how we triage support" into something you can hand to
-another team — or another company — as an installable, inspectable,
-upgradeable artifact (`txco package upgrade`). This is where TxCo is
-headed: departments you install, not rebuild.
+```sh
+txco package inspect ghcr.io/username/support-basic
+txco package install ghcr.io/username/support-basic --as support
+```
+
+And they can then modify it to meet their needs.

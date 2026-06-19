@@ -1,8 +1,7 @@
-# Chassis runtime reference
+# Chassis runtime
 
 _Operator reference for `txco serve`: personalities, listeners, data on
-disk, and the flags that matter in production. For the gentle
-introduction, see [running.md](../running.md)._
+disk, and the flags that matter in production._
 
 Every flag can also be set as an environment variable using the
 `TXCO_` prefix and underscores (`--ingress-config` ↔

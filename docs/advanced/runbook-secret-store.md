@@ -1,8 +1,30 @@
-# Secret store — operator runbook
+# Secrets — Segment your data
 
-A practical guide for operating the per-tenant secret store.
+
 
 ## TL;DR
+
+If you're an end-user, this may be what you're looking for:
+
+```bash
+# Hidden TTY prompt; the value is never on the command line.
+txco auth tenant secrets set STRIPE_API_KEY \
+  --description "Stripe live key, rotated 2026-06-19"
+```
+
+In a txcl rule's `WITH` clause, reference a secret by name. The
+chassis materializes the cleartext into the op handler's private
+buffer at execution time; the value never enters `op.Input`,
+trace events, mock fixtures, continuations, or logs.
+
+```txcl
+EXEC "https://api.stripe.com/v1/charges"
+  WITH secrets.headers.authorization.secret = "STRIPE_API_KEY",
+       secrets.headers.authorization.format = "Bearer {}",
+       method = "POST"
+```
+
+For operators:
 
 1. **Bootstrap is automatic**: the chassis mints a master key on first
    boot at `./chassis/data/secrets/txco-master.key`

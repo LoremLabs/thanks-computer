@@ -1,4 +1,4 @@
-<!-- nav: TXCL reference -->
+<!-- nav: TXCL -->
 
 # TXCL
 
@@ -122,6 +122,16 @@ WHEN .enabled == true
 WHEN .draft == false
 WHEN .ref == null
 ```
+
+## Conditions
+
+- `==  !=  <  <=  >  >=` (numbers, lexical strings), 
+- `=~` / `!~` (regex, `/pattern/` literals), 
+- `&&` and `||`, 
+- prefix `!`, parentheses for grouping. 
+
+A comma in `WHEN` is an AND.
+
 
 ### Branch paths
 
@@ -478,12 +488,21 @@ The convention is **transport-agnostic**: an HTTP op signals control flow by inc
 
 ```jsonc
 // HTTP responder ending the pipeline early
-{ "reason": "duplicate", "_txc": { "halt": true } }
+{ 
+    "reason": "duplicate", 
+    "_txc": { 
+        "halt": true 
+        } 
+    }
 ```
 
 ```jsonc
-// HTTP responder jumping to a different stage
-{ "_txc": { "goto": "users/signup-fast/0" } }
+// HTTP responder jumping to a different stage or stack
+{ 
+    "_txc": { 
+        "goto": "users/signup-fast/0" 
+        } 
+}
 ```
 
 Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise.
@@ -531,3 +550,33 @@ EXEC "txco://noop"
 (`@` is the shorthand for `._txc.` — see [Shorthand](#shorthand). Hyphenated header keys work in branch paths without quoting.)
 
 From there, prefix fallback handles per-scope inheritance automatically. There's no `slot` column or per-lane materialization; lane _is_ the stack prefix.
+
+
+## `WITH` — directives
+
+| Key | Applies to | Meaning |
+|---|---|---|
+| `timeout` | any EXEC | Per-call wall clock (ms or `"2h"`); capped by `--op-timeout-max` |
+| `method` | http(s) | HTTP verb override (default POST) |
+| `secrets.headers.<h>.secret` / `.format` | http(s), builtins | Splice a stored secret into the request; `format = "Bearer {}"` templates it ([runbook](../runbook-secret-store.md)) |
+| `secrets.body.<path>.secret` | http(s) | Same, into the JSON body |
+| `mode = "async"` | http(s), mcp+ | Worker acks 202 now, calls back later ([continuations](../../continuations.md)) |
+| `mode = "continuable"` | http(s) | Answer synchronously if quick; promote to a continuation at the deadline |
+| `continue_after` | continuable | The promotion deadline (default `--continue-after-default`, 5s) |
+| `redact` / `omit` | any | Scrub paths from [trace](../trace.md) artifacts (runtime data untouched) |
+| `debug = true` | any | Surface extra op debug detail to the trace |
+| `prompt`, `system`, `messages`, `model`, `provider`, `schema`, `intent`, `limits.*` | ai://chat | The chat request — see [ai](../../ai.md) |
+
+## `SET` vs `SET PRE`
+
+`SET` writes fields onto the event *before dispatch and they persist
+downstream*. `SET PRE` decorates **only this op's input** — the value
+never merges forward. Use it for scratch values a prompt template or
+handler needs once:
+
+```txcl
+SET PRE @body_text = .ticket.description
+WITH prompt = "Summarize: {{@body_text}}"
+EXEC "ai://chat"
+```
+
