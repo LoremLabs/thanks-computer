@@ -5,7 +5,7 @@ this page covers packaging a working stack so others can install it.
 ([Overview](./overview.md))_
 
 A working department — support triage, invoicing, onboarding — is a
-playbook for [arcs](./arcs.md) of a kind: a tree of rule files plus
+playbook for a kind of work: a tree of rule files plus
 the nano-ops they reference. A **package**
 makes that tree shareable: versioned, optionally signed, distributable
 from a public GitHub repo (zero infrastructure) or any OCI registry

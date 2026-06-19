@@ -18,9 +18,9 @@ Everything, keyed at the database row:
 | Resource | The boundary |
 |---|---|
 | Stacks & rules | A stack name is unique *per tenant*; tenant A's rules never fire for tenant B's events |
-| Hostnames & [domains](./domains.md) | Hostname bindings, delegated DNS zones, and DKIM keys are tenant rows — one tenant's claim 409s another's |
+| Hostnames & [domains](./advanced/protocols/dns.md) | Hostname bindings, delegated DNS zones, and DKIM keys are tenant rows — one tenant's claim 409s another's |
 | [Secrets](./running.md) | Scoped `(tenant, stack, name)`; materialization can't cross the line |
-| [Traces](./trace.md) | Tenant-attributed; the admin API only serves them under `/v1/tenants/{slug}/…` |
+| [Traces](./visibility.md) | Tenant-attributed; the admin API only serves them under `/v1/tenants/{slug}/…` |
 | [Cron](./advanced/protocols/cron.md) | Each tenant with a `_cron` stack gets its own tick envelope |
 | Usage & [fuel](./advanced/fuel.md) | Every request's spend is attributed to its tenant — the quota/billing dimension |
 | Outbound [mail](./advanced/protocols/sendmail.md) | Per-tenant rate limits, and the from-domain must be *that tenant's* verified hostname |
@@ -28,7 +28,7 @@ Everything, keyed at the database row:
 
 ## How an event gets its tenant — and keeps it
 
-[Routing](./advanced/protocols/routing.md) resolves the tenant before
+[Routing](./routing.md) resolves the tenant before
 any rule fires — by hostname, mail recipient, or listener — and stamps
 `@tenant` on the envelope. Then it's **pinned**: immutable for the
 life of the request. Rules and ops can't overwrite it (the envelope

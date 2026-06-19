@@ -1,6 +1,6 @@
 # Quickstart
 
-Build your first intelligence matrix in minutes.
+Build your first intelligence matrix with [Thanks, Computer](https://www.thanks.computer) in minutes.
 
 An intelligence matrix is a system that remembers what it is trying to accomplish. As opportunities, requests, approvals, and conversations move through the system, context stays attached and goals remain visible.
 
@@ -61,16 +61,3 @@ WHEN @web.req.url.path == "/opportunity"
 EXEC "https://api.example.com/enrich-opportunity"
 ```
 
-## Next
-
-- [Tutorial](./tutorial.md) — one real flow built end to end: mail in, AI
-  draft, human approval, reply sent
-- [Operations](./ops.md) — the three shapes of an op, and how to write one
-  in your own language over HTTP
-- [TXCL](./txcl.md) — the full rule language
-- [Running a chassis](./running.md) — `txco serve` and the author–apply
-  loop, when you're ready to run your own
-- [Arcs](./arcs.md) & [Sagas](./sagas.md) — the matters your rules manage,
-  and the missions those matters serve
-- Complete, runnable workspaces live in [`examples/`](../examples/) —
-  an inbound support mailbox, a Stripe enrichment flow, MCP, and more

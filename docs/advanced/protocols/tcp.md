@@ -27,8 +27,7 @@ connection held open._
 | `@client.ip` | Peer address |
 | `@client.body` | The incoming line, base64-encoded |
 
-Named listeners are also routing keys: [routing.md](./routing.md)
-maps a listener name to a tenant/stack.
+Named listeners are also [routing keys](../../routing.md) mapping a listener name to a tenant/stack.
 
 ## Timeouts
 

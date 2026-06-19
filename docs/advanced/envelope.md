@@ -13,7 +13,7 @@ Identity and routing (stamped by the chassis; read-only):
 |---|---|
 | `@src` | Inlet: `http`, `lmtp`, `cron`, `tcp` |
 | `@rid` | Request id (trace correlation) |
-| `@tenant` / `@stack` | Resolved by [ingress](./protocols/routing.md); pinned per request |
+| `@tenant` / `@stack` | Resolved by [ingress](../routing.md); pinned per request |
 | `@ingress` / `@hostname_verified` | Matched ingress key / ownership-verification bit |
 | `@op` / `@step` | The firing op's identity and scope (stamped on dispatched envelopes) |
 

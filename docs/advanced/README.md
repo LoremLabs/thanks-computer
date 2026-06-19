@@ -29,7 +29,7 @@ failure modes.
 ## Protocols — one page per channel
 
 - **[protocols/](./protocols/README.md)** — the index:
-  [routing](./protocols/routing.md) (tenant + stack resolution),
+  [routing](../routing.md) (tenant + stack resolution),
   [web](./protocols/web.md), [lmtp](./protocols/lmtp.md) (mail in),
   [sendmail](./protocols/sendmail.md) (mail out),
   [cron](./protocols/cron.md), [tcp](./protocols/tcp.md),

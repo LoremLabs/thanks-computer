@@ -37,8 +37,8 @@ Every rule below is shown in full.
 
 ```txcl
 WHEN @src == "lmtp"
-SET .saga.name = "q3-retention",
-    .saga.goal = "keep churn under 2%"
+SET .mission.name = "q3-retention",
+    .mission.goal = "keep churn under 2%"
 WITH system = "You draft warm, concise support replies. The mission is retention: keep this customer.",
      prompt  = "Draft a reply to this customer email:\n\n{{@lmtp.msg.text}}",
      intent  = "draft_support_reply"
@@ -46,9 +46,9 @@ EXEC "ai://chat"
 ```
 
 Reading it: fire when mail arrives (`@src == "lmtp"`); stamp the
-[saga](./sagas.md) onto the document — sagas are just fields you
-choose, no registration — so every later participant knows
-*why* this matter exists; hand the email's text to
+mission onto the document — just fields you choose, no registration —
+so every later participant knows *why* this matter exists; hand the
+email's text to
 [`ai://chat`](./ai.md) (`{{@lmtp.msg.text}}` reads the parsed message
 body from the envelope). The model's draft merges back as `.text`.
 
@@ -67,7 +67,7 @@ flow suspends — durably, surviving restarts — until your reviewer
 service calls back.
 
 The reviewer service is yours, and it's small. It receives the
-document (the email, the draft, the saga) plus a callback contract — a
+document (the email, the draft, the mission) plus a callback contract — a
 `callback_url` and a single-use token in the
 `X-Txco-Continuation-Token` header. It does three things:
 
@@ -128,7 +128,7 @@ txco apply
 txco trace last
 ```
 
-The [trace](./trace.md) is the payoff: three steps, the model's
+The [trace](./visibility.md) is the payoff: three steps, the model's
 tokens, the suspend at step 2 with the hours-long gap plainly visible
 in the timings, the resume, the send — the whole story of one matter,
 on disk, readable by you or by an AI you ask to debug it.
@@ -136,10 +136,10 @@ on disk, readable by you or by an AI you ask to debug it.
 ## What you just used
 
 One stack exercised most of the system: multi-protocol
-[ingress](./ingress.md), [AI as an operation](./ai.md), intent as data
-([sagas](./sagas.md)), a human in the loop via
+[ingress](./advanced/protocols/README.md), [AI as an operation](./ai.md), intent as data,
+a human in the loop via
 [continuations](./continuations.md), outbound
 [email](./advanced/protocols/sendmail.md), parallel rules at a step,
-and the [trace](./trace.md). Every piece is swappable the same way —
+and the [trace](./visibility.md). Every piece is swappable the same way —
 the approver could become a Slack bot, the model a different provider,
 the channel a web form — without touching the rules around it.

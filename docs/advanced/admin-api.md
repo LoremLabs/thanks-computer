@@ -118,7 +118,7 @@ Tenant-scoped, under `/v1/tenants/{tenant}`:
 | `POST /stacks/{name}/activate` | Atomic pointer flip to a version |
 | `GET /stacks/{name}/versions` · `/diff` | History / compare |
 | `PUT·HEAD /computes/{alg}/{digest}` | Upload / probe content-addressed wasm |
-| `GET·POST /hostnames` · `DELETE /hostnames/{h}` | Hostname bindings ([ingress.md](./protocols/routing.md)) |
+| `GET·POST /hostnames` · `DELETE /hostnames/{h}` | Hostname bindings ([ingress.md](../routing.md)) |
 | `POST /hostnames/{h}/attach` · `/challenges` | Bind to a stack / start ownership verification |
 | `GET·POST /auth/members` · `DELETE /auth/members/{actor}` | Tenant membership |
 | `GET /auth/actors` · `POST /auth/actors/{id}/revoke` | Actor list / revoke |

@@ -1,10 +1,7 @@
 <!-- nav: Builtins -->
 
-# EXEC schemes and `txco://` builtins
+# EXEC Schemes and Builtins
 
-_Everything an `EXEC` can point at, including the complete registry of
-in-chassis builtins — so you don't have to read `server.go` to find
-them._
 
 ## The schemes
 
@@ -15,7 +12,7 @@ them._
 | `txco://…` | A chassis builtin (table below) | this page |
 | `ai://chat` | A chat model via the chassis's AI registry | [ai.md](../ai.md) |
 | `mcp+http(s)://…` | A tool on an external MCP server | [mcp.md](./protocols/mcp.md) |
-| `<stack>/<scope>` | Unschemed stage jump (synthesized into `@goto`) | [txcl.md](../txcl.md) |
+| `<stack>/<scope>` | Unschemed stage jump (synthesized into `@goto`) | [resonators.md](../resonators.md) |
 
 ## The builtin registry
 
@@ -34,6 +31,4 @@ them._
 | `txco://continuation-result` | Poll handler behind `?_txc.continuation=<id>` ([continuations](../continuations.md)). Wired by the chassis; not called from rules. |
 
 Builtins pay normal [fuel](./fuel.md) and appear in
-[traces](./trace.md) like any other op. The current registry is
-assembled in `chassis/server/server.go`; if this table and the code
-disagree, the code wins — and this page needs a patch.
+[traces](./trace.md) like any other op.

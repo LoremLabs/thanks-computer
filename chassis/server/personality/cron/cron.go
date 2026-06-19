@@ -175,6 +175,12 @@ func spreadOffset(slug string, period int) time.Duration {
 // _ts + modN buckets) is frozen here at tick time, BEFORE any spread delay —
 // so a tenant's WHEN sees the tick instant, not the delayed dispatch instant.
 func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick uint64, period int) {
+	// Stamp every wall-clock field in UTC, not the chassis box's local zone,
+	// so `WHEN @cron.hour == N` means the same instant on every node. Authors
+	// targeting a local wall-clock convert with &tz (e.g.
+	// &tz("Asia/Tokyo", "hour", 9) → the UTC hour of 09:00 Tokyo today). The
+	// bucket below is already UTC.
+	now = now.UTC()
 	min := now.Minute()
 	// Canonical bucket at SECOND resolution (RFC3339), aligned to the
 	// period grid. Second resolution (not minute) so sub-minute periods get

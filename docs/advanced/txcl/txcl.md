@@ -194,7 +194,7 @@ SET @web.res.body = b64"not found\n"
 
 ## Functions
 
-Anywhere a literal or `@path` value is accepted as the RHS of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`:
+Anywhere a literal or `@path` value is accepted as the right hand side of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`:
 
 ```txcl
 SET .id  = &uuid()
@@ -280,6 +280,7 @@ The path argument is a string literal (or any value that evaluates to a string),
 | `&uuid()`   | () → string             | UUID v7 (time-ordered, lexicographically sortable)                           |
 | `&now()`    | () → number             | unix seconds                                                                 |
 | `&now(fmt)` | string → string\|number | formats: `"unix"` (default), `"millis"`, `"nanos"`, `"rfc3339"`, `"iso8601"` |
+| `&tz(zone, "hour"\|"minute", h [, m])` | string, string, int[, int] → number | the UTC **hour** or **minute** of local wall-clock `h:m` (minute `m` defaults 0) in IANA `zone` today (DST-aware) — bridges UTC `@cron.hour`/`@cron.minute` to a local time, incl. fractional offsets like `+05:30` |
 
 #### Strings / hashes
 

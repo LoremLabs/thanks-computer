@@ -87,5 +87,19 @@ In sync mode (`--trace-async=false`) redaction runs on the request goroutine jus
 
 - **Runtime data** is never touched. The rule's matchers, the op's input, the merged response all see real values.
 - **Timeline events** (`timeline.jsonl`) are not currently filtered. Avoid stamping sensitive fields directly into timeline event payloads.
-- **Operational logs** (zap stdout) are not affected — apply log redaction at the logger if needed.
+- **Operational logs** are not affected.
 - **The DLQ** preserves the original envelope by design (forensics).
+
+
+## Open Telemetry Support
+
+If you run your own chassis you can inspect each event via standard [Open Telemetry](https://opentelemetry.io/) signals. 
+Just configure your environment and point the chassis there:
+
+```
+// Configuration is via standard OTel environment variables:
+//   - OTEL_EXPORTER_OTLP_ENDPOINT   (e.g. http://localhost:4318)
+//   - OTEL_EXPORTER_OTLP_PROTOCOL   (http/protobuf | grpc)
+//   - OTEL_SERVICE_NAME             (default: txco-chassis)
+//   - OTEL_RESOURCE_ATTRIBUTES      (extra resource attributes)
+```

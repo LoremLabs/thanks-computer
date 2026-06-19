@@ -281,5 +281,4 @@ A package is a standard OCI artifact:
 - **artifactType** = `application/vnd.thanks.computer.package.v1alpha1`.
 
 Any OCI registry (GHCR, Docker Hub, ECR, Harbor, self-hosted) can store it; standard tools
-(`oras`) can inspect it. The optional signature (§11) is a second artifact in the same repo
-with artifactType `application/vnd.thanks.computer.signature.v1alpha1`.
+(`oras`) can inspect it. 

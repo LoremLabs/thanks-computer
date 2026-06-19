@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // embed zoneinfo so &tz tests resolve zones on minimal CI
 )
 
 // --- dispatcher --------------------------------------------------
@@ -28,7 +29,7 @@ func TestRegistryHas(t *testing.T) {
 	// registry is small enough that exhaustive coverage would be
 	// noise; this catches "init dropped a registration" regressions.
 	want := []string{
-		"uuid", "now",
+		"uuid", "now", "tz",
 		"b64encode", "b64decode", "urlencode", "urldecode", "json", "to_json",
 		"get", "set", "has",
 		"object", "array",
@@ -55,6 +56,63 @@ func TestRegister_DuplicatePanics(t *testing.T) {
 		}
 	}()
 	register("uuid", uuidFn) // already registered in init()
+}
+
+// --- &tz ---------------------------------------------------------
+
+func TestTz(t *testing.T) {
+	// Non-DST zones → deterministic regardless of the date time.Now()
+	// lands on (Japan and India never observe DST).
+	cases := []struct {
+		zone      string
+		component string
+		hour      int
+		minute    int // local minute; -1 = omit the 4th arg (defaults 0)
+		want      int64
+	}{
+		{"UTC", "hour", 9, -1, 9},
+		{"UTC", "minute", 9, -1, 0},
+		{"Asia/Tokyo", "hour", 9, -1, 0},      // 09:00 JST = 00:00 UTC
+		{"Asia/Tokyo", "minute", 9, -1, 0},    // whole-hour offset → :00
+		{"Asia/Tokyo", "hour", 0, -1, 15},     // 00:00 JST = 15:00 UTC (prior day)
+		{"Asia/Kolkata", "hour", 9, -1, 3},    // 09:00 IST = 03:30 UTC → hour 3
+		{"Asia/Kolkata", "minute", 9, -1, 30}, // …and minute 30 (the half-hour)
+		{"Asia/Kolkata", "hour", 9, 45, 4},    // 09:45 IST = 04:15 UTC → hour 4
+		{"Asia/Kolkata", "minute", 9, 45, 15}, // …and minute 15
+	}
+	for _, c := range cases {
+		args := []any{c.zone, c.component, int64(c.hour)}
+		if c.minute >= 0 {
+			args = append(args, int64(c.minute))
+		}
+		got, err := Call("tz", args)
+		if err != nil {
+			t.Fatalf("&tz(%v) error: %v", args, err)
+		}
+		if got != c.want {
+			t.Errorf("&tz(%v) = %v, want %d", args, got, c.want)
+		}
+	}
+}
+
+func TestTz_Errors(t *testing.T) {
+	bad := [][]any{
+		{},                       // too few args
+		{"UTC", "hour"},          // too few args
+		{"UTC", "hour", 9, 0, 0}, // too many args
+		{123, "hour", 9},         // non-string zone
+		{"UTC", 9, 9},            // non-string component
+		{"UTC", "second", 9},     // bad component
+		{"Not/AZone", "hour", 9}, // unknown zone
+		{"UTC", "hour", 24},      // hour out of range
+		{"UTC", "hour", -1},      // hour out of range
+		{"UTC", "minute", 9, 60}, // minute out of range
+	}
+	for _, args := range bad {
+		if v, err := Call("tz", args); err == nil {
+			t.Errorf("&tz(%v) expected error, got %v", args, v)
+		}
+	}
 }
 
 // --- &uuid -------------------------------------------------------

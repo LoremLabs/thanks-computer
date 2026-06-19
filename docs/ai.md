@@ -2,8 +2,7 @@
 
 _In Thanks, Computer, an AI model is just another [operation](./ops.md):
 gated by a resonator, reading the shared document, merging its answer
-back. This page covers the built-in `ai://chat` dispatch.
-([Overview](./overview.md))_
+back._
 
 One rule puts a model in the flow:
 
@@ -57,7 +56,7 @@ instead, and your next step's rules can resonate on that.
   construction — it can't reach traces, logs, or continuations.
 - **Telemetry rides the envelope.** Every call stamps
   `_txc.chat.{provider, model, tokens.in, tokens.out, latency_ms,
-  retries}` — visible in the [trace](./trace.md), aggregatable for
+  retries}` — visible in the [trace](./visibility.md), aggregatable for
   cost reporting. Token counts are *not* charged to
   [fuel](./advanced/fuel.md): provider compute is its own dimension.
 - **Limits per call.** `WITH limits.timeout_ms` and

@@ -1,8 +1,11 @@
-# Outbound email — `txco://sendmail`
+# Email Out — Send email with `EXEC txco://sendmail`
 
-_The chassis sends mail as well as receiving it
-([lmtp.md](lmtp.md)): a rule assembles a `_sendmail` contract on the
-envelope and dispatches `EXEC "txco://sendmail"`._
+You can send email from [Thanks, Computer](https://www.thanks.computer) as well as [receive it](./lmtp.md). 
+
+To send:
+
+-  Configure the `_sendmail` contract on the envelope 
+-  `EXEC "txco://sendmail"` to request the email be sent.
 
 ```txcl
 WHEN .resolution == "credited"
@@ -32,12 +35,12 @@ The HTML body is wrapped in a responsive, CSS-inlined default shell, and message
 DKIM-signed.
 
 **Anti-spoof:** the `from` domain must be a *verified hostname of the
-sending tenant* ([ingress.md](routing.md#how-the-two-sources-compose)) —
+sending tenant* ([ingress.md](../../routing.md#how-the-two-sources-compose)) —
 a rule cannot send as a domain its tenant doesn't own.
 
 ## What comes back
 
-The op merges a result under `_sendmail.result`:
+The `EXEC` of the operation merges a result under `_sendmail.result`:
 
 - success: `{sent, skipped, failed, recipients: […]}` — per-recipient
   outcomes; rate-limited recipients are skipped with reason
@@ -49,8 +52,7 @@ The op merges a result under `_sendmail.result`:
 ## Operator configuration
 
 Sending is **off until a relay is configured**. The chassis is a
-submitter, not an MTA: it hands rendered messages to your edge Postfix
-(same trust posture as the LMTP inlet — private network, no auth).
+submitter, not an MTA: it hands rendered messages to your edge SMTP.
 
 | Flag | Default | Meaning |
 |---|---|---|

@@ -1,24 +1,61 @@
-# TXCL — the rule language
+# Resonators
 
-_In Thanks, Computer, every [operation](./ops.md) is gated by a rule
-written in TXCL — a few readable lines saying when it resonates and what it
-contributes to the flow. ([Overview](./overview.md))_
+A resonator dictates when an operation runs in [Thanks, Computer](https://www.thanks.computer).
 
-The smallest rule is one line:
+## Sequencing by steps
+
+You may be familiar with the `BASIC` programming language that had line numbers.
+The rule attached to each [operation](./ops.md) is called a **resonator**: a filter that decides whether the operation fires at all. 
+With TXCO, each operation's resonator has a `STEP` that it resonates at. 
+
+```stack
+steps 
+0 hello
+10 world
+```
+
+As [requests come into a stack](./routing.md), they start at the top of the stack, at `STEP 0`. The
+`txco chassis` first gathers all operations at that step, and then evaluates their 
+resonators to see if we should execute the operation. [If there is no step 0, txco
+automatically moves on to the next highest step.]
+
+If there are multiple [ops](ops.md) at a step, they are evaluated in parallel:
+
+```stack
+steps 
+10 hello world
+```
+Advanced stacks use this parallel processing to pre-load data that you know you will need later at a step
+that you know takes a long time to process. But for now let's look at the simplest case, a single rule that always runs.
+
+## The smallest rule called a resonator is one line:
 
 ```txcl
 EMIT .hello = "world"
 ```
 
-Every event gets `{"hello": "world"}` merged in. Real rules almost
-always start with a condition — and that's the idea to get first.
+In this sample operation, the flow memory gets `{"hello": "world"}` merged in
+and available for future operations.
 
-## The resonator — fire only when needed
+Implicit in this rule is:
+
+```txcl
+WHEN *
+EMIT .hello = "world"
+```
+
+Which is what makes it always resonate and contribute 
+
+```json
+{
+    hello: "world"
+}
+```
+
+## The resonator — execute only when needed
 
 A stack may hold dozens of operations, but for any given event most of
-them should stay silent. The rule attached to each operation is called
-a **resonator**: a filter that decides whether the operation fires at
-all. Like a tuning fork, it's cut for a particular kind of event and
+them may stay silent. Like a tuning fork, it's cut for a particular kind of event and
 only rings when one matches — everything else passes by untouched.
 
 The `WHEN` clause is the resonance condition:
@@ -29,12 +66,10 @@ WHEN .amount > 1000                    # fire when the payload says so
 WHEN .tier == "vip"                    # fire on what a previous step found
 ```
 
-That last one is the trick that makes flows compose. Every operation's
-output merges into the shared event, so a condition on `.tier` is
+Every operation's output merges into the shared event, so a condition on `.tier` is
 really a condition on *what an earlier step concluded*. The classifier
 doesn't call the VIP handler — it just emits `.tier = "vip"`, and at
-the next step the VIP handler's resonator picks it up. Steps chain by
-resonance, not by wiring.
+the next step the VIP handler's resonator picks it up. 
 
 That's the shape it creates — handlers sitting in parallel at a step,
 the previous step's conclusion deciding which one rings:
@@ -55,22 +90,22 @@ EXEC "https://timeapi.io/api/v1/time/current/zone?timezone=Europe%2FAmsterdam"
 Only events with `.tz == "ams"` reach the URL; the HTTP response merges
 back into the event.
 
-## The seven clauses
+## Describe in English
 
-A resonator has up to seven clauses — all optional, evaluated in this
+A resonator has up to seven English clauses — all optional, evaluated in this
 order:
 
 | Clause     | What it does                                                    |
 | ---------- | --------------------------------------------------------------- |
 | `WHEN`     | The resonance condition (omitted or `*` = always fire)          |
 | `SET`      | Set fields on the event *before* dispatch                       |
-| `SELECT`   | Project what the operation receives                             |
+| `SELECT`   | Project what the operation receives (pass a tree).              |
 | `WITH`     | Per-call directives — `timeout`, `secrets.*`, `redact`, …       |
 | `PRIORITY` | Tie-breaker among matches at the same step                      |
 | `EXEC`     | Dispatch target — `op://`, `http(s)://`, `txco://`, `mcp+https://` |
 | `EMIT`     | Overlay values onto the response, *after* dispatch              |
 
-A complete rule using most of them:
+A complete rule using the most common:
 
 ```txcl
 WHEN .user.id =~ /^u_/
@@ -80,7 +115,7 @@ EXEC "https://api.example.com/enrich"
 EMIT .enriched_at = &now("rfc3339")
 ```
 
-## Reading paths
+## Working with Data: Dot-Path Access
 
 Paths are dot-paths into the event JSON. `.user.id` reads the payload;
 `@` is shorthand for `._txc.` — the chassis's envelope — so
@@ -93,7 +128,7 @@ Values are literals or function calls: `&uuid()`, `&now("rfc3339")`,
 `&json(...)`, `&b64decode(...)` — inline, pure computation without
 dispatching anything.
 
-## Private by convention
+## Private via the `_` convention
 
 The last step's context becomes the output. Output hides any part of the 
 context document that starts with an `_` by convention. Thus, `_shh` is private

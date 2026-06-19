@@ -54,7 +54,7 @@ txco auth bootstrap-local    # one-time: enrol your signing key
 txco auth login              # opens the admin UI, authenticated
 ```
 
-The admin UI shows your stacks, tenants, and [traces](./trace.md)
+The admin UI shows your stacks, tenants, and [traces](./visibility.md)
 against the live chassis.
 
 ## Secrets stay out of your rules
@@ -81,7 +81,7 @@ There is no reveal command — to inspect a value, you rotate it.
 The [advanced references](./advanced/README.md) cover the full flag
 surface ([serve.md](./advanced/serve.md)), the
 [admin API](./advanced/admin-api.md), multi-tenant
-[ingress routing](./advanced/protocols/routing.md), inbound mail via
+[ingress routing](./routing.md), inbound mail via
 [LMTP](./advanced/protocols/lmtp.md), and the
 [secret-store runbook](./advanced/runbook-secret-store.md).
 

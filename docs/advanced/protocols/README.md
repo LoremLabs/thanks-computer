@@ -1,28 +1,68 @@
-# Protocols — every channel, one envelope
+# Protocol Support
 
-_How each wire protocol becomes (or consumes) the chassis's JSON
-envelope. The conceptual story is [ingress](../../ingress.md); these
-pages are the per-channel facts._
+Multiple protocols are supported in the [Thanks, Computer](https://www.thanks.computer) chassis. They all become `JSON`.
 
-Whatever arrives, the head that received it stamps `_txc.src` and its
-own namespace (`@web.req.*`, `@lmtp.*`, `@cron.*`, `@tcp.*`) onto one
-envelope, and the same rules engine takes it from there. Outbound is
-symmetric: rules dispatch out over HTTP, MCP, or SMTP.
+## Protocols as JSON
 
-| Channel | Direction | Page |
-|---|---|---|
-| HTTP | in (+ responses, streaming) | [web.md](./web.md) |
-| Email — receiving | in | [lmtp.md](./lmtp.md) |
-| Email — sending | out | [sendmail.md](./sendmail.md) |
-| Cron | in (time as a channel) | [cron.md](./cron.md) |
-| TCP | in (line-delimited JSON) | [tcp.md](./tcp.md) |
-| MCP (agent tools) | out (in: see page) | [mcp.md](./mcp.md) |
-| DNS | authoritative answers for delegated zones | [dns.md](./dns.md) |
+We call the processes that speak the protocol a `head` in the `txco` chassis. These
+ingress points speak the native protocol and then serialize it to a `JSON` event.
+ 
+```json
+{
+  "_ts": "2026-06-18T16:58:59+02:00",
+  "_txc": {
+    "_seen": [
+      "boot/0->boot/50",
+      "boot/50->boot/100"
+    ],
+    "flag_breakpoint": true,
+    "fuel_used": 105,
+    "hostname_verified": true,
+    "ingress": "host:build-1.local.thanks.computer",
+    "rid": "CcAvW7aoT26xqmjgGVZbw",
+    "src": "http",
+    "stack": "build-1",
+    "tenant": "default",
+    "ttl": 497,
+    "web": {
+      "req": {
+        "headers": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "Go-http-client/1.1"
+          ]
+        },
+        "host": "build-1.local.thanks.computer",
+        "method": "GET",
+        "proto": "HTTP/1.1",
+        "url": {
+          "full": "/",
+          "path": "/"
+        }
+      }
+    }
+  }
+}
+```
 
-Before any rule fires, the **router** decides which tenant and stack
-an event belongs to — hostname bindings in the DB (live, no restart)
-or a static YAML file: [routing.md](./routing.md).
+When these events arrive, the head that received it stamps `_txc.src` and its
+own namespace (`@web.req.*`, `@lmtp.*`, `@cron.*`, `@tcp.*`) onto one flow
+envelope, and the same rules engine takes it from there. 
 
-Heads are enabled per chassis with `--personalities` (default
-`cron,tcp,web,admin`; `lmtp` and `dns` are opt-in) — see the
-[runtime reference](../serve.md).
+Each of these protocol heads also know how to convert back from the JSON event used
+in an opstack's flows into the protocol.
+
+## Protocols supported
+
+| Channel | Direction |
+|---|---|
+| [HTTP](./web.md) | bidirectional, with streaming |
+| [Email — receiving](./lmtp.md) | in |
+| [Email — sending](./sendmail.md) | out |
+| [Cron](./cron.md) | in |
+| [TCP](./tcp.md) | bidirectional |
+| [MCP](./mcp.md) (agent tools) | out, in as diy |
+| [DNS](./dns.md) | not a stack input. authoritative answers for delegated zones. |
+

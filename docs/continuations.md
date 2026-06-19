@@ -1,15 +1,21 @@
-# Continuations — built for waiting
+# Continuations 
 
-_In Thanks, Computer, operations usually answer in milliseconds — this
-page covers the ones that can't: how an operation suspends the flow and
-calls back to resume it, minutes or days later.
-([Overview](./overview.md))_
+Built for waiting, continuations allow [Thanks, Computer](https://www.thanks.computer) operations to run and resume for human-scale work.
 
-Most operational work is waiting. The model is still thinking, the
-webhook hasn't fired, a human hasn't decided. A **continuation** lets
+> I'll get back to you
+
+## Work is waiting
+
+Most operational work is waiting. 
+
+- The model is still thinking
+- The webhook hasn't fired
+- A manager hasn't decided 
+
+A **continuation** lets
 an operation say "I'll get back to you" — the flow suspends, durably,
-and resumes exactly once when the answer arrives. Waiting is most of an
-[arc's](./arcs.md) life; continuations are how the chassis waits
+and resumes exactly once when the answer arrives. Waiting is most of a
+long-running matter's life; continuations are how the chassis waits
 without burning a connection, a thread, or a restart.
 
 <img width="735" height="429" alt="image" src="https://github.com/user-attachments/assets/90047385-091a-4f08-8330-2857961f2337" />
@@ -17,7 +23,7 @@ without burning a connection, a thread, or a restart.
 
 ## The shape
 
-One directive turns a normal HTTP operation into a long-running one:
+One directive turns a normal HTTP operation into a long-running one: `WITH mode = "async"`
 
 ```txcl
 WHEN .doc.kind == "contract"
@@ -32,7 +38,7 @@ Three parties, three moves:
    bearer token (`X-Txco-Continuation-Token` header).
 2. **The worker acks immediately** — return `202 Accepted` and go do
    the slow thing. The flow suspends at this step's barrier; state is
-   written to disk.
+   persisted.
 3. **The worker calls back whenever it's done** — `POST` to the
    `callback_url` with `{"status": "completed", "output": {…}}` and
    the token. The output merges into the shared document and the flow
@@ -43,7 +49,7 @@ Meanwhile, the original caller isn't left hanging: JSON clients get a
 `?_txc.continuation=<id>`; browsers get redirected to an
 auto-refreshing wait page that turns into the answer when it lands.
 
-## Fast when it can be
+## Fast when it can be: `continuable`
 
 `WITH mode = "continuable"` is the hybrid: the operation gets a grace
 window (`WITH continue_after`, default 5s) to answer synchronously
@@ -70,11 +76,8 @@ it will get.
   a worker that acks now and calls back later.
 - **Webhook round-trips.** Kick off a payment, a build, a signature
   request — the provider's webhook handler is your callback.
-- **Humans in the flow.** The worker doesn't have to be software: a
+- **Humans in the loop's flow.** The worker doesn't have to be software: a
   service that emails someone "approve / reject" and POSTs the
   callback when they click is a person, wired in through the same
   contract. The approval step is just an operation that takes a day.
 
-Timeouts, ack windows, and retention are tunable per rule
-(`WITH timeout`, `WITH continue_after`) and chassis-wide — see the
-[runtime reference](./advanced/serve.md).

@@ -1,18 +1,18 @@
-# LMTP — accepting mail as events
+# Email In — accepting mail as events
 
-*For operators building mail-driven op stacks (e.g. a support mailbox). Requires a colocated Postfix.*
+*For operators building mail-driven op stacks (e.g. a support mailbox). Requires a colocated LMTP server, like Postfix.*
 
-The `lmtp` personality is a chassis head that speaks [LMTP](https://datatracker.ietf.org/doc/rfc2033/) (RFC 2033) to a colocated Postfix (or any LMTP client). Inbound mail becomes a normal event envelope (`_txc.src=lmtp`, `_txc.lmtp.*`) so resonators can SELECT on recipient, subject, headers, body, attachments, and emit per-recipient verdicts back to Postfix.
+The `lmtp` personality is a chassis head that speaks [LMTP](https://datatracker.ietf.org/doc/rfc2033/) (RFC 2033) to a colocated LMTP server. Inbound mail becomes a normal event envelope (`_txc.src=lmtp`, `_txc.lmtp.*`).
 
-The chassis is a **destination MTA**, not a public-internet MX: Postfix owns TLS termination, SPF/DKIM/DMARC verification, greylisting, queueing, retries, and bounces. The chassis sits behind it and answers LMTP over a Unix socket (or a private TCP listener).
+The chassis is a **destination MTA**, not a public-internet mail exchanger (MX): Your SMTP server owns TLS termination, SPF/DKIM/DMARC verification, greylisting, queueing, retries, and bounces. The chassis sits behind it and speaks LMTP.
 
 ## Quick reference
 
 | Flag / config key | Default | Meaning |
 |---|---|---|
-| `--personalities` | `cron,tcp,web,admin` | Add `lmtp` to enable the head. **Not default.** |
+| `--personalities` | `cron,tcp,web,admin` | Add `lmtp` to enable the head. **Not enabled by default.** |
 | `--lmtp-listen-addrs` | `:2424` | Comma list of `unix:/path` or `:port` / `host:port`. Default mirrors the chassis convention (high-port mirror of LMTP's well-known port 24, which needs root). Set empty to explicitly disable the head while keeping `lmtp` in `--personalities`. |
-| `--lmtp-max-msg-bytes` | `26214400` | 25 MiB. Postfix sees `552 5.3.4 message too large` on overflow. |
+| `--lmtp-max-msg-bytes` | `26214400` | 25 MiB. SMTP sees `552 5.3.4 message too large` on overflow. |
 | `--lmtp-max-recipients` | `50` | Per LMTP transaction. |
 | `--lmtp-read-timeout` | `30s` | Per-command idle. |
 | `--lmtp-data-timeout` | `60s` | DATA phase. |
@@ -22,10 +22,8 @@ The chassis is a **destination MTA**, not a public-internet MX: Postfix owns TLS
 
 **Enabled by `--personalities`** — the personality string is the only gate. Once `lmtp` is in the list, the head binds `:2424` by default. 
 
-To run alongside Postfix on a different port (or a Unix socket), override `--lmtp-listen-addrs`. Common production layouts:
-
 ```sh
-# Co-located with Postfix on the same host (recommended).
+# Co-located with SMTP (eg - Postfix) on the same host (recommended).
 txco serve --personalities=cron,tcp,web,admin,lmtp \
            --lmtp-listen-addrs=unix:/var/run/txco/lmtp.sock
 
@@ -403,9 +401,8 @@ EXEC "op://CLASSIFY"
 - `omit` deletes the path from the trace JSON entirely — best for big payloads (`_txc.lmtp.msg.raw`, `_txc.lmtp.msg.attachments`).
 - `redact` replaces the value with `"[REDACTED]"` — best for header values where "something was here" is a useful signal.
 
-The rule still SELECTs / EXECs against the full envelope; only what hits disk is masked. Scope is per-`(tenant, stack)` and hints take effect at the next dbcache reload. See [`docs/txcl.md` § WITH](../txcl/txcl.md#with--per-call-modifiers) for the full semantic.
+The rule still SELECTs / EXECs against the full envelope; only what hits disk is masked. Scope is per-`(tenant, stack)` and hints take effect at the next dbcache reload. See [`advanced/txcl/txcl.md` § WITH](../txcl/txcl.md#with--per-call-modifiers) for the full semantic.
 
 ## See also
 
-- [`docs/ingress.md`](routing.md) — the ingress router this builds on.
-- [`examples/inbound-support-mailbox/`](../../../examples/inbound-support-mailbox/) — worked example: route `support@…` to a classification + ticketing pipeline.
+- [`examples/inbound-support-mailbox/`](https://github.com/LoremLabs/thanks-computer/tree/main/examples/inbound-support-mailbox) 

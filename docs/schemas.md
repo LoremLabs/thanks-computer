@@ -50,7 +50,7 @@ named definitions — what comes in, what goes out:
       "type": "object",
       "properties": {
         "resolution": { "enum": ["credited", "upheld", "escalated"] },
-        "saga":       { "type": "object", "description": "mission context carried by this arc" }
+        "mission":    { "type": "object", "description": "the mission context this stack carries" }
       }
     }
   }
@@ -58,9 +58,9 @@ named definitions — what comes in, what goes out:
 ```
 
 Describe the *public* shape. Fields prefixed with `_` are private by
-convention and dropped from the answer ([TXCL](./txcl.md)) — leave them
+convention and dropped from the answer ([Resonators](./resonators.md)) — leave them
 out of the schema, along with the chassis's own `_txc.*` envelope.
-Documenting the saga fields your stack carries is worth the lines: the
+Documenting the mission fields your stack carries is worth the lines: the
 schema then records not just the shape of the work but the intent
-riding with it ([Sagas](./sagas.md)).
+riding with it.
 

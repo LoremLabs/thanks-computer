@@ -1,17 +1,25 @@
-# Trace — see what a flow actually did
+# Visibility 
 
-_Every event in Thanks, Computer flows through steps of parallel
-operations — this page covers how to see exactly what happened,
-after the fact. ([Overview](./overview.md))_
+Visiblity at every steps makes ease of debugging a core feature of [Thanks, Computer](https://www.thanks.computer).
+
+## Everything leaves a trace
+
+Unlike many application environments, you can trace every input and every output in a Thanks Computer request.
 
 Every flow can leave a complete, browsable record: the envelope that
 arrived, every operation that fired, what each received and returned,
-how long it took, and the final response. No rerun, no debug logging,
+how long it took, and the final response. 
+
+No rerun, no debug logging,
 no print statements — the answer to "what did this request do?" is
-sitting on disk. Each flow is one beat of an [arc](./arcs.md); read
-its traces together and you have the arc's story so far.
+sitting on disk. Each flow is one beat of a longer-running matter; read
+its traces together and you have its story so far.
 
 <img width="1155" height="737" alt="image" src="https://github.com/user-attachments/assets/e6bb68e0-a2f6-4e2d-ba3c-b10a27a8fbc8" />
+
+## Traces via CLI
+
+You can access traces via the `txco` tui too:
 
 ```sh
 txco trace          # recent flows: rid, source, route, duration
@@ -51,9 +59,15 @@ WITH redact = "_txc.web.req.headers.authorization"   # value → "[REDACTED]"
 WITH omit   = "_txc.lmtp.msg.attachments"            # field vanishes
 ```
 
-## Debuggable for AI, too
+## Open Telemetry Support
 
-A trace is structured JSON describing exactly what ran and why — which
-makes it as legible to an AI assistant as to you. "Read the trace and
-tell me why the billing op didn't fire" is a question an agent can
-actually answer.
+If you run your own chassis you can inspect each event via standard [Open Telemetry](https://opentelemetry.io/) signals. 
+Just configure your environment and point the chassis there:
+
+```
+// Configuration is via standard OTel environment variables:
+//   - OTEL_EXPORTER_OTLP_ENDPOINT   (e.g. http://localhost:4318)
+//   - OTEL_EXPORTER_OTLP_PROTOCOL   (http/protobuf | grpc)
+//   - OTEL_SERVICE_NAME             (default: txco-chassis)
+//   - OTEL_RESOURCE_ATTRIBUTES      (extra resource attributes)
+```

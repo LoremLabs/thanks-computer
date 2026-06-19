@@ -32,6 +32,7 @@ func init() {
 	// pilots (shipped in PR 3, kept here for the full registry view)
 	register("uuid", uuidFn)
 	register("now", nowFn)
+	register("tz", tzFn)
 
 	// codecs
 	register("b64encode", b64encodeFn)
@@ -102,6 +103,63 @@ func nowFn(args []any) (any, error) {
 	default:
 		return nil, fmt.Errorf("&now: unknown format %q (want unix|millis|nanos|rfc3339)", fmtSel)
 	}
+}
+
+// tzFn converts a local wall-clock time in an IANA zone to a UTC cron field
+// for today's date — the bridge to UTC-based cron fields. Cron stamps
+// @cron.hour/@cron.minute in UTC, so this lets a rule target a local time:
+//
+//	WHEN @cron.hour   == &tz("Asia/Tokyo", "hour", 9)
+//	  && @cron.minute == &tz("Asia/Tokyo", "minute", 9)   # 09:00 Tokyo
+//
+// args: (zone, "hour"|"minute", hour [, minute]). The component arg selects
+// which UTC field to return; hour (0-23) and the optional minute (0-59,
+// default 0) are the LOCAL wall-clock. Taking the whole local time keeps
+// fractional-offset zones exact — &tz("Asia/Kolkata","minute",9) is 30
+// (09:00 IST = 03:30 UTC), and the UTC hour can't be computed without the
+// minute (the half-hour borrow). "Today" comes from time.Now() (the cron
+// tick is ~now), which also resolves DST. Returns the UTC component as an int.
+func tzFn(args []any) (any, error) {
+	if len(args) < 3 || len(args) > 4 {
+		return nil, fmt.Errorf(`&tz: expected 3 or 4 arguments (zone, "hour"|"minute", hour[, minute]), got %d`, len(args))
+	}
+	zone, ok := args[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("&tz: zone argument must be a string, got %T", args[0])
+	}
+	component, ok := args[1].(string)
+	if !ok {
+		return nil, fmt.Errorf(`&tz: component argument must be "hour" or "minute", got %T`, args[1])
+	}
+	if component != "hour" && component != "minute" {
+		return nil, fmt.Errorf(`&tz: component must be "hour" or "minute", got %q`, component)
+	}
+	hour, err := toInt("&tz hour", args[2])
+	if err != nil {
+		return nil, err
+	}
+	minute := 0
+	if len(args) == 4 {
+		if minute, err = toInt("&tz minute", args[3]); err != nil {
+			return nil, err
+		}
+	}
+	if hour < 0 || hour > 23 {
+		return nil, fmt.Errorf("&tz: hour must be 0-23, got %d", hour)
+	}
+	if minute < 0 || minute > 59 {
+		return nil, fmt.Errorf("&tz: minute must be 0-59, got %d", minute)
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return nil, fmt.Errorf("&tz: unknown time zone %q: %w", zone, err)
+	}
+	now := time.Now().In(loc)
+	target := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, loc).UTC()
+	if component == "minute" {
+		return int64(target.Minute()), nil
+	}
+	return int64(target.Hour()), nil
 }
 
 // --- codecs ----------------------------------------------------

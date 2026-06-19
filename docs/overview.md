@@ -5,9 +5,9 @@
 ## Long-term goals. Everyday decisions. 
 
 
-Thanks, Computer is a runtime for **building systems that remember**—an _intelligence matrix_ in which people, software, AI, and automated processes cooperate through shared context, memory, and goals.
+Thanks, Computer is a runtime for **building systems that work toward a common goal**—an _intelligence matrix_ in which people, software, AI, and automated processes cooperate through shared context, memory, and north star goals.
 
-By composing small, reusable _stacks_, you can build systems that remember what they’re trying to accomplish and carry that understanding across emails, web requests, schedules, approvals, and AI interactions.
+By composing small, reusable _stacks_, you can build systems that remember what they're trying to accomplish and carry that understanding across emails, web requests, schedules, approvals, and AI interactions.
 
 > Your LLM has context. Why shouldn't your work? 
 
@@ -22,14 +22,12 @@ By composing small, reusable _stacks_, you can build systems that remember what 
 ## How it works
 
 Work is broken into small steps called **operations**, organized into an **op
-stack**. Each operation is gated by a **resonator** — its firing condition, a
-few lines of [TXCL](./txcl.md): like a tuning fork, it rings only when the
-right kind of event passes by, and says what to do when it does:
+stack**. Each operation is gated by a [**resonator**](./resonators.md) — its firing condition,
+like a tuning fork, it rings only when the right kind of event passes by, and says what to do when it does:
 
 ```txcl
 WHEN @web.req.url.path == "/opportunity"
 EXEC "https://api.example.com/enrich-opportunity"
-EMIT .qualified_at = &now("rfc3339")
 ```
 
 Everything at the same step runs in parallel; each operation's output
@@ -63,7 +61,7 @@ A stack's operations may span many systems, but its behavior remains visible:
 
 ## Run anywhere
 
-You can self-host the open source chassis on your infrastructure, or let our cloud run the matrix fleet for you. Same stacks, same rules — the CLI `txco apply` targets either.
+You can self-host the open source chassis on your infrastructure, or let our cloud run the matrix fleet for you. Same stacks, same rules — the CLI `txco` targets either.
 
 **Try it in two minutes:** [Quickstart](./quickstart.md) 
 

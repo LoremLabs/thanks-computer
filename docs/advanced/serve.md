@@ -69,7 +69,7 @@ Set `private` on any chassis that runs untrusted rules.
 
 - `--ingress-config` — path to a static `ingress.yaml`; empty (default)
   disables the YAML layer. Hostname bindings in the `tenant_hostnames`
-  table work either way — see [ingress.md](./protocols/routing.md).
+  table work either way — see [ingress.md](../routing.md).
 - `--ingress-miss-action` — `fallthrough` (default) sends unmatched
   events to the `boot/%/0` entry; `reject` returns a clean 404 without
   invoking the processor. Use `reject` when everything routes via

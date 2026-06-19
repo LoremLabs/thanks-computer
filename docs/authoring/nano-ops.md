@@ -1,7 +1,7 @@
 # Nano-ops — the `op://` lifecycle
 
 _Small, pure logic that runs sandboxed on the chassis — no service to
-deploy. Concepts in [ops.md](../ops.md); this is the workflow._
+deploy._
 
 ```sh
 txco op init OPS/support/0100_TRIAGE/classify    # scaffold classify.js next to its rule

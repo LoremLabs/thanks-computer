@@ -1,8 +1,6 @@
 # Secret store — operator runbook
 
-A practical guide for operating the per-tenant secret store. This doc is
-the day-2 manual: how to bring the feature up, how to manage secrets,
-what to do when something goes wrong.
+A practical guide for operating the per-tenant secret store.
 
 ## TL;DR
 
@@ -50,7 +48,9 @@ For production, point the flag at an operator-owned root such as
 missing parent directories with `0700` perms; the key file itself
 is `0600`.
 
-### Explicit init (rare — only when you want a different path before first boot)
+### Explicit init 
+
+Rarely you may want a different path before first boot. If so:
 
 ```bash
 # Production: pre-mint at the production path before first chassis
@@ -96,7 +96,7 @@ txco auth tenant secrets revoke PROBE_KEY --tenant default
 All operator-facing CRUD is under `txco auth tenant secrets`.
 See `--help` on any verb for full flag reference.
 
-### Store a vendor-supplied value (the 99% case)
+### Store a vendor-supplied value
 
 The operator already has a value (a Stripe key from the Stripe
 dashboard, an OAuth client secret, etc.). `set` prompts for it via
@@ -127,7 +127,7 @@ txco auth tenant secrets generate WEBHOOK_HMAC \
   --tenant acme \
   --byte-len 32 \
   --description "Stripe webhook signing"
-# stdout: jGWvsjCkKWXq0irVAZlSXNp1-qxQDh_yKpjzkrOKLVk
+# stdout: jGWvsjCkKWXq0irVAZlSXNp1-qxQDh_yKpjzkrOlLVk
 ```
 
 Format: base64-url no-padding. 32 bytes → 43 chars. Adjust

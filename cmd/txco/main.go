@@ -2,6 +2,10 @@ package main
 
 import (
 	"os"
+	// Embed the IANA time-zone database so &tz / time.LoadLocation resolve
+	// zones (e.g. "Asia/Tokyo") even on minimal images with no system
+	// zoneinfo (scratch/distroless).
+	_ "time/tzdata"
 
 	"github.com/loremlabs/thanks-computer/chassis/app"
 )
