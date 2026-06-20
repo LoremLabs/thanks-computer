@@ -34,9 +34,12 @@ Required: `subject`, `body` (HTML), `from`.
 The HTML body is wrapped in a responsive, CSS-inlined default shell, and messages are
 DKIM-signed.
 
-**Anti-spoof:** the `from` domain must be a *verified hostname of the
-sending tenant* ([ingress.md](../../routing.md#how-the-two-sources-compose)) —
-a rule cannot send as a domain its tenant doesn't own.
+:::note
+The `from` domain must be a **verified hostname of the sending tenant**
+([routing](../../routing.md#how-the-two-sources-compose)) — a rule can't send as a
+domain its tenant doesn't own. If a send fails with `from_not_verified`, add and
+verify the hostname first (`txco auth tenant hostnames add … && … verify`).
+:::
 
 ## What comes back
 

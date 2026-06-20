@@ -100,9 +100,9 @@ txco serve --personalities=cron,tcp,web,admin,lmtp
 
 If you want to use LMTP's well-known port 24 instead, set `--lmtp-listen-addrs=:24` and grant the chassis binary the bind capability (`setcap cap_net_bind_service+ep /usr/local/bin/txco` on Linux) or run as root.
 
-## Security Notice
-
-**TCP LMTP has no built-in authentication** You must restrict access at the network layer (security group, WireGuard tunnel, firewall, etc.) — `--lmtp-listen-addrs=10.0.0.5:2424` plus an ingress allowlist. 
+:::warning
+**TCP LMTP has no authentication.** Anyone who can reach the listener can inject mail. Bind it to a private interface and restrict access at the network layer (security group, WireGuard, firewall) — e.g. `--lmtp-listen-addrs=10.0.0.5:2424` behind an allowlist. Prefer a Unix socket when the SMTP edge is co-located.
+:::
 
 ## Routing inbound mail
 

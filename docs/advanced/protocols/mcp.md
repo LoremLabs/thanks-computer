@@ -31,5 +31,5 @@ fastest way to find the right `#tool-name` and check reachability.
 ## The other direction: Serving MCP tools
 
 Exposing a stack's rules *as* MCP tools (so Claude or another agent
-can call your flow) is something stacks an implement themselves. As an example, 
+can call your flow) is something stacks can implement themselves. As an example, 
 [examples/mcp-server](https://github.com/LoremLabs/thanks-computer/tree/main/examples/mcp-server) is a working MCP server written entirely as a Thanks, Computer stack.

@@ -31,7 +31,9 @@ head — requires the `dns` personality and `--acme-email`. Empty
 
 ## Data on disk
 
-All state is local files; back these up, not the process.
+:::note
+All state is local files — back **these** up, not the process.
+:::
 
 | Path                                | What                                              |
 | ----------------------------------- | ------------------------------------------------- |
@@ -77,6 +79,12 @@ Set `private` on any chassis that runs untrusted rules.
   in production so unverified hostname bindings don't route.
   (`--dev-auto-verify-local-hostnames`, default `true`, auto-verifies
   `localhost`-style names for development.)
+
+:::warning
+Set `--require-hostname-verification=true` in production. It's `false` by default
+(convenient for dev), which means **unverified hostname bindings still route** — a
+tenant could route a hostname it hasn't proven it owns.
+:::
 
 ## Admin auth
 

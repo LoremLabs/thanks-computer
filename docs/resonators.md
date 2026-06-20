@@ -44,7 +44,7 @@ WHEN *
 EMIT .hello = "world"
 ```
 
-Which is what makes it always resonate and contribute 
+Which is what makes it always resonate and contribute: 
 
 ```json
 {
@@ -133,6 +133,12 @@ dispatching anything.
 The last step's context becomes the output. Output hides any part of the 
 context document that starts with an `_` by convention. Thus, `_shh` is private
 and `hi` is returned in the answer.
+
+:::note
+`_`-prefixed fields are dropped from the **response**, but they're still visible
+to **downstream operations** in the same flow. To keep a value out of a later op's
+input too, project with `SELECT`.
+:::
 
 ## That's most of it
 

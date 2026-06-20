@@ -70,6 +70,12 @@ it will get.
   [fuel/TTL budgets](./advanced/fuel.md) travel with the suspended
   flow, so a resumed request is still the same accountable request.
 
+:::note
+**The first callback wins.** The token is single-use and completed steps are never
+re-run, so make your worker's first `POST` the authoritative answer — the chassis
+won't retry a callback that reported failure.
+:::
+
 ## What to build with it
 
 - **Slow AI.** A deep-research model that takes twenty minutes is just

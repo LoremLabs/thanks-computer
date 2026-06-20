@@ -51,8 +51,10 @@ WHEN @cron.hour == &tz("Asia/Kolkata", "hour", 9)
 EXEC "https://ops.example.com/morning-sweep"
 ```
 
-`&tz` assumes `@cron.*` is UTC, so use it *or* a tenant timezone — not both (a
-tenant timezone already localizes the fields, which would double-convert).
+:::warning
+`&tz` assumes `@cron.*` is UTC, so use it **or** a tenant timezone — not both. A
+tenant timezone already localizes the fields, so combining them double-converts.
+:::
 
 | Field | Meaning |
 |---|---|

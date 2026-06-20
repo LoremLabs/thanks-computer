@@ -25,8 +25,8 @@ Read in order, or jump to what you need:
    it's going.
 2. **[Quickstart](./quickstart.md)** — install, `txco demo`, and the
    model. About 2 minutes.
-3. **[Tutorial](./tutorial.md)** — one real flow built end to end:
-   mail in, AI draft, human approval, reply sent.
+3. **[Tutorial: hello, world](./tutorial/hello-world.md)** — hands-on, end to
+   end on the hosted service: sign in, pull a package, deploy, get a public URL.
 4. **[Operations](./ops.md)** — the unit of work: three shapes, one
    JSON-merge contract, any language.
 5. **[Resonators](./resonators.md)** — the rule that gates each operation:

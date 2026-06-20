@@ -4,8 +4,7 @@
 
 ## Long-term goals. Everyday decisions. 
 
-
-Thanks, Computer is a runtime for **building systems that work toward a common goal**—an _intelligence matrix_ in which people, software, AI, and automated processes cooperate through shared context, memory, and north star goals.
+Thanks, Computer is a programmable runtime for durable, human-in-the-loop workflows. Pause an operation for a slow model, a webhook, or a human approver — for days — and resume exactly once, surviving restarts. Any language, plain JSON, every step replayable.
 
 By composing small, reusable _stacks_, you can build systems that remember what they're trying to accomplish and carry that understanding across emails, web requests, schedules, approvals, and AI interactions.
 

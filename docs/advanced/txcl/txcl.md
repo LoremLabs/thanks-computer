@@ -12,7 +12,7 @@ Every clause is optional. When present, clauses appear in this order:
 [SELECT   * | <branch> [AS <path>] [DEFAULT <v>] … ] # project the output
 [WITH     <key> = <value> [, …] ]                    # per-call chassis directives
 [PRIORITY <int> ]                                    # tie-breaker among matches
-[EXEC     "txco://… | http(s)://…" ]                 # dispatch to an operation
+[EXEC     "op:// | http(s):// | txco:// | ai://chat | mcp+https://" ]                 # dispatch to an operation
 [EMIT     <path> = <value> [, …] ]                   # overlay onto the response (after EXEC)
 ```
 
@@ -74,7 +74,7 @@ A resonator has up to seven clauses, all optional, in this order:
 | `SELECT`   | Project — `*`, or a branch list (with optional `AS`/`DEFAULT`) |
 | `WITH`     | Per-call chassis directives (e.g., `timeout`)                  |
 | `PRIORITY` | Tie-breaker among matches at the same stage (integer)          |
-| `EXEC`     | Dispatch target — `txco://`, `http://`, or `https://`          |
+| `EXEC`     | Dispatch target — `op://`, `http(s)://`, `txco://`, `ai://chat`, `mcp+https://` |
 | `EMIT`     | Overlay values onto the response, after `EXEC`                 |
 
 ## Lexical structure
@@ -400,20 +400,23 @@ fires in parallel.
 ## EXEC — dispatch target
 
 ```txcl
-EXEC "txco://internal-op"           # in-process op
-EXEC "http://api.internal/op"       # HTTP POST
-EXEC "https://api.example.com/op"   # HTTPS POST
+EXEC "op://classify"                # sandboxed nano-op (your JS/TS)
+EXEC "https://api.example.com/op"   # your HTTP service (POST)
+EXEC "txco://sendmail"              # chassis builtin
+EXEC "ai://chat"                    # a model, via the AI registry
+EXEC "mcp+https://mcp.example.com"  # a tool on an external MCP server
 ```
 
-Three schemes are supported:
+Five schemes are supported:
 
-| Scheme     | Dispatch path                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------- |
-| `txco://`  | In-process via `ExecCore`; the op name (everything after `txco://`) is looked up in the registry. |
-| `http://`  | POSTs the envelope as JSON to the URL; response body is merged back in.                           |
-| `https://` | Same as `http://`, with TLS.                                                                      |
+| Scheme | Dispatch path |
+| --- | --- |
+| `op://NAME` | A sandboxed WebAssembly [nano-op](../../authoring/nano-ops.md) compiled from your JS/TS, run in-process on the chassis — no service to deploy. |
+| `http://` / `https://` | POSTs the envelope as JSON to the URL; the response body merges back in (`https` adds TLS). |
+| `txco://NAME` | In-process chassis [builtin](../builtins.md) via `ExecCore`; the name after `txco://` is looked up in the registry (`noop`, `static`, `sendmail`, …). |
+| `ai://chat` | A chat model via the chassis's AI registry — see [ai](../../ai.md). |
+| `mcp+http://` / `mcp+https://` | Calls a tool on an external [MCP](../protocols/mcp.md) server (egress). |
 
-Anything else is a resonator-authoring error: `"unsupported transport scheme; use txco://, http://, or https://"`.
 
 ## EMIT — response overlay
 

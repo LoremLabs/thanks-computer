@@ -56,6 +56,13 @@ INFO  secret store enabled  path=…/txco-master.key key_version=1
 On every subsequent boot the existing key is loaded and only the
 second line appears.
 
+:::danger
+Back up `txco-master.key` off-box, on a **different** volume from the runtime DB.
+Lose it and **every stored secret becomes permanently unrecoverable** — there is
+no in-chassis recovery path; you'd have to re-issue every credential from its
+vendor.
+:::
+
 ### Where the file lands
 
 | Scenario | Default path |
@@ -184,9 +191,10 @@ txco auth tenant secrets describe STRIPE_API_KEY \
   --set "Stripe live key — rotated by alice on 2026-05-20"
 ```
 
-**There is no `reveal` command.** Per design, the value never leaves
-the chassis once stored — to inspect it, rotate it (the rotate path
-shows the new value once).
+:::note
+There is no `reveal` command. Per design, a stored value never leaves the chassis
+— to inspect it, rotate it (the rotate path shows the new value once).
+:::
 
 ### Revoke
 
