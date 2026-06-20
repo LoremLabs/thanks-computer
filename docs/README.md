@@ -1,8 +1,10 @@
 # Thanks, Computer — Documentation
 
-_Thanks, Computer (TxCo) runs parts of your work as small, readable
-rules: events arrive from any protocol, matching operations fire in
-parallel, and their JSON outputs merge into one answer._
+_Thanks, Computer (TxCo) is an event-driven runtime for durable,
+human-in-the-loop workflows: events arrive from any protocol, matching
+operations fire in parallel, and their JSON outputs merge into one
+answer — and a person, or a slow AI, can pause a flow and resume it
+exactly once._
 
 ```
           event (JSON)
@@ -29,7 +31,7 @@ Read in order, or jump to what you need:
    end on the hosted service: sign in, pull a package, deploy, get a public URL.
 4. **[Operations](./ops.md)** — the unit of work: three shapes, one
    JSON-merge contract, any language.
-5. **[Resonators](./resonators.md)** — the rule that gates each operation:
+5. **[Resonators](./resonators.md)** — the trigger condition that gates each operation:
    when it fires and what it contributes.
 6. **[Continuations](./continuations.md)** — built for waiting: how an
    operation suspends a flow and calls back to resume it.

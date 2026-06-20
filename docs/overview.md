@@ -4,14 +4,15 @@
 
 ## Long-term goals. Everyday decisions. 
 
-Thanks, Computer is a programmable runtime for durable, human-in-the-loop workflows. Pause an operation for a slow model, a webhook, or a human approver — for days — and resume exactly once, surviving restarts. Any language, plain JSON, every step replayable.
+Thanks, Computer is a programmable runtime for durable, human-in-the-loop workflows. Pause an operation for a slow model, a webhook, or a human approver — for days — and resume exactly once, surviving restarts. Any language, plain JSON, every step replayable. Most workflow engines automate people *out* of a process; here a person — or a slow AI — is a first-class participant, not an exception.
 
-By composing small, reusable _stacks_, you can build systems that remember what they're trying to accomplish and carry that understanding across emails, web requests, schedules, approvals, and AI interactions.
+Bundle a set of operations into a reusable _stack_, and curate stacks into a **department** — a Support department, an Invoicing department, an Onboarding department — that runs a real business function on your own data, carrying its context across emails, web requests, schedules, approvals, and AI.
 
 > Your LLM has context. Why shouldn't your work? 
 
-### Put your goals to work:
+### What people build with it:
 
+- a support department that drafts replies with AI and pauses for a human to approve
 - qualify sales opportunities against your ideal customer profile
 - prioritize customer success work around retention
 - guide partnership pipelines with strategic priorities
@@ -21,8 +22,7 @@ By composing small, reusable _stacks_, you can build systems that remember what 
 ## How it works
 
 Work is broken into small steps called **operations**, organized into an **op
-stack**. Each operation is gated by a [**resonator**](./resonators.md) — its firing condition,
-like a tuning fork, it rings only when the right kind of event passes by, and says what to do when it does:
+stack**. Each operation is gated by a [**resonator**](./resonators.md) — a trigger condition that fires only when the right kind of event passes by, and says what to do when it does:
 
 ```txcl
 WHEN @web.req.url.path == "/opportunity"
@@ -47,7 +47,7 @@ Because the event is shared external memory — not parameters threaded through 
 
 ## Composable by design
 
-You can think of operations as being black boxes. They receive JSON, emit JSON, and **can be written in any language**. Emails, web requests, AI tool calls, and schedules all become events interacting in the same intelligence matrix.
+You can think of operations as being black boxes. They receive JSON, emit JSON, and **can be written in any language**. Emails, web requests, AI tool calls, and schedules all become events flowing through the same shared document.
 
 A stack's operations may span many systems, but its behavior remains visible:
 
@@ -60,7 +60,8 @@ A stack's operations may span many systems, but its behavior remains visible:
 
 ## Run anywhere
 
-You can self-host the open source chassis on your infrastructure, or let our cloud run the matrix fleet for you. Same stacks, same rules — the CLI `txco` targets either.
+Self-host the open-source chassis on your own infrastructure, or let our cloud be the place to run it — managed reliability, email deliverability, and fleet scale, so your departments run like infrastructure instead of a script you babysit. The CLI `txco` targets either. The chassis is free and open source under the MPL-2.0 — self-host it, commercial use included.
+
 
 **Try it in two minutes:** [Quickstart](./quickstart.md) 
 

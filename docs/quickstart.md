@@ -1,8 +1,8 @@
 # Quickstart
 
-Build your first intelligence matrix with [Thanks, Computer](https://www.thanks.computer) in minutes.
+Build your first workflow with [Thanks, Computer](https://www.thanks.computer) in minutes.
 
-An intelligence matrix is a system that remembers what it is trying to accomplish. As opportunities, requests, approvals, and conversations move through the system, context stays attached and goals remain visible.
+Thanks, Computer is an event-driven runtime for durable, human-in-the-loop workflows. As requests, emails, approvals, and conversations move through it, context stays attached — and an operation can pause for a human (or a slow AI), then resume exactly once.
 
 Let's see one running.
 
@@ -25,17 +25,17 @@ curl -fsSL https://get.thanks.computer/install.sh | bash
 txco demo
 ```
 
-This boots a throwaway local **chassis** — the TxCo runtime,
-one binary — and opens a demo in your browser. 
+This boots a self-contained local **chassis** — the TxCo runtime,
+one binary — and opens a guided demo in your browser, with short tracks for web, mail, async (human-in-the-loop), and MCP. 
 
 ![The txco demo playground in the browser](https://github.com/user-attachments/assets/696fce36-17ae-4609-807d-723450a3c6bc)
 
 
 ## 3. How stacks work
 
-Every intelligence matrix is composed of stacks. Each stack contributes a small piece of behavior, context, or decision-making.
+A workflow is composed of **stacks**. Each stack contributes a small piece of behavior, context, or decision-making.
 
-As your work moves through the matrix, context travels with it. Most operations ignore most events. Only the operations whose conditions match will react, contribute information, and influence what happens next.
+As your work moves through, context travels with it. Most operations ignore most events. Only the operations whose conditions match will react, contribute information, and influence what happens next.
 
 ```stack
 opportunity
@@ -46,7 +46,7 @@ opportunity
 300 followup
 ```
 
-When an opportunity enters the matrix, mission, OKRs, and history contribute context. Other operations score, review, assign, and follow up. Together they help the system make decisions that remain aligned with its goals.
+When an opportunity enters, mission, OKRs, and history contribute context. Other operations score, review, assign, and follow up. Together they help the system make decisions that remain aligned with its goals.
 
 Three ideas make this possible:
 

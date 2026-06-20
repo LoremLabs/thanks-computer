@@ -1,0 +1,25 @@
+# Auto-reply once to every inbound message.
+#
+# Loop guards — two auto-responders replying to each other is a mail storm:
+#   - @lmtp.is_bounce == false      → skip bounces/DSNs and any mail with an
+#     empty reverse-path (the RFC 5321 marker an auto-reply already carries).
+#   - auto-submitted header absent  → skip mail another responder generated
+#     (sendmail stamps Auto-Submitted on its own outbound, so replies don't loop).
+#   - campaign "autoreply:<Message-ID>" → reply AT MOST ONCE per inbound message
+#     (dedups LMTP retries of the same email; every new message still gets one).
+#
+# The reply is FROM the address that was written to (@lmtp.rcpt.0) — a valid
+# sender precisely because the mail routed here: the stack's structured host is
+# minted verified and signs its own DKIM. It goes TO the original sender
+# (@lmtp.mail.from). envelope_from "<>" is the RFC 3834 null reverse-path, so a
+# bounce of the reply is discarded rather than looping. sendmail auto-stamps
+# Auto-Submitted + X-Auto-Response-Suppress. A bare `@path` RHS resolves to its
+# envelope value; `&concat` joins a literal + a path.
+WHEN @lmtp.is_bounce == false && @lmtp.msg.headers.auto-submitted == ""
+  SET ._sendmail.to            = @lmtp.mail.from,
+      ._sendmail.from          = @lmtp.rcpt.0,
+      ._sendmail.subject       = &concat("Re: ", @lmtp.msg.subject),
+      ._sendmail.body          = "<p>Thanks for your message! This is an automated reply — a real response is on its way.</p>",
+      ._sendmail.envelope_from = "<>",
+      ._sendmail.campaign      = &concat("autoreply:", @lmtp.msg.id)
+  EXEC "txco://sendmail"

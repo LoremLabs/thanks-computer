@@ -12,7 +12,7 @@ package, and pushes it to your cloud tenant. Nothing executes locally — there'
 :::note
 **Cloud or local?** This tutorial uses our hosted chassis — it has a free tier, needs no
 setup, and gives your stack a public URL. To run the very same stack on your own machine
-instead, skip `txco login` and use **`txco dev`**: it boots a throwaway local chassis,
+instead, skip `txco login` and use **`txco dev`**: it boots a self-contained local chassis,
 applies your `OPS/`, and serves the stack at a printed `http://hello-<rand>.localhost:8099`.
 Same package, same rules — just no account and a local URL.
 :::

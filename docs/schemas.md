@@ -22,8 +22,9 @@ read, and that's precisely what makes it pay off:
   the schema in whatever language your op is written in — the
   JSON Schema toolchain already exists everywhere.
 - **AI agents.** A tool call needs a declared input shape; a stack
-  with a schema is already most of the way to being an MCP tool an
-  agent can discover and call correctly.
+  with a schema already declares the shape an MCP tool would expose —
+  most of the way there, though serving it as a tool is something you
+  wire up yourself ([MCP](./advanced/protocols/mcp.md)).
 - **Reviewable change.** When the shape changes, the schema diff shows
   it in the pull request — before a downstream op finds out at 2 a.m.
 

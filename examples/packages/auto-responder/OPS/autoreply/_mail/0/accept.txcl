@@ -1,0 +1,12 @@
+# Accept every inbound recipient (250) so mail lands instead of the default-deny
+# 550. Bounces/DSNs are accepted too (silently — the reply rule skips them).
+#
+# EMIT, not SET: this rule has no EXEC, so a SET would only shape a nonexistent
+# op's input and be dropped before the merge. EMIT overlays the verdict onto the
+# envelope, where the LMTP inlet reads it. `@lmtp.res.code` is the BROADCAST
+# verdict (applies to every recipient) — fine here since every message to this
+# stack's host is addressed to a domain you own. For per-recipient accept/reject,
+# use `@lmtp.res.recipients.<i>.code` instead (see docs/advanced/protocols/lmtp.md).
+WHEN @src == "lmtp"
+  EMIT @lmtp.res.code = 250,
+       @lmtp.res.msg  = "accepted"

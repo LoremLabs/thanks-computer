@@ -11,8 +11,8 @@ command supports `--help` for full flags; common deploy flags
 | Command | What it does |
 |---|---|
 | `txco serve` | Boot the chassis ([runtime reference](./serve.md)) |
-| `txco dev` | The dev loop: boots your `txco.yaml` apps + a throwaway chassis, watches `OPS/*.txcl` and compute `.js/.ts` files, re-applies on save. `--ui` adds the admin-UI Vite server; `--tcp` / `--dns` add those heads |
-| `txco demo` | Throwaway chassis + browser playground with a guided curriculum (build/web/mail/async/mcp tracks) |
+| `txco dev` | The dev loop: boots your `txco.yaml` apps + an ephemeral chassis, watches `OPS/*.txcl` and compute `.js/.ts` files, re-applies on save. `--ui` adds the admin-UI Vite server; `--tcp` / `--dns` add those heads |
+| `txco demo` | Ephemeral chassis + browser playground with a guided curriculum (build/web/mail/async/mcp tracks) |
 | `txco init <stack>` | Scaffold `OPS/<stack>/…`; `--from github:…\|oci:…\|dir:…` scaffolds from a template |
 | `txco doctor` | Diagnose local setup: home dir, profile, keys, chassis reachability, version sync (`--offline` skips remote checks) |
 

@@ -1,0 +1,26 @@
+apiVersion: thanks.computer/v1alpha1
+kind: Package
+
+name: auto-responder
+version: 0.1.0
+summary: Auto-reply once to every inbound email, with loop protection.
+
+package:
+  kind: department
+  install:
+    defaultMode: as-stack
+    suggestedStack: autoreply
+
+compatibility:
+  txco: ">=0.2.8"
+
+# Pure txcl: the rules reference no op:// — so there are NO bundled computes and
+# NO external endpoints to wire. Two rules live in the stack's `_mail` channel:
+# accept the recipient (250), then auto-reply once via txco://sendmail. Inbound
+# mail to the stack's structured host (<stack>-<rand>.stacks.thanks.computer)
+# routes here automatically; the same host is a verified, DKIM-signing sender.
+
+metadata:
+  homepage: https://thanks.computer/packages/auto-responder
+  source: https://github.com/loremlabs/thanks-computer
+  license: MIT
