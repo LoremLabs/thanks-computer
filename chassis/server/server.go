@@ -1149,6 +1149,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Wire the filecas store so activation can persist FILES/ asset bytes
 	// content-addressed. Nil-safe (gated on a configured store).
 	adminCtrl.SetFileCAS(fcas)
+	// Cross-node room fan-out (fleet). Empty --room-relay keeps rooms in-process
+	// (single node). A relay-open failure degrades to in-process rather than
+	// crashing — room chat is best-effort, unlike trace/control.
+	if conf.RoomRelay != "" {
+		if rerr := adminCtrl.EnableRoomRelay(conf.RoomRelay); rerr != nil {
+			logger.Warn("room relay disabled — rooms stay single-node",
+				zap.String("relay", conf.RoomRelay), zap.String("err", rerr.Error()))
+		} else {
+			logger.Info("room relay enabled", zap.String("relay", conf.RoomRelay))
+		}
+	}
 	// LMTP head needs a MailResolver for per-recipient routing. The
 	// data-plane resolver (`*DBResolver` wrapping the yamlResolver)
 	// implements MailResolver directly. Assigning through the

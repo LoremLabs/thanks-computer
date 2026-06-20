@@ -47,6 +47,10 @@ type Controller struct {
 	// (POST .../rooms/{room}/messages) and the SSE feed (GET .../stream).
 	hub *room.Hub
 
+	// roomRelay, when set (--room-relay + an overlay backend), fans room
+	// messages across fleet nodes; attached to hub via SetRelay, closed in Stop.
+	roomRelay room.Relay
+
 	// traceReader is the read-side trace backend (file by default; a
 	// non-fs backend when admin is split off from the chassis). Built
 	// once in Start when the trace routes are mounted.
@@ -114,6 +118,23 @@ func (c *Controller) SetArtifactStore(s artifact.Store) { c.astore = s }
 // SetFileCAS wires the content-addressed store activation uses to persist
 // tenant FILES/ asset bytes. Nil-safe.
 func (c *Controller) SetFileCAS(s filecas.Store) { c.fcas = s }
+
+// EnableRoomRelay opens the named cross-node room relay and attaches it to the
+// hub so room messages fan out across fleet nodes (the relay's inbound feed is
+// wired to hub.Deliver). Empty name is a no-op (rooms stay in-process). Called
+// from boot when --room-relay is set; the relay is closed in Stop.
+func (c *Controller) EnableRoomRelay(name string) error {
+	if name == "" {
+		return nil
+	}
+	relay, err := room.OpenRelay(name, room.RelayConfig{}, c.hub.Deliver)
+	if err != nil {
+		return err
+	}
+	c.roomRelay = relay
+	c.hub.SetRelay(relay)
+	return nil
+}
 
 func (c *Controller) Start() {
 	if !strings.Contains(c.pu.Conf.Personalities, "admin") {
@@ -576,6 +597,11 @@ func (c *Controller) Start() {
 func (c *Controller) Stop() {
 	if !strings.Contains(c.pu.Conf.Personalities, "admin") {
 		return
+	}
+	if c.roomRelay != nil {
+		if err := c.roomRelay.Close(); err != nil {
+			c.pu.Logger.Warn("room relay close", zap.String("err", err.Error()))
+		}
 	}
 	if c.server == nil {
 		return

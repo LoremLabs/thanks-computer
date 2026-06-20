@@ -21,10 +21,16 @@ type Event struct {
 
 // Hub fans out room Events to live subscribers and keeps a small per-room ring
 // buffer of recent Events for subscriber backfill. Safe for concurrent use.
+//
+// With a Relay attached (SetRelay), locally-published Events also fan out to
+// other fleet nodes, and Events from other nodes arrive via Deliver. Without
+// one, the Hub is purely in-process (single node).
 type Hub struct {
 	mu       sync.Mutex
 	rooms    map[string]*roomState
 	ringSize int
+	// relay is set once at boot, before serving; nil = in-process only.
+	relay Relay
 }
 
 type roomState struct {
@@ -55,16 +61,48 @@ func (h *Hub) stateLocked(tenant, room string) *roomState {
 	return rs
 }
 
-// Publish appends an Event to (tenant, room): it assigns a per-room sequence,
-// records it in the ring buffer, and fans it out to live subscribers
-// (non-blocking — a subscriber whose buffer is full drops this Event rather
-// than stalling the publisher). Returns the stored Event.
+// SetRelay attaches a cross-node relay so locally-published Events fan out to
+// other fleet nodes. Call once at boot, before serving; nil keeps the Hub
+// purely in-process.
+func (h *Hub) SetRelay(r Relay) { h.relay = r }
+
+// Publish records a locally-created Event for (tenant, room) — assigning a
+// per-room sequence, ringing it, and fanning it out to local subscribers — then
+// relays it to other fleet nodes when a Relay is attached. Returns the stored
+// Event.
 func (h *Hub) Publish(tenant, room, actor, text, messageID string) Event {
+	ev := h.deliverLocked(tenant, room, Event{Actor: actor, Text: text, MessageID: messageID}, true)
+	if h.relay != nil {
+		h.relay.Publish(tenant, room, ev)
+	}
+	return ev
+}
+
+// Deliver injects an Event received from ANOTHER fleet node into this Hub's
+// local subscribers + ring. It is the callback handed to a Relay. To bound
+// memory it only delivers to rooms this node already has state for (something
+// subscribed or published here) — a node with no local interest in a room drops
+// remote Events for it rather than materializing unbounded per-room state. It
+// re-sequences locally and does NOT relay (no loop).
+func (h *Hub) Deliver(tenant, room string, ev Event) {
+	h.deliverLocked(tenant, room, ev, false)
+}
+
+// deliverLocked is the shared ring+fanout core. create=true materializes room
+// state on demand (the local Publish path); create=false delivers only to
+// already-known rooms (the remote Deliver path).
+func (h *Hub) deliverLocked(tenant, room string, ev Event, create bool) Event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	rs := h.stateLocked(tenant, room)
+	var rs *roomState
+	if create {
+		rs = h.stateLocked(tenant, room)
+	} else if rs = h.rooms[roomKey(tenant, room)]; rs == nil {
+		return ev // no local interest in this room
+	}
 	rs.seq++
-	ev := Event{Seq: rs.seq, Room: room, Actor: actor, Text: text, MessageID: messageID}
+	ev.Seq = rs.seq
+	ev.Room = room
 	rs.recent = append(rs.recent, ev)
 	if len(rs.recent) > h.ringSize {
 		rs.recent = rs.recent[len(rs.recent)-h.ringSize:]

@@ -164,6 +164,7 @@ type Config struct {
 	FeedPollPeriod               int      `id:"feed-poll-period" default:"15" desc:"Seconds between control-event feed polls; applies when feed-source != nop (15)"`
 	FeedSink                     string   `id:"feed-sink" default:"nop" desc:"Control-event feed sink (producer): {nop, file}. nop (default) means admin mutations stay local; no events emitted."`
 	FeedSinkBatchSize            int      `id:"feed-sink-batch-size" default:"64" desc:"Max outbox rows drained per pump tick when feed-sink != nop (64)"`
+	RoomRelay                    string   `id:"room-relay" default:"" desc:"Cross-node room-message relay for fleet fan-out: empty (default) = in-process only (single node). An out-of-tree backend (e.g. NATS) self-registers and is selected here, e.g. --room-relay=nats."`
 	EgressPolicy                 string   `id:"egress-policy" default:"open" desc:"Outbound op dial policy: {open, private}. open (default) allows any address; private blocks loopback/private/link-local/CGNAT/cloud-metadata and any egress-deny-cidrs."`
 	EgressDenyCIDRs              []string `id:"egress-deny-cidrs" default:"" desc:"Extra CIDRs the 'private' egress policy also blocks (comma-separated); for deployment-specific internal ranges. ()"`
 	EgressAllowCIDRs             []string `id:"egress-allow-cidrs" default:"" desc:"CIDRs the 'private' egress policy allows even if otherwise blocked (comma-separated); explicit escape hatch for a trusted internal op endpoint. ()"`
