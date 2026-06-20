@@ -1,0 +1,5 @@
+# hello-world — return json hello world
+#
+# Pure txcl: no op:// refs, no local apps. It deploys to the hosted service
+WHEN @src == "http"
+EMIT .say = "hello world"

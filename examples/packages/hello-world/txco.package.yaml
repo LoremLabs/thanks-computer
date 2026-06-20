@@ -1,0 +1,25 @@
+apiVersion: thanks.computer/v1alpha1
+kind: Package
+
+name: hello-world
+version: 0.1.1
+summary: A one-rule stack that returns a json hello world
+
+package:
+  kind: department
+  install:
+    defaultMode: as-stack
+    suggestedStack: hello
+
+compatibility:
+  txco: ">=0.2.8"
+
+# Pure txcl: the single rule references no op:// — so there are NO bundled
+# computes and NO external endpoints to wire. Install materializes one file and
+# `txco apply` deploys it. (Contrast examples/packages/support-basic, which has
+# both a bundled compute and required endpoints.)
+
+metadata:
+  homepage: https://thanks.computer/packages/hello-world
+  source: https://github.com/loremlabs/thanks-computer
+  license: MIT
