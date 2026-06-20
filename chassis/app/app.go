@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +69,12 @@ func init() {
 // normal-shutdown path. Fatal config/db errors still exit in place via
 // log.Fatalf / logger.Fatal exactly as before.
 func Run(bi BuildInfo) int {
+	// `thanks` is the same binary as `txco`, dispatched by argv[0] into room
+	// mode: `thanks <args>` becomes `txco room <args>`. The second name is a
+	// symlink/hardlink (Homebrew bin.install_symlink, the installer's `ln -sf`),
+	// so there's one binary to build and ship.
+	os.Args = roomAlias(os.Args)
+
 	semver := fmt.Sprintf("%s+%s", bi.Version, bi.CommitId) // set via ldflag at build time
 
 	// Surface the ldflag-injected build identity to the CLI surface BEFORE
@@ -379,6 +386,17 @@ func Run(bi BuildInfo) int {
 		}
 	}
 	return 0
+}
+
+// roomAlias rewrites argv so that invoking the binary as `thanks` behaves as
+// `txco room`: `thanks <args>` → `txco room <args>`. Invoked as anything else
+// (the normal `txco`), argv is returned unchanged. Keeping the split here means
+// one binary serves both names via a symlink/hardlink.
+func roomAlias(args []string) []string {
+	if len(args) > 0 && filepath.Base(args[0]) == "thanks" {
+		return append([]string{args[0], "room"}, args[1:]...)
+	}
+	return args
 }
 
 // selectSchemaSource picks where migration SQL files come from.

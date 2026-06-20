@@ -162,6 +162,35 @@ func TestDetectTenantBodyCronLegacyUnchanged(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyRoom: a room message (src=room with a trusted
+// _txc.room.tenant stamped by the authenticated inlet) proposes a route into
+// that tenant's _room/0, even though the resolver would miss.
+func TestDetectTenantBodyRoom(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"room","room":{"tenant":"acme","name":"support"}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_room/0" {
+		t.Errorf("_txc.route.to = %q, want _room/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.stack").String(); got != "_room" {
+		t.Errorf("_txc.route.stack = %q, want _room", got)
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+}
+
+// A room event with no _txc.room.tenant must NOT take the room branch — it
+// falls through to the resolver (here a miss → "{}").
+func TestDetectTenantBodyRoomNoTenantUnchanged(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"room","room":{"name":"support"}}}`)); body != "{}" {
+		t.Errorf("room body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyMiss: on a resolver miss the transform returns
 // `{}` (no proposal), so the gated route op is skipped and _sys/boot
 // scope 1000 serves the 404.

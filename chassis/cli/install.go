@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -29,7 +30,7 @@ import (
 func runInstall(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("install", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
-	as := fs.String("as", "", "materialize the package's single stack as <stack>")
+	as := fs.String("as", "", "namespace prefix to install the package's stack under (e.g. --as inbox → OPS/inbox/...); omitted, the package's own stack name is used")
 	vendorOnly := fs.Bool("vendor-only", false, "fetch + validate into .txco/vendor/, do not touch OPS/")
 	dryRun := fs.Bool("dry-run", false, "show what would change; mutate nothing")
 	force := fs.Bool("force", false, "overwrite a tracked stack even if it has local edits")
@@ -38,7 +39,7 @@ func runInstall(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco install <source> [--as <stack>] [--vendor-only] [--dry-run]
+Usage: txco install <source> [--as <namespace>] [--vendor-only] [--dry-run]
 
 Materialize a package into OPS/, then review and run `+"`txco apply`"+` to deploy.
 Install never contacts a chassis.
@@ -142,13 +143,19 @@ Flags:
 		return 1
 	}
 	exportedStack := exported[0]
-	installedAs := exportedStack
+	// --as renames the package's BASE stack, preserving any trailing channel
+	// segment (`_mail`/`_cron`). A normal stack renames (support → billing); a
+	// channel-only package installs UNDER the chosen base (`_mail` → <as>/_mail)
+	// instead of flattening the channel away. Omitted, the package's own stack
+	// name is used as-is.
+	base, channel := splitBaseChannel(exportedStack)
 	if *as != "" {
-		installedAs = strings.Trim(*as, "/")
-		if err := opname.ValidStack(installedAs); err != nil {
-			fmt.Fprintf(stderr, "install: --as %q: %v\n", *as, err)
-			return 1
-		}
+		base = strings.Trim(*as, "/")
+	}
+	installedAs := path.Join(base, channel)
+	if err := opname.ValidStack(installedAs); err != nil {
+		fmt.Fprintf(stderr, "install: --as %q: %v\n", *as, err)
+		return 1
 	}
 
 	stackFiles := opsToFiles(ops) // <scope>/<name>.txcl — stack-independent; for the manifest hash

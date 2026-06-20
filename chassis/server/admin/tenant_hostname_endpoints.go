@@ -11,6 +11,7 @@ package admin
 // caller's membership in that tenant.
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base32"
@@ -241,6 +242,135 @@ func (c *Controller) handleCreateHostname(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusCreated, hostnameToRecord(h))
+}
+
+type mintHostnameRequest struct {
+	Stack string `json:"stack"`
+}
+
+// handleMintHostname mints a structured (auto-generated) hostname bound to a
+// stack and makes it routable fleet-wide — the same host the activate flow mints
+// for a web stack, but ON DEMAND and for ANY stack, including a mail-only stack
+// (a `_mail` channel with no web). It gives a non-web stack a reachable,
+// verified, DKIM-signing host without inventing an inbox/web stack:
+//
+//	POST /v1/tenants/{tenant}/hostnames/mint   {"stack":"autoreply"}
+//
+// The host binds to the BASE stack name; mail to <localpart>@<host> then routes
+// to <stack>/_mail. If the tenant has a delegated DNS zone the host is wired
+// under it (<label>.<origin>); otherwise the global structured-host suffix is
+// used. Verified + DKIM are set at mint (EnsureZone/SystemHostnameTx), so the
+// host can both receive mail and send DKIM-signed replies immediately.
+func (c *Controller) handleMintHostname(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "hostname:*:write"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+
+	var req mintHostnameRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body", map[string]any{"err": err.Error()})
+		return
+	}
+	stack := strings.Trim(strings.TrimSpace(req.Stack), "/")
+	if stack == "" {
+		writeJSONError(w, http.StatusBadRequest, "stack_required", nil)
+		return
+	}
+	// The host binds to the BASE stack, but a mail-only deployment only has the
+	// `<stack>/_mail` stack (no web `<stack>`). Accept either as proof the stack
+	// is real, so we never mint a host that routes to nothing.
+	if !c.stackOrMailChannelExists(r.Context(), ac.TenantID, stack) {
+		writeJSONError(w, http.StatusBadRequest, "stack_not_found",
+			map[string]any{"stack": stack, "hint": "apply the stack (or its _mail channel) first"})
+		return
+	}
+
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	var host string
+	origin, hasZone, zerr := tenants.ActivePatternZoneOriginTx(r.Context(), tx, ac.TenantID)
+	if zerr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "zone_lookup", map[string]any{"err": zerr.Error()})
+		return
+	}
+	switch {
+	case hasZone:
+		host, err = tenants.EnsureZoneHostnameTx(r.Context(), tx, ac.TenantID, stack, origin, now)
+	case c.pu.Conf.StructuredHostSuffix != "":
+		host, err = tenants.EnsureSystemHostnameTx(r.Context(), tx, ac.TenantID, stack, c.pu.Conf.StructuredHostSuffix, now)
+	default:
+		writeJSONError(w, http.StatusBadRequest, "no_host_scheme",
+			map[string]any{"hint": "no delegated DNS zone and no --structured-host-suffix configured"})
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "mint", map[string]any{"err": err.Error()})
+		return
+	}
+	if host == "" {
+		writeJSONError(w, http.StatusInternalServerError, "mint", map[string]any{"err": "mint produced no hostname"})
+		return
+	}
+
+	// Fleet-publish so every data-plane node routes the host (zone + structured
+	// rows aren't re-derivable from a stack.activated replay). Each is a no-op
+	// when its row set is empty, so calling both is safe.
+	if qerr := c.queueZoneHostnameUpserts(r.Context(), tx, ac.TenantID, stack); qerr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "fleet_zone_hostname", map[string]any{"err": qerr.Error()})
+		return
+	}
+	if qerr := c.queueStructuredHostnameUpserts(r.Context(), tx, ac.TenantID, stack); qerr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "fleet_structured_hostname", map[string]any{"err": qerr.Error()})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+
+	if err := c.pu.Dbc.Reload(); err != nil {
+		c.pu.Logger.Warn("dbcache reload after hostname mint failed; FS watcher will retry",
+			zap.String("err", err.Error()))
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"hostname": host,
+		"stack":    stack,
+		"url":      structuredURL(r, host, c.pu.Conf.WebAddr),
+	})
+}
+
+// stackOrMailChannelExists reports whether <stack> or <stack>/_mail has a row in
+// the stacks table for the tenant — proof the base is real before binding a host.
+func (c *Controller) stackOrMailChannelExists(ctx context.Context, tenantID, stack string) bool {
+	if _, _, err := c.lookupStack(ctx, c.pu.RuntimeDB, tenantID, stack); err == nil {
+		return true
+	}
+	if _, _, err := c.lookupStack(ctx, c.pu.RuntimeDB, tenantID, stack+"/_mail"); err == nil {
+		return true
+	}
+	return false
 }
 
 // handleRevokeHostname soft-deletes the active row for the URL's

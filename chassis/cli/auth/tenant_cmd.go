@@ -512,6 +512,11 @@ Available commands:
   add <hostname> [--stack <stack>] [--tenant SLUG]
                                          Claim a hostname; --stack
                                          attaches in one step (shortcut)
+  add --mint --stack <stack> [--tenant SLUG]
+                                         Mint a structured (auto-generated)
+                                         host bound to <stack> — verified +
+                                         DKIM, no DNS setup. Gives a non-web
+                                         stack (e.g. a _mail channel) a host.
   attach <hostname> --stack <stack> [--tenant SLUG]
                                          Bind a claimed hostname to a stack
   remove <hostname> [--tenant SLUG]      Release a hostname (soft-delete)
@@ -591,11 +596,50 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
 	tenant := fs.String("tenant", "", "tenant slug to claim the hostname in")
 	stack := fs.String("stack", "", "stack within the tenant the hostname routes to")
+	mint := fs.Bool("mint", false, "mint a structured (auto-generated) hostname for --stack instead of claiming a given one (verified + DKIM, no DNS setup)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+
+	// --mint: the chassis generates a structured host (<stack>-<rand>.<suffix>,
+	// or <stack>.<delegated-zone>) bound to --stack and returns it verified +
+	// DKIM-signing. No positional hostname; reachable immediately — ideal for a
+	// non-web stack (e.g. a mail-only `_mail` channel) that has no host to claim.
+	if *mint {
+		if strings.TrimSpace(*stack) == "" {
+			PrintCLIError(stderr, "auth tenant hostnames add --mint: --stack is required")
+			return 2
+		}
+		resolvedProfile, err := resolveProfileForTenant(*profile, *name)
+		if err != nil {
+			PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
+			return 1
+		}
+		target, err := buildSignedTarget(resolvedProfile, *url)
+		if err != nil {
+			PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
+			return 1
+		}
+		if target.Auth == nil {
+			PrintCLIError(stderr, "auth tenant hostnames add: no signing key configured")
+			return 1
+		}
+		target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+		res, err := client.New(target).MintHostname(context.Background(), strings.TrimSpace(*stack))
+		if err != nil {
+			PrintCLIErrorf(stderr, "auth tenant hostnames add --mint: %v", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "minted %s → %s/%s\n", res.Hostname, target.Tenant, res.Stack)
+		fmt.Fprintf(stdout, "  routes immediately (verified + DKIM); mail to <anything>@%s reaches %s/_mail\n", res.Hostname, res.Stack)
+		if res.URL != "" {
+			fmt.Fprintf(stdout, "  url: %s\n", res.URL)
+		}
+		return 0
+	}
+
 	if fs.NArg() < 1 {
-		PrintCLIError(stderr, "auth tenant hostnames add: hostname is required")
+		PrintCLIError(stderr, "auth tenant hostnames add: hostname is required (or use --mint --stack <name>)")
 		return 2
 	}
 	hostname := fs.Arg(0)
@@ -1123,4 +1167,3 @@ Flags:
 	fmt.Fprintf(stdout, "revoked %s in tenant %s\n", actorID, target.Tenant)
 	return 0
 }
-

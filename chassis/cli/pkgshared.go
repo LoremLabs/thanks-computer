@@ -74,6 +74,28 @@ func summarizeStacks(ops []bundle.Op) []stackSummary {
 	return out
 }
 
+// splitBaseChannel splits a stack name into its base and a trailing channel
+// segment — a `_`-prefixed FINAL segment like `_mail` or `_cron`. The base is
+// what `txco install --as` renames; the channel rides along so a channel-only
+// package (`_mail`) installs under the chosen base (`<as>/_mail`) rather than
+// having the channel flattened onto the base.
+//
+//	"support"        -> ("support", "")
+//	"_mail"          -> ("", "_mail")
+//	"support/_mail"  -> ("support", "_mail")
+//	"a/b/_cron"      -> ("a/b", "_cron")
+func splitBaseChannel(stack string) (base, channel string) {
+	i := strings.LastIndex(stack, "/")
+	last := stack[i+1:] // i==-1 → whole string
+	if strings.HasPrefix(last, "_") {
+		if i < 0 {
+			return "", last
+		}
+		return stack[:i], last
+	}
+	return stack, ""
+}
+
 // exportedStackNames returns the distinct stack names in ops, sorted.
 func exportedStackNames(ops []bundle.Op) []string {
 	seen := map[string]bool{}

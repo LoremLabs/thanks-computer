@@ -1110,6 +1110,45 @@ func (c *Client) AddHostname(ctx context.Context, req AddHostnameRequest) (*Host
 	return &h, nil
 }
 
+// MintHostnameResult is the response from POST /hostnames/mint.
+type MintHostnameResult struct {
+	Hostname string `json:"hostname"`
+	Stack    string `json:"stack"`
+	URL      string `json:"url"`
+}
+
+// MintHostname mints a structured (auto-generated) hostname bound to a stack —
+// verified + DKIM at mint, routable fleet-wide. Use it to give a non-web stack
+// (e.g. a mail-only `_mail` channel) a reachable host with no DNS setup.
+func (c *Client) MintHostname(ctx context.Context, stack string) (*MintHostnameResult, error) {
+	body, err := json.Marshal(map[string]string{"stack": stack})
+	if err != nil {
+		return nil, err
+	}
+	endpoint := c.scopedURL("/hostnames/mint")
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(httpReq, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return nil, decodeError(resp)
+	}
+	var out MintHostnameResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode mint hostname: %w", err)
+	}
+	return &out, nil
+}
+
 // AttachHostname binds an existing hostname (claimed earlier via
 // AddHostname without --stack, or being re-pointed at a different
 // stack) to the given stack within the active tenant.

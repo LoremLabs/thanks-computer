@@ -28,9 +28,14 @@ class Txco < Formula
 
   def install
     bin.install "txco"
+    # `thanks` is the same binary under a second name; argv[0] dispatches it
+    # into room mode (`thanks <args>` == `txco room <args>`). install_symlink
+    # lets Homebrew manage the second command with no post-install script.
+    bin.install_symlink "txco" => "thanks"
   end
 
   test do
     system "#{bin}/txco", "--help"
+    system "#{bin}/thanks", "--help"
   end
 end

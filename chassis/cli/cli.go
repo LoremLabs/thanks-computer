@@ -149,6 +149,11 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runDNS(rest, stdout, stderr), true
 	case "cron":
 		return runCron(rest, stdout, stderr), true
+	case "room":
+		// `thanks` is this command under another name (argv[0] dispatch in
+		// chassis/app.roomAlias). A room message becomes a normal
+		// @src=="room" event — see chassis/cli/room.go.
+		return runRoom(rest, stdout, stderr), true
 	case "admin":
 		return runAdmin(rest, stdout, stderr), true
 	case "update":
@@ -303,6 +308,7 @@ func printUsage(w io.Writer) {
 			{"trace [<rid>]", muted("Render the execution trace for a request (use ") + hint("`txco trace last`") + muted(" for the most recent)")},
 			{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
 			{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},
+			{"room [--room N] <msg>", muted("Send a message into a room (also installed as ") + hint("thanks") + muted(")")},
 		}},
 		{"CLI", []row{
 			{"version", muted("Print version info")},

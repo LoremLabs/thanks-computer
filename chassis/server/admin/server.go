@@ -26,6 +26,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	"github.com/loremlabs/thanks-computer/chassis/room"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
 	"github.com/loremlabs/thanks-computer/chassis/serverext"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
@@ -41,6 +42,10 @@ type Controller struct {
 	tenants  *tenants.Store
 	nonces   *auth.NonceStore
 	verifier signature.Verifier
+
+	// hub is the in-process room timeline pub/sub backing the room inlet
+	// (POST .../rooms/{room}/messages) and the SSE feed (GET .../stream).
+	hub *room.Hub
 
 	// traceReader is the read-side trace backend (file by default; a
 	// non-fs backend when admin is split off from the chassis). Built
@@ -97,7 +102,7 @@ type Controller struct {
 }
 
 func NewController(ctx context.Context, pu *processor.Unit) *Controller {
-	return &Controller{ctx: ctx, pu: pu}
+	return &Controller{ctx: ctx, pu: pu, hub: room.NewHub(roomRingSize)}
 }
 
 // SetArtifactStore wires the artifact store the admin handlers use
@@ -333,6 +338,10 @@ func (c *Controller) Start() {
 	// tenant's @cron.* wall-clock fields; @cron.bucket stays UTC.
 	tenantR.HandleFunc("/cron/config", c.handleGetCronConfig).Methods(http.MethodGet)
 	tenantR.HandleFunc("/cron/config", c.handlePutCronConfig).Methods(http.MethodPut)
+	// Room inlet (thanks / txco room): POST a message into a room — it becomes
+	// a normal @src=="room" event routed to the tenant's _room stack.
+	tenantR.HandleFunc("/rooms/{room}/messages", c.handlePostRoomMessage).Methods(http.MethodPost)
+	tenantR.HandleFunc("/rooms/{room}/stream", c.handleRoomStream).Methods(http.MethodGet)
 	tenantR.HandleFunc("/auth/actors", c.handleListActors).Methods(http.MethodGet)
 	tenantR.HandleFunc("/auth/actors/{actorID}/revoke", c.handleRevokeActor).Methods(http.MethodPost)
 	tenantR.HandleFunc("/auth/members", c.handleListTenantMembers).Methods(http.MethodGet)
@@ -378,6 +387,7 @@ func (c *Controller) Start() {
 	// request that misses the YAML map.
 	tenantR.HandleFunc("/hostnames", c.handleListHostnames).Methods(http.MethodGet)
 	tenantR.HandleFunc("/hostnames", c.handleCreateHostname).Methods(http.MethodPost)
+	tenantR.HandleFunc("/hostnames/mint", c.handleMintHostname).Methods(http.MethodPost)
 	tenantR.HandleFunc("/hostnames/{hostname}", c.handleRevokeHostname).Methods(http.MethodDelete)
 	tenantR.HandleFunc("/hostnames/{hostname}/attach", c.handleAttachHostname).Methods(http.MethodPost)
 	tenantR.HandleFunc("/hostnames/{hostname}/challenges", c.handleCreateChallenge).Methods(http.MethodPost)

@@ -145,6 +145,23 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			return raw
 		}
 	}
+	// Room message. The room inlet (admin POST /v1/tenants/{t}/rooms/{room}/
+	// messages) stamps the target slug in `_txc.room.tenant` (trusted: the
+	// authenticated URL tenant, never client input). Propose a route into that
+	// tenant's `_room/0` — the same sanctioned _sys→tenant pin as cron and
+	// hostname routing, no bypass. A tenant with no `_room` stack falls through
+	// to the 404 like any unrouted request.
+	if gjson.GetBytes(in, "_txc.src").String() == "room" {
+		if rt := gjson.GetBytes(in, "_txc.room.tenant").String(); rt != "" {
+			raw := "{}"
+			raw, _ = sjson.Set(raw, "_txc.route.tenant", rt)
+			raw, _ = sjson.Set(raw, "_txc.route.stack", "_room")
+			raw, _ = sjson.Set(raw, "_txc.route.ingress", "room")
+			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
+			raw, _ = sjson.Set(raw, "_txc.route.to", "_room/0")
+			return raw
+		}
+	}
 	target, hit := resolver.Resolve(ingress.KeyFromEnvelope(string(in)))
 	if !hit {
 		return "{}"

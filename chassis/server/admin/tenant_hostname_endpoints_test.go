@@ -79,6 +79,71 @@ func TestCreateHostnameHappyPath(t *testing.T) {
 	}
 }
 
+// TestMintHostname — POST /hostnames/mint mints a structured host bound to the
+// BASE stack, accepting a mail-only `<stack>/_mail` as proof the stack is real,
+// and stamps verified_at (so it's an immediate sender).
+func TestMintHostname(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin", AuthMode: "open", StructuredHostSuffix: ".stacks.example"})
+	// Mail-only deployment: only the `_mail` channel exists, no web `autoreply`.
+	seedStackForTest(t, c, "tnt_default", "autoreply/_mail")
+
+	body := mustJSON(t, map[string]any{"stack": "autoreply"})
+	req := withTenantContext(httptest.NewRequest(http.MethodPost,
+		"/v1/tenants/default/hostnames/mint", bytes.NewReader(body)), "tnt_default")
+	rr := httptest.NewRecorder()
+	c.handleMintHostname(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct{ Hostname, Stack, URL string }
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Stack != "autoreply" {
+		t.Errorf("stack = %q, want autoreply", got.Stack)
+	}
+	if !strings.HasPrefix(got.Hostname, "autoreply-") || !strings.HasSuffix(got.Hostname, ".stacks.example") {
+		t.Errorf("hostname = %q, want autoreply-<rand>.stacks.example", got.Hostname)
+	}
+	// The minted row binds to the base stack and is verified (an immediate sender).
+	var stack, verifiedAt string
+	if err := c.pu.RuntimeDB.QueryRow(
+		`SELECT stack, verified_at FROM tenant_hostnames WHERE hostname=?`, got.Hostname,
+	).Scan(&stack, &verifiedAt); err != nil {
+		t.Fatalf("query minted row: %v", err)
+	}
+	if stack != "autoreply" || verifiedAt == "" {
+		t.Errorf("minted row stack=%q verified_at=%q, want autoreply + non-empty", stack, verifiedAt)
+	}
+}
+
+// TestMintHostnameStackNotFound — minting for a stack with neither a web nor a
+// `_mail` presence is rejected, so we never bind a host that routes to nothing.
+func TestMintHostnameStackNotFound(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin", AuthMode: "open", StructuredHostSuffix: ".stacks.example"})
+	body := mustJSON(t, map[string]any{"stack": "ghost"})
+	req := withTenantContext(httptest.NewRequest(http.MethodPost,
+		"/v1/tenants/default/hostnames/mint", bytes.NewReader(body)), "tnt_default")
+	rr := httptest.NewRecorder()
+	c.handleMintHostname(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestMintHostnameMissingStack — stack is required.
+func TestMintHostnameMissingStack(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin", AuthMode: "open", StructuredHostSuffix: ".stacks.example"})
+	body := mustJSON(t, map[string]any{})
+	req := withTenantContext(httptest.NewRequest(http.MethodPost,
+		"/v1/tenants/default/hostnames/mint", bytes.NewReader(body)), "tnt_default")
+	rr := httptest.NewRecorder()
+	c.handleMintHostname(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rr.Code)
+	}
+}
+
 // TestCreateHostnameInvalidHostname — strict admin-write rejection.
 func TestCreateHostnameInvalidHostname(t *testing.T) {
 	c := newHostnameTestController(t)
