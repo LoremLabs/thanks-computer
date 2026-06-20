@@ -19,6 +19,16 @@ type Result struct {
 	Stdout string
 	Stderr string
 	Exit   int
+
+	// Cursor + PollAfterMs make a forwarded command POLLABLE. When PollAfterMs
+	// > 0, the forwarding CLI prints Stdout/Stderr, waits that many ms, then
+	// re-invokes the SAME command passing Cursor back (read via Cursor(ctx)) —
+	// looping until the user interrupts or a result with PollAfterMs == 0
+	// arrives. This lets a command stream incrementally over repeated /v1/cli
+	// requests with no streaming transport. Zero values keep the classic
+	// single-shot behaviour, so existing commands are unaffected.
+	Cursor      string
+	PollAfterMs int
 }
 
 // Handler runs one forwarded command server-side. args is everything after the
@@ -41,4 +51,20 @@ func Register(name string, h Handler) {
 func Lookup(name string) (Handler, bool) {
 	h, ok := registry[name]
 	return h, ok
+}
+
+type cursorCtxKey struct{}
+
+// WithCursor carries the poll cursor a forwarded command was invoked with into
+// the handler's context (set by the /v1/cli endpoint). Empty on the first call.
+func WithCursor(ctx context.Context, cursor string) context.Context {
+	return context.WithValue(ctx, cursorCtxKey{}, cursor)
+}
+
+// Cursor returns the poll cursor for this invocation — empty on the first poll
+// or for a non-pollable command. A handler echoes a new cursor via
+// Result.Cursor to be passed back on the next poll.
+func Cursor(ctx context.Context) string {
+	c, _ := ctx.Value(cursorCtxKey{}).(string)
+	return c
 }

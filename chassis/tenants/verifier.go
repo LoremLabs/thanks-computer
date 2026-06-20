@@ -75,6 +75,56 @@ func (v *Verifier) VerifyDNS(ctx context.Context, hostname, token string) error 
 	return ErrTokenMismatch
 }
 
+// ZoneNSVerified reports whether `origin`'s NS records — resolved RECURSIVELY
+// against the public DNS, not via our own authoritative head — include all of
+// `wantNameservers`, i.e. the domain is actually delegated to us. This makes
+// "delegation is proof of control" real rather than assumed, so a zone can't be
+// squatted (you can't make a domain you don't own delegate to us). Returns the
+// resolved NS hosts (normalized) for diagnostics. Uses net.Resolver{PreferGo:
+// true} like VerifyDNS so cgo/host-file quirks can't satisfy it.
+func ZoneNSVerified(ctx context.Context, origin string, wantNameservers []string) (ok bool, resolved []string, err error) {
+	canon, cok := CanonicalizeHost(origin)
+	if !cok || len(wantNameservers) == 0 {
+		return false, nil, nil
+	}
+	resolver := &net.Resolver{PreferGo: true}
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	recs, lerr := resolver.LookupNS(lookupCtx, canon)
+	if lerr != nil {
+		return false, nil, fmt.Errorf("lookup_ns: %w", lerr)
+	}
+	for _, ns := range recs {
+		resolved = append(resolved, normalizeNSHost(ns.Host))
+	}
+	return nsContainsAll(resolved, wantNameservers), resolved, nil
+}
+
+// nsContainsAll reports whether every nameserver in `want` (normalized) appears
+// in `resolved` (normalized) — i.e. the domain is delegated to at least our full
+// nameserver set. Empty `want` → false (nothing to match against).
+func nsContainsAll(resolved, want []string) bool {
+	if len(want) == 0 {
+		return false
+	}
+	got := make(map[string]bool, len(resolved))
+	for _, r := range resolved {
+		got[normalizeNSHost(r)] = true
+	}
+	for _, w := range want {
+		if !got[normalizeNSHost(w)] {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeNSHost lowercases + strips a trailing dot so resolved NS hosts (which
+// carry a trailing dot) compare equal to configured nameserver names.
+func normalizeNSHost(h string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+}
+
 // VerifyHTTP fetches `http://<hostname><portSuffix>/.well-known/
 // txco-verify/<token>` with SSRF defenses (pinned-IP dialer +
 // redirect refusal) and confirms the response body equals the

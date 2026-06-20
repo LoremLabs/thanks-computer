@@ -164,6 +164,19 @@ func (c *Controller) handleCreateHostname(w http.ResponseWriter, r *http.Request
 		now := h.CreatedAt
 		h.VerifiedAt = &now
 	}
+	// Zone-covered auto-verify: a hostname inside a zone THIS tenant has
+	// delegated to us needs no separate ownership proof — the NS delegation IS
+	// the proof (the same basis fromDomainVerified uses for sending), and the
+	// zone already synthesizes the A/AAAA, so there's no routing record to add.
+	// Stamp verified_at so the CLI skips the spurious dns-txt challenge +
+	// routing-record reminder. Not flag-gated: it's a soundness fact, not a dev
+	// convenience.
+	if h.VerifiedAt == nil {
+		if covered, cerr := tenants.DomainCoveredByZone(r.Context(), c.pu.RuntimeDB, ac.TenantSlug, canon); cerr == nil && covered {
+			now := h.CreatedAt
+			h.VerifiedAt = &now
+		}
+	}
 
 	// Fleet-sync producer: upload artifact BEFORE the tx so an
 	// orphaned upload (commit fails) is GC-recoverable.

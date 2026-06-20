@@ -441,6 +441,7 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/dns/zones", c.handleListZones).Methods(http.MethodGet)
 	tenantR.HandleFunc("/dns/zones", c.handleCreateZone).Methods(http.MethodPost)
 	tenantR.HandleFunc("/dns/zones/{origin}", c.handleRevokeZone).Methods(http.MethodDelete)
+	tenantR.HandleFunc("/dns/zones/{origin}/verify", c.handleVerifyZone).Methods(http.MethodPost)
 	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleListRecords).Methods(http.MethodGet)
 	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleCreateRecord).Methods(http.MethodPost)
 	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleRevokeRecord).Methods(http.MethodDelete)

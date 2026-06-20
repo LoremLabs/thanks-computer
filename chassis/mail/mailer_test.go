@@ -28,7 +28,7 @@ const testDDL = `
 CREATE TABLE tenants (tenant_id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT, created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE tenant_hostnames (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, tenant_id TEXT NOT NULL, stack TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT, revoked_at TEXT, verified_at TEXT, dkim_selector TEXT NOT NULL DEFAULT '', dkim_private_pem TEXT NOT NULL DEFAULT '', dkim_public_b64 TEXT NOT NULL DEFAULT '');
 CREATE TABLE mail_campaign_sends (tenant_id TEXT NOT NULL, campaign TEXT NOT NULL, recipient TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'claimed', message_id TEXT NOT NULL DEFAULT '', sent_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (tenant_id, campaign, recipient));
-CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, origin TEXT NOT NULL, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT NOT NULL DEFAULT 'pattern', created_at TEXT NOT NULL, created_by TEXT, updated_at TEXT NOT NULL, revoked_at TEXT, dkim_selector TEXT NOT NULL DEFAULT '', dkim_private_pem TEXT NOT NULL DEFAULT '', dkim_public_b64 TEXT NOT NULL DEFAULT '');`
+CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, origin TEXT NOT NULL, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT NOT NULL DEFAULT 'pattern', created_at TEXT NOT NULL, created_by TEXT, updated_at TEXT NOT NULL, revoked_at TEXT, verified_at TEXT, dkim_selector TEXT NOT NULL DEFAULT '', dkim_private_pem TEXT NOT NULL DEFAULT '', dkim_public_b64 TEXT NOT NULL DEFAULT '');`
 
 type fakeSubmit struct {
 	calls []struct {
@@ -74,11 +74,11 @@ func newTestDB(t *testing.T) *sql.DB {
 	mustExec(t, db, hn+`('h1','acme.com','tnt_acme','web','t','op',NULL,'2026-01-01T00:00:00Z')`)
 	mustExec(t, db, hn+`('h2','unv.acme.com','tnt_acme','web','t','op',NULL,NULL)`)
 	mustExec(t, db, hn+`('h3','gone.acme.com','tnt_acme','web','t','op','2026-02-01T00:00:00Z','2026-01-01T00:00:00Z')`)
-	// zoned.example: acme serves DNS for it (active zone) but has NO verified
-	// hostname row — DNS delegation alone makes it a valid sender domain. Carries
-	// a DKIM key so the signing path is exercised.
-	if _, err := db.Exec(`INSERT INTO dns_zones(id,tenant_id,origin,mname,rname,created_at,updated_at,dkim_selector,dkim_private_pem,dkim_public_b64)
-		VALUES('dz1','tnt_acme','zoned.example','ns1','h','t','t','txco',?,?)`, testDKIMPriv, testDKIMPub); err != nil {
+	// zoned.example: acme serves DNS for it (active, VERIFIED zone) but has NO
+	// verified hostname row — the verified zone delegation alone makes it a valid
+	// sender domain. Carries a DKIM key so the signing path is exercised.
+	if _, err := db.Exec(`INSERT INTO dns_zones(id,tenant_id,origin,mname,rname,created_at,updated_at,verified_at,dkim_selector,dkim_private_pem,dkim_public_b64)
+		VALUES('dz1','tnt_acme','zoned.example','ns1','h','t','t','t','txco',?,?)`, testDKIMPriv, testDKIMPub); err != nil {
 		t.Fatalf("seed zone: %v", err)
 	}
 	// A chassis-minted structured host with its OWN per-host DKIM key — signs

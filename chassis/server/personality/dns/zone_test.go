@@ -66,9 +66,9 @@ func newTestDB(t *testing.T) *sql.DB {
 func seedZone(t *testing.T, db *sql.DB, ts string) {
 	t.Helper()
 	_, err := db.Exec(`INSERT INTO dns_zones
-		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, created_at, created_by, updated_at)
-		VALUES ('dz_1', ?, ?, 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, ?, 'actor_x', ?)`,
-		testTenantID, testOrigin, ts, ts)
+		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, created_at, created_by, updated_at, verified_at)
+		VALUES ('dz_1', ?, ?, 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, ?, 'actor_x', ?, ?)`,
+		testTenantID, testOrigin, ts, ts, ts)
 	if err != nil {
 		t.Fatalf("insert zone: %v", err)
 	}
@@ -297,9 +297,9 @@ func TestTenantScoping(t *testing.T) {
 	seedZone(t, db, fixedTS)
 	// A second zone owned by a different tenant.
 	if _, err := db.Exec(`INSERT INTO dns_zones
-		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, created_at, created_by, updated_at)
-		VALUES ('dz_2', ?, 'other.example.net', 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, ?, 'actor_y', ?)`,
-		otherTenantID, fixedTS, fixedTS); err != nil {
+		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, created_at, created_by, updated_at, verified_at)
+		VALUES ('dz_2', ?, 'other.example.net', 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, ?, 'actor_y', ?, ?)`,
+		otherTenantID, fixedTS, fixedTS, fixedTS); err != nil {
 		t.Fatalf("insert other zone: %v", err)
 	}
 	snap := buildOrDie(t, db, SynthConfig{})

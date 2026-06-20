@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
@@ -62,12 +63,14 @@ type dnsZoneDTO struct {
 	DefaultTTL int    `json:"default_ttl"`
 	CreatedAt  string `json:"created_at,omitempty"`
 	RevokedAt  string `json:"revoked_at,omitempty"`
+	VerifiedAt string `json:"verified_at,omitempty"` // empty = pending (awaiting NS verification)
 }
 
 func zoneToDTO(z tenants.DNSZone) dnsZoneDTO {
 	return dnsZoneDTO{
 		Origin: z.Origin, Mode: z.Mode, MName: z.MName, RName: z.RName,
 		DefaultTTL: z.DefaultTTL, CreatedAt: z.CreatedAt, RevokedAt: z.RevokedAt,
+		VerifiedAt: z.VerifiedAt,
 	}
 }
 
@@ -86,6 +89,17 @@ type createZoneResponse struct {
 // SOA mname/rname + timers are filled from config defaults so the
 // caller only supplies the origin. Requires --dns-nameservers to be
 // configured (you're delegating to us; we must know our own NS names).
+//
+// Ownership gate (0019): with --dns-require-zone-verification off (default), the
+// zone is stamped verified_at at creation and confers authority immediately —
+// fine for dev / single-operator chassis where you trust the operator (and why
+// creation is super-admin-only). With the flag on (multi-tenant), the zone is
+// created PENDING (confers nothing) until handleVerifyZone confirms the origin's
+// NS actually resolve to our nameservers — so a tenant can't squat a domain they
+// don't own (`zone create stripe.com` stays inert; they can't make its NS point
+// at us). The verified_at gate is enforced uniformly across the dns_zones
+// authority readers (DomainCoveredByZone, TenantForMailZone,
+// ActivePatternZoneOriginTx, BuildSnapshot, DKIMSignerForDomain).
 func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	if !c.requireDNSZoneAccess(w, r, true) {
 		return
@@ -129,6 +143,13 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		Mode:      strings.TrimSpace(req.Mode),
 		CreatedBy: ac.ActorID,
 	}
+	// Verification gate (0019): with --dns-require-zone-verification off (default),
+	// stamp verified_at now so the zone confers authority immediately (current
+	// behavior, dev / single-operator). On → leave it pending until
+	// `txco dns zone verify` confirms the NS actually delegates to us.
+	if !c.pu.Conf.DNSRequireZoneVerification {
+		z.VerifiedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 
 	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -156,7 +177,10 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	// activation-time mint only fires when the zone already exists), and on a
 	// multi-node fleet only the admin node would hold the rows. Pattern mode
 	// only — manual zones synthesize nothing. See dns_fleet.go.
-	if z.Mode == "" || strings.EqualFold(z.Mode, "pattern") {
+	// A pending zone (verification on) confers nothing yet, so defer wiring
+	// stacks + fleet-publishing to verify time (handleVerifyZone). Verified at
+	// creation (default) → do them now.
+	if z.VerifiedAt != "" && (z.Mode == "" || strings.EqualFold(z.Mode, "pattern")) {
 		if err := c.reconcileZoneHostnames(r.Context(), tx, z.TenantID, z.Origin); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "reconcile_zone_hostnames",
 				map[string]any{"err": err.Error()})
@@ -167,7 +191,7 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	// (re-derive routing hosts on future activations; serve it with the dns
 	// head). Read the persisted row so CreateZoneTx's SOA + timestamp defaults
 	// ride along.
-	if c.fleetEnabled() {
+	if z.VerifiedAt != "" && c.fleetEnabled() {
 		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, z.ID)
 		if gerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
@@ -189,11 +213,117 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	zoneSOADefaultsForDTO(&z)
+	delegation := delegationHint(canon, nameservers)
+	if z.VerifiedAt == "" {
+		delegation += "\n\nThe zone is PENDING — it serves no records, routes no mail, and" +
+			" signs no DKIM until verified. Once the NS records above resolve, run:\n  txco dns zone verify " + canon
+	}
 	writeJSON(w, http.StatusCreated, createZoneResponse{
 		Zone:        zoneToDTO(z),
 		Nameservers: nameservers,
-		Delegation:  delegationHint(canon, nameservers),
+		Delegation:  delegation,
 	})
+}
+
+// handleVerifyZone confirms a (pending) zone's NS actually delegates to our
+// nameservers, then flips it live — wiring already-active stacks into it and
+// fleet-publishing the now-verified row. This is the anti-squat gate: a tenant
+// can't make a domain they don't own delegate to us, so they can't verify (and
+// thus can't gain DKIM/verified-sender/routing authority over) it. Idempotent
+// for an already-verified zone.
+func (c *Controller) handleVerifyZone(w http.ResponseWriter, r *http.Request) {
+	if !c.requireDNSZoneAccess(w, r, true) {
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	rawOrigin := mux.Vars(r)["origin"]
+	origin, ok := tenants.CanonicalizeHost(rawOrigin)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "invalid_origin", map[string]any{"origin": rawOrigin})
+		return
+	}
+	zone, err := c.tenants.LookupActiveZone(r.Context(), ac.TenantID, origin)
+	switch {
+	case errors.Is(err, tenants.ErrNotFound):
+		writeJSONError(w, http.StatusNotFound, "zone_not_found", map[string]any{"origin": origin})
+		return
+	case err != nil:
+		writeJSONError(w, http.StatusInternalServerError, "lookup_zone", map[string]any{"err": err.Error()})
+		return
+	}
+
+	eff := dnsp.EffectiveSynthConfig(c.pu.Dbc.Snapshot(), dnsp.SynthConfigFrom(c.pu.Conf))
+	nameservers := nonBlank(eff.Nameservers)
+	if len(nameservers) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "dns_not_configured",
+			map[string]any{"hint": "no nameservers configured to verify against"})
+		return
+	}
+
+	// The check: does origin's NS (resolved against public DNS) point at us?
+	verified, resolved, nerr := tenants.ZoneNSVerified(r.Context(), origin, nameservers)
+	if nerr != nil {
+		writeJSONError(w, http.StatusBadGateway, "ns_lookup_failed",
+			map[string]any{"origin": origin, "err": nerr.Error(),
+				"hint": "the NS records may not have propagated yet — retry shortly"})
+		return
+	}
+	if !verified {
+		writeJSONError(w, http.StatusConflict, "ns_not_delegated",
+			map[string]any{"origin": origin, "want": nameservers, "resolved": resolved,
+				"hint": "set the NS records from `txco dns zone create` at your registrar, then retry once they propagate"})
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := tenants.SetZoneVerifiedTx(r.Context(), tx, ac.TenantID, origin, now); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "set_verified", map[string]any{"err": err.Error()})
+		return
+	}
+	// Now live: wire already-active stacks into the zone + fleet-publish the
+	// verified row (mirrors the verified-at-create path in handleCreateZone).
+	if zone.Mode == "" || strings.EqualFold(zone.Mode, "pattern") {
+		if err := c.reconcileZoneHostnames(r.Context(), tx, ac.TenantID, origin); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "reconcile_zone_hostnames", map[string]any{"err": err.Error()})
+			return
+		}
+	}
+	if c.fleetEnabled() {
+		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zone.ID)
+		if gerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
+			return
+		}
+		if err := c.fleetPublishZone(r.Context(), tx, persisted); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "publish_zone", map[string]any{"err": err.Error()})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+	if err := c.pu.Dbc.Reload(); err != nil {
+		c.pu.Logger.Warn("dbcache reload after dns zone verify failed; FS watcher will retry",
+			zap.String("err", err.Error()))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"origin": origin, "verified_at": now})
 }
 
 // handleListZones lists the tenant's zones (?history=true includes revoked).

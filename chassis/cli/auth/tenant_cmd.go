@@ -684,15 +684,15 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "claimed %s → %s/%s\n", h.Hostname, target.Tenant, h.Stack)
 	}
 
-	// Dev-local auto-verify path: when the chassis stamped verified_at
-	// on creation (localhost, *.localhost, *.local, *.local.thanks.
-	// computer; gated by --dev-auto-verify-local-hostnames, default on),
-	// the operator self-evidently owns the hostname — no DNS-TXT proof
-	// needed. Skip the auto-challenge and the DNS-record reminder
-	// entirely; print a one-liner so the operator knows it routed and
-	// is ready to receive traffic.
+	// Auto-verify path: the chassis stamped verified_at on creation because the
+	// hostname needs no separate ownership proof — either a dev-local hostname
+	// (localhost, *.localhost, …; --dev-auto-verify-local-hostnames) or a
+	// hostname inside a zone this tenant has delegated to us (the NS delegation
+	// IS the proof; the zone already synthesizes the A). Skip the auto-challenge
+	// and the DNS-record reminder; print a one-liner so the operator knows it
+	// routed and is ready.
 	if h.VerifiedAt != "" {
-		fmt.Fprintf(stdout, "auto-verified (dev-local): routes immediately, no DNS-TXT step required.\n")
+		fmt.Fprintf(stdout, "auto-verified: routes immediately, no DNS-TXT step required.\n")
 		if h.Stack == "" {
 			fmt.Fprintf(stdout, "\nthen attach: txco auth tenant hostnames attach %s --stack <name>\n", h.Hostname)
 		}

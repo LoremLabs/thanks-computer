@@ -64,7 +64,7 @@ func DKIMSignerForDomain(ctx context.Context, db *sql.DB, domain string) (sdid, 
 	// 2. Delegated-zone key (apex or subdomain; most-specific wins).
 	err = db.QueryRowContext(ctx,
 		`SELECT origin, dkim_selector, dkim_private_pem FROM dns_zones
-		  WHERE revoked_at IS NULL AND dkim_private_pem != ''
+		  WHERE revoked_at IS NULL AND verified_at IS NOT NULL AND dkim_private_pem != ''
 		    AND (origin = ? OR ? LIKE '%.' || origin)
 		  ORDER BY length(origin) DESC LIMIT 1`,
 		canon, canon).Scan(&sdid, &selector, &privPEM)

@@ -447,6 +447,14 @@ func zoneToRow(z tenants.DNSZone) map[string]any {
 	if z.RevokedAt != "" {
 		row["revoked_at"] = z.RevokedAt
 	}
+	// verified_at (0019) gates serving on data-plane nodes (BuildSnapshot), so it
+	// MUST ride the fleet upsert — else a synced zone reads pending and stops
+	// serving. We only ever publish VERIFIED zones (create-when-verified +
+	// verify), so it's always set here; the consumer's INSERT OR REPLACE would
+	// otherwise reset an absent column to pending.
+	if z.VerifiedAt != "" {
+		row["verified_at"] = z.VerifiedAt
+	}
 	return row
 }
 

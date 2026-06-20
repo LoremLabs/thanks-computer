@@ -207,7 +207,11 @@ CREATE TABLE dns_zones (
 	created_at  TEXT NOT NULL,
 	created_by  TEXT,
 	updated_at  TEXT NOT NULL,
-	revoked_at  TEXT
+	revoked_at  TEXT,
+	verified_at TEXT,
+	dkim_selector    TEXT NOT NULL DEFAULT '',
+	dkim_private_pem TEXT NOT NULL DEFAULT '',
+	dkim_public_b64  TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE cron_settings (
 	tenant_id  TEXT PRIMARY KEY,

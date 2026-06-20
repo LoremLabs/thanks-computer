@@ -144,6 +144,48 @@ func TestMintHostnameMissingStack(t *testing.T) {
 	}
 }
 
+// TestCreateHostnameZoneCoveredAutoVerifies — adding a hostname that falls
+// inside a zone THIS tenant has delegated to us is auto-verified (the NS
+// delegation is the proof of control); no dns-txt challenge needed.
+func TestCreateHostnameZoneCoveredAutoVerifies(t *testing.T) {
+	c := newHostnameTestController(t) // seeds tnt_default (slug "default") + stack default/web
+	if _, err := c.pu.RuntimeDB.Exec(
+		`INSERT INTO dns_zones (id, tenant_id, origin, mname, rname, created_at, updated_at, verified_at)
+		 VALUES ('dz_test','tnt_default','example.test','ns1.test.','hostmaster.example.test.','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("seed zone: %v", err)
+	}
+
+	// Apex of the delegated zone — should auto-verify (no challenge).
+	body := mustJSON(t, map[string]any{"hostname": "example.test", "stack": "default/web"})
+	req := withTenantContext(httptest.NewRequest(http.MethodPost,
+		"/v1/tenants/default/hostnames", bytes.NewReader(body)), "tnt_default")
+	rr := httptest.NewRecorder()
+	c.handleCreateHostname(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got hostnameRecord
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.VerifiedAt == "" {
+		t.Errorf("hostname in own delegated zone should be auto-verified, got empty verified_at: %+v", got)
+	}
+
+	// A hostname NOT covered by the zone still requires verification.
+	body2 := mustJSON(t, map[string]any{"hostname": "elsewhere.test", "stack": "default/web"})
+	req2 := withTenantContext(httptest.NewRequest(http.MethodPost,
+		"/v1/tenants/default/hostnames", bytes.NewReader(body2)), "tnt_default")
+	rr2 := httptest.NewRecorder()
+	c.handleCreateHostname(rr2, req2)
+	var got2 hostnameRecord
+	_ = json.Unmarshal(rr2.Body.Bytes(), &got2)
+	if got2.VerifiedAt != "" {
+		t.Errorf("hostname outside any zone should NOT be auto-verified: %+v", got2)
+	}
+}
+
 // TestCreateHostnameInvalidHostname — strict admin-write rejection.
 func TestCreateHostnameInvalidHostname(t *testing.T) {
 	c := newHostnameTestController(t)

@@ -12,12 +12,18 @@ import (
 
 type cliExecRequest struct {
 	Args []string `json:"args"`
+	// Cursor is the poll cursor for a POLLABLE command (empty on the first
+	// call). Forwarded to the handler via clicmd.WithCursor.
+	Cursor string `json:"cursor,omitempty"`
 }
 
 type cliExecResponse struct {
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
 	Exit   int    `json:"exit"`
+	// Cursor + PollAfterMs ask the forwarding CLI to re-poll (see clicmd.Result).
+	Cursor      string `json:"cursor,omitempty"`
+	PollAfterMs int    `json:"poll_after_ms,omitempty"`
 }
 
 // handleCLIExec runs a server-side CLI command forwarded by the core CLI's
@@ -56,10 +62,17 @@ func (c *Controller) handleCLIExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h(r.Context(), req.Args[1:])
+	ctx := clicmd.WithCursor(r.Context(), req.Cursor)
+	res, err := h(ctx, req.Args[1:])
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "command_failed", map[string]any{"err": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, cliExecResponse{Stdout: res.Stdout, Stderr: res.Stderr, Exit: res.Exit})
+	writeJSON(w, http.StatusOK, cliExecResponse{
+		Stdout:      res.Stdout,
+		Stderr:      res.Stderr,
+		Exit:        res.Exit,
+		Cursor:      res.Cursor,
+		PollAfterMs: res.PollAfterMs,
+	})
 }

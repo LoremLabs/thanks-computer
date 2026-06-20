@@ -30,7 +30,7 @@ CREATE TABLE stack_versions (version_id INTEGER PRIMARY KEY, stack_id TEXT, vers
 CREATE TABLE stack_files (version_id INTEGER, path TEXT, content TEXT, content_hash TEXT, PRIMARY KEY(version_id,path));
 CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INTEGER, name TEXT, txcl TEXT, mock_req TEXT, mock_res TEXT);
 CREATE TABLE applied_events (event_id TEXT PRIMARY KEY, control_version INTEGER NOT NULL, applied_at TEXT NOT NULL);
-CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT, origin TEXT, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT, created_at TEXT, created_by TEXT, updated_at TEXT, revoked_at TEXT);
+CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT, origin TEXT, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT, created_at TEXT, created_by TEXT, updated_at TEXT, revoked_at TEXT, verified_at TEXT);
 CREATE TABLE cron_settings (tenant_id TEXT PRIMARY KEY, timezone TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, updated_by TEXT);
 INSERT INTO tenants VALUES ('tnt_a','a');
 `

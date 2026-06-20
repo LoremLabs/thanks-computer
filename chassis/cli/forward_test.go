@@ -1,7 +1,13 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -53,5 +59,66 @@ func TestSplitForwardFlags(t *testing.T) {
 				t.Errorf("rest = %v, want %v", r, tc.wantRest)
 			}
 		})
+	}
+}
+
+// TestForwardToServerPollLoop: a POLLABLE command (poll_after_ms > 0) makes the
+// forwarder print, re-run with the returned cursor, and stop once poll_after_ms
+// drops to 0 — cursor threading visible in the output.
+func TestForwardToServerPollLoop(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir()) // no real profile/signer → unsigned request
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Args   []string `json:"args"`
+			Cursor string   `json:"cursor"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		calls++
+		resp := map[string]any{
+			"stdout": fmt.Sprintf("poll%d cursor=%q\n", calls, req.Cursor),
+			"exit":   0,
+		}
+		if calls < 3 { // two more polls, then stop
+			resp["cursor"] = fmt.Sprintf("cur%d", calls)
+			resp["poll_after_ms"] = 1
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	status, ok := forwardToServer("nats", []string{"sub", "x", "--addr", srv.URL}, &out, &errb)
+	if !ok || status != 0 {
+		t.Fatalf("status=%d ok=%v stderr=%q", status, ok, errb.String())
+	}
+	if calls != 3 {
+		t.Fatalf("server calls = %d, want 3 (loop until poll_after_ms==0)", calls)
+	}
+	s := out.String()
+	if !strings.Contains(s, `poll1 cursor=""`) ||
+		!strings.Contains(s, `poll2 cursor="cur1"`) ||
+		!strings.Contains(s, `poll3 cursor="cur2"`) {
+		t.Fatalf("cursor not threaded across polls:\n%s", s)
+	}
+}
+
+// TestForwardToServerSingleShot: a non-pollable command (no poll directive) runs
+// exactly once — the classic behaviour is unchanged.
+func TestForwardToServerSingleShot(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir())
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"stdout": "done\n", "exit": 0})
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	status, ok := forwardToServer("credit", []string{"grant", "--addr", srv.URL}, &out, &errb)
+	if !ok || status != 0 || calls != 1 || out.String() != "done\n" {
+		t.Fatalf("status=%d ok=%v calls=%d out=%q", status, ok, calls, out.String())
 	}
 }

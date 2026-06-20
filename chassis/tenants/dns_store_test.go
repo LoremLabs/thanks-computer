@@ -30,6 +30,7 @@ func newDNSStore(t *testing.T) (*Store, *sql.DB) {
 			created_by  TEXT,
 			updated_at  TEXT NOT NULL,
 			revoked_at  TEXT,
+			verified_at TEXT,
 			dkim_selector    TEXT NOT NULL DEFAULT '',
 			dkim_private_pem TEXT NOT NULL DEFAULT '',
 			dkim_public_b64  TEXT NOT NULL DEFAULT ''
@@ -68,6 +69,9 @@ func newDNSStore(t *testing.T) (*Store, *sql.DB) {
 
 func mustZone(t *testing.T, db *sql.DB, s *Store, z DNSZone) {
 	t.Helper()
+	if z.VerifiedAt == "" {
+		z.VerifiedAt = "2026-01-01T00:00:00Z" // verified by default so gated readers see it
+	}
 	ctx := context.Background()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

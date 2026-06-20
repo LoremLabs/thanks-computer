@@ -45,6 +45,7 @@ Usage: txco dns <subcommand> ...
 
 Subcommands:
   zone create <origin>   Register a delegated zone (prints NS delegation steps)
+  zone verify <origin>   Verify the zone's NS delegate to us, then activate it
   zone list              List your delegated zones
   zone delete <origin>   Revoke a delegated zone
   record add <origin>    Add an override/extra record to a zone
@@ -154,6 +155,8 @@ func runDNSZone(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "create":
 		return runDNSZoneCreate(args[1:], stdout, stderr)
+	case "verify":
+		return runDNSZoneVerify(args[1:], stdout, stderr)
 	case "list", "ls":
 		return runDNSZoneList(args[1:], stdout, stderr)
 	case "delete", "rm", "revoke":
@@ -192,6 +195,32 @@ func runDNSZoneCreate(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runDNSZoneVerify(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("dns zone verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	f := registerDNSFlags(fs)
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, "\nUsage: txco dns zone verify [flags] <origin>\n\nConfirm the zone's NS resolve to the chassis nameservers, then activate it\n(needed only when --dns-require-zone-verification is on).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	origin, ok := parsePositional(fs, args)
+	if !ok {
+		return 2
+	}
+	if origin == "" {
+		fmt.Fprintln(stderr, "dns zone verify: <origin> is required (e.g. ops.example.com)")
+		return 2
+	}
+	res, err := f.client().VerifyZone(context.Background(), origin)
+	if err != nil {
+		fmt.Fprintf(stderr, "dns zone verify: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "verified %s — the zone is now live.\n", res.Origin)
+	return 0
+}
+
 func runDNSZoneList(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("dns zone list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -209,9 +238,13 @@ func runDNSZoneList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ORIGIN\tMODE\tNS\tTTL")
+	fmt.Fprintln(tw, "ORIGIN\tMODE\tSTATUS\tNS\tTTL")
 	for _, z := range zones {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", z.Origin, z.Mode, z.MName, z.DefaultTTL)
+		status := "verified"
+		if z.VerifiedAt == "" {
+			status = "pending"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", z.Origin, z.Mode, status, z.MName, z.DefaultTTL)
 	}
 	_ = tw.Flush()
 	return 0

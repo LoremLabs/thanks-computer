@@ -75,7 +75,7 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 	                               default_ttl, mode, updated_at,
 	                               dkim_selector, dkim_public_b64
 	                          FROM dns_zones
-	                         WHERE revoked_at IS NULL`)
+	                         WHERE revoked_at IS NULL AND verified_at IS NOT NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("dns: query zones: %w", err)
 	}

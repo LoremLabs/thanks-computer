@@ -49,9 +49,9 @@ const patTenant = "tnt_pat"
 func seedPatternZone(t *testing.T, db *sql.DB, tenantID, origin, ts string) {
 	t.Helper()
 	_, err := db.Exec(`INSERT INTO dns_zones
-		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, mode, created_at, created_by, updated_at)
-		VALUES ('dz_pat', ?, ?, 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, 'pattern', ?, 'seed', ?)`,
-		tenantID, origin, ts, ts)
+		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, mode, created_at, created_by, updated_at, verified_at)
+		VALUES ('dz_pat', ?, ?, 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, 'pattern', ?, 'seed', ?, ?)`,
+		tenantID, origin, ts, ts, ts)
 	if err != nil {
 		t.Fatalf("insert pattern zone: %v", err)
 	}
@@ -229,9 +229,9 @@ func TestManualModeNoSynthesis(t *testing.T) {
 	db := newTestDB(t)
 	// manual zone with a single explicit A; synthesis must not add NS/MX.
 	if _, err := db.Exec(`INSERT INTO dns_zones
-		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, mode, created_at, created_by, updated_at)
-		VALUES ('dz_man', ?, 'man.example.com', 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, 'manual', ?, 'seed', ?)`,
-		patTenant, fixedTS, fixedTS); err != nil {
+		(id, tenant_id, origin, mname, rname, refresh, retry, expire, minimum, default_ttl, mode, created_at, created_by, updated_at, verified_at)
+		VALUES ('dz_man', ?, 'man.example.com', 'ns1.txco.io', 'hostmaster.txco.io', 7200, 3600, 1209600, 300, 300, 'manual', ?, 'seed', ?, ?)`,
+		patTenant, fixedTS, fixedTS, fixedTS); err != nil {
 		t.Fatalf("insert manual zone: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO dns_records (id, zone_id, name, type, ttl, rdata, created_at, created_by, updated_at)

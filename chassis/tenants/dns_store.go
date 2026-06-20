@@ -37,7 +37,8 @@ func ActivePatternZoneOriginTx(ctx context.Context, tx *sql.Tx, tenantID string)
 	var origin string
 	err := tx.QueryRowContext(ctx,
 		`SELECT origin FROM dns_zones
-		  WHERE tenant_id = ? AND mode = 'pattern' AND revoked_at IS NULL
+		  WHERE tenant_id = ? AND mode = 'pattern'
+		    AND revoked_at IS NULL AND verified_at IS NOT NULL
 		  ORDER BY origin LIMIT 1`, tenantID).Scan(&origin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
@@ -63,7 +64,8 @@ func DomainCoveredByZone(ctx context.Context, db *sql.DB, slug, domain string) (
 	err := db.QueryRowContext(ctx,
 		`SELECT 1 FROM dns_zones z
 		   JOIN tenants t ON t.tenant_id = z.tenant_id
-		  WHERE t.slug = ? AND t.revoked_at IS NULL AND z.revoked_at IS NULL
+		  WHERE t.slug = ? AND t.revoked_at IS NULL
+		    AND z.revoked_at IS NULL AND z.verified_at IS NOT NULL
 		    AND (z.origin = ? OR ? LIKE '%.' || z.origin)
 		  LIMIT 1`, slug, canon, canon).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -89,6 +91,7 @@ func TenantForMailZone(ctx context.Context, db *sql.DB, domain string) (slug str
 		`SELECT t.slug FROM dns_zones z
 		   JOIN tenants t ON t.tenant_id = z.tenant_id
 		  WHERE z.revoked_at IS NULL AND t.revoked_at IS NULL
+		    AND z.verified_at IS NOT NULL
 		    AND (z.origin = ? OR ? LIKE '%.' || z.origin)
 		  ORDER BY length(z.origin) DESC LIMIT 1`, canon, canon).Scan(&slug)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -158,6 +161,11 @@ type DNSZone struct {
 	CreatedBy  string
 	UpdatedAt  string
 	RevokedAt  string
+	// VerifiedAt gates whether the zone confers authority (0019). Empty/NULL =
+	// pending (created with --dns-require-zone-verification on, awaiting an NS
+	// check); set = verified. When the flag is off, CreateZoneTx stamps it at
+	// creation so behavior is unchanged.
+	VerifiedAt string
 	// Per-domain DKIM material (0016), generated once on the control plane at
 	// CreateZoneTx and fleet-synced on this row. Populated by GetZoneByIDTx
 	// (for the producer); ListZones/LookupActiveZone leave them zero.
@@ -356,15 +364,21 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 	if z.CreatedBy != "" {
 		createdByArg = z.CreatedBy
 	}
+	// verified_at (0019): the caller stamps it (handleCreateZone passes `now`
+	// when --dns-require-zone-verification is off, "" when on → pending).
+	var verifiedAtArg any
+	if strings.TrimSpace(z.VerifiedAt) != "" {
+		verifiedAtArg = z.VerifiedAt
+	}
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO dns_zones
 		     (id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		      minimum, default_ttl, mode, created_at, created_by, updated_at,
-		      dkim_selector, dkim_private_pem, dkim_public_b64)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		      dkim_selector, dkim_private_pem, dkim_public_b64, verified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		z.ID, z.TenantID, canon, z.MName, z.RName, z.Refresh, z.Retry, z.Expire,
 		z.Minimum, z.DefaultTTL, z.Mode, now, createdByArg, now,
-		z.DKIMSelector, z.DKIMPrivatePEM, z.DKIMPublicB64)
+		z.DKIMSelector, z.DKIMPrivatePEM, z.DKIMPublicB64, verifiedAtArg)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrZoneExists
@@ -378,7 +392,7 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 func (s *Store) ListZones(ctx context.Context, tenantID string, includeRevoked bool) ([]DNSZone, error) {
 	q := `SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 	             minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
-	             updated_at, COALESCE(revoked_at, '')
+	             updated_at, COALESCE(revoked_at, ''), COALESCE(verified_at, '')
 	        FROM dns_zones
 	       WHERE tenant_id = ?`
 	if !includeRevoked {
@@ -395,7 +409,7 @@ func (s *Store) ListZones(ctx context.Context, tenantID string, includeRevoked b
 		var z DNSZone
 		if err := rows.Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
 			&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
-			&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt); err != nil {
+			&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt, &z.VerifiedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, z)
@@ -412,12 +426,12 @@ func GetZoneByIDTx(ctx context.Context, tx *sql.Tx, id string) (DNSZone, error) 
 	err := tx.QueryRowContext(ctx,
 		`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		        minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
-		        updated_at, COALESCE(revoked_at, ''),
+		        updated_at, COALESCE(revoked_at, ''), COALESCE(verified_at, ''),
 		        dkim_selector, dkim_private_pem, dkim_public_b64
 		   FROM dns_zones
 		  WHERE id = ?`, id).Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
 		&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
-		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt,
+		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt, &z.VerifiedAt,
 		&z.DKIMSelector, &z.DKIMPrivatePEM, &z.DKIMPublicB64)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DNSZone{}, ErrNotFound
@@ -452,6 +466,28 @@ func (s *Store) LookupActiveZone(ctx context.Context, tenantID, origin string) (
 		return DNSZone{}, err
 	}
 	return z, nil
+}
+
+// SetZoneVerifiedTx stamps verified_at (and bumps updated_at, so the synthesized
+// SOA serial advances) on a tenant's active zone — flipping a PENDING zone live
+// once its NS delegation is confirmed. Idempotent (re-verify refreshes it).
+// ErrNotFound if no active zone for (tenantID, origin).
+func SetZoneVerifiedTx(ctx context.Context, tx *sql.Tx, tenantID, origin, now string) error {
+	canon, ok := CanonicalizeHost(origin)
+	if !ok {
+		return ErrNotFound
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE dns_zones SET verified_at = ?, updated_at = ?
+		  WHERE tenant_id = ? AND origin = ? AND revoked_at IS NULL`,
+		now, now, tenantID, canon)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // RevokeZoneTx soft-revokes a tenant's active zone by origin. Lenient:

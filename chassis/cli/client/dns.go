@@ -55,6 +55,7 @@ type DNSZoneInfo struct {
 	DefaultTTL int    `json:"default_ttl"`
 	CreatedAt  string `json:"created_at,omitempty"`
 	RevokedAt  string `json:"revoked_at,omitempty"`
+	VerifiedAt string `json:"verified_at,omitempty"`
 }
 
 // CreateZoneResult is the create-zone response (zone + delegation hint).
@@ -97,6 +98,38 @@ func (c *Client) CreateZone(ctx context.Context, origin, mode string) (*CreateZo
 	var out CreateZoneResult
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode create zone: %w", err)
+	}
+	return &out, nil
+}
+
+// VerifyZoneResult is the verify-zone response.
+type VerifyZoneResult struct {
+	Origin     string `json:"origin"`
+	VerifiedAt string `json:"verified_at"`
+}
+
+// VerifyZone confirms a zone's NS delegate to the chassis (POST
+// /dns/zones/{origin}/verify), flipping a pending zone live.
+func (c *Client) VerifyZone(ctx context.Context, origin string) (*VerifyZoneResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.scopedURL("/dns/zones/"+url.PathEscape(origin)+"/verify"), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out VerifyZoneResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode verify zone: %w", err)
 	}
 	return &out, nil
 }

@@ -71,6 +71,12 @@ func splitForwardFlags(args []string) (globals map[string]string, rest []string)
 //
 // Any other outcome (the command ran, or the configured server returned an
 // auth/server/network error) is surfaced with ok=true.
+// forwardRequestTimeout bounds each /v1/cli request. Generous (vs the old 15s)
+// so a command that collects/long-polls server-side — e.g. a pollable tail —
+// isn't cut off mid-window; the shared http client's own 30s timeout is the
+// real ceiling.
+const forwardRequestTimeout = 35 * time.Second
+
 func forwardToServer(name string, args []string, stdout, stderr io.Writer) (status int, ok bool) {
 	globals, rest := splitForwardFlags(args)
 	addr := globals["addr"]
@@ -81,24 +87,37 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 	if target.Addr == "" {
 		return 0, false // not logged in / no chassis configured
 	}
+	c := client.New(target)
+	argv := append([]string{name}, rest...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	res, err := client.New(target).RunCommand(ctx, append([]string{name}, rest...))
-	if err != nil {
-		if errors.Is(err, client.ErrCommandUnsupported) {
-			return 0, false // server doesn't implement it → graceful fall-through
+	// Poll loop: a single request for the common case; a POLLABLE command
+	// (Result.PollAfterMs > 0) makes us print, wait, and re-run with the
+	// returned cursor, until it stops or the user interrupts (Ctrl-C kills the
+	// process, the server sees the dropped connection and cleans up).
+	cursor := ""
+	first := true
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), forwardRequestTimeout)
+		res, err := c.RunCommandCursor(ctx, argv, cursor)
+		cancel()
+		if err != nil {
+			if first && errors.Is(err, client.ErrCommandUnsupported) {
+				return 0, false // server doesn't implement it → graceful fall-through
+			}
+			fmt.Fprintf(stderr, "txco: %v\n", err)
+			return 1, true
 		}
-		fmt.Fprintf(stderr, "txco: %v\n", err)
-		return 1, true
+		first = false
+		if res.Stdout != "" {
+			fmt.Fprint(stdout, res.Stdout)
+		}
+		if res.Stderr != "" {
+			fmt.Fprint(stderr, res.Stderr)
+		}
+		if res.PollAfterMs <= 0 {
+			return res.Exit, true
+		}
+		cursor = res.Cursor
+		time.Sleep(time.Duration(res.PollAfterMs) * time.Millisecond)
 	}
-
-	if res.Stdout != "" {
-		fmt.Fprint(stdout, res.Stdout)
-	}
-	if res.Stderr != "" {
-		fmt.Fprint(stderr, res.Stderr)
-	}
-	return res.Exit, true
 }
