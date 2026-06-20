@@ -15,10 +15,16 @@ the [auto-responder tutorial](../../../docs/tutorial/auto-responder.md) pulls.
 
 ## How the mail flows
 
-When you `txco apply` this stack, the chassis mints a structured host
-`<stack>-<rand>.stacks.thanks.computer` that is *both*:
+This stack has no web channel, so it doesn't get a host automatically. After `txco apply`,
+mint one and bind it to the stack:
 
-- an **inbox** — mail to `<anything>@<stack>-<rand>.stacks.thanks.computer` routes to this
+```sh
+txco auth tenant hostnames add --mint --stack autoreply
+```
+
+That returns a structured host `autoreply-<rand>.stacks.thanks.computer` that is *both*:
+
+- an **inbox** — mail to `<anything>@autoreply-<rand>.stacks.thanks.computer` routes to this
   stack's `_mail` channel, and
 - a **verified, DKIM-signing sender** — so the reply (FROM the address that was written to)
   passes the anti-spoof check with no setup.
@@ -36,7 +42,8 @@ a null `<>` reverse-path (RFC 3834).
 ```sh
 txco install auto-responder --as autoreply
 txco apply
-# → https://autoreply-<rand>.stacks.thanks.computer  (also your inbox)
+txco auth tenant hostnames add --mint --stack autoreply
+# → autoreply-<rand>.stacks.thanks.computer
 # email anything@autoreply-<rand>.stacks.thanks.computer → get an auto-reply
 ```
 

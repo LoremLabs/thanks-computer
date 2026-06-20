@@ -1,0 +1,4 @@
+{
+  "note": "The room inlet lives on the admin API (POST /v1/tenants/{t}/rooms/{room}/messages) plus an SSE feed, not the web port, so the smoke harness's HTTP checks don't apply — only the dry-run baseline runs here. Exercise it manually: `txco apply`, then `thanks --room support \"hello\"` (see README.md).",
+  "checks": []
+}

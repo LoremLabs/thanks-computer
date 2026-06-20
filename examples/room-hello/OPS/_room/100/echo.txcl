@@ -1,0 +1,11 @@
+# OPS/_room/100 — echo a room message back as a reply.
+#
+# The room inlet (`thanks` / `txco room`) routes every @src=="room" event for
+# this tenant into _room/0, so this stack runs for each message. This rule
+# answers by writing `.text`: the inlet reads it as the reply, returns it to the
+# sender, and publishes it to the room's live feed.
+#
+# @ is sugar for ._txc, so @room.text is the incoming message text and `.text`
+# (no @) is the top-level reply the inlet looks for.
+WHEN @src == "room"
+  EMIT .text = &concat("echo: ", @room.text)

@@ -1,0 +1,23 @@
+# examples/room-hello — the smallest possible room.
+#
+# A `_room` stack that echoes whatever you say. The room inlet routes every
+# `@src == "room"` event for this tenant into `_room/0`; the rule below answers
+# by writing `.text`, which the inlet returns to you and publishes to the room
+# feed.
+#
+# Try it (against a running chassis — e.g. `txco dev` in this directory):
+#
+#   txco apply
+#   thanks --room support "hello"          # one-shot send
+#   txco room --room support "hello"       # same thing, explicit
+#   thanks --room support                  # interactive: live feed + input
+#
+# Replace the echo with real work — an AI op, a lookup, a human handoff. A room
+# message is just an event.
+
+target: dev
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow
