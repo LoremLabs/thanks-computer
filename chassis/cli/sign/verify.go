@@ -21,6 +21,7 @@ type TrustedKey struct {
 type Verdict struct {
 	Signed   bool   `json:"signed"`
 	KeyID    string `json:"keyId,omitempty"`
+	Name     string `json:"name,omitempty"` // friendly name of the matched trusted key, when known
 	Trusted  bool   `json:"trusted"`
 	Reason   string `json:"reason,omitempty"`
 	SignedAt string `json:"signedAt,omitempty"`
@@ -64,7 +65,7 @@ func VerifyArtifact(manifestBytes, layerBytes []byte, ann map[string]string, exp
 		if t.Registry != "" && t.Registry != registryHost {
 			continue
 		}
-		return Verdict{Signed: true, Trusted: true, KeyID: keyID, SignedAt: p.SignedAt}
+		return Verdict{Signed: true, Trusted: true, KeyID: keyID, Name: t.Name, SignedAt: p.SignedAt}
 	}
 	return Verdict{Signed: true, KeyID: keyID, SignedAt: p.SignedAt, Reason: "signed by untrusted key " + keyID}
 }
@@ -73,6 +74,9 @@ func VerifyArtifact(manifestBytes, layerBytes []byte, ann map[string]string, exp
 func (v Verdict) String() string {
 	switch {
 	case v.Signed && v.Trusted:
+		if v.Name != "" {
+			return "verified: signed by " + v.Name + " [" + v.KeyID + "]"
+		}
 		return "verified: signed by " + v.KeyID
 	case v.Signed:
 		return "signed but untrusted: " + v.Reason

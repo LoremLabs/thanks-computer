@@ -5,7 +5,9 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"io"
+	"os"
 
+	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/sign"
 	"github.com/loremlabs/thanks-computer/chassis/cli/source"
 )
@@ -67,6 +69,11 @@ func verifyPackageSignature(prov source.Provenance, trusted []sign.TrustedKey) (
 	if !found {
 		return sign.Verdict{Reason: "no signature found"}, nil
 	}
+	// Augment the local trust set with keys the registry publishes at its
+	// well-known endpoint, scoped to that registry host — so packages from a
+	// (blessed) registry verify with no local `trust:`/--key config. Best-effort:
+	// a missing endpoint just leaves the package "untrusted".
+	trusted = append(trusted, fetchRegistrySigningKeys(context.Background(), prov.Registry)...)
 	return sign.VerifyArtifact(man, layer, ann, prov.Digest, ref.Repository(), prov.Registry, trusted), nil
 }
 
@@ -77,7 +84,7 @@ func verifyPackageSignature(prov source.Provenance, trusted []sign.TrustedKey) (
 func enforceSignaturePosture(v sign.Verdict, requireSig bool, stdout, stderr io.Writer) bool {
 	switch {
 	case v.Signed && v.Trusted:
-		fmt.Fprintf(stdout, "  verified: signed by %s\n", v.KeyID)
+		fmt.Fprintf(stdout, "  %s\n", verifiedLine(v, banner.IsTTY(stdout) && os.Getenv("NO_COLOR") == ""))
 		return true
 	case requireSig:
 		fmt.Fprintf(stderr, "  signature required, but %s\n", verdictReason(v))
@@ -86,6 +93,22 @@ func enforceSignaturePosture(v sign.Verdict, requireSig bool, stdout, stderr io.
 		fmt.Fprintf(stderr, "  warning: %s (use --require-signature to enforce)\n", verdictReason(v))
 		return true
 	}
+}
+
+// verifiedLine renders the success line: a green check, the friendly signer
+// name when known, and the key fingerprint dimmed in brackets. With color=false
+// (pipes, files, NO_COLOR) it's the same text with no escape codes.
+func verifiedLine(v sign.Verdict, color bool) string {
+	green, bold, dim, reset := "", "", "", ""
+	if color {
+		green, bold, dim, reset = "\x1b[32m", "\x1b[1m", "\x1b[2m", "\x1b[0m"
+	}
+	check := green + "✔" + reset
+	if v.Name != "" {
+		return fmt.Sprintf("%s verified: signed by %s%s%s %s[%s]%s",
+			check, bold, v.Name, reset, dim, v.KeyID, reset)
+	}
+	return fmt.Sprintf("%s verified: signed by %s%s%s", check, dim, v.KeyID, reset)
 }
 
 func verdictReason(v sign.Verdict) string {

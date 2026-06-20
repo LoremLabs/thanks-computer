@@ -21,6 +21,9 @@ import (
 // publish and a subsequent install/pull/inspect round-trip with no network.
 func sharedStore(t *testing.T) {
 	t.Helper()
+	// Keep signature tests hermetic: skip the live .well-known key fetch (trust
+	// here comes from --key / workspace trust:, not network discovery).
+	t.Setenv("TXCO_NO_KEY_DISCOVERY", "1")
 	store, err := oci.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
