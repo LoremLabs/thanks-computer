@@ -48,6 +48,7 @@ func printAdminUsage(w io.Writer) {
 	fmt.Fprint(w, `
 Usage:
   txco admin resync --tenant <slug>            Re-emit a tenant's control-plane state to the fleet
+  txco admin tenant show <slug>                Show a tenant's admission state (enabled/suspended + deny reason)
   txco admin tenant suspend <slug> [--status]  Deny a tenant's requests (default 402) until resumed
   txco admin tenant resume <slug>              Restore a suspended tenant
 
@@ -69,6 +70,8 @@ func runAdminTenant(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "show", "status", "get":
+		return runAdminTenantShow(args[1:], stdout, stderr)
 	case "suspend":
 		return runAdminTenantSuspend(args[1:], stdout, stderr)
 	case "resume":
@@ -89,10 +92,13 @@ func printAdminTenantUsage(w io.Writer) {
 	banner.PrintLogo(w)
 	fmt.Fprint(w, `
 Usage:
+  txco admin tenant show    <slug>
   txco admin tenant suspend <slug> [--status 402] [--reason payment_required]
   txco admin tenant resume  <slug>
   txco admin tenant limits  <slug> [--rate 50/s] [--burst N] [--concurrency N]
 
+`+"`show`"+` prints a tenant's current admission state (read-only) — whether it's
+admitting requests or being denied, and the deny status+reason it returns.
 Suspend/resume a tenant's request admission (the 402/403 gate), or set its
 node-local rate-limit / concurrency caps (429). A suspended tenant's requests
 are denied before its stack runs; limits are enforced per chassis. Live on the
@@ -146,6 +152,85 @@ Flags:
 	fmt.Fprintf(stdout, "Suspended tenant %q — requests now return %d (%s).\n", st.Slug, st.DenyStatus, st.DenyReason)
 	fmt.Fprintf(stdout, "Resume with: txco admin tenant resume %s\n", st.Slug)
 	return 0
+}
+
+// runAdminTenantShow: `txco admin tenant show <slug>` — read-only admission state.
+func runAdminTenantShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("admin tenant show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addr := fs.String("addr", "", "chassis admin endpoint (overrides the active profile's chassis URL)")
+	target := fs.String("target", "", "workspace target name")
+	user := fs.String("user", "", "basic-auth user")
+	pass := fs.String("pass", "", "basic-auth password")
+	profile := fs.String("profile", "", "signing profile (defaults to the active profile)")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco admin tenant show <slug> [flags]
+
+Show a tenant's current admission state (read-only): whether it's admitting
+requests or being denied, the deny status+reason a denied request receives,
+and its node-local rate/concurrency limits. Needs a super_admin profile.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		auth.PrintCLIError(stderr, "admin tenant show: <slug> is required")
+		return 2
+	}
+	slug := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil { // allow flags after the slug
+		return 2
+	}
+
+	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
+	st, err := client.New(clientTarget).GetTenantRuntimeState(context.Background(), slug)
+	if err != nil {
+		auth.PrintCLIError(stderr, requestErrorMessage("admin tenant show", clientTarget, *profile, err))
+		return 1
+	}
+
+	// Either knob denies: !enabled (operator suspend) OR suspended (a programmatic
+	// gate set by an external service). Mirrors admission.TenantRuntimeState.Admitted.
+	fmt.Fprintf(stdout, "tenant:      %s\n", st.Slug)
+	if !st.Enabled || st.Suspended {
+		cause := "suspended by a programmatic gate (an external service set the suspended column)"
+		if !st.Enabled {
+			cause = "disabled by an operator (txco admin tenant suspend)"
+		}
+		fmt.Fprintf(stdout, "admission:   DENIED → %d %s\n", st.DenyStatus, st.DenyReason)
+		fmt.Fprintf(stdout, "cause:       %s\n", cause)
+		fmt.Fprintf(stdout, "resume:      txco admin tenant resume %s%s\n", st.Slug, resumeNote(st))
+	} else {
+		fmt.Fprintf(stdout, "admission:   OK (admitting requests)\n")
+	}
+	fmt.Fprintf(stdout, "enabled:     %t\n", st.Enabled)
+	fmt.Fprintf(stdout, "suspended:   %t\n", st.Suspended)
+	rate := "none"
+	if st.RateLimitRPS > 0 {
+		rate = fmt.Sprintf("%g rps (burst %d)", st.RateLimitRPS, st.RateBurst)
+	}
+	fmt.Fprintf(stdout, "rate limit:  %s\n", rate)
+	conc := "unlimited"
+	if st.ConcurrencyLimit > 0 {
+		conc = fmt.Sprintf("%d", st.ConcurrencyLimit)
+	}
+	fmt.Fprintf(stdout, "concurrency: %s\n", conc)
+	return 0
+}
+
+// resumeNote warns when `resume` won't help because the deny is a programmatic
+// gate (resume only clears the operator `enabled` column, not `suspended`).
+func resumeNote(st *client.TenantRuntimeState) string {
+	if st.Suspended {
+		return "   (note: clears the operator gate only; a programmatic suspension must be cleared by the service that set it)"
+	}
+	return ""
 }
 
 // runAdminTenantResume: `txco admin tenant resume <slug>`.

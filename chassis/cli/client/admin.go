@@ -796,6 +796,33 @@ func (c *Client) ResumeTenant(ctx context.Context, slug string) (*TenantRuntimeS
 	return c.postTenantRuntimeState(ctx, slug, "resume", SuspendTenantRequest{})
 }
 
+// GetTenantRuntimeState reads a tenant's current admission state (read-only) —
+// enabled/suspended, the deny status+reason a denied request gets, and the
+// rate/concurrency limits. super_admin. Signed.
+func (c *Client) GetTenantRuntimeState(ctx context.Context, slug string) (*TenantRuntimeState, error) {
+	endpoint := strings.TrimRight(c.target.Addr, "/") + "/v1/tenants/" + url.PathEscape(slug) + "/runtime"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(httpReq, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out TenantRuntimeState
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode tenant runtime state: %w", err)
+	}
+	return &out, nil
+}
+
 func (c *Client) postTenantRuntimeState(ctx context.Context, slug, action string, req SuspendTenantRequest) (*TenantRuntimeState, error) {
 	body, err := json.Marshal(req)
 	if err != nil {

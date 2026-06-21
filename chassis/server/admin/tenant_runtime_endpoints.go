@@ -225,6 +225,24 @@ func (c *Controller) handleSetTenantLimits(w http.ResponseWriter, r *http.Reques
 	c.writeRuntimeRow(w, r, ac, rr)
 }
 
+// handleGetTenantRuntimeState returns a tenant's current admission/runtime
+// state (read-only) — enabled/suspended, the deny status+reason a denied request
+// receives, and the rate/concurrency limits. Lets an operator see WHY a tenant
+// is being denied (the deny status+reason set by the operator or a programmatic
+// gate) without mutating anything. super_admin.
+func (c *Controller) handleGetTenantRuntimeState(w http.ResponseWriter, r *http.Request) {
+	ac := c.runtimeStateAuth(w, r)
+	if ac == nil {
+		return
+	}
+	rr, err := c.loadRuntimeRow(r.Context(), ac.TenantID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "load_runtime_state", map[string]any{"err": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, runtimeRecord(ac, rr))
+}
+
 // runtimeStateAuth enforces super_admin and returns the resolved auth
 // context (with a populated TenantID), or writes the error and returns nil.
 func (c *Controller) runtimeStateAuth(w http.ResponseWriter, r *http.Request) *auth.Context {
@@ -328,7 +346,13 @@ func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, tenantRuntimeStateRecord{
+	writeJSON(w, http.StatusOK, runtimeRecord(ac, rr))
+}
+
+// runtimeRecord projects a loaded row into the wire record (shared by the
+// read-only GET and the mutating verbs).
+func runtimeRecord(ac *auth.Context, rr runtimeRow) tenantRuntimeStateRecord {
+	return tenantRuntimeStateRecord{
 		TenantID:         ac.TenantID,
 		Slug:             ac.TenantSlug,
 		Enabled:          rr.Enabled != 0,
@@ -338,7 +362,7 @@ func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac 
 		RateLimitRPS:     rr.RateLimitRPS,
 		RateBurst:        rr.RateBurst,
 		ConcurrencyLimit: rr.ConcurrencyLimit,
-	})
+	}
 }
 
 // fleetUploadEntitlementUpsert mirrors fleetUploadHostnameUpsert: a

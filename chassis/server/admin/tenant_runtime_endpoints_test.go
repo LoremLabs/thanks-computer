@@ -107,6 +107,57 @@ func TestSuspendTenantDefaultsTo402(t *testing.T) {
 	}
 }
 
+func TestGetTenantRuntimeState(t *testing.T) {
+	c := newRuntimeStateTestController(t)
+	get := func() (tenantRuntimeStateRecord, int) {
+		req := withSuperAdminTenantContext(httptest.NewRequest(http.MethodGet,
+			"/v1/tenants/default/runtime", nil), "tnt_default", "default")
+		rr := httptest.NewRecorder()
+		c.handleGetTenantRuntimeState(rr, req)
+		var rec tenantRuntimeStateRecord
+		_ = json.Unmarshal(rr.Body.Bytes(), &rec)
+		return rec, rr.Code
+	}
+
+	// Default (no row) → admitting.
+	rec, code := get()
+	if code != http.StatusOK {
+		t.Fatalf("status=%d", code)
+	}
+	if !rec.Enabled || rec.Suspended {
+		t.Errorf("default tenant should admit: %+v", rec)
+	}
+
+	// Suspend, then GET reflects the deny — read-only, so the row is unchanged.
+	sreq := withSuperAdminTenantContext(httptest.NewRequest(http.MethodPost,
+		"/v1/tenants/default/suspend", bytes.NewReader([]byte(`{}`))), "tnt_default", "default")
+	c.handleSuspendTenant(httptest.NewRecorder(), sreq)
+
+	rec, code = get()
+	if code != http.StatusOK {
+		t.Fatalf("status=%d", code)
+	}
+	if rec.Enabled {
+		t.Errorf("suspended tenant should not be enabled: %+v", rec)
+	}
+	if rec.DenyStatus != 402 || rec.DenyReason != "payment_required" {
+		t.Errorf("want deny 402 payment_required, got %d %q", rec.DenyStatus, rec.DenyReason)
+	}
+}
+
+func TestGetTenantRuntimeStateRejectsNonSuperAdmin(t *testing.T) {
+	c := newRuntimeStateTestController(t)
+	ac := &auth.Context{Source: "signed", ActorID: "actor_x", TenantID: "tnt_default", TenantSlug: "default",
+		Capabilities: []string{"hostname:*:write"}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/tenants/default/runtime", nil)
+	req = req.WithContext(auth.WithContext(req.Context(), ac))
+	rr := httptest.NewRecorder()
+	c.handleGetTenantRuntimeState(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("non-super-admin get status=%d, want 403", rr.Code)
+	}
+}
+
 func TestSuspendTenantRejectsNonSuperAdmin(t *testing.T) {
 	c := newRuntimeStateTestController(t)
 	ac := &auth.Context{Source: "signed", ActorID: "actor_x", TenantID: "tnt_default", TenantSlug: "default",

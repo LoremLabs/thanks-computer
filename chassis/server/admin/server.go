@@ -425,6 +425,7 @@ func (c *Controller) Start() {
 	// `enabled` column; the `suspended` column is the programmatic gate driven
 	// by background services (e.g. the credit reconciler) via entitlement.updated
 	// events / the in-process SetGate path — so the two never clobber each other.
+	tenantR.HandleFunc("/runtime", c.handleGetTenantRuntimeState).Methods(http.MethodGet)
 	tenantR.HandleFunc("/suspend", c.handleSuspendTenant).Methods(http.MethodPost)
 	tenantR.HandleFunc("/resume", c.handleResumeTenant).Methods(http.MethodPost)
 	tenantR.HandleFunc("/limits", c.handleSetTenantLimits).Methods(http.MethodPost)
