@@ -1504,12 +1504,20 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 	}
 	committed = true
 
-	// Refresh the in-memory dbcache synchronously so the next request
-	// sees the new ops without waiting for the FS watcher.
-	if err := c.pu.Dbc.Reload(); err != nil {
-		c.pu.Logger.Warn("dbcache reload after activate failed; FS watcher will retry",
-			zap.String("err", err.Error()))
-	}
+	// Refresh the in-memory dbcache so this node serves the new active
+	// version. Do it ASYNC: the activation is already durably committed and
+	// the data plane has it via the control event published above, so
+	// blocking the HTTP response on the multi-second dump+replay only times
+	// out at the edge (502) with no correctness benefit. The FS watcher is
+	// the backstop if this reload errors. Trade-off: this node's in-memory
+	// mirror may lag the commit by one reload cycle; acceptable since the
+	// commit is durable and the fleet event is the source of truth.
+	go func() {
+		if err := c.pu.Dbc.Reload(); err != nil {
+			c.pu.Logger.Warn("async dbcache reload after activate failed; FS watcher will retry",
+				zap.String("err", err.Error()))
+		}
+	}()
 
 	resp := activateResponse{VersionNumber: req.VersionNumber}
 	if currentActiveID.Valid && currentActiveID.Int64 != targetVersionID {
