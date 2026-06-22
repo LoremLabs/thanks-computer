@@ -908,12 +908,22 @@ func materialiseFiles(ctx context.Context, fcas filecas.Store, files map[string]
 	g.SetLimit(materialiseConcurrency)
 	for path, content := range files {
 		h := sha256Hex(content)
-		g.Go(func() error {
+		g.Go(func() (err error) {
+			// A panic in a worker goroutine would otherwise crash the WHOLE
+			// chassis — the HTTP handler's recover middleware can't reach another
+			// goroutine — turning a recoverable backend fault into a dropped
+			// connection (502). Convert it to an error so activation rolls back
+			// cleanly and the cause surfaces in the response/logs.
+			defer func() {
+				if r := recover(); r != nil {
+					err = &materialiseError{http.StatusInternalServerError, "filecas_panic", map[string]any{"path": path, "panic": fmt.Sprint(r)}}
+				}
+			}()
 			if ok, _ := fcas.Exists(gctx, h); ok {
 				return nil
 			}
-			if err := fcas.Put(gctx, h, []byte(content)); err != nil {
-				return &materialiseError{http.StatusServiceUnavailable, "filecas_put", map[string]any{"path": path, "err": err.Error()}}
+			if perr := fcas.Put(gctx, h, []byte(content)); perr != nil {
+				return &materialiseError{http.StatusServiceUnavailable, "filecas_put", map[string]any{"path": path, "err": perr.Error()}}
 			}
 			return nil
 		})

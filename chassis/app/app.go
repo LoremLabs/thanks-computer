@@ -335,6 +335,29 @@ func Run(bi BuildInfo) int {
 	if err != nil {
 		logger.Fatal("KVStore connection error", zap.String("kvstoreError", err.Error()))
 	}
+	// Boot visibility, consistent with the continuation/artifact/filecas/secret
+	// stores. The redis backend's NewStore does NOT verify connectivity — it
+	// returns a usable handle even when redis is down — so for redis we actively
+	// probe. The probe is NON-FATAL: go-redis reconnects on its own, so an
+	// unreachable redis is a WARN (KV ops fail until it returns), not a boot
+	// failure. boltdb is a local file, so no probe is needed.
+	if conf.KVStore == redis.StoreName {
+		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, perr := kv.Exists(pctx, "_txc:kv:bootprobe", nil)
+		cancel()
+		if perr != nil {
+			logger.Warn("kv store loaded but redis not reachable at boot (will reconnect)",
+				zap.String("backend", conf.KVStore),
+				zap.Strings("addrs", conf.KVStoreAddrs),
+				zap.String("err", perr.Error()))
+		} else {
+			logger.Info("kv store loaded",
+				zap.String("backend", conf.KVStore),
+				zap.Strings("addrs", conf.KVStoreAddrs))
+		}
+	} else {
+		logger.Info("kv store loaded", zap.String("backend", conf.KVStore))
+	}
 
 	// Start chassis Personalities
 	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver)

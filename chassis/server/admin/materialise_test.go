@@ -13,15 +13,19 @@ import (
 // number of concurrent Puts, can pretend some hashes already exist, and can fail
 // every Put.
 type countingStore struct {
-	exists  map[string]bool
-	putErr  error
-	delay   time.Duration
-	puts    int32
-	inFlt   int32
-	maxInFl int32
+	exists   map[string]bool
+	putErr   error
+	putPanic bool
+	delay    time.Duration
+	puts     int32
+	inFlt    int32
+	maxInFl  int32
 }
 
 func (s *countingStore) Put(_ context.Context, _ string, _ []byte) error {
+	if s.putPanic {
+		panic("simulated backend panic")
+	}
 	n := atomic.AddInt32(&s.inFlt, 1)
 	for {
 		m := atomic.LoadInt32(&s.maxInFl)
@@ -82,5 +86,19 @@ func TestMaterialiseFilesPutError(t *testing.T) {
 	}
 	if me.code != "filecas_put" {
 		t.Fatalf("code = %q, want filecas_put", me.code)
+	}
+}
+
+// A panic in a worker goroutine becomes a clean materialiseError, not a process
+// crash (which would surface as a 502 at the edge).
+func TestMaterialiseFilesRecoversPanic(t *testing.T) {
+	files := map[string]string{"FILES/a.html": "aaa"}
+	s := &countingStore{exists: map[string]bool{}, putPanic: true}
+	me := materialiseFiles(context.Background(), s, files)
+	if me == nil {
+		t.Fatal("expected a materialiseError from the recovered panic, got nil")
+	}
+	if me.code != "filecas_panic" {
+		t.Fatalf("code = %q, want filecas_panic", me.code)
 	}
 }
