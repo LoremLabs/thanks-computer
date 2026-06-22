@@ -50,6 +50,13 @@ type DbCache struct {
 	Logger *zap.Logger
 	Mu     sync.Mutex
 
+	// reloadMu serializes Reload() end-to-end. It is deliberately SEPARATE
+	// from Mu (which Snapshot() takes): the multi-second dump+replay runs
+	// under reloadMu only, so readers are never blocked by it — just the
+	// brief swap+overlay critical section takes Mu. See Reload for why the
+	// serialization is still required for correctness.
+	reloadMu sync.Mutex
+
 	// Source is the chassis's runtime *sql.DB handle — the live,
 	// configured connection pool that the rest of the chassis writes
 	// through. Reload() dumps from this handle (via
@@ -123,21 +130,33 @@ func (dbc *DbCache) Snapshot() *sql.DB {
 // auth DB (when present) is owned exclusively by the admin role and is
 // never mirrored into the read cache.
 //
-// Concurrency: the entire dump+rebuild+swap runs under the mutex. Two
-// concurrent writers each calling Reload after their commits would
-// otherwise dump in parallel (each capturing a snapshot before some of
-// the OTHER writer's commits land), then queue at the swap mutex; the
-// reload that finishes its dump LAST would publish a STALE snapshot,
-// silently clobbering durably-committed rows from the mirror. Symptom:
-// a row on disk but missing from the resolver until the next
-// (unrelated) reload happens to dump after every commit settled. Moving
-// the dump inside the lock costs serial reloads under write bursts, but
-// the dump was the dominant cost regardless — concurrent dumps were a
-// parallelism mirage.
+// Concurrency: the dump+replay+swap runs under reloadMu (serializing
+// reloads end-to-end) while only the swap+overlay touches Mu — so the
+// expensive dump never blocks Snapshot() readers. Serialization is still
+// required: two concurrent writers each calling Reload after their
+// commits would otherwise dump in parallel (each capturing a snapshot
+// before some of the OTHER writer's commits land), and the reload that
+// finishes its dump LAST would publish a STALE snapshot, silently
+// clobbering durably-committed rows from the mirror. Symptom: a row on
+// disk but missing from the resolver until the next (unrelated) reload
+// happens to dump after every commit settled. reloadMu held across
+// dump+swap keeps the second reload's dump strictly after the first's
+// swap. (This costs serial reloads under write bursts, but the dump was
+// the dominant cost regardless — concurrent dumps were a parallelism
+// mirage.)
 func (dbc *DbCache) Reload() error {
-	dbc.Mu.Lock()
-	defer dbc.Mu.Unlock()
+	// Serialize reloads under reloadMu — NOT Mu. The expensive dump+replay
+	// below ran under Mu (the lock Snapshot() takes), so a large stack
+	// activation stalled every reader (healthz, ingress resolver, DNS) for
+	// the whole multi-second dump → edge 502s / "web response timeout".
+	// reloadMu keeps reloads strictly serial without blocking readers; only
+	// the brief swap+overlay critical section below takes Mu.
+	dbc.reloadMu.Lock()
+	defer dbc.reloadMu.Unlock()
 
+	// Build the fresh mirror (dump Source → replay into a new :memory: DB)
+	// with Mu NOT held, so readers keep serving from the current mirror
+	// throughout. This is the dominant cost of a reload.
 	var b bytes.Buffer
 	out := bufio.NewWriter(&b)
 
@@ -168,23 +187,37 @@ func (dbc *DbCache) Reload() error {
 	dbc.Logger.Debug("dbcache reload",
 		zap.String("source", dbc.Conf.DbRuntimeDsn),
 		zap.Int("dump_bytes", b.Len()))
-	_, err = dbNew.Exec(b.String())
-	if err != nil {
+	if _, err = dbNew.Exec(b.String()); err != nil {
 		dbc.Logger.Warn("reload cachedb open db err", zap.String("err", err.Error()))
+		_ = dbNew.Close() // don't leak the half-built mirror on the error path
 		return err
 	}
 
-	// Atomic publish of the freshly-built mirror. The PREVIOUS handle
-	// must be closed or every Reload leaks a whole :memory: SQLite DB
-	// (database/sql does not close it on GC). It can't be closed
-	// synchronously here: a reader that captured it via Snapshot()
-	// just before this swap may still be mid-query on it. Close it
-	// after a grace window that dwarfs any in-memory snapshot query
-	// (the ingress resolver's is a 250ms ctx; others are similarly
-	// short), or immediately on shutdown. Bounds live mirrors to the
-	// current one plus at most a couple in their grace window.
+	// Brief critical section under Mu — the only part Snapshot() readers can
+	// wait on. Publish the mirror and run the OnReload overlay here, in the
+	// SAME order as before, so no reader observes dbNew before sysops has
+	// re-applied the trusted opstacks into it. Milliseconds (a pointer swap +
+	// the bounded overlay), not the multi-second dump above.
+	dbc.Mu.Lock()
 	old := dbc.Db
 	dbc.Db = dbNew
+	if dbc.OnReload != nil {
+		if herr := dbc.OnReload(dbNew); herr != nil {
+			// Non-fatal: log loudly and keep serving with the snapshot
+			// as-is. A broken overlay must not take the chassis dark.
+			dbc.Logger.Error("dbcache OnReload hook failed",
+				zap.String("err", herr.Error()))
+		}
+	}
+	dbc.Mu.Unlock()
+
+	// Close the superseded mirror after a grace window that dwarfs any
+	// in-flight Snapshot() query. The PREVIOUS handle must be closed or every
+	// Reload leaks a whole :memory: SQLite DB (database/sql does not close it
+	// on GC); it can't be closed synchronously because a reader that captured
+	// it just before the swap may still be mid-query. The grace need only
+	// exceed the longest in-memory snapshot query (ingress resolver caps at
+	// 250ms; others are similarly short), or close immediately on shutdown.
 	if old != nil && old != dbNew {
 		go func(prev *sql.DB) {
 			t := time.NewTimer(supersededDBCloseGrace)
@@ -202,15 +235,6 @@ func (dbc *DbCache) Reload() error {
 					zap.String("err", cerr.Error()))
 			}
 		}(old)
-	}
-
-	if dbc.OnReload != nil {
-		if herr := dbc.OnReload(dbNew); herr != nil {
-			// Non-fatal: log loudly and keep serving with the snapshot
-			// as-is. A broken overlay must not take the chassis dark.
-			dbc.Logger.Error("dbcache OnReload hook failed",
-				zap.String("err", herr.Error()))
-		}
 	}
 
 	dbc.Logger.Info("reload cachedb complete")
