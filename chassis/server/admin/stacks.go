@@ -806,9 +806,20 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	for _, f := range req.Files {
+		// content_hash is BOTH the content-addressed store key (materialise)
+		// AND the static-index fingerprint (RebuildTenant skips empty-hash
+		// rows). The client may omit it — collectFileAssets historically sent
+		// "" for FILES assets — so backfill it from the content here. Without
+		// this, a stack's FILES are invisible to txco://read-file. A
+		// fingerprint-only row (content already stripped, hash supplied) keeps
+		// its supplied hash.
+		hash := f.ContentHash
+		if hash == "" && f.Content != "" {
+			hash = sha256Hex(f.Content)
+		}
 		if _, err := tx.ExecContext(r.Context(),
 			`INSERT INTO stack_files (version_id, path, content, content_hash)
-			 VALUES (?, ?, ?, ?)`, versionID, f.Path, f.Content, f.ContentHash); err != nil {
+			 VALUES (?, ?, ?, ?)`, versionID, f.Path, f.Content, hash); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "insert_file",
 				map[string]any{"path": f.Path, "err": err.Error()})
 			return

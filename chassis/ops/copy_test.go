@@ -167,10 +167,10 @@ func TestCopyAtSugarWorksOnBothSides(t *testing.T) {
 }
 
 func TestCopyDefaultUsedWhenSourceEmpty(t *testing.T) {
-	// `default` is the literal substituted when `from` resolves
+	// `fallback` is the literal substituted when `from` resolves
 	// empty/missing — the "query-param with default" idiom.
 	in := []byte(`{}`)
-	out, err := Copy(withMeta(`{"from":"@web.req.url.query.repoName.0","to":".repoName","default":"loremlabs/kudos"}`), "txco://copy", in, nil)
+	out, err := Copy(withMeta(`{"from":"@web.req.url.query.repoName.0","to":".repoName","fallback":"loremlabs/kudos"}`), "txco://copy", in, nil)
 	if err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
@@ -180,9 +180,9 @@ func TestCopyDefaultUsedWhenSourceEmpty(t *testing.T) {
 }
 
 func TestCopyDefaultSkippedWhenSourcePresent(t *testing.T) {
-	// `default` MUST NOT clobber a present value.
+	// `fallback` MUST NOT clobber a present value.
 	in := []byte(`{"_txc":{"web":{"req":{"url":{"query":{"repoName":["facebook/react"]}}}}}}`)
-	out, err := Copy(withMeta(`{"from":"@web.req.url.query.repoName.0","to":".repoName","default":"loremlabs/kudos"}`), "txco://copy", in, nil)
+	out, err := Copy(withMeta(`{"from":"@web.req.url.query.repoName.0","to":".repoName","fallback":"loremlabs/kudos"}`), "txco://copy", in, nil)
 	if err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
@@ -192,10 +192,10 @@ func TestCopyDefaultSkippedWhenSourcePresent(t *testing.T) {
 }
 
 func TestCopyDefaultRespectsEncode(t *testing.T) {
-	// When `default` is substituted, encoding still applies — so
+	// When `fallback` is substituted, encoding still applies — so
 	// `encode=base64` works for both real and defaulted sources.
 	in := []byte(`{}`)
-	out, err := Copy(withMeta(`{"from":".x","to":".y","default":"hello","encode":"base64"}`), "txco://copy", in, nil)
+	out, err := Copy(withMeta(`{"from":".x","to":".y","fallback":"hello","encode":"base64"}`), "txco://copy", in, nil)
 	if err != nil {
 		t.Fatalf("Copy: %v", err)
 	}

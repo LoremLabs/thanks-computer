@@ -54,7 +54,9 @@ func kvKey(ctx context.Context, op string) (string, error) {
 }
 
 // kvGet reads one key's JSON value into the envelope at `into` (default
-// `_kv`). A miss writes the optional `default`, or nothing.
+// `_kv`). A miss writes the optional `fallback`, or nothing. (Named
+// `fallback`, not `default`: `default` is a reserved txcl keyword, so it
+// can't be a WITH param name.)
 func kvGet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error) {
 	key, err := kvKey(ctx, "kv/get")
 	if err != nil {
@@ -79,8 +81,8 @@ func kvGet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error)
 	case found:
 		resp, _ = sjson.SetRaw(resp, into, string(val))
 	default:
-		if def := gjson.GetBytes(meta, "default"); def.Exists() {
-			resp, _ = sjson.SetRaw(resp, into, def.Raw)
+		if fb := gjson.GetBytes(meta, "fallback"); fb.Exists() {
+			resp, _ = sjson.SetRaw(resp, into, fb.Raw)
 		}
 	}
 	return event.Payload{Raw: resp, Type: event.JSON}, nil

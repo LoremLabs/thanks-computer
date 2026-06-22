@@ -28,15 +28,17 @@ import (
 //	from    = ".text"                 (required: source path on input envelope)
 //	to      = "_txc.web.res.body"     (required: destination path on response)
 //	encode  = "base64"                (optional: "base64" | "" — default "")
-//	default = "fallback value"        (optional: literal substituted when
+//	fallback = "value"                (optional: literal substituted when
 //	                                  the source path is empty/missing)
 //
 // Path syntax follows gjson on read (a leading "." is optional and
 // stripped) and sjson on write. When the source path is absent or
-// resolves to an empty value AND `default` is set, the literal
-// `default` value is used as the source instead — letting one rule
+// resolves to an empty value AND `fallback` is set, the literal
+// `fallback` value is used as the source instead — letting one rule
 // express "use query param if present, else fall back to this."
-// Without `default`, an empty source produces an empty destination
+// (Named `fallback`, not `default`: `default` is a reserved txcl keyword,
+// so it can't be a WITH param name.) Without `fallback`, an empty source
+// produces an empty destination
 // (no failure). A missing `from` or `to` parameter at the WITH
 // level IS an authoring error and fails loud.
 func Copy(ctx context.Context, _ string, in, _ []byte) (event.Payload, error) {
@@ -74,14 +76,13 @@ func Copy(ctx context.Context, _ string, in, _ []byte) (event.Payload, error) {
 		}
 	}
 
-	// `default` fallback: if the source resolved to an empty
-	// string/missing AND a default was supplied, substitute it. The
-	// default is a string literal — for structured defaults the
-	// caller is better off with a SET-pre rule.
+	// `fallback`: if the source resolved to an empty string/missing AND a
+	// fallback was supplied, substitute it. The fallback is a string literal —
+	// for structured fallbacks the caller is better off with a SET-pre rule.
 	if value == "" {
-		if def := gjson.GetBytes(meta, "default"); def.Exists() {
-			value = def.String()
-			srcIsStructured = false // default is always a string literal
+		if fb := gjson.GetBytes(meta, "fallback"); fb.Exists() {
+			value = fb.String()
+			srcIsStructured = false // fallback is always a string literal
 		}
 	}
 
@@ -98,7 +99,7 @@ func Copy(ctx context.Context, _ string, in, _ []byte) (event.Payload, error) {
 	resp := `{}`
 	// When encoding is empty AND the source was a structured type
 	// (object/array/number/bool/null), SetRaw preserves the
-	// structure. Otherwise (string, encoded, or default-substituted)
+	// structure. Otherwise (string, encoded, or fallback-substituted)
 	// we set as a string.
 	if encode == "" && srcIsStructured {
 		resp, _ = sjson.SetRaw(resp, to, value)

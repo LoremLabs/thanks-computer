@@ -530,9 +530,11 @@ func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 		if rerr != nil {
 			return rerr
 		}
+		ch := sha256.Sum256(content)
 		out = append(out, client.StackFile{
-			Path:    filepath.ToSlash(rel),
-			Content: string(content),
+			Path:        filepath.ToSlash(rel),
+			Content:     string(content),
+			ContentHash: hex.EncodeToString(ch[:]),
 		})
 		return nil
 	})

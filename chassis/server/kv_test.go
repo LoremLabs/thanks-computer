@@ -82,14 +82,14 @@ func TestKVSetFromPath(t *testing.T) {
 	}
 }
 
-func TestKVGetMissingDefault(t *testing.T) {
+func TestKVGetMissingFallback(t *testing.T) {
 	k := newKVHandle(t)
-	// missing + default → default lands at into
-	pay, _ := callKV(t, kvGet, k, "t1", "hello", `{"key":"absent","default":{"d":true}}`, "")
+	// missing + fallback → fallback lands at into
+	pay, _ := callKV(t, kvGet, k, "t1", "hello", `{"key":"absent","fallback":{"d":true}}`, "")
 	if !gjson.Get(pay.Raw, "_kv.d").Bool() {
-		t.Fatalf("default not applied: raw=%s", pay.Raw)
+		t.Fatalf("fallback not applied: raw=%s", pay.Raw)
 	}
-	// missing + no default → nothing written
+	// missing + no fallback → nothing written
 	pay, _ = callKV(t, kvGet, k, "t1", "hello", `{"key":"absent"}`, "")
 	if gjson.Get(pay.Raw, "_kv").Exists() {
 		t.Fatalf("missing key must write nothing: raw=%s", pay.Raw)
