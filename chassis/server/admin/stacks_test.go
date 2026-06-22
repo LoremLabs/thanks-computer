@@ -90,6 +90,43 @@ func callActivate(t *testing.T, c *Controller, stack string, n int64) activateRe
 	return resp
 }
 
+// TestDeactivateViaEmptyVersion proves the mechanism client.DeactivateStack
+// relies on: activating an EMPTY version (no files) clears the stack's
+// materialised ops, so it stops serving — while the stack row + version
+// history remain (re-deployable). This is the fleet-safe "stop serving"
+// that `txco deactivate` performs.
+func TestDeactivateViaEmptyVersion(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin"})
+
+	v1 := callCreateDraft(t, c, "hello", "")
+	callPutFiles(t, c, "hello", v1, []stackFile{
+		{Path: "100/main.txcl", Content: `EXEC "http://example.com/v1"`},
+	})
+	callActivate(t, c, "hello", v1)
+	if n := helloOpsCount(t, c); n != 1 {
+		t.Fatalf("after activate v1: ops=%d, want 1", n)
+	}
+
+	// Deactivate = activate an empty version: empty draft + zero files.
+	v2 := callCreateDraft(t, c, "hello", "")
+	callPutFiles(t, c, "hello", v2, nil)
+	callActivate(t, c, "hello", v2)
+	if n := helloOpsCount(t, c); n != 0 {
+		t.Fatalf("after deactivate (empty v2): ops=%d, want 0 (stack should serve nothing)", n)
+	}
+}
+
+func helloOpsCount(t *testing.T, c *Controller) int {
+	t.Helper()
+	var n int
+	if err := c.pu.RuntimeDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM ops WHERE tenant_id = ? AND stack = ?`,
+		testTenant, "hello").Scan(&n); err != nil {
+		t.Fatalf("count ops: %v", err)
+	}
+	return n
+}
+
 // TestStacksRoundTrip pushes two drafts to one stack, activates each
 // in turn, and verifies that ops materialisation, version listing,
 // and rollback all behave as documented.
@@ -659,12 +696,12 @@ func TestStackFilePathValidation(t *testing.T) {
 		"a/../b.txcl",
 		"a//b.txcl",
 		"./a.txcl",
-		"foo.txt",          // wrong extension
-		"100/main",         // no extension
-		"100/random.json",  // .json with non-mock-* basename
-		"100/he%llo.txcl",  // bad rule-name char
+		"foo.txt",           // wrong extension
+		"100/main",          // no extension
+		"100/random.json",   // .json with non-mock-* basename
+		"100/he%llo.txcl",   // bad rule-name char
 		"100/bad name.txcl", // whitespace in rule name
-		"100/..foo.txcl",   // leading dots in rule name
+		"100/..foo.txcl",    // leading dots in rule name
 	}
 	for _, p := range badPaths {
 		w := callPatchFile(c, "hello", n, p, "content", "")
@@ -1006,4 +1043,3 @@ func TestReservedStackNameRejectedAtCreate(t *testing.T) {
 		t.Errorf("reserved name vivified %d stacks rows, want 0", n)
 	}
 }
-

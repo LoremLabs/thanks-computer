@@ -79,6 +79,18 @@ func New(t Target) *Client {
 	}
 }
 
+// NewWithTimeout is New with a custom overall per-request timeout. Use a
+// generous value for commands that push a lot of data (e.g. `apply` uploading
+// many FILES); the 30s default is too short for large bundles. A non-positive
+// timeout falls back to the default.
+func NewWithTimeout(t Target, timeout time.Duration) *Client {
+	c := New(t)
+	if timeout > 0 {
+		c.http.Timeout = timeout
+	}
+	return c
+}
+
 // SetTraceAllTenants switches trace reads to the chassis-wide (all-tenant)
 // endpoints. Default (false) is tenant-scoped; the trace command turns this
 // on when whoami reports the caller is a super-admin.

@@ -11,8 +11,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
+	"golang.org/x/term"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
@@ -29,6 +31,34 @@ import (
 type applyOpts struct {
 	*targetFlags
 	dryRun, noValidate, jsonOut bool
+	timeout                     time.Duration
+}
+
+// spin animates a braille spinner on a TTY while fn runs, then clears the line.
+// On a non-terminal writer (pipe, CI, log) it just runs fn — no control bytes.
+func spin(w io.Writer, msg string, fn func() error) error {
+	f, ok := w.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return fn()
+	}
+	stop := make(chan struct{})
+	go func() {
+		frames := []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+		tk := time.NewTicker(90 * time.Millisecond)
+		defer tk.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-tk.C:
+				fmt.Fprintf(w, "\r\x1b[2K%c %s", frames[i%len(frames)], msg)
+			}
+		}
+	}()
+	err := fn()
+	close(stop)
+	fmt.Fprint(w, "\r\x1b[2K")
+	return err
 }
 
 // deployResult is the per-stack JSON form of a deploy, shared by the --json
@@ -60,6 +90,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "validate the bundle locally; do not POST")
 	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate (push+activate even if the chassis flags errors)")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (array of per-stack deploy results)")
+	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response (method, URL, status, error body) to stderr. Equivalent to TXCO_VERBOSE=1, which works for ANY txco command.")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -119,6 +150,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "validate locally; do not push")
 	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (the deploy result object)")
+	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response to stderr (TXCO_VERBOSE=1)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -266,7 +298,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 
 	clientTarget := resolveTarget(dir, opts.Target, opts.Addr, opts.User, opts.Pass, opts.Profile)
 	clientTarget.Tenant = resolveTenant(opts.Tenant, opts.Profile)
-	c := client.New(clientTarget)
+	c := client.NewWithTimeout(clientTarget, opts.timeout)
 	ctx := context.Background()
 
 	// In --json mode stdout must carry only the result object, so route
@@ -309,7 +341,10 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 				cmd, stack, err, clientTarget.Addr, resolved.Name)
 			return 1
 		}
-		if _, err := c.PutDraftFiles(ctx, stack, versionNumber, files); err != nil {
+		if err := spin(progress, fmt.Sprintf("uploading %d files → %s v%d", len(files), stack, versionNumber), func() error {
+			_, e := c.PutDraftFiles(ctx, stack, versionNumber, files)
+			return e
+		}); err != nil {
 			fmt.Fprintf(stderr, "%s: %s: upload files for v%d: %v\n", cmd, stack, versionNumber, err)
 			return 1
 		}
@@ -319,9 +354,13 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		// user can either fix locally and re-deploy or activate it
 		// manually via the admin UI after investigating.
 		if !opts.noValidate {
-			vresp, verr := c.ValidateVersion(ctx, stack, versionNumber)
-			if verr != nil {
-				fmt.Fprintf(stderr, "%s: %s: validate v%d: %v\n", cmd, stack, versionNumber, verr)
+			var vresp *client.ValidateResponse
+			if err := spin(progress, fmt.Sprintf("validating %s v%d", stack, versionNumber), func() error {
+				var e error
+				vresp, e = c.ValidateVersion(ctx, stack, versionNumber)
+				return e
+			}); err != nil {
+				fmt.Fprintf(stderr, "%s: %s: validate v%d: %v\n", cmd, stack, versionNumber, err)
 				return 1
 			}
 			if vresp != nil && !vresp.OK {
@@ -334,8 +373,12 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 				return 1
 			}
 		}
-		act, err := c.Activate(ctx, stack, versionNumber)
-		if err != nil {
+		var act *client.ActivateResponse
+		if err := spin(progress, fmt.Sprintf("activating %s v%d", stack, versionNumber), func() error {
+			var e error
+			act, e = c.Activate(ctx, stack, versionNumber)
+			return e
+		}); err != nil {
 			fmt.Fprintf(stderr, "%s: %s: activate v%d: %v\n", cmd, stack, versionNumber, err)
 			return 1
 		}

@@ -93,6 +93,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return jsonErrWrap(rest, stdout, stderr, runPush), true
 	case "activate":
 		return jsonErrWrap(rest, stdout, stderr, runActivate), true
+	case "deactivate":
+		return jsonErrWrap(rest, stdout, stderr, runDeactivate), true
 	case "versions":
 		return jsonErrWrap(rest, stdout, stderr, runVersions), true
 	case "edit":

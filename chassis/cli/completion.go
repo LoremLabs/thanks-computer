@@ -258,6 +258,7 @@ var cliCommandTree = []node{
 	{Name: "push", Desc: "Deploy one stack (create + activate; inverse of pull)"},
 	{Name: "draft", Desc: "Stage a draft version of a stack (no activate)"},
 	{Name: "activate", Desc: "Activate a draft version"},
+	{Name: "deactivate", Desc: "Retire a stack (activate an empty version; inverse of activate)"},
 	{Name: "versions", Desc: "List stack versions"},
 	{Name: "edit", Desc: "Edit a rule and apply on save"},
 	{Name: "dev", Desc: "Run the dev loop (apps + chassis + hot reload)"},

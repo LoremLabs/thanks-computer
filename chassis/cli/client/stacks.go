@@ -460,3 +460,26 @@ func (c *Client) Activate(ctx context.Context, name string, versionNumber int64)
 	}
 	return &out, nil
 }
+
+// DeactivateStack retires a stack by activating an EMPTY version: it
+// creates an empty draft (no ops/files) and activates it, so the stack
+// stops serving (HTTP 404 / mail 550 / no matching ops) while its version
+// history stays intact and re-deployable.
+//
+// This is the fleet-safe "stop serving": it rides the normal stack
+// activation path, so every node converges the same way `apply` does —
+// no bespoke control event that an older node couldn't apply.
+//
+// Use it when you've removed a stack from your local OPS/ tree: `apply`
+// only re-versions the stacks it still finds, so a deleted stack keeps
+// serving its last active version until it's deactivated here.
+func (c *Client) DeactivateStack(ctx context.Context, name string) (*ActivateResponse, error) {
+	v, err := c.CreateDraft(ctx, name, "") // empty draft (no clone of active)
+	if err != nil {
+		return nil, fmt.Errorf("create empty draft: %w", err)
+	}
+	if _, err := c.PutDraftFiles(ctx, name, v, nil); err != nil { // zero files → empty version
+		return nil, fmt.Errorf("clear files: %w", err)
+	}
+	return c.Activate(ctx, name, v)
+}

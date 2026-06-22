@@ -475,6 +475,76 @@ Flags:
 	return 0
 }
 
+// runDeactivate: `txco deactivate <stack>` — the inverse of `txco activate`.
+//
+// Retires a stack by activating an EMPTY version: the stack stops serving
+// (HTTP 404 / mail 550) but its version history is kept, so a later
+// `txco apply`/`txco activate` brings it back. Use this when you've removed
+// a stack from your local OPS/ tree — `apply` only re-versions the stacks it
+// still finds, so a deleted stack keeps serving its last active version until
+// you deactivate it here. Fleet-safe: it propagates via the normal activation
+// path, so every node converges.
+func runDeactivate(args []string, stdout, stderr io.Writer) int {
+	fs := pflag.NewFlagSet("deactivate", pflag.ContinueOnError)
+	fs.SetOutput(stderr)
+	tf := bindTargetFlags(fs)
+	asJSON := fs.Bool("json", false, "emit machine-readable JSON instead of human output")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco deactivate [flags] <stack>
+
+Retire <stack> by activating an empty version: it stops serving (HTTP 404 /
+mail 550), but its version history is kept so `+"`txco apply`"+` restores it.
+Use after deleting a stack locally — `+"`apply`"+` won't remove a stack it no
+longer finds.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(stderr, "deactivate: missing <stack> argument")
+		return 2
+	}
+	stack := fs.Arg(0)
+
+	dir, err := workspaceDir("")
+	if err != nil {
+		fmt.Fprintf(stderr, "deactivate: resolve dir: %v\n", err)
+		return 1
+	}
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	c := client.New(clientTarget)
+
+	act, err := c.DeactivateStack(context.Background(), stack)
+	if err != nil {
+		fmt.Fprintf(stderr, "deactivate: %v\n", err)
+		return 1
+	}
+	if *asJSON {
+		if err := writeJSON(stdout, activateResult{
+			Stack: stack, Version: act.VersionNumber, PriorVersion: act.PriorVersionNumber,
+		}); err != nil {
+			fmt.Fprintf(stderr, "deactivate: encode json: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if act.PriorVersionNumber != nil {
+		fmt.Fprintf(stdout, "deactivated %s — activated empty v%d (was v%d); stack no longer serves\n",
+			stack, act.VersionNumber, *act.PriorVersionNumber)
+	} else {
+		fmt.Fprintf(stdout, "deactivated %s — activated empty v%d; stack no longer serves\n",
+			stack, act.VersionNumber)
+	}
+	return 0
+}
+
 // runVersions: `txco versions <stack>` — list versions reverse chronologically.
 func runVersions(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("versions", pflag.ContinueOnError)
