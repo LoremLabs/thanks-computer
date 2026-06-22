@@ -37,6 +37,12 @@ func kvScope(ctx context.Context, in []byte) (tenant, ns string, err error) {
 	meta := []byte(operation.MetaFromContext(ctx))
 	ns = gjson.GetBytes(meta, "namespace").String()
 	if ns == "" {
+		// routed stack: _txc.stack on the mail/LMTP path, _txc.route.stack on
+		// the HTTP path (same dual read as readfile.go — reading only
+		// _txc.route.stack made mail-routed KV ops fall through to "default").
+		ns = gjson.GetBytes(in, "_txc.stack").String()
+	}
+	if ns == "" {
 		ns = gjson.GetBytes(in, "_txc.route.stack").String()
 	}
 	if ns == "" {

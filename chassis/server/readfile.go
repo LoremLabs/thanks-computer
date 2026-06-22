@@ -80,8 +80,21 @@ func readFile(ctx context.Context, ix *static.Index, fcas filecas.Store, in []by
 		maxBytes = int(mb.Int())
 	}
 
-	tenant := gjson.GetBytes(in, "_txc.route.tenant").String()
-	stack := gjson.GetBytes(in, "_txc.route.stack").String()
+	// The routed tenant/stack live at _txc.tenant / _txc.stack once the
+	// ingress router resolves them (server/ingress/router.go) — that's the
+	// mail/LMTP path. The HTTP path instead leaves them as the inert proposal
+	// under _txc.route.*. Read the canonical top-level value first and fall
+	// back to the route proposal — the same dual lookup mailer.go uses.
+	// (Reading only _txc.route.* silently yields "" for mail-routed reads, so
+	// Asset("","",path) misses the tenant FILES layer → found:false.)
+	tenant := gjson.GetBytes(in, "_txc.tenant").String()
+	if tenant == "" {
+		tenant = gjson.GetBytes(in, "_txc.route.tenant").String()
+	}
+	stack := gjson.GetBytes(in, "_txc.stack").String()
+	if stack == "" {
+		stack = gjson.GetBytes(in, "_txc.route.stack").String()
+	}
 
 	resp := `{}`
 	seen := make(map[string]struct{}, len(files.Array()))
