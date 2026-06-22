@@ -1306,14 +1306,19 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// manageCerts reads the atomic snapshot only (no Dbc lock), so it's safe
 	// inside the OnReload hook (which runs while Dbc.Mu is held).
 	if certMgr != nil {
+		// certMu serializes cert passes so two reloads can't run overlapping
+		// ACME obtains; Manage itself is idempotent (valid certs → fast).
+		var certMu sync.Mutex
 		manageCerts := func() {
+			certMu.Lock()
+			defer certMu.Unlock()
 			domains := txtls.WildcardDomains(dnsCtrl.Origins())
 			if err := certMgr.Manage(ctx, domains); err != nil {
 				logger.Error("bundled TLS manage failed",
 					zap.Strings("domains", domains), zap.String("err", err.Error()))
 			}
 		}
-		manageCerts()
+		go manageCerts() // initial obtain off the boot path
 		if dbc != nil {
 			prev := dbc.OnReload
 			dbc.OnReload = func(db *sql.DB) error {
@@ -1321,7 +1326,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 				if prev != nil {
 					err = prev(db)
 				}
-				manageCerts()
+				// ACME is network-bound — a DNS-01 obtain for a freshly minted
+				// host can take tens of seconds. The OnReload hook runs while
+				// Dbc.Mu is held, so calling Manage synchronously here stalls
+				// EVERY reader (healthz, ingress resolver, DNS) for the whole
+				// obtain → that's the dbcache-reload 502 on stack activation.
+				// Run it in the background instead; certMu serializes passes.
+				go manageCerts()
 				return err
 			}
 		}
