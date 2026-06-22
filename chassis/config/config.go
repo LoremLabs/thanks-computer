@@ -109,9 +109,12 @@ type Config struct {
 	K8sNamespace                 string   `id:"k8s-namespace" default:"default" desc:"Kubernetes Namespace (default)"`
 	KubeConfig                   string   `id:"kube-config" default:"$USER/.kube/config" desc:"What path to use for Kubernetes Config? ($USER/.kube/config)"`
 	KubeCheckInCluster           bool     `id:"kube-check-incluster" default:"true" desc:"Use to prefer in cluster service account over kube config. Tests if we're running inside a cluster? (true)"`
-	KVStore                      string   `id:"kvstore" default:"boltdb" desc:"Which Key/Value Store to use? {boltdb, etcd} (boltdb)"`
+	KVStore                      string   `id:"kvstore" default:"boltdb" desc:"Backend for the op-writable KV (txco://kv/*): {boltdb, redis}. boltdb is an embedded on-disk store; redis is a shared networked store (native TTL + atomic ops). (boltdb)"`
 	KVStoreAddrs                 []string `id:"kvstore-addrs" default:"./chassis/data/kv" desc:"List of KVStore addresses, if appropriate. (./chassis/data/kv)"`
-	KVStoreBucket                string   `id:"kvstore-bucket" default:"txco" desc:"KVStore bucket (txco)"`
+	KVStoreBucket                string   `id:"kvstore-bucket" default:"txco" desc:"KVStore bucket (boltdb only) (txco)"`
+	KVStorePassword              string   `id:"kvstore-password" default:"" desc:"Password for the redis KV backend. Empty (default) sends no AUTH — correct for boltdb or an unauthenticated redis on a trusted private network. Set it to match the redis 'requirepass' to authenticate the redis KV. ()"`
+	KVMaxValueBytes              int      `id:"kv-max-value-bytes" default:"65536" desc:"Per-value byte cap for the txco://kv/* ops; a larger value errors. 0 = unlimited. Guards the store + envelope against oversized values (65536, 64KiB)."`
+	KVMaxTTL                     int      `id:"kv-max-ttl" default:"0" desc:"Ceiling (seconds) on a txco://kv/set or kv/incr TTL; a larger requested ttl is clamped down to it. 0 = unlimited. Per-key TTL is opt-in — the default is a persistent key (no expiry)."`
 	Logger                       string   `id:"logger" default:"env" desc:"Set Log display type: {env, production, dev, dev-plain} (env)"`
 	LogLevel                     string   `id:"log-level" default:"" desc:"Set Logging Level: {debug, info, warn, error, dpanic, panic, and fatal} (info)"`
 	LogOps                       string   `id:"log-ops" default:"disabled" desc:"Log operations to {logger,disabled,dir} (disabled)"`
@@ -170,6 +173,7 @@ type Config struct {
 	EgressAllowCIDRs             []string `id:"egress-allow-cidrs" default:"" desc:"CIDRs the 'private' egress policy allows even if otherwise blocked (comma-separated); explicit escape hatch for a trusted internal op endpoint. ()"`
 	SystemOpstacksDir            string   `id:"system-opstacks-dir" default:"" desc:"Optional workspace dir containing an OPS/ tree whose _-prefixed stacks (OPS/_sys/...) overlay the embedded system default. Empty uses the embedded default only (txco serve). txco dev points this at the workspace."`
 	SystemOpstacksWatch          bool     `id:"system-opstacks-watch" default:"false" desc:"Watch the system-opstacks dir's OPS/ tree and hot-recompile on change. Off for serve (static after boot); txco dev enables it."`
+	ReadFileMaxBytes             int      `id:"read-file-max-bytes" default:"1048576" desc:"Per-file byte cap for the txco://read-file op. Files larger than this are truncated (entry marked truncated) unless the op runs with strict=true, which errors instead. Guards the envelope against oversized inlined content (1048576, 1MiB)."`
 	ServerId                     string   `id:"sid" default:"" desc:"Set the Server Id ()"`
 	LMTPListenAddrs              []string `id:"lmtp-listen-addrs" default:":2424" desc:"LMTP listen addresses. Comma list of 'unix:/path' or ':port'. Default :2424 (mirrors the chassis convention of high-port defaults; the well-known LMTP port is 24 but that needs root). Set to empty to explicitly disable the head even when 'lmtp' is in --personalities. (:2424)"`
 	LMTPMaxMsgBytes              int      `id:"lmtp-max-msg-bytes" default:"26214400" desc:"Max accepted DATA message size in bytes. Postfix rejects with 552 on overflow. (26214400 ~= 25 MiB)"`

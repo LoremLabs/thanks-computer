@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/abronan/valkeyrie/store"
+	"github.com/kvtools/valkeyrie/store"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
@@ -43,6 +43,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	_ "github.com/loremlabs/thanks-computer/chassis/filecas/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/mail"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
@@ -1101,6 +1102,38 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	pu.Handle([]byte("txco://static"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return event.Payload{Raw: staticResultBody(ctx, staticIndex, fcas, in), Type: event.JSON}, nil
+		}))
+
+	// `txco://read-file` reads the routed stack's static FILES/ assets into
+	// the envelope as DATA (vs `txco://static`, which serves a file as an
+	// HTTP response). Same in-memory index + filecas, so it never touches
+	// the filesystem on the request path; it CAN read `_`-private assets
+	// (the FILES/_mail/ templating case). See chassis/server/readfile.go.
+	pu.Handle([]byte("txco://read-file"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return readFile(ctx, staticIndex, fcas, in, conf.ReadFileMaxBytes)
+		}))
+
+	// Op-writable tenant KV (txco://kv/get|set|delete|incr) — the only ops
+	// that persist across requests. Backed by the configured KV store (boltdb or
+	// redis, via --kvstore). Tenant-scoped via processor.TenantScope; namespace
+	// defaults to the routed stack. See chassis/server/kv.go + chassis/kv.
+	kvHandle := kvstore.New(kv, conf.KVMaxValueBytes, time.Duration(conf.KVMaxTTL)*time.Second)
+	pu.Handle([]byte("txco://kv/get"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return kvGet(ctx, kvHandle, in)
+		}))
+	pu.Handle([]byte("txco://kv/set"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return kvSet(ctx, kvHandle, in)
+		}))
+	pu.Handle([]byte("txco://kv/delete"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return kvDelete(ctx, kvHandle, in)
+		}))
+	pu.Handle([]byte("txco://kv/incr"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return kvIncr(ctx, kvHandle, in)
 		}))
 
 	// Computed-secret core ops. These consume cleartext from

@@ -203,6 +203,46 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 	return Result{}
 }
 
+// Asset resolves an EXACT stack-relative path across the same layers as
+// Lookup (routed stack → chassis → embedded → tenant CAS) but WITHOUT
+// try_files probing and WITHOUT the `_`-private HTTP filter — so ops
+// (e.g. txco://read-file) can read FILES/_mail/ templates as data. Bytes
+// are inline (Result.Body) or a tenant CAS entry (Result.Hash, the caller
+// resolves via filecas). Returns (_, false) on miss. Pure in-memory: the
+// index holds the bytes, so this never touches the filesystem.
+func (ix *Index) Asset(tenant, stack, rel string) (Result, bool) {
+	cand := safeRel(rel)
+	if cand == "" {
+		return Result{}, false
+	}
+
+	ix.mu.Lock()
+	emb, ch, ps, tn := ix.embedded, ix.chassis, ix.perStack, ix.tenant
+	ix.mu.Unlock()
+
+	st := safeSeg(stack)
+
+	opLayers := make([]layer, 0, 3)
+	if st != "" {
+		if l, ok := ps[st]; ok {
+			opLayers = append(opLayers, l)
+		}
+	}
+	opLayers = append(opLayers, ch, emb)
+
+	var tl tenantLayer
+	haveTenant := false
+	if ten := safeSeg(tenant); ten != "" && st != "" {
+		if stacks, ok := tn[ten]; ok {
+			if l, ok := stacks[st]; ok {
+				tl, haveTenant = l, true
+			}
+		}
+	}
+
+	return lookupExact(cand, opLayers, tl, haveTenant)
+}
+
 // lookupExact resolves a single candidate path across the operator/inline
 // layers (bytes inline) then the tenant layer (bytes resolved by content
 // hash downstream). Returns (_, false) on miss.

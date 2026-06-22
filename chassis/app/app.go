@@ -23,9 +23,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/abronan/valkeyrie"
-	"github.com/abronan/valkeyrie/store"
-	"github.com/abronan/valkeyrie/store/boltdb"
+	"github.com/kvtools/boltdb"
+	"github.com/kvtools/redis"
+	"github.com/kvtools/valkeyrie"
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 
@@ -58,10 +58,6 @@ type BuildInfo struct {
 	// (e.g. txco-saas stamps the core pseudo-version here while
 	// Version/CommitId describe the overlay build). Empty for open-core.
 	Chassis string
-}
-
-func init() {
-	boltdb.Register()
 }
 
 // Run is the full chassis boot. It returns a process exit code; the
@@ -324,8 +320,18 @@ func Run(bi BuildInfo) int {
 		logger.Info("system opstacks hot-reload enabled", zap.String("dir", conf.SystemOpstacksDir))
 	}
 
-	// Setup KeyValue Store
-	kv, err := valkeyrie.NewStore(store.Backend(conf.KVStore), conf.KVStoreAddrs, &store.Config{Bucket: conf.KVStoreBucket})
+	// Setup KeyValue Store. The KV backends self-register via their
+	// init() on import; each takes a backend-specific config. boltdb
+	// (default) is an embedded on-disk store; redis is a shared networked
+	// store. Switch via --kvstore. The op-writable KV (txco://kv/*) uses this.
+	var kvCfg valkeyrie.Config
+	switch conf.KVStore {
+	case redis.StoreName:
+		kvCfg = &redis.Config{Password: conf.KVStorePassword}
+	default: // boltdb (bucket-backed)
+		kvCfg = &boltdb.Config{Bucket: conf.KVStoreBucket}
+	}
+	kv, err := valkeyrie.NewStore(ctx, conf.KVStore, conf.KVStoreAddrs, kvCfg)
 	if err != nil {
 		logger.Fatal("KVStore connection error", zap.String("kvstoreError", err.Error()))
 	}
