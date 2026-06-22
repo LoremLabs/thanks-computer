@@ -121,10 +121,31 @@ func safeRel(p string) string {
 	return p
 }
 
-// safeSeg validates a single path segment (the routed stack name).
+// safeSeg validates a single path segment (e.g. a tenant slug, or a flat
+// stack name). Slashes are rejected — use safeStack for stack names, which
+// can be nested (`<parent>/_mail`).
 func safeSeg(s string) string {
 	if s == "" || s == "." || s == ".." || strings.ContainsRune(s, '/') || s[0] == '.' {
 		return ""
+	}
+	return s
+}
+
+// safeStack validates a possibly-NESTED stack name (e.g. "hello/_mail" — the
+// route shape for a hostname-bound mail substack: <h.stack>/_mail). Slashes
+// BETWEEN segments are allowed; each segment must itself be safe (no empty /
+// "." / ".." / leading dot), so there is no traversal or hidden-file escape.
+// Returns "" if any segment is unsafe. Used for the stack DIMENSION of the
+// FILES index — safeSeg would reject the slash and silently drop every nested
+// stack's assets from both the build and the lookup.
+func safeStack(s string) string {
+	if s == "" {
+		return ""
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if seg == "" || seg == "." || seg == ".." || seg[0] == '.' {
+			return ""
+		}
 	}
 	return s
 }

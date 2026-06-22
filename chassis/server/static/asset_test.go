@@ -88,3 +88,41 @@ func TestIndexAssetTenantCAS(t *testing.T) {
 		t.Fatalf("tenant CAS entry must carry no inline body; %+v", r)
 	}
 }
+
+// A NESTED stack name — "<parent>/_mail", the route shape for a hostname-bound
+// mail substack — must surface its FILES through Asset. Regression: safeSeg
+// rejected the slash, so RebuildTenant silently dropped every such stack from
+// the index and Asset never consulted the tenant layer, so read-file got
+// found:false in prod even though the bytes were deployed.
+func TestIndexAssetNestedStackName(t *testing.T) {
+	db := tenantDB(t)
+	insTenant(t, db, "tnt_a", "prod-mankins", false)
+	insStack(t, db, "s_a", "tnt_a", "hello/_mail", 7)
+	insFile(t, db, 7, "FILES/_data/publications/a-farewell-to-arms/index.json", "INDEX", hhex("INDEX"))
+
+	ix := NewIndex("", zap.NewNop())
+	if err := ix.RebuildTenant(db); err != nil {
+		t.Fatalf("RebuildTenant: %v", err)
+	}
+
+	r, ok := ix.Asset("prod-mankins", "hello/_mail", "_data/publications/a-farewell-to-arms/index.json")
+	if !ok || !r.Found {
+		t.Fatalf("nested-stack tenant asset must resolve; ok=%v %+v", ok, r)
+	}
+	if r.Hash != hhex("INDEX") {
+		t.Fatalf("want CAS hash %q, got %q", hhex("INDEX"), r.Hash)
+	}
+}
+
+func TestSafeStack(t *testing.T) {
+	for _, s := range []string{"hello", "hello/_mail", "a/b/c", "_mail", "auto_reply/_mail"} {
+		if got := safeStack(s); got != s {
+			t.Errorf("safeStack(%q) = %q, want %q (valid nested name)", s, got, s)
+		}
+	}
+	for _, s := range []string{"", "..", "a/..", "../b", "a//b", "a/./b", "a/.hidden", ".hidden/b", "/leading", "trailing/"} {
+		if got := safeStack(s); got != "" {
+			t.Errorf("safeStack(%q) = %q, want \"\" (unsafe)", s, got)
+		}
+	}
+}

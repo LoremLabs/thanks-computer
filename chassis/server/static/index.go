@@ -153,7 +153,7 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 	emb, ch, ps, tn := ix.embedded, ix.chassis, ix.perStack, ix.tenant
 	ix.mu.Unlock()
 
-	st := safeSeg(stack)
+	st := safeStack(stack)
 
 	// Operator/inline layers first (disk workspace → chassis → embedded),
 	// highest precedence, returning bytes directly. An operator override of
@@ -220,7 +220,7 @@ func (ix *Index) Asset(tenant, stack, rel string) (Result, bool) {
 	emb, ch, ps, tn := ix.embedded, ix.chassis, ix.perStack, ix.tenant
 	ix.mu.Unlock()
 
-	st := safeSeg(stack)
+	st := safeStack(stack)
 
 	opLayers := make([]layer, 0, 3)
 	if st != "" {
@@ -328,7 +328,7 @@ func (ix *Index) RebuildTenant(db *sql.DB) error {
 		if rel == "" {
 			continue
 		}
-		sl, st := safeSeg(slug), safeSeg(name)
+		sl, st := safeSeg(slug), safeStack(name)
 		if sl == "" || st == "" {
 			continue
 		}
