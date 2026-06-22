@@ -354,62 +354,6 @@ func (ix *Index) RebuildTenant(db *sql.DB) error {
 		return err // keep prior layer
 	}
 
-	// DIAG (driplit read-file found:false): report what got indexed plus the
-	// join state of every `_mail` stack on THIS node, so a dropped FILES set
-	// (stale active_version / empty content_hash / missing-or-revoked tenant
-	// row) is visible in the log instead of a silent miss. Cheap; runs once
-	// per cachedb reload.
-	if ix.log != nil {
-		kept := 0
-		for _, stacks := range out {
-			for _, tl := range stacks {
-				kept += len(tl.files)
-			}
-		}
-		ix.log.Info("static: tenant index rebuilt",
-			zap.Int("tenants", len(out)), zap.Int("kept_files", kept))
-		if drows, derr := db.Query(`
-			SELECT s.name, s.tenant_id, COALESCE(t.slug,''), COALESCE(t.revoked_at,''),
-			       s.active_version,
-			       (SELECT count(*) FROM stack_files f
-			          WHERE f.version_id=s.active_version AND f.path LIKE 'FILES/%') nfiles,
-			       (SELECT count(*) FROM stack_files f
-			          WHERE f.version_id=s.active_version AND f.path LIKE 'FILES/%'
-			            AND f.content_hash<>'') nhash
-			  FROM stacks s LEFT JOIN tenants t ON t.tenant_id=s.tenant_id
-			 WHERE s.name LIKE '%/_mail'`); derr == nil {
-			for drows.Next() {
-				var name, tid, slug, rev string
-				var av sql.NullInt64
-				var nf, nh int
-				if drows.Scan(&name, &tid, &slug, &rev, &av, &nf, &nh) == nil {
-					// cross-check: did this stack actually land in the index we
-					// just built? (key = safeSeg(slug)/safeStack(name), the SAME
-					// keys ix.Asset looks up with). indexed<files => the builder
-					// dropped rows the DB has — the smoking gun.
-					indexed := -1
-					if sl := safeSeg(slug); sl != "" {
-						if st := safeStack(name); st != "" {
-							if tl, ok := out[sl][st]; ok {
-								indexed = len(tl.files)
-							} else {
-								indexed = 0
-							}
-						}
-					}
-					ix.log.Info("static: _mail diag",
-						zap.String("name", name), zap.String("tenant_id", tid),
-						zap.String("tenant_slug", slug), zap.String("revoked_at", rev),
-						zap.Int64("active_version", av.Int64),
-						zap.Int("db_files", nf), zap.Int("db_files_with_hash", nh),
-						zap.String("index_key", safeSeg(slug)+"/"+safeStack(name)),
-						zap.Int("indexed_files", indexed))
-				}
-			}
-			drows.Close()
-		}
-	}
-
 	ix.mu.Lock()
 	ix.tenant = out
 	ix.mu.Unlock()
