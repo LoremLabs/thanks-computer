@@ -392,6 +392,7 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}/files", c.handleDeleteDraftFile).Methods(http.MethodDelete)
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}/validate", c.handleValidateVersion).Methods(http.MethodPost)
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}", c.handleGetVersion).Methods(http.MethodGet)
+	tenantR.HandleFunc("/stacks/{name:.+}/cat", c.handleCatFile).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}", c.handleGetStack).Methods(http.MethodGet)
 
 	// Content-addressed compute artifacts (op:// computes). Upload is

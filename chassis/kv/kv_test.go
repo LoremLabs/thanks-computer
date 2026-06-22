@@ -185,3 +185,48 @@ func TestInvalidSegments(t *testing.T) {
 		t.Fatal("invalid JSON value must error")
 	}
 }
+
+func TestIncrDecrements(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 0, 0)
+	if n, err := k.Incr(ctx, "t1", "s1", "c", 5, 0); err != nil || n != 5 {
+		t.Fatalf("seed: n=%d err=%v", n, err)
+	}
+	if n, err := k.Incr(ctx, "t1", "s1", "c", -2, 0); err != nil || n != 3 {
+		t.Fatalf("decrement by -2: n=%d want 3", n)
+	}
+	if n, err := k.Incr(ctx, "t1", "s1", "c", -10, 0); err != nil || n != -7 {
+		t.Fatalf("decrement past zero: n=%d want -7", n)
+	}
+}
+
+func TestCAS(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 0, 0)
+
+	// set-if-absent (expectAbsent): first creates, second refuses.
+	if sw, _, err := k.CAS(ctx, "t1", "s1", "lock", true, nil, json.RawMessage(`"held"`), 0); err != nil || !sw {
+		t.Fatalf("create-if-absent should swap: sw=%v err=%v", sw, err)
+	}
+	if sw, cur, _ := k.CAS(ctx, "t1", "s1", "lock", true, nil, json.RawMessage(`"again"`), 0); sw || string(cur) != `"held"` {
+		t.Fatalf("second create-if-absent must fail and report current: sw=%v cur=%s", sw, cur)
+	}
+
+	// value-match: correct `expected` swaps.
+	if sw, _, err := k.CAS(ctx, "t1", "s1", "lock", false, json.RawMessage(`"held"`), json.RawMessage(`"taken"`), 0); err != nil || !sw {
+		t.Fatalf("value-match should swap: sw=%v err=%v", sw, err)
+	}
+	if v, _, _ := k.Get(ctx, "t1", "s1", "lock"); string(v) != `"taken"` {
+		t.Fatalf("after swap value=%s want \"taken\"", v)
+	}
+
+	// value-match: stale `expected` does NOT swap and returns the real current.
+	if sw, cur, _ := k.CAS(ctx, "t1", "s1", "lock", false, json.RawMessage(`"held"`), json.RawMessage(`"nope"`), 0); sw || string(cur) != `"taken"` {
+		t.Fatalf("stale expected must not swap: sw=%v cur=%s", sw, cur)
+	}
+
+	// value-match on an absent key can't match → no swap.
+	if sw, _, _ := k.CAS(ctx, "t1", "s1", "ghost", false, json.RawMessage(`"x"`), json.RawMessage(`"y"`), 0); sw {
+		t.Fatal("value-mode CAS on an absent key must not swap")
+	}
+}

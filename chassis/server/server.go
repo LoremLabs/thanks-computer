@@ -1135,6 +1135,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return kvIncr(ctx, kvHandle, in)
 		}))
+	pu.Handle([]byte("txco://kv/cas"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return kvCAS(ctx, kvHandle, in)
+		}))
 
 	// Computed-secret core ops. These consume cleartext from
 	// op.Secrets (plumbed onto ctx by processor.ExecCore) and emit

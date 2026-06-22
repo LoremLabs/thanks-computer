@@ -114,6 +114,28 @@ func TestIndexAssetNestedStackName(t *testing.T) {
 	}
 }
 
+// The WORKER's exact state: a nested mail substack whose FILES arrived
+// fingerprint-only via the control-event applier — content stripped (""),
+// content_hash set. This is what RebuildTenant sees on a data-plane node.
+func TestIndexAssetNestedFingerprintOnly(t *testing.T) {
+	db := tenantDB(t)
+	insTenant(t, db, "tnt_a", "prod-mankins", false)
+	insStack(t, db, "s_a", "tnt_a", "hello/_mail", 9)
+	insFile(t, db, 9, "FILES/_data/publications/a-farewell-to-arms/index.json", "", hhex("INDEX"))
+
+	ix := NewIndex("", zap.NewNop())
+	if err := ix.RebuildTenant(db); err != nil {
+		t.Fatalf("RebuildTenant: %v", err)
+	}
+	r, ok := ix.Asset("prod-mankins", "hello/_mail", "_data/publications/a-farewell-to-arms/index.json")
+	if !ok || !r.Found {
+		t.Fatalf("fingerprint-only nested asset must resolve; ok=%v %+v", ok, r)
+	}
+	if r.Hash != hhex("INDEX") {
+		t.Fatalf("want CAS hash %q, got %q", hhex("INDEX"), r.Hash)
+	}
+}
+
 func TestSafeStack(t *testing.T) {
 	for _, s := range []string{"hello", "hello/_mail", "a/b/c", "_mail", "auto_reply/_mail"} {
 		if got := safeStack(s); got != s {

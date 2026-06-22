@@ -101,20 +101,10 @@ func kvSet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error)
 	}
 
 	meta := []byte(operation.MetaFromContext(ctx))
-	var raw string
-	switch {
-	case gjson.GetBytes(meta, "from").Exists():
-		from := normReadFilePath(gjson.GetBytes(meta, "from").String())
-		src := gjson.GetBytes(in, from)
-		if !src.Exists() {
-			e := fmt.Sprintf("kv/set: source path %q is absent", from)
-			return kvErr(e), errors.New(e)
-		}
-		raw = src.Raw
-	case gjson.GetBytes(meta, "value").Exists():
-		raw = gjson.GetBytes(meta, "value").Raw
-	default:
-		return kvErr("kv/set: need `from` or `value`"), errors.New("kv/set: no value")
+	raw, verr := kvNewValue(meta, in)
+	if verr != nil {
+		e := "kv/set: " + verr.Error()
+		return kvErr(e), errors.New(e)
 	}
 
 	ttl := kvstore.ParseTTLSeconds(gjson.GetBytes(meta, "ttl").Int())
@@ -122,6 +112,72 @@ func kvSet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error)
 		return kvErr(serr.Error()), serr
 	}
 	return event.Payload{Raw: `{}`, Type: event.JSON}, nil
+}
+
+// kvNewValue resolves the value to write from WITH `from` (an envelope path)
+// or `value` (a literal). Exactly one is required. Shared by kv/set + kv/cas.
+func kvNewValue(meta, in []byte) (string, error) {
+	switch {
+	case gjson.GetBytes(meta, "from").Exists():
+		from := normReadFilePath(gjson.GetBytes(meta, "from").String())
+		src := gjson.GetBytes(in, from)
+		if !src.Exists() {
+			return "", fmt.Errorf("source path %q is absent", from)
+		}
+		return src.Raw, nil
+	case gjson.GetBytes(meta, "value").Exists():
+		return gjson.GetBytes(meta, "value").Raw, nil
+	default:
+		return "", errors.New("need `from` or `value`")
+	}
+}
+
+// kvCAS is check-and-set: write the new value (`value` literal or `from` path)
+// at `key` only if the current value equals `expected` — or, when `expected`
+// is omitted, only if the key is absent (set-if-missing / lock primitive).
+// Writes {swapped, current} at `into` (default `_kv`): `swapped` reports
+// whether it wrote; `current` is the value now in the store (the new value on
+// success, the existing value when the check failed) — for retry-on-conflict.
+func kvCAS(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error) {
+	key, err := kvKey(ctx, "kv/cas")
+	if err != nil {
+		return kvErr(err.Error()), err
+	}
+	tenant, ns, err := kvScope(ctx, in)
+	if err != nil {
+		return kvErr(err.Error()), err
+	}
+
+	meta := []byte(operation.MetaFromContext(ctx))
+	raw, verr := kvNewValue(meta, in)
+	if verr != nil {
+		e := "kv/cas: " + verr.Error()
+		return kvErr(e), errors.New(e)
+	}
+
+	exp := gjson.GetBytes(meta, "expected")
+	expectAbsent := !exp.Exists()
+	var expected json.RawMessage
+	if !expectAbsent {
+		expected = json.RawMessage(exp.Raw)
+	}
+
+	ttl := kvstore.ParseTTLSeconds(gjson.GetBytes(meta, "ttl").Int())
+	swapped, current, cerr := k.CAS(ctx, tenant, ns, key, expectAbsent, expected, json.RawMessage(raw), ttl)
+	if cerr != nil {
+		return kvErr(cerr.Error()), cerr
+	}
+
+	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
+	if into == "" {
+		into = "_kv"
+	}
+	resp := `{}`
+	resp, _ = sjson.Set(resp, into+".swapped", swapped)
+	if len(current) > 0 {
+		resp, _ = sjson.SetRaw(resp, into+".current", string(current))
+	}
+	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }
 
 // kvDelete removes a key (a missing key is a success).

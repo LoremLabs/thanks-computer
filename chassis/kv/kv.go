@@ -20,10 +20,12 @@
 package kv
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -33,8 +35,8 @@ import (
 // segMax bounds each key segment (tenant / namespace / userkey).
 const segMax = 256
 
-// incrAttempts bounds the CAS retry loop in Incr under contention.
-const incrAttempts = 5
+// casAttempts bounds the compare-and-swap retry loop (Incr, CAS) under contention.
+const casAttempts = 5
 
 // KV is a tenant-scoped view over the underlying key-value store.
 type KV struct {
@@ -173,7 +175,7 @@ func (k *KV) Incr(ctx context.Context, tenant, ns, key string, delta int64, ttl 
 	if err != nil {
 		return 0, err
 	}
-	for attempt := 0; attempt < incrAttempts; attempt++ {
+	for attempt := 0; attempt < casAttempts; attempt++ {
 		var cur int64
 		var casPrev *store.KVPair
 
@@ -210,6 +212,84 @@ func (k *KV) Incr(ctx context.Context, tenant, ns, key string, delta int64, ttl 
 		}
 	}
 	return 0, fmt.Errorf("kv: incr contention on %q", key)
+}
+
+// CAS is check-and-set: write newVal at (tenant, ns, key) only if the current
+// value passes the check, using the store's atomic compare so it stays
+// race-safe under concurrency. With expectAbsent=true it writes only if the
+// key is absent (a create-if-missing / lock primitive); otherwise it writes
+// only if the current value equals `expected`. Returns whether it swapped and
+// the value now in the store (newVal if swapped, else the existing value —
+// nil if the key was absent).
+func (k *KV) CAS(ctx context.Context, tenant, ns, key string, expectAbsent bool, expected, newVal json.RawMessage, ttl time.Duration) (swapped bool, current json.RawMessage, err error) {
+	if k == nil || k.s == nil {
+		return false, nil, errors.New("kv: store not configured")
+	}
+	fk, ferr := k.fullKey(tenant, ns, key)
+	if ferr != nil {
+		return false, nil, ferr
+	}
+	if !json.Valid(newVal) {
+		return false, nil, errors.New("kv: value is not valid JSON")
+	}
+	if k.maxValue > 0 && len(newVal) > k.maxValue {
+		return false, nil, fmt.Errorf("kv: value %d bytes exceeds cap %d", len(newVal), k.maxValue)
+	}
+	if !expectAbsent && !json.Valid(expected) {
+		return false, nil, errors.New("kv: expected is not valid JSON")
+	}
+
+	for attempt := 0; attempt < casAttempts; attempt++ {
+		var curVal json.RawMessage
+		var prev *store.KVPair
+		live := false // key exists AND is not expired
+
+		pair, gerr := k.s.Get(ctx, fk, nil)
+		switch {
+		case gerr == nil:
+			prev = pair // CAS against the existing pair (replaces an expired one too)
+			var w wrapper
+			if json.Unmarshal(pair.Value, &w) == nil && !k.expired(w) {
+				live, curVal = true, w.V
+			}
+		case errors.Is(gerr, store.ErrKeyNotFound):
+			prev = nil
+		default:
+			return false, nil, gerr
+		}
+
+		pass := !live // expectAbsent: pass iff the key isn't live
+		if !expectAbsent {
+			pass = live && jsonEqual(curVal, expected)
+		}
+		if !pass {
+			return false, curVal, nil // check failed — report the actual current
+		}
+
+		blob, wo := k.encode(newVal, ttl)
+		ok, _, perr := k.s.AtomicPut(ctx, fk, blob, prev, wo)
+		if perr != nil {
+			if errors.Is(perr, store.ErrKeyExists) || errors.Is(perr, store.ErrKeyModified) {
+				continue // raced between read and write; re-read and re-check
+			}
+			return false, nil, perr
+		}
+		if ok {
+			return true, newVal, nil
+		}
+	}
+	return false, nil, fmt.Errorf("kv: cas contention on %q", key)
+}
+
+// jsonEqual reports whether two JSON values are semantically equal (ignoring
+// whitespace and object key order). Falls back to a raw byte compare if either
+// side doesn't parse.
+func jsonEqual(a, b json.RawMessage) bool {
+	var av, bv any
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return bytes.Equal(a, b)
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // encode wraps value with an optional expiry and returns the stored bytes

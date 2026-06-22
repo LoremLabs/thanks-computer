@@ -84,6 +84,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return jsonErrWrap(rest, stdout, stderr, runStatus), true
 	case "pull":
 		return jsonErrWrap(rest, stdout, stderr, runPull), true
+	case "cat":
+		// Resolve + print a deployed stack's FILES/ asset the way read-file
+		// does (manifest → CAS) — an ops/debugging probe. See stacks_cmd.go.
+		return jsonErrWrap(rest, stdout, stderr, runCat), true
 	case "draft":
 		return jsonErrWrap(rest, stdout, stderr, runDraft), true
 	case "push":

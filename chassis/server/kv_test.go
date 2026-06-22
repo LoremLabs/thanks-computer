@@ -154,6 +154,7 @@ func TestKVValidation(t *testing.T) {
 		"set no value":    {kvSet, `{"key":"k"}`},
 		"delete no key":   {kvDelete, `{}`},
 		"incr no key":     {kvIncr, `{}`},
+		"cas no value":    {kvCAS, `{"key":"k"}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -161,5 +162,42 @@ func TestKVValidation(t *testing.T) {
 				t.Fatalf("%s must error", name)
 			}
 		})
+	}
+}
+
+func TestKVCASOp(t *testing.T) {
+	k := newKVHandle(t)
+
+	// set-if-absent (no `expected`): first hit swaps + creates, second refuses.
+	pay, _ := callKV(t, kvCAS, k, "t1", "hello", `{"key":"lock","value":"held"}`, "")
+	if !gjson.Get(pay.Raw, "_kv.swapped").Bool() {
+		t.Fatalf("first set-if-absent should swap: %s", pay.Raw)
+	}
+	pay, _ = callKV(t, kvCAS, k, "t1", "hello", `{"key":"lock","value":"again"}`, "")
+	if gjson.Get(pay.Raw, "_kv.swapped").Bool() {
+		t.Fatalf("second set-if-absent must not swap: %s", pay.Raw)
+	}
+	if gjson.Get(pay.Raw, "_kv.current").String() != "held" {
+		t.Fatalf("current should report the held value: %s", pay.Raw)
+	}
+
+	// value-match: correct `expected` swaps.
+	pay, _ = callKV(t, kvCAS, k, "t1", "hello", `{"key":"lock","expected":"held","value":"taken"}`, "")
+	if !gjson.Get(pay.Raw, "_kv.swapped").Bool() {
+		t.Fatalf("value-match should swap: %s", pay.Raw)
+	}
+	// stale `expected` must not swap, and reports the real current.
+	pay, _ = callKV(t, kvCAS, k, "t1", "hello", `{"key":"lock","expected":"held","value":"x"}`, "")
+	if gjson.Get(pay.Raw, "_kv.swapped").Bool() {
+		t.Fatalf("stale expected must not swap: %s", pay.Raw)
+	}
+	if gjson.Get(pay.Raw, "_kv.current").String() != "taken" {
+		t.Fatalf("current after failed swap: %s", pay.Raw)
+	}
+
+	// value from an envelope path.
+	pay, _ = callKV(t, kvCAS, k, "t1", "hello", `{"key":"k2","from":".payload"}`, `{"payload":{"a":1}}`)
+	if !gjson.Get(pay.Raw, "_kv.swapped").Bool() || gjson.Get(pay.Raw, "_kv.current.a").Int() != 1 {
+		t.Fatalf("from-path cas should swap and report current: %s", pay.Raw)
 	}
 }

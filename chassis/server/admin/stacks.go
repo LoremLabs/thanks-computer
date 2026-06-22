@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -552,6 +553,95 @@ func (c *Controller) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, versionDetail{versionRecord: v, Files: files})
 }
 
+// handleCatFile resolves a single FILES/ asset of a stack's ACTIVE version the
+// same way txco://read-file does — manifest row → inline content, else the
+// content-addressed store keyed by content_hash — and reports exactly where the
+// resolution succeeds or fails (manifest miss / empty hash / CAS miss). A
+// debugging + ops probe: `txco cat <stack> <path>`.
+func (c *Controller) handleCatFile(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "opstack:*:read"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusBadRequest, "tenant_unresolved", nil)
+		return
+	}
+	name := mux.Vars(r)["name"]
+	rel := r.URL.Query().Get("path")
+	if rel == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing_path", nil)
+		return
+	}
+	// Accept either the read-file-style path ("_data/x") or a full "FILES/_data/x".
+	stored := rel
+	if !strings.HasPrefix(stored, "FILES/") {
+		stored = "FILES/" + strings.TrimPrefix(rel, "/")
+	}
+
+	_, activeVersionID, err := c.lookupStack(r.Context(), c.pu.RuntimeDB, ac.TenantID, name)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSONError(w, http.StatusNotFound, "stack_not_found", map[string]any{"name": name})
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "query_failed", map[string]any{"err": err.Error()})
+		return
+	}
+	resp := map[string]any{"stack": name, "path": stored}
+	if !activeVersionID.Valid {
+		resp["found"] = false
+		resp["reason"] = "stack has no active version"
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	resp["active_version_id"] = activeVersionID.Int64
+
+	var content, hash string
+	err = c.pu.RuntimeDB.QueryRowContext(r.Context(),
+		`SELECT content, content_hash FROM stack_files WHERE version_id = ? AND path = ?`,
+		activeVersionID.Int64, stored).Scan(&content, &hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		resp["found"] = false
+		resp["reason"] = "no stack_files row for (active version, path) — not in the deployed manifest"
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "query_failed", map[string]any{"err": err.Error()})
+		return
+	}
+	resp["content_hash"] = hash
+	resp["inline_len"] = len(content)
+
+	switch {
+	case content != "":
+		resp["found"] = true
+		resp["source"] = "inline"
+		resp["content_b64"] = base64.StdEncoding.EncodeToString([]byte(content))
+	case hash == "":
+		resp["found"] = false
+		resp["reason"] = "row present but content AND content_hash are empty — read-file's index skips this"
+	case c.fcas == nil:
+		resp["found"] = false
+		resp["reason"] = "fingerprint-only row but this node has no content-addressed store"
+	default:
+		b, gerr := c.fcas.Get(r.Context(), hash)
+		if gerr != nil {
+			resp["found"] = false
+			resp["source"] = "cas"
+			resp["reason"] = "manifest has hash " + hash + " but the CAS has no bytes: " + gerr.Error()
+		} else {
+			resp["found"] = true
+			resp["source"] = "cas"
+			resp["size"] = len(b)
+			resp["content_b64"] = base64.StdEncoding.EncodeToString(b)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, includeContent bool) ([]stackFile, error) {
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
 		`SELECT path, content, content_hash FROM stack_files
@@ -1032,10 +1122,17 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// rollback rather than half-publishing. Also fires on fleet apply
 	// (applier → ApplyStackVersion → here), so nodes self-populate their CAS
 	// from the still-inline content (Phase 1).
-	if c.fcas != nil {
-		// Collect the FILES/* rows to materialise (skip non-FILES inline rows +
-		// fingerprint-only rows whose bytes already live in the shared CAS), then
-		// write them concurrently — see materialiseFiles.
+	// Materialise FILES/* bytes into the content-addressed store. On a FLEET
+	// node the producer ALREADY did this BEFORE the tx (handleActivateStack →
+	// readStackFilesForArtifact puts every FILES/ asset to the shared CAS), so
+	// we MUST skip it here. The runtime DB is single-connection
+	// (dbcache.MaxOpenConns=1); doing the per-file R2 round-trips while the
+	// activation tx pins that connection stalls the WHOLE node — healthz and
+	// inbound mail time out (the `context canceled` storm), and a starved
+	// dbcache reload can leave the static index stale. Single-node deployments
+	// have no pre-tx producer, so they still materialise here, against their
+	// (local, fast) CAS where holding the connection briefly is harmless.
+	if c.fcas != nil && !c.fleetEnabled() {
 		assets := make(map[string]string)
 		for _, rf := range rawFiles {
 			if strings.HasPrefix(rf.path, "FILES/") && rf.content != "" {

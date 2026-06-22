@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +37,76 @@ type activateResult struct {
 	Stack        string `json:"stack"`
 	Version      int64  `json:"version"`
 	PriorVersion *int64 `json:"prior_version,omitempty"`
+}
+
+// runCat: `txco cat [flags] <stack> <path>` — resolve a deployed stack's FILES/
+// asset (active version) the same way txco://read-file does, and print it.
+// Reports where resolution succeeds/fails — an ops + debugging probe.
+func runCat(args []string, stdout, stderr io.Writer) int {
+	fs := pflag.NewFlagSet("cat", pflag.ContinueOnError)
+	fs.SetOutput(stderr)
+	tf := bindTargetFlags(fs)
+	asJSON := fs.Bool("json", false, "emit the raw diagnostic JSON instead of file content")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, `
+Usage: txco cat [flags] <stack> <path>
+
+Resolve a FILES/ asset of a stack's ACTIVE version exactly the way
+txco://read-file does (manifest row -> content-addressed store) and print it to
+stdout. Reports on stderr where resolution succeeds or fails (manifest miss /
+empty hash / CAS miss). <path> is FILES-relative, e.g.
+_data/publications/white-fang/index.json
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 2 {
+		fmt.Fprintln(stderr, "cat: usage: txco cat <stack> <path>")
+		return 2
+	}
+	stack, filePath := fs.Arg(0), fs.Arg(1)
+
+	dir, err := workspaceDir("")
+	if err != nil {
+		fmt.Fprintf(stderr, "cat: %v\n", err)
+		return 1
+	}
+	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	c := client.New(clientTarget)
+
+	fc, err := c.CatFile(context.Background(), stack, filePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "cat: %v\n", err)
+		return 1
+	}
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(fc)
+		if !fc.Found {
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stderr, "stack=%s path=%s active_version_id=%d found=%v source=%s hash=%s inline_len=%d\n",
+		stack, fc.Path, fc.ActiveVersionID, fc.Found, fc.Source, fc.ContentHash, fc.InlineLen)
+	if !fc.Found {
+		fmt.Fprintf(stderr, "  ✗ %s\n", fc.Reason)
+		return 1
+	}
+	b, derr := base64.StdEncoding.DecodeString(fc.ContentB64)
+	if derr != nil {
+		fmt.Fprintf(stderr, "cat: decode content: %v\n", derr)
+		return 1
+	}
+	_, _ = stdout.Write(b)
+	return 0
 }
 
 func runPull(args []string, stdout, stderr io.Writer) int {

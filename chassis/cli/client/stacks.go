@@ -240,6 +240,46 @@ func (c *Client) GetVersion(ctx context.Context, name string, versionNumber int6
 	return &out, nil
 }
 
+// FileContent is the diagnostic + resolved bytes from GET /stacks/{name}/cat.
+type FileContent struct {
+	Stack           string `json:"stack"`
+	Path            string `json:"path"`
+	ActiveVersionID int64  `json:"active_version_id"`
+	Found           bool   `json:"found"`
+	Source          string `json:"source"`
+	Reason          string `json:"reason"`
+	ContentHash     string `json:"content_hash"`
+	InlineLen       int    `json:"inline_len"`
+	Size            int    `json:"size"`
+	ContentB64      string `json:"content_b64"`
+}
+
+// CatFile: GET /stacks/{name}/cat?path=... — resolve a FILES/ asset of the
+// stack's active version the way read-file does (manifest → CAS), for debugging.
+func (c *Client) CatFile(ctx context.Context, name, filePath string) (*FileContent, error) {
+	endpoint := c.scopedURL(stackPath(name, "/cat")) + "?path=" + url.QueryEscape(filePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out FileContent
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode cat: %w", err)
+	}
+	return &out, nil
+}
+
 // CreateDraft: POST /stacks/{name}/draft
 // from: "active" to clone the currently-active version, "<N>" to clone a
 // specific version_number, or "" for an empty draft.
