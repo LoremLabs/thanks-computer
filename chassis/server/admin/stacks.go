@@ -18,6 +18,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
@@ -25,6 +26,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
+	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/opname"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
@@ -885,6 +887,46 @@ type materialiseError struct {
 
 func (e *materialiseError) Error() string { return e.code }
 
+// materialiseConcurrency bounds how many FILES/* assets materialiseFiles writes
+// to the content-addressed store at once. The old code wrote them one at a time;
+// for a large stack on a network (R2) CAS that ran past Cloudflare's ~100s edge
+// timeout (524) on activate.
+const materialiseConcurrency = 32
+
+// materialiseFiles writes the given path→content assets into the content-
+// addressed store, CONCURRENTLY (bounded) and skipping content already present
+// (so an unchanged file costs no write on re-deploy). The first Put error aborts
+// the rest (gctx cancels) and is returned so the caller rolls back the
+// activation. Callers pass only the rows to materialise (FILES/* with non-empty
+// content); non-FILES rows stay inline in ops, and an empty content is a
+// fingerprint-only row whose bytes already live in the shared CAS.
+func materialiseFiles(ctx context.Context, fcas filecas.Store, files map[string]string) *materialiseError {
+	if fcas == nil || len(files) == 0 {
+		return nil
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(materialiseConcurrency)
+	for path, content := range files {
+		h := sha256Hex(content)
+		g.Go(func() error {
+			if ok, _ := fcas.Exists(gctx, h); ok {
+				return nil
+			}
+			if err := fcas.Put(gctx, h, []byte(content)); err != nil {
+				return &materialiseError{http.StatusServiceUnavailable, "filecas_put", map[string]any{"path": path, "err": err.Error()}}
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		if me, ok := err.(*materialiseError); ok {
+			return me
+		}
+		return &materialiseError{http.StatusServiceUnavailable, "filecas_put", map[string]any{"err": err.Error()}}
+	}
+	return nil
+}
+
 // materialiseStackVersion is the transactional core of activation, extracted
 // verbatim from handleActivateStack so the identical logic can run from a
 // non-HTTP context (e.g. a control-event applier — see the fleet sync plan).
@@ -970,19 +1012,17 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// (applier → ApplyStackVersion → here), so nodes self-populate their CAS
 	// from the still-inline content (Phase 1).
 	if c.fcas != nil {
+		// Collect the FILES/* rows to materialise (skip non-FILES inline rows +
+		// fingerprint-only rows whose bytes already live in the shared CAS), then
+		// write them concurrently — see materialiseFiles.
+		assets := make(map[string]string)
 		for _, rf := range rawFiles {
-			if !strings.HasPrefix(rf.path, "FILES/") {
-				continue
+			if strings.HasPrefix(rf.path, "FILES/") && rf.content != "" {
+				assets[rf.path] = rf.content
 			}
-			if rf.content == "" {
-				// Fingerprint-only row (fleet data-plane apply): the bytes
-				// already live in the shared CAS — nothing to put from here.
-				continue
-			}
-			h := sha256Hex(rf.content)
-			if err := c.fcas.Put(ctx, h, []byte(rf.content)); err != nil {
-				return currentActiveID, targetVersionID, &materialiseError{http.StatusServiceUnavailable, "filecas_put", map[string]any{"path": rf.path, "err": err.Error()}}
-			}
+		}
+		if me := materialiseFiles(ctx, c.fcas, assets); me != nil {
+			return currentActiveID, targetVersionID, me
 		}
 	}
 
