@@ -23,7 +23,7 @@ const defaultRuntimeDB = "./chassis/data/db/runtime-dev.db"
 // chassis environment when present, falling back to the dev path.
 // The chassis sets TXCO_DB_ROOT_DIR + TXCO_ENV inside its container
 // (e.g. /data/db + prod → /data/db/runtime-prod.db), so a `docker
-// exec txco-txco-1 txco snapshot publish` Just Works without an
+// exec <chassis-container> txco snapshot publish` Just Works without an
 // explicit --db. Local repo invocations see neither env var set and
 // fall back to the dev default.
 func defaultRuntimeDBForEnv() string {
@@ -147,7 +147,7 @@ func runSnapshotExport(args []string, stdout, stderr io.Writer) int {
 // --alias is supplied, the SAME bytes are written a second time under
 // the alias key — operator workflow:
 //
-//	$ docker exec txco-txco-1 txco snapshot publish --alias=snapshots/latest
+//	$ docker exec <chassis-container> txco snapshot publish --alias=snapshots/latest
 //	published snapshots/20260521-143012-9f2c6e3d.snap
 //	  control_version=4837, bytes=2156033
 //	  alias: snapshots/latest
@@ -161,7 +161,7 @@ func runSnapshotPublish(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	// Default looks at the current chassis runtime env first — `txco
 	// snapshot publish` is overwhelmingly invoked via `docker exec
-	// txco-txco-1 …` where TXCO_DB_ROOT_DIR + TXCO_ENV are populated
+	// <chassis-container> …` where TXCO_DB_ROOT_DIR + TXCO_ENV are populated
 	// — and falls back to the dev path so a local repo invocation
 	// still works.
 	db := fs.String("db", defaultRuntimeDBForEnv(), "runtime DB file")

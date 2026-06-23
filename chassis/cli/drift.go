@@ -25,6 +25,7 @@ type stackDrift struct {
 	URL       string // reachable stack URL, e.g. "https://app.acme.com" (empty when none/unknown)
 	DevURL    string // reachable URL on the local `txco dev` chassis (empty when no dev run is known)
 	MailPath  string // inbound mail pattern for _mail stacks, e.g. "*@acme.com" (empty otherwise)
+	Headless  bool   // stack opted out of the auto-minted routing URL (`txco stack set --no-host`)
 	Divergent bool
 }
 
@@ -51,9 +52,15 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 
 		// Remote pointer.
 		var remoteN int64 = -1
-		if st, err := c.GetStack(ctx, name); err == nil && st != nil && st.ActiveVersion != nil {
-			remoteN = *st.ActiveVersion
-			d.Remote = fmt.Sprintf("v%d", remoteN)
+		if st, err := c.GetStack(ctx, name); err == nil && st != nil {
+			if st.ActiveVersion != nil {
+				remoteN = *st.ActiveVersion
+				d.Remote = fmt.Sprintf("v%d", remoteN)
+			}
+			// nil = older server that doesn't report the field → leave unflagged.
+			if st.MintHostname != nil && !*st.MintHostname {
+				d.Headless = true
+			}
 		}
 
 		// Local state + cleanliness.
@@ -304,14 +311,21 @@ func printDriftTable(w io.Writer, drifts []stackDrift) bool {
 		if d.MailPath != "" {
 			mailSeg = "  mail=" + cyan + d.MailPath + reset
 		}
+		// Trailing headless marker: the stack opted out of the auto-minted
+		// routing URL, so the url= cell is (correctly) blank — say so
+		// explicitly rather than leaving the absence ambiguous.
+		headlessSeg := ""
+		if d.Headless {
+			headlessSeg = "  " + yellow + "headless" + reset
+		}
 
-		fmt.Fprintf(w, "%s%s%s%s%s%s  remote=%s  local=%s%s  %s→ %s%s%s%s\n",
+		fmt.Fprintf(w, "%s%s%s%s%s%s  remote=%s  local=%s%s  %s→ %s%s%s%s%s\n",
 			markerC, marker, reset,
 			bold, padRight(d.Stack, nameW), reset,
 			padRight(d.Remote, remoteW),
 			padRight(d.Local, localW),
 			urlSeg,
-			noteC, d.Note, reset, devSeg, mailSeg)
+			noteC, d.Note, reset, headlessSeg, devSeg, mailSeg)
 	}
 	return any
 }

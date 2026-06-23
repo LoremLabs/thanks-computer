@@ -32,6 +32,7 @@ CREATE TABLE stacks (
 	name            TEXT NOT NULL,
 	active_version  INTEGER,
 	created_at      TEXT NOT NULL,
+	mint_hostname   INTEGER NOT NULL DEFAULT 1,
 	UNIQUE(tenant_id, name)
 );
 CREATE TABLE stack_versions (

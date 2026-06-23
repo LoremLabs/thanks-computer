@@ -43,6 +43,7 @@ type stackRecord struct {
 	ActiveVersion *int64 `json:"active_version,omitempty"` // version_number, nil if no active version
 	ManifestHash  string `json:"manifest_hash,omitempty"`  // active version's manifest hash; lets a client skip a no-op push
 	CreatedAt     string `json:"created_at"`
+	MintHostname  bool   `json:"mint_hostname"` // false = headless (no auto-minted routing URL); see `txco stack set --no-host`
 }
 
 type versionRecord struct {
@@ -83,6 +84,25 @@ type createDraftRequest struct {
 
 type createDraftResponse struct {
 	VersionNumber int64 `json:"version_number"`
+}
+
+type patchStackSettingsRequest struct {
+	// MintHostname sets the per-stack auto-URL gate (stacks.mint_hostname).
+	// Pointer so an omitted field is a no-op rather than a silent reset:
+	// nil → 400 (nothing to change); false → headless; true → re-enable.
+	MintHostname *bool `json:"mint_hostname,omitempty"`
+	// Force authorizes the destructive part of going headless: revoking any
+	// live chassis-minted routing host already bound to the stack. Without it,
+	// a --no-host on a stack that already has a URL is a 409 (the URL would
+	// otherwise keep serving — going headless wouldn't take effect).
+	Force bool `json:"force,omitempty"`
+}
+
+type stackSettingsResponse struct {
+	MintHostname bool `json:"mint_hostname"`
+	// RevokedHosts lists the routing hostnames torn down by a forced --no-host
+	// (empty when none existed or the stack was already headless).
+	RevokedHosts []string `json:"revoked_hosts,omitempty"`
 }
 
 type putFilesRequest struct {
@@ -167,6 +187,26 @@ func (c *Controller) lookupStack(ctx context.Context, tx interface {
 		tenantID, name)
 	err = row.Scan(&stackID, &activeVersionID)
 	return
+}
+
+// stackMintsHost reports whether the stack's auto-URL mint is enabled
+// (stacks.mint_hostname). A stack toggled headless via `txco stack set
+// --no-host` returns false, suppressing the structured/zone hostname mint at
+// activate. Defaults to true when the row or column is absent, or on any read
+// error — minting is the historical default, so a missing column or a transient
+// read must never silently drop a stack's URL. Only the control-plane activate
+// path calls this (gated behind mintHosts), so the data-plane applier adds no
+// query.
+func (c *Controller) stackMintsHost(ctx context.Context, tx interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, tenantID, name string) bool {
+	var v sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT mint_hostname FROM stacks WHERE tenant_id = ? AND name = ?`,
+		tenantID, name).Scan(&v); err != nil {
+		return true
+	}
+	return !v.Valid || v.Int64 != 0
 }
 
 // lookupVersion finds (stack_id, version_number) → version_id + status.
@@ -370,7 +410,7 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
-		`SELECT s.name, sv.version_number, sv.manifest_hash, s.created_at
+		`SELECT s.name, sv.version_number, sv.manifest_hash, s.created_at, s.mint_hostname
 		   FROM stacks s
 		   LEFT JOIN stack_versions sv ON sv.version_id = s.active_version
 		  WHERE s.tenant_id = ?
@@ -385,7 +425,8 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 		var rec stackRecord
 		var av sql.NullInt64
 		var mh sql.NullString
-		if err := rows.Scan(&rec.Name, &av, &mh, &rec.CreatedAt); err != nil {
+		var mint int64
+		if err := rows.Scan(&rec.Name, &av, &mh, &rec.CreatedAt, &mint); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "scan_failed", map[string]any{"err": err.Error()})
 			return
 		}
@@ -393,6 +434,7 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 			rec.ActiveVersion = &av.Int64
 		}
 		rec.ManifestHash = mh.String
+		rec.MintHostname = mint != 0
 		out = append(out, rec)
 	}
 	writeJSON(w, http.StatusOK, listStacksResponse{Stacks: out})
@@ -414,11 +456,12 @@ func (c *Controller) handleGetStack(w http.ResponseWriter, r *http.Request) {
 	rec.Name = name
 	var av sql.NullInt64
 	var mh sql.NullString
+	var mint int64
 	err := c.pu.RuntimeDB.QueryRowContext(r.Context(),
-		`SELECT sv.version_number, sv.manifest_hash, s.created_at
+		`SELECT sv.version_number, sv.manifest_hash, s.created_at, s.mint_hostname
 		   FROM stacks s
 		   LEFT JOIN stack_versions sv ON sv.version_id = s.active_version
-		  WHERE s.tenant_id = ? AND s.name = ?`, ac.TenantID, name).Scan(&av, &mh, &rec.CreatedAt)
+		  WHERE s.tenant_id = ? AND s.name = ?`, ac.TenantID, name).Scan(&av, &mh, &rec.CreatedAt, &mint)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSONError(w, http.StatusNotFound, "stack_not_found", map[string]any{"name": name})
 		return
@@ -431,7 +474,220 @@ func (c *Controller) handleGetStack(w http.ResponseWriter, r *http.Request) {
 		rec.ActiveVersion = &av.Int64
 	}
 	rec.ManifestHash = mh.String
+	rec.MintHostname = mint != 0
 	writeJSON(w, http.StatusOK, rec)
+}
+
+// handlePatchStackSettings: PATCH /v1/tenants/{t}/stacks/{name}/settings
+//
+// Updates stack-level policy that lives on the stacks row itself (not on a
+// version). Currently just mint_hostname — the per-stack auto-URL gate flipped
+// by `txco stack set --no-host|--host`. Vivifies the stacks row if it doesn't
+// exist yet (mirrors handleCreateDraft), so the toggle can be set BEFORE a
+// stack's first apply — otherwise the URL would already be minted by the time
+// you could flip it. Suppress-future-mint only: it never revokes a live host.
+func (c *Controller) handlePatchStackSettings(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "opstack:*:update"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusBadRequest, "tenant_unresolved", nil)
+		return
+	}
+	name := mux.Vars(r)["name"]
+	if name == "" {
+		writeJSONError(w, http.StatusBadRequest, "empty_stack_name", nil)
+		return
+	}
+	if err := validateStackName(name, ac.TenantID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "reserved_stack_name", map[string]any{"reason": err.Error()})
+		return
+	}
+	var req patchStackSettingsRequest
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_json", map[string]any{"err": err.Error()})
+			return
+		}
+	}
+	if req.MintHostname == nil {
+		writeJSONError(w, http.StatusBadRequest, "no_settings", map[string]any{"reason": "no settings provided (expected mint_hostname)"})
+		return
+	}
+	goingHeadless := !*req.MintHostname
+
+	// Going headless on a stack that already has a live chassis-minted URL
+	// must tear that URL down to take effect (the column only gates FUTURE
+	// mints; the existing host keeps routing otherwise). That is destructive
+	// and outward-facing, so it requires --force; without it, refuse with the
+	// live host(s) named so the operator can decide. The hostname revoke is a
+	// distinct capability, so an actor force-revoking must hold it too.
+	var toRevoke []tenants.Hostname
+	if goingHeadless {
+		hosts, herr := c.listManagedStackHosts(r.Context(), ac.TenantID, name)
+		if herr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "lookup_hosts", map[string]any{"err": herr.Error()})
+			return
+		}
+		if len(hosts) > 0 {
+			if !req.Force {
+				names := make([]string, len(hosts))
+				for i, h := range hosts {
+					names[i] = h.Hostname
+				}
+				writeJSONError(w, http.StatusConflict, "live_url_exists", map[string]any{
+					"hostnames": names,
+					"hint":      "stack already has a live URL; re-run with --force to revoke it and go headless",
+				})
+				return
+			}
+			if err := policy.RequireCapability(r.Context(), "hostname:*:write"); err != nil {
+				auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+				return
+			}
+			toRevoke = hosts
+		}
+	}
+
+	nowT := time.Now().UTC()
+	now := nowT.Format("2006-01-02T15:04:05.000Z")
+
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Look up or auto-vivify the stack (mirrors handleCreateDraft).
+	var stackID string
+	var activeVersionID sql.NullInt64
+	switch err = tx.QueryRowContext(r.Context(),
+		`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`,
+		ac.TenantID, name).Scan(&stackID, &activeVersionID); {
+	case errors.Is(err, sql.ErrNoRows):
+		stackID = "stk_" + hxid.NewTimeSort().String()
+		if _, err := tx.ExecContext(r.Context(),
+			`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`,
+			stackID, ac.TenantID, name, now); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": err.Error()})
+			return
+		}
+	case err != nil:
+		writeJSONError(w, http.StatusInternalServerError, "lookup_stack", map[string]any{"err": err.Error()})
+		return
+	}
+
+	mint := 0
+	if *req.MintHostname {
+		mint = 1
+	}
+	if _, err := tx.ExecContext(r.Context(),
+		`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND name = ?`,
+		mint, ac.TenantID, name); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "update_settings", map[string]any{"err": err.Error()})
+		return
+	}
+
+	revoked := make([]string, 0, len(toRevoke))
+	for _, h := range toRevoke {
+		if err := c.revokeManagedHostTx(r.Context(), tx, ac.TenantID, h, nowT); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "revoke_host", map[string]any{"err": err.Error(), "hostname": h.Hostname})
+			return
+		}
+		revoked = append(revoked, h.Hostname)
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+
+	// A revoke changes data-plane routing (the resolver reads tenant_hostnames),
+	// so refresh the cache like handleRevokeHostname does. The column flip alone
+	// needs no reload (mint_hostname is read only at activate).
+	if len(revoked) > 0 {
+		if err := c.pu.Dbc.Reload(); err != nil {
+			c.pu.Logger.Warn("dbcache reload after stack-headless revoke failed; FS watcher will retry",
+				zap.String("err", err.Error()))
+		}
+	}
+
+	writeJSON(w, http.StatusOK, stackSettingsResponse{MintHostname: mint != 0, RevokedHosts: revoked})
+}
+
+// listManagedStackHosts returns the live chassis-minted routing hosts bound to
+// (tenant, stack) — the structured-host-suffix and delegated-zone rows that the
+// activate path auto-mints. Custom/user-bound hostnames (other created_by) are
+// intentionally excluded: `txco stack set --no-host` only owns what the chassis
+// minted. Usually 0 or 1 row, so the per-host LookupActiveHostname (to get the
+// full row incl. DKIM for the fleet artifact) is fine.
+func (c *Controller) listManagedStackHosts(ctx context.Context, tenantID, stack string) ([]tenants.Hostname, error) {
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
+		`SELECT hostname FROM tenant_hostnames
+		  WHERE tenant_id = ? AND stack = ? AND revoked_at IS NULL
+		    AND created_by IN (?, ?)
+		  ORDER BY hostname`,
+		tenantID, stack, tenants.SystemStructuredHostCreatedBy, tenants.SystemZoneHostCreatedBy)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]tenants.Hostname, 0, len(names))
+	for _, n := range names {
+		h, err := c.tenants.LookupActiveHostname(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+// revokeManagedHostTx soft-deletes one routing host the fleet-safe way, mirroring
+// handleRevokeHostname: upload the revoked-row artifact (so data-plane nodes
+// learn the soft-delete) BEFORE appending the outbox event, then RevokeHostnameTx
+// + queue a hostname.revoked event, all inside the caller's tx.
+func (c *Controller) revokeManagedHostTx(ctx context.Context, tx *sql.Tx, tenantID string, h tenants.Hostname, now time.Time) error {
+	var ref, sum string
+	if c.fleetEnabled() {
+		postRevoke := h
+		postRevoke.RevokedAt = &now
+		r, s, err := c.fleetUploadHostnameUpsert(ctx, postRevoke)
+		if err != nil {
+			return fmt.Errorf("fleet upload: %w", err)
+		}
+		ref, sum = r, s
+	}
+	if _, _, err := c.tenants.RevokeHostnameTx(ctx, tx, h.Hostname); err != nil {
+		return fmt.Errorf("revoke: %w", err)
+	}
+	if c.fleetEnabled() {
+		if _, err := c.fleetQueueEvent(ctx, tx,
+			controlevent.TypeHostnameRevoked, tenantID, "", 0, 0, ref, sum); err != nil {
+			return fmt.Errorf("queue revoke event: %w", err)
+		}
+	}
+	return nil
 }
 
 // handleListVersions: GET /v1/tenants/{t}/stacks/{name}/versions
@@ -1254,7 +1510,7 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// mintHosts is the control-plane gate: only the admin handler mints
 	// (then fleet-publishes the row); the data-plane applier passes false
 	// so it never mints a divergent random host (see the func doc).
-	if mintHosts && isMintableStack(stackName) {
+	if mintHosts && isMintableStack(stackName) && c.stackMintsHost(ctx, tx, tenantID, stackName) {
 		origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID)
 		if zerr != nil {
 			// A zone-lookup failure must never skip the structured-host

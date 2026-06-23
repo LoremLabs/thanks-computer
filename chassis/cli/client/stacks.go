@@ -19,6 +19,11 @@ type StackRecord struct {
 	ActiveVersion *int64 `json:"active_version,omitempty"`
 	ManifestHash  string `json:"manifest_hash,omitempty"`
 	CreatedAt     string `json:"created_at"`
+	// MintHostname: false = headless (activate mints no auto routing URL),
+	// true = mints one. Pointer so an OLDER server that doesn't send the
+	// field decodes to nil ("unknown") rather than a misleading false — a
+	// plain bool would label every stack headless against such a server.
+	MintHostname *bool `json:"mint_hostname,omitempty"`
 }
 
 type VersionRecord struct {
@@ -523,4 +528,52 @@ func (c *Client) DeactivateStack(ctx context.Context, name string) (*ActivateRes
 		return nil, fmt.Errorf("clear files: %w", err)
 	}
 	return c.Activate(ctx, name, v)
+}
+
+type stackSettingsReq struct {
+	MintHostname *bool `json:"mint_hostname,omitempty"`
+	Force        bool  `json:"force,omitempty"`
+}
+
+type StackSettingsResponse struct {
+	MintHostname bool     `json:"mint_hostname"`
+	RevokedHosts []string `json:"revoked_hosts,omitempty"`
+}
+
+// SetStackHostMint flips the per-stack auto-URL gate (stacks.mint_hostname) via
+// PATCH /stacks/{name}/settings. mint=false makes activate skip the auto-minted
+// routing hostname (`txco stack set --no-host`); mint=true re-enables it. The
+// stack row is vivified server-side if it doesn't exist yet, so this can be set
+// before the stack's first apply.
+//
+// If the stack already has a live chassis-minted URL, mint=false requires
+// force=true (the server returns 409 "live_url_exists" otherwise) and revokes
+// that host; the revoked hostnames come back in RevokedHosts.
+func (c *Client) SetStackHostMint(ctx context.Context, name string, mint, force bool) (*StackSettingsResponse, error) {
+	body, err := json.Marshal(stackSettingsReq{MintHostname: &mint, Force: force})
+	if err != nil {
+		return nil, err
+	}
+	endpoint := c.scopedURL(stackPath(name, "/settings"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(req, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out StackSettingsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode stack settings: %w", err)
+	}
+	return &out, nil
 }

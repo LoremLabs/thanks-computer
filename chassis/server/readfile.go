@@ -14,6 +14,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
 )
 
@@ -27,12 +28,16 @@ import (
 // Reading goes through the in-memory static Index (and the filecas store
 // for tenant CAS entries), never the filesystem — so it stays off the
 // request hot path. Unlike HTTP serving, it CAN read `_`-private assets
-// (the FILES/_mail/ templating case); cross-tenant reads are impossible
-// (the index is keyed by routed tenant+stack).
+// (the FILES/_mail/ templating case). The tenant is the TRUSTED pinned
+// tenant (processor.TenantScope), so cross-tenant reads are impossible —
+// even with an explicit `stack`, which only re-targets WITHIN the caller's
+// own tenant (e.g. a router checking another stack's existence).
 //
 // WITH parameters (op.Meta):
 //
 //	files = [{"path":"_mail/welcome.html","as":"welcome"}]   (required)
+//	stack = "publications/white-fang"  (optional: read another of YOUR tenant's
+//	                                    stacks; default = the routed stack)
 //	into  = "_files"        (optional: destination subtree, default "_files")
 //	encode = "auto"         (optional: "auto" | "utf8" | "base64")
 //	strict = false          (optional: a miss / over-cap fails the op)
@@ -80,20 +85,27 @@ func readFile(ctx context.Context, ix *static.Index, fcas filecas.Store, in []by
 		maxBytes = int(mb.Int())
 	}
 
-	// The routed tenant/stack live at _txc.tenant / _txc.stack once the
-	// ingress router resolves them (server/ingress/router.go) — that's the
-	// mail/LMTP path. The HTTP path instead leaves them as the inert proposal
-	// under _txc.route.*. Read the canonical top-level value first and fall
-	// back to the route proposal — the same dual lookup mailer.go uses.
-	// (Reading only _txc.route.* silently yields "" for mail-routed reads, so
-	// Asset("","",path) misses the tenant FILES layer → found:false.)
-	tenant := gjson.GetBytes(in, "_txc.tenant").String()
+	// Tenant is the TRUSTED pinned tenant (processor.TenantScope), never the
+	// mutable envelope value — so an explicit `stack` (below) can only re-target
+	// WITHIN the caller's own tenant, never cross-tenant. Fall back to the
+	// envelope only if the scope isn't pinned (defensive; pinned in normal ops).
+	tenant := processor.TenantScope(ctx)
 	if tenant == "" {
-		tenant = gjson.GetBytes(in, "_txc.route.tenant").String()
+		tenant = gjson.GetBytes(in, "_txc.tenant").String()
+		if tenant == "" {
+			tenant = gjson.GetBytes(in, "_txc.route.tenant").String()
+		}
 	}
-	stack := gjson.GetBytes(in, "_txc.stack").String()
+	// `stack` (WITH) reads from another of the tenant's stacks — e.g. a router
+	// checking publications/<slug>/_data/index.json without keeping a registry.
+	// Default = the routed stack (_txc.stack on the mail path, _txc.route.stack
+	// on the HTTP boot path).
+	stack := gjson.GetBytes(meta, "stack").String()
 	if stack == "" {
-		stack = gjson.GetBytes(in, "_txc.route.stack").String()
+		stack = gjson.GetBytes(in, "_txc.stack").String()
+		if stack == "" {
+			stack = gjson.GetBytes(in, "_txc.route.stack").String()
+		}
 	}
 
 	resp := `{}`

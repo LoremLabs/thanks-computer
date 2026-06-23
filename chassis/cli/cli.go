@@ -99,6 +99,11 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return jsonErrWrap(rest, stdout, stderr, runActivate), true
 	case "deactivate":
 		return jsonErrWrap(rest, stdout, stderr, runDeactivate), true
+	case "stack":
+		// Stack-level settings on the stack record itself (not a version),
+		// e.g. `txco stack set --no-host <stack>` to deploy with no auto-URL.
+		// See chassis/cli/stack_cmd.go.
+		return jsonErrWrap(rest, stdout, stderr, runStack), true
 	case "versions":
 		return jsonErrWrap(rest, stdout, stderr, runVersions), true
 	case "edit":

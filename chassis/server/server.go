@@ -204,8 +204,17 @@ func routeBody(in []byte) string {
 	}
 	raw := "{}"
 	raw, _ = sjson.Set(raw, "_txc.goto", to)
+	// Tenant is ESTABLISHED once — at ingress/boot, when none is set yet — and may
+	// only be re-affirmed afterward. A (tenant) op can re-run route to re-pin the
+	// STACK for cross-stack dispatch, but it must NOT be able to SWITCH the tenant
+	// via `SET @route.tenant=other`. route is the only path that can set
+	// `_txc.tenant` (EMIT + untrusted op output are blocked), so `cur` is always
+	// the established tenant and this invariant holds inductively. On a switch
+	// attempt we omit it, so the per-scope merge keeps the established value.
 	if tn := gjson.GetBytes(in, "_txc.route.tenant"); tn.Exists() && tn.String() != "" {
-		raw, _ = sjson.Set(raw, "_txc.tenant", tn.String())
+		if cur := gjson.GetBytes(in, "_txc.tenant").String(); cur == "" || cur == tn.String() {
+			raw, _ = sjson.Set(raw, "_txc.tenant", tn.String())
+		}
 	}
 	if s := gjson.GetBytes(in, "_txc.route.stack"); s.Exists() {
 		raw, _ = sjson.Set(raw, "_txc.stack", s.String())

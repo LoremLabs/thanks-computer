@@ -18,6 +18,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
 )
 
@@ -124,6 +125,78 @@ func TestReadFileIntoOverrideAndStackPrecedence(t *testing.T) {
 	}
 	if got := g.Get("data.files.r.content").String(); got != "STACK" {
 		t.Fatalf("routed-stack robots content=%q", got)
+	}
+}
+
+// TestReadFileStackParam covers the `stack` WITH override against the DB-backed
+// tenant layer (the real path for per-stack FILES; the disk-walk layer is
+// single-segment only). A router reads ANOTHER of its tenant's stacks (the nested
+// publications/<slug>/_data/index.json) so existence is authoritative — no
+// registry. Default reads the routed stack; a nonexistent stack misses; and the
+// TRUSTED pinned tenant (TenantScope) beats a spoofed envelope tenant, so `stack`
+// can never cross tenants.
+func TestReadFileStackParam(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(casDDL); err != nil {
+		t.Fatal(err)
+	}
+	mustExec := func(q string, args ...any) {
+		if _, e := db.Exec(q, args...); e != nil {
+			t.Fatalf("exec %q: %v", q, e)
+		}
+	}
+	idx := `{"title":"White Fang"}`
+	mustExec(`INSERT INTO tenants(tenant_id,slug,name,created_at) VALUES('tnt_a','acme','acme','t')`)
+	mustExec(`INSERT INTO stacks(stack_id,tenant_id,name,active_version,created_at) VALUES('s_r','tnt_a','router',1,'t')`)
+	mustExec(`INSERT INTO stacks(stack_id,tenant_id,name,active_version,created_at) VALUES('s_p','tnt_a','publications/white-fang',2,'t')`)
+	mustExec(`INSERT INTO stack_files(version_id,path,content,content_hash) VALUES(1,'FILES/own.txt','ROUTER',?)`, sha256Hex([]byte("ROUTER")))
+	mustExec(`INSERT INTO stack_files(version_id,path,content,content_hash) VALUES(2,'FILES/_data/index.json',?,?)`, idx, sha256Hex([]byte(idx)))
+	ix := static.NewIndex("", zap.NewNop())
+	if err := ix.RebuildTenant(db); err != nil {
+		t.Fatalf("RebuildTenant: %v", err)
+	}
+	fcas := &fakeCAS{m: map[string][]byte{
+		sha256Hex([]byte("ROUTER")): []byte("ROUTER"),
+		sha256Hex([]byte(idx)):      []byte(idx),
+	}}
+
+	// default: routed stack = router → reads router's own file.
+	pay, _ := runReadFile(t, ix, fcas, "acme", "router", `{"files":[{"path":"own.txt","as":"o"}]}`, 1<<20)
+	if got := gjson.Get(pay.Raw, "_files.o.content").String(); got != "ROUTER" {
+		t.Fatalf("default routed-stack read=%q; raw=%s", got, pay.Raw)
+	}
+
+	// stack param: routed stack = router, but read the (nested) publication stack.
+	pay, _ = runReadFile(t, ix, fcas, "acme", "router", `{"files":[{"path":"_data/index.json","as":"idx"}],"stack":"publications/white-fang"}`, 1<<20)
+	if got := gjson.Get(pay.Raw, "_files.idx.content").String(); got != idx {
+		t.Fatalf("cross-stack content=%q; raw=%s", got, pay.Raw)
+	}
+
+	// a nonexistent stack → miss (the authoritative "no such publication" signal).
+	pay, _ = runReadFile(t, ix, fcas, "acme", "router", `{"files":[{"path":"_data/index.json","as":"idx"}],"stack":"publications/nope"}`, 1<<20)
+	if gjson.Get(pay.Raw, "_files.idx.found").Bool() {
+		t.Fatalf("nonexistent stack must miss; raw=%s", pay.Raw)
+	}
+
+	// SECURITY: the trusted pinned tenant (TenantScope) wins over a spoofed
+	// envelope tenant, so `stack` can never reach another tenant's FILES.
+	in := `{}`
+	in, _ = sjson.Set(in, "_txc.route.tenant", "EVIL") // would mis-resolve if envelope-trusted
+	in, _ = sjson.Set(in, "_txc.route.stack", "router")
+	ctx := processor.WithTenant(
+		operation.WithMeta(context.Background(),
+			`{"files":[{"path":"_data/index.json","as":"idx"}],"stack":"publications/white-fang"}`),
+		"acme")
+	pay, err = readFile(ctx, ix, fcas, []byte(in), 1<<20)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got := gjson.Get(pay.Raw, "_files.idx.content").String(); got != idx {
+		t.Fatalf("TenantScope(acme) must win over envelope tenant=EVIL; raw=%s", pay.Raw)
 	}
 }
 
