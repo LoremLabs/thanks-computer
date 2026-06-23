@@ -1,0 +1,18 @@
+-- Per-stack opt-out for the auto-minted routing hostname (URL).
+--
+-- Activating a web stack auto-mints a structured-host/zone routing hostname
+-- (e.g. `<stack>-<rand>.<suffix>`) whenever --structured-host-suffix (or a
+-- delegated zone) is configured and the stack passes isMintableStack's
+-- `_`-prefix carve-out. That is fleet-wide all-or-nothing; there was no way to
+-- say "deploy this stack but don't give it a public URL".
+--
+-- mint_hostname is the per-stack gate. 1 = mint (today's behavior, so every
+-- existing and newly-created stack is unchanged); 0 = headless (skip the
+-- auto-mint at activate). It only further restricts: isMintableStack and the
+-- --structured-host-suffix config still apply on top. Flipped via
+-- `txco stack set --no-host <name>` (PATCH /stacks/{name}/settings); read on
+-- the control-plane activate path in materialiseStackVersion.
+--
+-- Suppress-future-mint only: setting it on a stack that already minted a URL
+-- does NOT revoke the live host (that is a separate revoke + fleet-unpublish).
+ALTER TABLE stacks ADD COLUMN mint_hostname INTEGER NOT NULL DEFAULT 1;
