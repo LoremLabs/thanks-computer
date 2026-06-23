@@ -17,6 +17,7 @@ import (
 type StackRecord struct {
 	Name          string `json:"name"`
 	ActiveVersion *int64 `json:"active_version,omitempty"`
+	ManifestHash  string `json:"manifest_hash,omitempty"`
 	CreatedAt     string `json:"created_at"`
 }
 

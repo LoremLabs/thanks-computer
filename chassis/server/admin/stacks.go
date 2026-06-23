@@ -41,6 +41,7 @@ import (
 type stackRecord struct {
 	Name          string `json:"name"`
 	ActiveVersion *int64 `json:"active_version,omitempty"` // version_number, nil if no active version
+	ManifestHash  string `json:"manifest_hash,omitempty"`  // active version's manifest hash; lets a client skip a no-op push
 	CreatedAt     string `json:"created_at"`
 }
 
@@ -369,7 +370,7 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
-		`SELECT s.name, sv.version_number, s.created_at
+		`SELECT s.name, sv.version_number, sv.manifest_hash, s.created_at
 		   FROM stacks s
 		   LEFT JOIN stack_versions sv ON sv.version_id = s.active_version
 		  WHERE s.tenant_id = ?
@@ -383,13 +384,15 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rec stackRecord
 		var av sql.NullInt64
-		if err := rows.Scan(&rec.Name, &av, &rec.CreatedAt); err != nil {
+		var mh sql.NullString
+		if err := rows.Scan(&rec.Name, &av, &mh, &rec.CreatedAt); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "scan_failed", map[string]any{"err": err.Error()})
 			return
 		}
 		if av.Valid {
 			rec.ActiveVersion = &av.Int64
 		}
+		rec.ManifestHash = mh.String
 		out = append(out, rec)
 	}
 	writeJSON(w, http.StatusOK, listStacksResponse{Stacks: out})
@@ -410,11 +413,12 @@ func (c *Controller) handleGetStack(w http.ResponseWriter, r *http.Request) {
 	var rec stackRecord
 	rec.Name = name
 	var av sql.NullInt64
+	var mh sql.NullString
 	err := c.pu.RuntimeDB.QueryRowContext(r.Context(),
-		`SELECT sv.version_number, s.created_at
+		`SELECT sv.version_number, sv.manifest_hash, s.created_at
 		   FROM stacks s
 		   LEFT JOIN stack_versions sv ON sv.version_id = s.active_version
-		  WHERE s.tenant_id = ? AND s.name = ?`, ac.TenantID, name).Scan(&av, &rec.CreatedAt)
+		  WHERE s.tenant_id = ? AND s.name = ?`, ac.TenantID, name).Scan(&av, &mh, &rec.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSONError(w, http.StatusNotFound, "stack_not_found", map[string]any{"name": name})
 		return
@@ -426,6 +430,7 @@ func (c *Controller) handleGetStack(w http.ResponseWriter, r *http.Request) {
 	if av.Valid {
 		rec.ActiveVersion = &av.Int64
 	}
+	rec.ManifestHash = mh.String
 	writeJSON(w, http.StatusOK, rec)
 }
 

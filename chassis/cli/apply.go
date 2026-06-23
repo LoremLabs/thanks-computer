@@ -71,6 +71,9 @@ type deployResult struct {
 	PriorVersion *int64 `json:"prior_version,omitempty"`
 	Files        int    `json:"files"`
 	Activated    bool   `json:"activated"`
+	// Unchanged is true when the push was a no-op: the local content matched
+	// the active version's manifest hash, so no new version was minted.
+	Unchanged bool `json:"unchanged,omitempty"`
 }
 
 // runApply walks <dir>/OPS/, validates each resonator's txcl client-side, and
@@ -337,6 +340,28 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			if timeIt {
 				fmt.Fprintf(stderr, "[txco timing] %s %s: %s\n", stack, label, time.Since(start).Round(time.Millisecond))
 			}
+		}
+
+		// No-op short-circuit: if the local content is byte-identical to the
+		// stack's ACTIVE version (same manifest hash), a push would mint a new
+		// version that changes nothing. Skip create→upload→activate entirely so
+		// no version number is consumed. Authoritative — asks the chassis for
+		// the active hash — so it's immune to stale local state. Best-effort:
+		// any lookup error, or no active version / empty hash, falls through to
+		// a normal push. Safe by construction: the hashes only match on
+		// identical content, so this can never skip a real change.
+		if rec, rerr := c.GetStack(ctx, stack); rerr == nil && rec != nil &&
+			rec.ActiveVersion != nil && rec.ManifestHash != "" &&
+			rec.ManifestHash == localManifestHash(files) {
+			results = append(results, deployResult{
+				Stack: stack, Version: *rec.ActiveVersion,
+				Files: len(files), Activated: false, Unchanged: true,
+			})
+			if !opts.jsonOut {
+				fmt.Fprintf(stdout, "%s v%d unchanged — no changes, not re-versioned\n",
+					stack, *rec.ActiveVersion)
+			}
+			continue
 		}
 
 		tPhase := time.Now()
