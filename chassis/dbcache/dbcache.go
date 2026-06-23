@@ -1,10 +1,9 @@
 package dbcache
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -12,9 +11,8 @@ import (
 	"time"
 
 	"github.com/bep/debounce"
-	_ "github.com/mattn/go-sqlite3" // add sqlite support to database
+	sqlite3 "github.com/mattn/go-sqlite3" // sqlite driver + the online Backup API
 	"github.com/radovskyb/watcher"
-	"github.com/schollz/sqlite3dump"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
@@ -59,12 +57,12 @@ type DbCache struct {
 
 	// Source is the chassis's runtime *sql.DB handle — the live,
 	// configured connection pool that the rest of the chassis writes
-	// through. Reload() dumps from this handle (via
-	// sqlite3dump.DumpDB) rather than opening its own connection to
-	// the file: in WAL mode a second uncoordinated connection races
-	// the main one's .db-shm state and fails with "database is
-	// locked" on first boot. Going through the same pool means there
-	// is no second connection to race.
+	// through. Reload() copies from this handle (via the SQLite online
+	// backup API over a borrowed Source connection) rather than opening
+	// its own connection to the file: in WAL mode a second uncoordinated
+	// connection races the main one's .db-shm state and fails with
+	// "database is locked" on first boot. Going through the same pool
+	// means there is no second connection to race.
 	Source *sql.DB
 
 	// OnReload, if set, runs at the end of every Reload against the
@@ -156,47 +154,82 @@ func (dbc *DbCache) Reload() error {
 	lockWait := time.Since(lockWaitStart)
 	defer dbc.reloadMu.Unlock()
 
-	dumpStart := time.Now()
+	copyStart := time.Now()
 
-	// Build the fresh mirror (dump Source → replay into a new :memory: DB)
-	// with Mu NOT held, so readers keep serving from the current mirror
-	// throughout. This is the dominant cost of a reload.
-	var b bytes.Buffer
-	out := bufio.NewWriter(&b)
-
-	// Dump THROUGH the chassis's own *sql.DB handle (Source) — not
-	// by opening the file again with sqlite3dump.Dump(path). The
-	// bare-path version opens a SECOND connection to the same file
-	// with default SQLite settings, which under WAL mode races the
-	// main connection's .db-shm coordination state and fails with
-	// "database is locked" on the very first reload at boot. Going
-	// through the same pool means there's no second connection to
-	// race, and any contention is the standard pool-level kind that
-	// busy_timeout handles.
-	if err := sqlite3dump.DumpDB(dbc.Source, out); err != nil {
-		dbc.Logger.Warn("reload cachedb err", zap.String("err", err.Error()))
-		return err
-	}
-	_ = out.Flush()
-
+	// Build the fresh mirror by COPYING Source → a new :memory: DB via SQLite's
+	// online backup API — a binary, page-level copy — NOT a SQL-text
+	// dump+replay. The old path serialized the whole DB to ~8MB of INSERT text
+	// and fed it to one dbNew.Exec; go-sqlite3's no-args exec re-CStrings the
+	// ENTIRE remaining string once per statement (sqlite3.go), making replay
+	// O(statements × bytes) ≈ O(n²) — ~35s for a 1MB DB. The backup copies pages
+	// directly: O(db size), ~ms. It runs over the existing Source *connection*
+	// (no second handle to the file), so the WAL .db-shm race the old dump
+	// avoided stays avoided.
 	dbNew, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
-		dbc.Logger.Warn("sql.Open err", zap.String("err", err.Error()))
+		dbc.Logger.Warn("reload cachedb open err", zap.String("err", err.Error()))
 		return err
 	}
-	// Pin to one connection. See the rationale in New(): each go-sqlite3
-	// connection gets its own `:memory:` DB, so without this any second
-	// connection in the pool would be empty.
+	// Pin to one connection: each go-sqlite3 :memory: connection is its OWN db,
+	// so the mirror must live on a single pinned connection (see New()).
 	dbNew.SetMaxOpenConns(1)
-	dbc.Logger.Debug("dbcache reload",
-		zap.String("source", dbc.Conf.DbRuntimeDsn),
-		zap.Int("dump_bytes", b.Len()))
-	if _, err = dbNew.Exec(b.String()); err != nil {
-		dbc.Logger.Warn("reload cachedb open db err", zap.String("err", err.Error()))
-		_ = dbNew.Close() // don't leak the half-built mirror on the error path
+
+	bctx := dbc.Ctx
+	if bctx == nil {
+		bctx = context.Background()
+	}
+	srcConn, err := dbc.Source.Conn(bctx)
+	if err != nil {
+		dbc.Logger.Warn("reload cachedb source-conn err", zap.String("err", err.Error()))
+		_ = dbNew.Close()
 		return err
 	}
-	dumpDur := time.Since(dumpStart)
+	defer srcConn.Close()
+	destConn, err := dbNew.Conn(bctx)
+	if err != nil {
+		dbc.Logger.Warn("reload cachedb mirror-conn err", zap.String("err", err.Error()))
+		_ = dbNew.Close()
+		return err
+	}
+	var pages int
+	berr := destConn.Raw(func(dc any) error {
+		return srcConn.Raw(func(sc any) error {
+			bk, err := dc.(*sqlite3.SQLiteConn).Backup("main", sc.(*sqlite3.SQLiteConn), "main")
+			if err != nil {
+				return err
+			}
+			// Step(-1) copies all remaining pages in one shot; it restarts
+			// internally if the source is written mid-copy, returning
+			// done=false until it settles. Bounded retry guards a pathological
+			// sustained-write source.
+			for tries := 0; ; tries++ {
+				done, serr := bk.Step(-1)
+				if serr != nil {
+					_ = bk.Finish()
+					return serr
+				}
+				if done {
+					break
+				}
+				if tries >= 500 {
+					_ = bk.Finish()
+					return errors.New("dbcache backup did not converge (source under sustained write)")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			pages = bk.PageCount()
+			return bk.Finish()
+		})
+	})
+	// Return the populated connection to dbNew's 1-conn pool; the :memory: db
+	// lives on it, so every subsequent mirror read reuses exactly this copy.
+	_ = destConn.Close()
+	if berr != nil {
+		dbc.Logger.Warn("reload cachedb backup err", zap.String("err", berr.Error()))
+		_ = dbNew.Close()
+		return berr
+	}
+	dumpDur := time.Since(copyStart)
 
 	// Brief critical section under Mu — the only part Snapshot() readers can
 	// wait on. Publish the mirror and run the OnReload overlay here, in the
@@ -251,9 +284,9 @@ func (dbc *DbCache) Reload() error {
 	// is fixed.
 	dbc.Logger.Info("reload cachedb complete",
 		zap.Duration("lock_wait", lockWait),
-		zap.Duration("dump_replay", dumpDur),
+		zap.Duration("db_copy", dumpDur),
 		zap.Duration("hook", hookDur),
-		zap.Int("dump_bytes", b.Len()))
+		zap.Int("pages", pages))
 
 	return nil
 }
