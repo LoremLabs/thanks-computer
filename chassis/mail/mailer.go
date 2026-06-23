@@ -1,10 +1,10 @@
 // Package mail implements the bundled txco://sendmail op: it reads the
-// `_sendmail` envelope contract a rule assembled, renders an email (the
-// bundled default template wrapping the body), enforces the per-tenant
-// campaign at-most-once guard, verifies the From domain, submits to a relay,
-// and emits a usage line. Phase 1 = the common case (to/subject/body/from);
-// custom FILES/ templates, attachments, and policy caps are later phases
-// (see internal docs/todo-sendmail.md).
+// `_sendmail` envelope contract a rule assembled, renders an email (a shell
+// template wrapping the body — the bundled default, or a caller-supplied
+// `_sendmail.templates.html`), enforces the per-tenant campaign at-most-once
+// guard, verifies the From domain, submits to a relay, and emits a usage line.
+// The common case is to/subject/body/from; attachments and policy caps are
+// later phases (see internal docs/todo-sendmail.md).
 package mail
 
 import (
@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	htmltemplate "html/template"
 	"net/mail"
 	"strings"
 	"time"
@@ -97,7 +98,8 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 	body := s.Get("body").String()
 	fromRaw := s.Get("from").String()
 	campaign := s.Get("campaign").String()
-	textTmpl := s.Get("text").String() // explicit plaintext part; else derived from the HTML body
+	textTmpl := s.Get("text").String()            // explicit plaintext part; else derived from the HTML body
+	htmlShell := s.Get("templates.html").String() // optional custom HTML shell; else the bundled default
 	if subject == "" || body == "" || fromRaw == "" {
 		return errResult("missing_field", "_sendmail requires subject, body, and from"),
 			fmt.Errorf("sendmail: missing required field (subject/body/from)")
@@ -177,6 +179,21 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 		}
 	}
 
+	// Optional custom HTML shell (_sendmail.templates.html) — e.g. a Maizzle-built
+	// template a stack ships in its FILES and reads at send time. Parsed ONCE here
+	// (the body/subject it wraps are per-recipient, executed in the loop); empty
+	// falls back to the bundled default. A broken template fails loud rather than
+	// silently reverting to the default.
+	var customShell *htmltemplate.Template
+	if strings.TrimSpace(htmlShell) != "" {
+		t, perr := parseShell(htmlShell)
+		if perr != nil {
+			return errResult("invalid_template", fmt.Sprintf("templates.html: %v", perr)),
+				fmt.Errorf("sendmail: invalid templates.html: %w", perr)
+		}
+		customShell = t
+	}
+
 	var results []recipResult
 	var sent, skipped, failed int
 	for _, r := range recips {
@@ -221,7 +238,11 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 				rerr = berr
 			} else {
 				bodyHTML = string(bh)
-				full, rerr = renderDefault(subj, bh, "")
+				if customShell != nil {
+					full, rerr = renderShell(customShell, subj, bh, "")
+				} else {
+					full, rerr = renderDefault(subj, bh, "")
+				}
 			}
 			if rerr == nil {
 				// Explicit _sendmail.text wins (rendered per-recipient, newlines

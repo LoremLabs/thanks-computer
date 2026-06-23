@@ -1,12 +1,14 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jhillyerd/enmime"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -509,6 +511,126 @@ func TestRenderAndCompose(t *testing.T) {
 	}
 	if txt := htmlToText(full); strings.Contains(txt, "<") {
 		t.Fatalf("htmlToText left tags: %q", txt)
+	}
+}
+
+func TestRenderShellCustom(t *testing.T) {
+	body, err := renderBody("<p>Hi {{.name}}</p>", map[string]any{"name": "Bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := parseShell(`<!doctype html><title>{{.Subject}}</title><main>{{.Body}}</main><i>DRIPCHROME</i>`)
+	if err != nil {
+		t.Fatalf("parseShell: %v", err)
+	}
+	out, err := renderShell(tmpl, "Subj", body, "")
+	if err != nil {
+		t.Fatalf("renderShell: %v", err)
+	}
+	// The custom shell wraps the (var-rendered) body and subject, and is NOT the
+	// default shell.
+	for _, want := range []string{"Subj", "Hi Bob", "DRIPCHROME"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("custom shell output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "thanks.computer") {
+		t.Fatalf("custom shell must not include the default footer:\n%s", out)
+	}
+	// parseShell rejects a malformed template.
+	if _, err := parseShell(`{{.Body`); err == nil {
+		t.Fatal("malformed shell must fail to parse")
+	}
+}
+
+// customShellTmpl is a minimal valid shell: a distinctive body wrapper + a
+// chrome word (DRIPCHROME) that lives ONLY in the shell, never the body.
+const customShellTmpl = `<!doctype html><html><head><title>{{.Subject}}</title></head>` +
+	`<body><div id="drip-shell">{{.Body}}</div><footer>DRIPCHROME</footer></body></html>`
+
+func TestSendCustomShell(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+
+	in := env(t, map[string]any{
+		"to": "x@example.com", "subject": "Welcome", "from": "noreply@acme.com",
+		"body":           "<p>BODYWORD here.</p>",
+		"templates.html": customShellTmpl,
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(sub.calls) != 1 {
+		t.Fatalf("submit calls=%d want 1", len(sub.calls))
+	}
+	msg, err := enmime.ReadEnvelope(bytes.NewReader(sub.calls[0].msg))
+	if err != nil {
+		t.Fatalf("parse mime: %v", err)
+	}
+	// HTML part: the custom shell wraps the body; the default footer is absent.
+	for _, want := range []string{"drip-shell", "BODYWORD", "DRIPCHROME"} {
+		if !strings.Contains(msg.HTML, want) {
+			t.Fatalf("html part missing %q:\n%s", want, msg.HTML)
+		}
+	}
+	if strings.Contains(msg.HTML, "thanks.computer") {
+		t.Fatalf("custom shell must replace the default footer:\n%s", msg.HTML)
+	}
+	// Plaintext derives from the BODY, not the shell-wrapped doc: the body word is
+	// present, the shell chrome is not.
+	if !strings.Contains(msg.Text, "BODYWORD") {
+		t.Fatalf("plaintext should carry the body:\n%s", msg.Text)
+	}
+	if strings.Contains(msg.Text, "DRIPCHROME") {
+		t.Fatalf("shell chrome leaked into the plaintext part:\n%s", msg.Text)
+	}
+}
+
+func TestSendDefaultShellFallback(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+
+	// No templates.html → the bundled default shell (its footer marks it).
+	in := env(t, map[string]any{
+		"to": "x@example.com", "subject": "Welcome", "from": "noreply@acme.com",
+		"body": "<p>BODYWORD here.</p>",
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	msg, err := enmime.ReadEnvelope(bytes.NewReader(sub.calls[0].msg))
+	if err != nil {
+		t.Fatalf("parse mime: %v", err)
+	}
+	if !strings.Contains(msg.HTML, "thanks.computer") {
+		t.Fatalf("absent templates.html must fall back to the default shell:\n%s", msg.HTML)
+	}
+	if strings.Contains(msg.HTML, "drip-shell") {
+		t.Fatalf("default shell must not contain custom markers:\n%s", msg.HTML)
+	}
+}
+
+func TestSendInvalidShell(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+
+	in := env(t, map[string]any{
+		"to": "x@example.com", "subject": "Welcome", "from": "noreply@acme.com",
+		"body":           "<p>hi</p>",
+		"templates.html": "<html>{{.Body", // unterminated action
+	})
+	p, err := m.Send(context.Background(), "acme", in)
+	if err == nil {
+		t.Fatal("malformed templates.html must error")
+	}
+	if r := gjson.Get(p.Raw, "_sendmail.result.reason").String(); r != "invalid_template" {
+		t.Fatalf("reason=%q want invalid_template; raw=%s", r, p.Raw)
+	}
+	if len(sub.calls) != 0 {
+		t.Fatalf("a broken shell must not submit; calls=%d", len(sub.calls))
 	}
 }
 

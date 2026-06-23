@@ -15,8 +15,8 @@ import (
 // defaultShellSrc is the bundled default email template — a responsive,
 // CSS-inlined HTML shell (a Go port of the moonbase apps/mailer
 // layouts/base.html), with {{.Subject}} as the title and {{.Body}} as the
-// content slot. A tenant gets a decent-looking email with zero authoring;
-// custom per-stack templates (Phase 2) override it.
+// content slot. A tenant gets a decent-looking email with zero authoring; a
+// caller-supplied `_sendmail.templates.html` (same contract) overrides it.
 //
 //go:embed templates/default.html
 var defaultShellSrc string
@@ -95,6 +95,24 @@ func renderDefault(subject string, body htmltemplate.HTML, preheader string) (st
 	if err != nil {
 		return "", err
 	}
+	return execShell(t, subject, body, preheader)
+}
+
+// parseShell parses a caller-supplied shell template — e.g.
+// `_sendmail.templates.html`, a (Maizzle-built) shell a stack ships in its FILES
+// and reads at send time. Same contract as the bundled default: Go html/template
+// with {{.Subject}} / {{.Body}} / {{.Preheader}}. Parse once per send (the body
+// and subject it wraps are per-recipient); execute via renderShell.
+func parseShell(src string) (*htmltemplate.Template, error) {
+	return htmltemplate.New("shell").Parse(src)
+}
+
+// renderShell wraps an already-rendered body in a pre-parsed custom shell.
+func renderShell(t *htmltemplate.Template, subject string, body htmltemplate.HTML, preheader string) (string, error) {
+	return execShell(t, subject, body, preheader)
+}
+
+func execShell(t *htmltemplate.Template, subject string, body htmltemplate.HTML, preheader string) (string, error) {
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, shellData{Subject: subject, Preheader: preheader, Body: body}); err != nil {
 		return "", err
