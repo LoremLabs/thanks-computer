@@ -29,6 +29,8 @@ my-workspace/
 Scope directories sort the flow (`0100` before `0200`; leading zeros
 are cosmetic) — a *scope* is simply a step's address on disk. Step numbers can be sparse and start at 0, flowing to the next largest step.
 
+Folders nested *below* a scope are for organization; the nearest numbered folder sets the step (`0100_TRIAGE/llm/classify.txcl` runs at scope 100).
+
 Stacks whose names start with `_` are system/local
 (`_cron`, `_sys/…`) — loaded by the chassis, not pushed by apply.
 
