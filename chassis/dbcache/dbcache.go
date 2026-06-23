@@ -149,12 +149,8 @@ func (dbc *DbCache) Reload() error {
 	// the whole multi-second dump → edge 502s / "web response timeout".
 	// reloadMu keeps reloads strictly serial without blocking readers; only
 	// the brief swap+overlay critical section below takes Mu.
-	lockWaitStart := time.Now()
 	dbc.reloadMu.Lock()
-	lockWait := time.Since(lockWaitStart)
 	defer dbc.reloadMu.Unlock()
-
-	copyStart := time.Now()
 
 	// Build the fresh mirror by COPYING Source → a new :memory: DB via SQLite's
 	// online backup API — a binary, page-level copy — NOT a SQL-text
@@ -191,7 +187,6 @@ func (dbc *DbCache) Reload() error {
 		_ = dbNew.Close()
 		return err
 	}
-	var pages int
 	berr := destConn.Raw(func(dc any) error {
 		return srcConn.Raw(func(sc any) error {
 			bk, err := dc.(*sqlite3.SQLiteConn).Backup("main", sc.(*sqlite3.SQLiteConn), "main")
@@ -217,7 +212,6 @@ func (dbc *DbCache) Reload() error {
 				}
 				time.Sleep(5 * time.Millisecond)
 			}
-			pages = bk.PageCount()
 			return bk.Finish()
 		})
 	})
@@ -229,14 +223,11 @@ func (dbc *DbCache) Reload() error {
 		_ = dbNew.Close()
 		return berr
 	}
-	dumpDur := time.Since(copyStart)
-
 	// Brief critical section under Mu — the only part Snapshot() readers can
 	// wait on. Publish the mirror and run the OnReload overlay here, in the
 	// SAME order as before, so no reader observes dbNew before sysops has
 	// re-applied the trusted opstacks into it. Milliseconds (a pointer swap +
 	// the bounded overlay), not the multi-second dump above.
-	hookStart := time.Now()
 	dbc.Mu.Lock()
 	old := dbc.Db
 	dbc.Db = dbNew
@@ -249,7 +240,6 @@ func (dbc *DbCache) Reload() error {
 		}
 	}
 	dbc.Mu.Unlock()
-	hookDur := time.Since(hookStart)
 
 	// Close the superseded mirror after a grace window that dwarfs any
 	// in-flight Snapshot() query. The PREVIOUS handle must be closed or every
@@ -277,16 +267,7 @@ func (dbc *DbCache) Reload() error {
 		}(old)
 	}
 
-	// TEMP instrumentation: localize the ~34s activate reload. lock_wait =
-	// time queued behind another in-flight reload; dump_replay = DumpDB(Source)
-	// + replay into the new :memory: mirror; hook = swap + the OnReload chain
-	// (sysops/redact/admission/static/dns/certs). Remove once the slow bucket
-	// is fixed.
-	dbc.Logger.Info("reload cachedb complete",
-		zap.Duration("lock_wait", lockWait),
-		zap.Duration("db_copy", dumpDur),
-		zap.Duration("hook", hookDur),
-		zap.Int("pages", pages))
+	dbc.Logger.Info("reload cachedb complete")
 
 	return nil
 }
