@@ -87,7 +87,7 @@ dev:
 smoke:
 	@set -e; \
 	failed=0; \
-	for s in scripts/secrets-smoke.sh scripts/fleet-sync-smoke.sh scripts/examples-smoke.sh; do \
+	for s in scripts/secrets-smoke.sh scripts/control-sync-smoke.sh scripts/examples-smoke.sh; do \
 		echo; echo "════════ $$s ════════"; \
 		if ! bash "$$s"; then failed=$$((failed+1)); fi; \
 	done; \

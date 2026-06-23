@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scripts/fleet-sync-smoke.sh
+# scripts/control-sync-smoke.sh
 #
-# End-to-end operational smoke for the fleet-sync producer +
+# End-to-end operational smoke for the control-event sync producer +
 # consumer pipeline. Cold-boots a single chassis configured as both
 # producer (feed-sink=file) AND consumer (feed-source=file) against
 # the same shared directory — the self-loop proves every leg of the
@@ -20,8 +20,8 @@
 #      idempotently (applied_events guard).
 #
 # Usage:
-#   scripts/fleet-sync-smoke.sh          # build txco + run
-#   TXCO=/path/to/txco scripts/fleet-sync-smoke.sh   # use pre-built binary
+#   scripts/control-sync-smoke.sh          # build txco + run
+#   TXCO=/path/to/txco scripts/control-sync-smoke.sh   # use pre-built binary
 #
 # Exit status: 0 on full pass, 1 on any failed check. Failed runs
 # preserve $LOG_DIR + the workspace for inspection; passing runs
@@ -32,7 +32,7 @@ set -uo pipefail
 # --- knobs ---
 CHASSIS_PORT=18283
 CHASSIS_URL="http://localhost:${CHASSIS_PORT}"
-TENANT_SLUG=fleet-smoke
+TENANT_SLUG=control-smoke
 STACK_NAME=hello
 # Distinctive content so grep can confirm the artifact made it
 # through end-to-end.
@@ -47,7 +47,7 @@ if [[ -z "${TXCO}" ]]; then
         echo "FAIL: not inside a git repo and TXCO not set" >&2
         exit 1
     fi
-    BUILT_TXCO="$(mktemp -t txco-fleet-smoke-XXXXXX)"
+    BUILT_TXCO="$(mktemp -t txco-control-smoke-XXXXXX)"
     echo "==> building txco binary at ${BUILT_TXCO}..."
     ( cd "${REPO_ROOT}" && go build -o "${BUILT_TXCO}" ./cmd/txco ) || {
         echo "FAIL: go build failed" >&2
@@ -69,8 +69,8 @@ if [[ "${TXCO}" != /* ]]; then
 fi
 
 # --- sandbox + cleanup wiring ---
-WORKSPACE="$(mktemp -d -t fleet-smoke-ws-XXXXXX)"
-LOG_DIR="$(mktemp -d -t fleet-smoke-logs-XXXXXX)"
+WORKSPACE="$(mktemp -d -t control-smoke-ws-XXXXXX)"
+LOG_DIR="$(mktemp -d -t control-smoke-logs-XXXXXX)"
 FEED_DIR="${WORKSPACE}/feed"
 ART_DIR="${WORKSPACE}/artifacts"
 DB_DIR="${WORKSPACE}/db"
