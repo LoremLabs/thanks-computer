@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
@@ -37,22 +38,18 @@ func TestHMACSignSHA256Hex(t *testing.T) {
 	in := []byte(`{"body":"Hi There"}`)
 	meta := `{"secrets":{"key":{"secret":"K"}},"input_path":"body"}`
 
-	// gjson .Raw on a string field returns the JSON-encoded form
-	// (quotes included). To match the RFC vector exactly, we'd need
-	// to extract the unquoted value. For this test we just verify
-	// the round-trip: same input twice → same digest, different
-	// inputs → different digests.
+	// A JSON string field is signed as its literal (unquoted) value, so the
+	// digest matches the RFC 4231 vector exactly (the bug this guards against
+	// was signing the quoted form `"Hi There"`, which matched nothing).
+	const rfcVector = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
 	ctx := withBagAndMeta(t, "K", key, meta)
 	out1, err := HMACSign(ctx, "txco://hmac-sign", in, nil)
 	if err != nil {
 		t.Fatalf("HMACSign: %v", err)
 	}
 	sig1 := gjson.Get(out1.Raw, "_txc.computed.hmac").String()
-	if sig1 == "" {
-		t.Fatalf("expected non-empty signature, got %s", out1.Raw)
-	}
-	if len(sig1) != 64 { // hex of 32 bytes
-		t.Errorf("sha256 hex length = %d, want 64", len(sig1))
+	if sig1 != rfcVector {
+		t.Fatalf("RFC 4231 vector mismatch:\n got  %s\n want %s", sig1, rfcVector)
 	}
 
 	// Determinism: same input twice → same digest.
@@ -79,6 +76,39 @@ func TestHMACSignSHA256Hex(t *testing.T) {
 	out4, _ := HMACSign(ctx4, "txco://hmac-sign", in, nil)
 	if gjson.Get(out4.Raw, "_txc.computed.hmac").String() == sig1 {
 		t.Errorf("HMAC collision on different keys")
+	}
+}
+
+// TestHMACSignVerifyRoundTrip is the regression guard for the sign/verify
+// string-input symmetry: a signature hmac-sign produces MUST verify with
+// hmac-verify — for a string payload (the case that was broken) and a JSON
+// object alike.
+func TestHMACSignVerifyRoundTrip(t *testing.T) {
+	key := []byte("round-trip-key")
+	cases := map[string]string{
+		"string": `{"payload":"white-fang.42.9f1c"}`,
+		"object": `{"payload":{"a":1,"b":[2,3]}}`,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			signMeta := `{"secrets":{"key":{"secret":"K"}},"input_path":"payload","output_path":"sig"}`
+			out, err := HMACSign(withBagAndMeta(t, "K", key, signMeta), "txco://hmac-sign", []byte(in), nil)
+			if err != nil {
+				t.Fatalf("sign: %v", err)
+			}
+			sig := gjson.Get(out.Raw, "sig").String()
+
+			// Carry the produced signature alongside the same input, then verify.
+			vin, _ := sjson.Set(in, "sig", sig)
+			vMeta := `{"secrets":{"key":{"secret":"K"}},"input_path":"payload","expected_path":"sig"}`
+			vout, err := HMACVerify(withBagAndMeta(t, "K", key, vMeta), "txco://hmac-verify", []byte(vin), nil)
+			if err != nil {
+				t.Fatalf("verify: %v", err)
+			}
+			if !gjson.Get(vout.Raw, "_txc.computed.sig_valid").Bool() {
+				t.Fatalf("sign→verify did not round-trip for %s input; resp=%s", name, vout.Raw)
+			}
+		})
 	}
 }
 

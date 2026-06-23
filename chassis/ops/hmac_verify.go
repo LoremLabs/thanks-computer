@@ -108,16 +108,9 @@ func HMACVerify(ctx context.Context, opName string, in, _ []byte) (event.Payload
 			fmt.Errorf("hmac-verify: unsupported algorithm %q", algorithm)
 	}
 
-	// Input bytes: a string field is hashed as its literal value
-	// (webhook schemes sign the exact string, e.g. Stripe's "t.body");
-	// objects/arrays use .Raw so the signed byte sequence is preserved.
-	res := gjson.GetBytes(in, inputPath)
-	var inputBytes []byte
-	if res.Type == gjson.String {
-		inputBytes = []byte(res.String())
-	} else {
-		inputBytes = []byte(res.Raw)
-	}
+	// Input bytes — IDENTICAL handling to hmac-sign (shared hmacInputBytes), so
+	// a signature produced there verifies here.
+	inputBytes := hmacInputBytes(in, inputPath)
 
 	mac := hmac.New(hashFn, key)
 	mac.Write(inputBytes)

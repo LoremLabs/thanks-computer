@@ -41,9 +41,11 @@ import (
 //	encoding            = "hex"            // hex (default) | base64
 //
 // The handler reads `op.Secrets["WEBHOOK_HMAC"]` (the splice puts it
-// there during processor.Run), computes
-// `HMAC-<alg>(secret, gjson.Get(op.Input, input_path).Raw)`, and
-// writes the digest into the response at output_path. The response
+// there during processor.Run), computes `HMAC-<alg>(secret, <input>)`
+// — where <input> is the value at input_path, a JSON string taken as
+// its literal (unquoted) value and an object/array as its raw bytes
+// (see hmacInputBytes; matches hmac-verify so signatures round-trip) —
+// and writes the digest into the response at output_path. The response
 // is JSON; output_path defaults to `_txc.computed.hmac` if absent.
 //
 // Cleartext is consumed inside this function and never leaves it —
@@ -96,16 +98,11 @@ func HMACSign(ctx context.Context, opName string, in, _ []byte) (event.Payload, 
 			fmt.Errorf("hmac-sign: unsupported algorithm %q", algorithm)
 	}
 
-	// Extract the input bytes to sign. `.Raw` preserves whitespace
-	// and field ordering (load-bearing for HMACs of JSON bodies —
-	// vendors compute over the byte sequence they received).
-	inputBytes := []byte(gjson.GetBytes(in, inputPath).Raw)
-	if len(inputBytes) == 0 {
-		// Treat "missing path" as "sign the empty string" so an
-		// operator can opt-in by setting input_path="" or pointing
-		// at a key that doesn't exist (matches what most webhook
-		// schemes do for empty bodies).
-	}
+	// Extract the input bytes to sign — IDENTICAL handling to hmac-verify
+	// (shared hmacInputBytes), so a signature produced here verifies there.
+	// A missing path yields empty bytes (sign the empty string), matching how
+	// most webhook schemes treat an empty body.
+	inputBytes := hmacInputBytes(in, inputPath)
 
 	mac := hmac.New(hashFn, key)
 	mac.Write(inputBytes)
@@ -133,6 +130,21 @@ func HMACSign(ctx context.Context, opName string, in, _ []byte) (event.Payload, 
 			fmt.Errorf("hmac-sign: sjson set: %w", err)
 	}
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
+}
+
+// hmacInputBytes extracts the bytes to HMAC at `path`, shared by hmac-sign and
+// hmac-verify so the two CANNOT diverge (a divergence silently breaks every
+// sign→verify round-trip). A JSON string is hashed as its literal (unquoted)
+// value — webhook schemes and HMAC test vectors sign the literal string, e.g.
+// Stripe's "t.body"; an object/array uses the raw JSON bytes so the exact
+// whitespace and key order vendors sign are preserved. A missing path yields
+// empty bytes.
+func hmacInputBytes(in []byte, path string) []byte {
+	res := gjson.GetBytes(in, path)
+	if res.Type == gjson.String {
+		return []byte(res.String())
+	}
+	return []byte(res.Raw)
 }
 
 // errPayload builds a structured error event.Payload. NEVER includes
