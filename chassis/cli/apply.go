@@ -329,7 +329,19 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, assets...)
+
+		// TEMP timing (set TXCO_TIMING=1): per-phase client-side durations, to
+		// localize slowness vs the server reload. Remove with the server timers.
+		timeIt := os.Getenv("TXCO_TIMING") != ""
+		phase := func(label string, start time.Time) {
+			if timeIt {
+				fmt.Fprintf(stderr, "[txco timing] %s %s: %s\n", stack, label, time.Since(start).Round(time.Millisecond))
+			}
+		}
+
+		tPhase := time.Now()
 		versionNumber, err := c.CreateDraft(ctx, stack, "active")
+		phase("create-draft", tPhase)
 		if err != nil {
 			// Name the EFFECTIVE endpoint actually dialed — i.e.
 			// clientTarget.Addr after --addr/env/profile override, not
@@ -341,13 +353,16 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 				cmd, stack, err, clientTarget.Addr, resolved.Name)
 			return 1
 		}
+		tPhase = time.Now()
 		if err := spin(progress, fmt.Sprintf("uploading %d files → %s v%d", len(files), stack, versionNumber), func() error {
 			_, e := c.PutDraftFiles(ctx, stack, versionNumber, files)
 			return e
 		}); err != nil {
+			phase("upload", tPhase)
 			fmt.Fprintf(stderr, "%s: %s: upload files for v%d: %v\n", cmd, stack, versionNumber, err)
 			return 1
 		}
+		phase("upload", tPhase)
 		// Pre-activate validation: run the same checks the chassis
 		// would run on activate, but surface them before we flip the
 		// pointer. On failure we leave the draft on the chassis so the
@@ -373,15 +388,18 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 				return 1
 			}
 		}
+		tPhase = time.Now()
 		var act *client.ActivateResponse
 		if err := spin(progress, fmt.Sprintf("activating %s v%d", stack, versionNumber), func() error {
 			var e error
 			act, e = c.Activate(ctx, stack, versionNumber)
 			return e
 		}); err != nil {
+			phase("activate", tPhase) // time even on the 502 — this is the one we care about
 			fmt.Fprintf(stderr, "%s: %s: activate v%d: %v\n", cmd, stack, versionNumber, err)
 			return 1
 		}
+		phase("activate", tPhase)
 		// Record local state so `txco status` shows this stack in sync. Push
 		// deployed the LOCAL files as v<act.VersionNumber>, so the workspace now
 		// mirrors that version's content exactly — the same invariant a fresh

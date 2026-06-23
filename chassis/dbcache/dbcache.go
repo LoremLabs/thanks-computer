@@ -151,8 +151,12 @@ func (dbc *DbCache) Reload() error {
 	// the whole multi-second dump → edge 502s / "web response timeout".
 	// reloadMu keeps reloads strictly serial without blocking readers; only
 	// the brief swap+overlay critical section below takes Mu.
+	lockWaitStart := time.Now()
 	dbc.reloadMu.Lock()
+	lockWait := time.Since(lockWaitStart)
 	defer dbc.reloadMu.Unlock()
+
+	dumpStart := time.Now()
 
 	// Build the fresh mirror (dump Source → replay into a new :memory: DB)
 	// with Mu NOT held, so readers keep serving from the current mirror
@@ -192,12 +196,14 @@ func (dbc *DbCache) Reload() error {
 		_ = dbNew.Close() // don't leak the half-built mirror on the error path
 		return err
 	}
+	dumpDur := time.Since(dumpStart)
 
 	// Brief critical section under Mu — the only part Snapshot() readers can
 	// wait on. Publish the mirror and run the OnReload overlay here, in the
 	// SAME order as before, so no reader observes dbNew before sysops has
 	// re-applied the trusted opstacks into it. Milliseconds (a pointer swap +
 	// the bounded overlay), not the multi-second dump above.
+	hookStart := time.Now()
 	dbc.Mu.Lock()
 	old := dbc.Db
 	dbc.Db = dbNew
@@ -210,6 +216,7 @@ func (dbc *DbCache) Reload() error {
 		}
 	}
 	dbc.Mu.Unlock()
+	hookDur := time.Since(hookStart)
 
 	// Close the superseded mirror after a grace window that dwarfs any
 	// in-flight Snapshot() query. The PREVIOUS handle must be closed or every
@@ -237,7 +244,16 @@ func (dbc *DbCache) Reload() error {
 		}(old)
 	}
 
-	dbc.Logger.Info("reload cachedb complete")
+	// TEMP instrumentation: localize the ~34s activate reload. lock_wait =
+	// time queued behind another in-flight reload; dump_replay = DumpDB(Source)
+	// + replay into the new :memory: mirror; hook = swap + the OnReload chain
+	// (sysops/redact/admission/static/dns/certs). Remove once the slow bucket
+	// is fixed.
+	dbc.Logger.Info("reload cachedb complete",
+		zap.Duration("lock_wait", lockWait),
+		zap.Duration("dump_replay", dumpDur),
+		zap.Duration("hook", hookDur),
+		zap.Int("dump_bytes", b.Len()))
 
 	return nil
 }
