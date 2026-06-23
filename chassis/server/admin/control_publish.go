@@ -29,6 +29,8 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -83,11 +85,15 @@ func (c *Controller) readStackFilesForArtifact(
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	// Drain the rows first: we must not hold the query open while fanning out
+	// the concurrent CAS Puts below. Artifact order stays fixed by ORDER BY path.
 	var out []controlevent.StackArtifactFile
+	type casPut struct{ path, hash, content string }
+	var puts []casPut
 	for rows.Next() {
 		var path, content, hash string
 		if err := rows.Scan(&path, &content, &hash); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		// FILES/** static assets travel as a fingerprint, not bytes: ensure
@@ -100,16 +106,93 @@ func (c *Controller) readStackFilesForArtifact(
 				hash = sha256Hex(content)
 			}
 			if c.fcas != nil {
-				if err := c.fcas.Put(ctx, hash, []byte(content)); err != nil {
-					return nil, fmt.Errorf("filecas put %s: %w", path, err)
-				}
+				puts = append(puts, casPut{path: path, hash: hash, content: content})
 			}
 			out = append(out, controlevent.StackArtifactFile{Path: path, ContentHash: hash})
 			continue
 		}
 		out = append(out, controlevent.StackArtifactFile{Path: path, Content: content})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// Push FILES bytes into the shared CAS CONCURRENTLY (bounded), skipping
+	// content already present — the same pattern + limit as materialiseFiles.
+	// This producer path runs on FLEET nodes, where the in-tx materialiseFiles
+	// is gated off; doing these Puts one-at-a-time in the row loop above ran
+	// ~Nfiles × put-latency (≈69s for 790 files) and 502'd the activate.
+	if len(puts) > 0 {
+		// Skip files whose hash is already active for this stack: the current
+		// active version materialised them into the shared CAS, so they need NO
+		// CAS round-trip at all — not even an Exists HEAD. (The active version's
+		// bytes being in the CAS is load-bearing: the live stack couldn't serve
+		// otherwise.) This makes a re-push that touched a few files cost a few
+		// CAS ops, not Nfiles. The remaining new/changed hashes still go through
+		// Exists-then-Put — they may exist from an OLDER version or a concurrent
+		// push, so the Exists guard stays for those.
+		prior := c.priorActiveFileHashes(ctx, tenantID, stackName)
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(materialiseConcurrency)
+		for _, p := range puts {
+			if _, alreadyActive := prior[p.hash]; alreadyActive {
+				continue
+			}
+			g.Go(func() (err error) {
+				// A worker panic would crash the whole chassis (the HTTP
+				// handler's recover can't reach another goroutine); convert it
+				// to an error so activation fails cleanly.
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("filecas put %s: panic: %v", p.path, r)
+					}
+				}()
+				if ok, _ := c.fcas.Exists(gctx, p.hash); ok {
+					return nil
+				}
+				if perr := c.fcas.Put(gctx, p.hash, []byte(p.content)); perr != nil {
+					return fmt.Errorf("filecas put %s: %w", p.path, perr)
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// priorActiveFileHashes returns the set of FILES/* content hashes that the
+// stack's CURRENT active version already materialised into the shared CAS.
+// readStackFilesForArtifact runs BEFORE the activation tx flips active_version,
+// so this is the prior version's set — and a new version's file whose hash is
+// in it is provably already in the CAS, so it needs no CAS round-trip at all.
+// Best-effort: an empty/nil set just routes everything through Exists-then-Put.
+func (c *Controller) priorActiveFileHashes(
+	ctx context.Context, tenantID, stackName string,
+) map[string]struct{} {
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+		SELECT sf.content_hash
+		  FROM stack_files sf
+		  JOIN stacks s ON s.active_version = sf.version_id
+		 WHERE s.tenant_id = ? AND s.name = ?
+		   AND sf.path LIKE 'FILES/%' AND sf.content_hash <> ''`,
+		tenantID, stackName)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	set := make(map[string]struct{})
+	for rows.Next() {
+		var h string
+		if rows.Scan(&h) == nil && h != "" {
+			set[h] = struct{}{}
+		}
+	}
+	return set
 }
 
 // currentActiveVersionNumber returns the active_version of the named
