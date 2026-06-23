@@ -126,9 +126,17 @@ Flags:
 		return 1
 	}
 
-	ops, err := bundle.Walk(dir)
+	ops, diags, err := bundle.WalkDiag(dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "apply: walk %s: %v\n", dir, err)
+		return 1
+	}
+	// A whole-tree apply must be clean: a no-step leaf (silently undeployed) or
+	// a flatten collision (would fail server-side at activate) is fatal here.
+	if len(diags) > 0 {
+		for _, d := range diags {
+			fmt.Fprintf(stderr, "apply: %s\n", d.Msg)
+		}
 		return 1
 	}
 	if len(ops) == 0 {
@@ -189,9 +197,22 @@ Flags:
 		return 1
 	}
 
-	ops, err := bundle.Walk(dir)
+	ops, diags, err := bundle.WalkDiag(dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "push: walk %s: %v\n", dir, err)
+		return 1
+	}
+	// push is scoped to one stack, so a stray elsewhere in the tree only warns;
+	// but a flatten collision *in the pushed stack* would fail at activate, so
+	// surface it early and stop.
+	fatal := false
+	for _, d := range diags {
+		fmt.Fprintf(stderr, "push: %s\n", d.Msg)
+		if d.Stack == stack {
+			fatal = true
+		}
+	}
+	if fatal {
 		return 1
 	}
 	if len(ops) == 0 {
