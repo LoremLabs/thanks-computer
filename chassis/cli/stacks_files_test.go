@@ -31,7 +31,7 @@ func TestLoadLocalStackFilesMatchesPushManifest(t *testing.T) {
 	// Op nested below the scope dir → flattened name "sub_extra".
 	write("OPS/www/0100_REDIRECT/sub/extra.txcl", "WHEN @z\n  EMIT @w = 1\n")
 	// The stack's own static assets.
-	write("OPS/www/FILES/index.html", "<!doctype html><title>dripl.it</title>")
+	write("OPS/www/FILES/index.html", "<!doctype html><title>example site</title>")
 	write("OPS/www/FILES/app/immutable/a.js", "export const x = 1")
 	// A nested sub-stack (www/_mail): its rules AND its own FILES/ must NOT leak
 	// into www's file set.

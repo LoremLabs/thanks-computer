@@ -36,8 +36,8 @@ import (
 // WITH parameters (op.Meta):
 //
 //	files = [{"path":"_mail/welcome.html","as":"welcome"}]   (required)
-//	stack = "publications/white-fang"  (optional: read another of YOUR tenant's
-//	                                    stacks; default = the routed stack)
+//	stack = "other-stack"  (optional: read another of YOUR tenant's
+//	                        stacks; default = the routed stack)
 //	into  = "_files"        (optional: destination subtree, default "_files")
 //	encode = "auto"         (optional: "auto" | "utf8" | "base64")
 //	strict = false          (optional: a miss / over-cap fails the op)

@@ -203,6 +203,8 @@ func TestSendReplyToAndHeaders(t *testing.T) {
 		"headers": map[string]any{
 			"X-Campaign":       "spring",
 			"List-Unsubscribe": "<mailto:unsub@acme.com>",
+			"In-Reply-To":      "<thread-root@example.com>", // threading: not protected, passes through
+			"References":       "<thread-root@example.com>",
 			"From":             "evil@bad.com", // protected → ignored
 			"Subject":          "hijacked",     // protected → ignored
 		},
@@ -216,6 +218,12 @@ func TestSendReplyToAndHeaders(t *testing.T) {
 	}
 	if !strings.Contains(msg, "X-Campaign: spring") || !strings.Contains(msg, "List-Unsubscribe: <mailto:unsub@acme.com>") {
 		t.Fatalf("custom headers missing:\n%s", msg)
+	}
+	// Threading headers (In-Reply-To / References, RFC 5322 §3.6.4) are not
+	// protected and must survive to the wire so a client can group a conversation.
+	if !strings.Contains(msg, "In-Reply-To: <thread-root@example.com>") ||
+		!strings.Contains(msg, "References: <thread-root@example.com>") {
+		t.Fatalf("In-Reply-To/References (threading) missing:\n%s", msg)
 	}
 	// Protected headers can't be overridden; the real From/Subject survive.
 	if strings.Contains(msg, "evil@bad.com") || strings.Contains(msg, "hijacked") {
@@ -525,13 +533,13 @@ func TestRenderShellCustom(t *testing.T) {
 		t.Fatalf("parseShell: %v", err)
 	}
 	out, err := renderShell(tmpl, "Subj", body, "",
-		map[string]any{"nexturl": "https://www.dripl.it/drip?t=abc-123"})
+		map[string]any{"nexturl": "https://www.example.com/next?t=abc-123"})
 	if err != nil {
 		t.Fatalf("renderShell: %v", err)
 	}
 	// The custom shell wraps the (var-rendered) body + subject, interpolates a
 	// per-send var ({{.Vars.nexturl}}) into the button href, and is NOT the default.
-	for _, want := range []string{"Subj", "Hi Bob", "DRIPCHROME", `href="https://www.dripl.it/drip?t=abc-123"`} {
+	for _, want := range []string{"Subj", "Hi Bob", "DRIPCHROME", `href="https://www.example.com/next?t=abc-123"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("custom shell output missing %q:\n%s", want, out)
 		}

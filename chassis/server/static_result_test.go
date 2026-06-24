@@ -88,6 +88,35 @@ func TestStaticResultBodyLayeredAndETag(t *testing.T) {
 	}
 }
 
+// HTML must revalidate (so a deploy's new HTML + asset URLs are picked up); other
+// (content-hashed) assets stay cacheable. The 304 echoes the same policy.
+func TestStaticResultBodyCachePolicy(t *testing.T) {
+	ws := t.TempDir()
+	mkfile(t, ws, "OPS/site/FILES/index.html", "<!doctype html><title>hi</title>")
+	mkfile(t, ws, "OPS/site/FILES/robots.txt", "User-agent: *")
+	ix := static.NewIndex(ws, zap.NewNop())
+
+	html := staticResultBody(context.Background(), ix, nil, reqIn(t, "/index.html", "site", ""))
+	if cc := gjson.Get(html, "_txc.web.res.headers.cache-control.0").String(); cc != "max-age=0, must-revalidate" {
+		t.Fatalf("html cache-control=%q want max-age=0, must-revalidate; env=%s", cc, html)
+	}
+
+	asset := staticResultBody(context.Background(), ix, nil, reqIn(t, "/robots.txt", "site", ""))
+	if cc := gjson.Get(asset, "_txc.web.res.headers.cache-control.0").String(); cc != "public, max-age=3600" {
+		t.Fatalf("asset cache-control=%q want public, max-age=3600; env=%s", cc, asset)
+	}
+
+	// A conditional GET of the HTML → 304 that carries the same (revalidate) policy.
+	etag := gjson.Get(html, "_txc.web.res.headers.etag.0").String()
+	c := staticResultBody(context.Background(), ix, nil, reqIn(t, "/index.html", "site", etag))
+	if gjson.Get(c, "_txc.web.res.status").Int() != 304 {
+		t.Fatalf("want 304; env=%s", c)
+	}
+	if cc := gjson.Get(c, "_txc.web.res.headers.cache-control.0").String(); cc != "max-age=0, must-revalidate" {
+		t.Fatalf("304 cache-control=%q want max-age=0, must-revalidate", cc)
+	}
+}
+
 // A directory in FILES owns its prefix: a miss under it is a static
 // 404 + halt, NOT a pass-through to the app.
 func TestStaticResultBodyOwnedDir404(t *testing.T) {

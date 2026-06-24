@@ -56,7 +56,7 @@ Resolve a FILES/ asset of a stack's ACTIVE version exactly the way
 txco://read-file does (manifest row -> content-addressed store) and print it to
 stdout. Reports on stderr where resolution succeeds or fails (manifest miss /
 empty hash / CAS miss). <path> is FILES-relative, e.g.
-_data/publications/white-fang/index.json
+_data/posts/welcome/index.json
 
 Flags:
 `)

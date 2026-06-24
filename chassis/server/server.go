@@ -455,6 +455,16 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 		return env
 	}
 
+	// Cache policy: HTML is the entry point that references content-hashed assets, so
+	// it must revalidate — otherwise a deploy's new HTML (and thus the new asset URLs)
+	// isn't picked up until the cache lapses. `max-age=0, must-revalidate` makes the
+	// browser check every time; the strong ETag makes that check a cheap 304. Other
+	// assets (typically content-hashed, immutable) stay cacheable.
+	cacheControl := "public, max-age=3600"
+	if strings.HasPrefix(r.Ctype, "text/html") {
+		cacheControl = "max-age=0, must-revalidate"
+	}
+
 	// Conditional GET applies to any Found result (inline or CAS) and is
 	// checked before fetching bytes — a 304 never touches the CAS/LRU.
 	if r.Found {
@@ -463,6 +473,7 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 			env := "{}"
 			env, _ = sjson.Set(env, "_txc.web.res.status", 304)
 			env, _ = sjson.Set(env, "_txc.web.res.headers.etag.0", r.ETag)
+			env, _ = sjson.Set(env, "_txc.web.res.headers.cache-control.0", cacheControl)
 			return halt(env)
 		}
 	}
@@ -471,7 +482,7 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 		env := "{}"
 		env, _ = sjson.Set(env, "_txc.web.res.status", 200)
 		env, _ = sjson.Set(env, "_txc.web.res.headers.content-type.0", r.Ctype)
-		env, _ = sjson.Set(env, "_txc.web.res.headers.cache-control.0", "public, max-age=3600")
+		env, _ = sjson.Set(env, "_txc.web.res.headers.cache-control.0", cacheControl)
 		env, _ = sjson.Set(env, "_txc.web.res.headers.etag.0", r.ETag)
 		env, _ = sjson.Set(env, "_txc.web.res.body", base64.StdEncoding.EncodeToString(body))
 		return halt(env)
