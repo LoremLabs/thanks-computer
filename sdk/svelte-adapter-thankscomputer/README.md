@@ -31,7 +31,7 @@ export default {
 Then build and deploy:
 
 ```sh
-vite build       # writes OPS/web/FILES/** and OPS/web/100/spa-fallback.txcl
+vite build       # writes OPS/web/FILES/** and OPS/web/900000/spa-fallback.txcl
 txco apply       # ships the stack to your tenant
 ```
 
@@ -66,7 +66,7 @@ would silently fail to load. Setting `appDir` to a non-underscore name (`app`,
 | `out`           | `"OPS/web"`    | Stack directory holding `FILES/` and scope folders; build lands in `<out>/FILES/`.           |
 | `fallback`      | `"index.html"` | SPA fallback page filename, or `false` to disable SPA mode (serve only prerendered files).   |
 | `fallbackOp`    | `true`         | Generate `<out>/<fallbackScope>/spa-fallback.txcl` to serve the shell for client routes.     |
-| `fallbackScope` | `1000`         | txcl scope for the generated fallback op. High by default so this catch-all runs last (after `txco://route` and any ops you add), never swallowing extension-less requests your own handlers should answer. |
+| `fallbackScope` | `900000`       | txcl scope for the generated fallback op. Very high by default so this catch-all runs last (after `txco://route` and any ops you add) and leaves the whole 1…899999 range free for your own ops. |
 | `apply`         | `false`        | Run `txco apply` in the current directory after building, to deploy in one step.             |
 | `precompress`   | `false`        | Precompress assets with gzip + brotli.                                                        |
 

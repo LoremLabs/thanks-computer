@@ -24,11 +24,14 @@ export interface AdapterOptions {
    */
   fallbackOp?: boolean;
   /**
-   * txcl scope for the generated fallback op. Default: `1000`. The fallback is
+   * txcl scope for the generated fallback op. Default: `900000`. The fallback is
    * a catch-all that halts, so it must run LAST — after `txco://route` and any
    * ops you add to this stack (APIs, redirects). A low scope would swallow
-   * extension-less requests (`/api/x`) before your own handlers see them. 1000
-   * matches the house last-resort convention (`_sys/boot/1000` notfound).
+   * extension-less requests (`/api/x`) before your own handlers see them. The
+   * default sits very high on purpose: it leaves the whole 1…899999 range free
+   * for your own ops, so you never have to squeeze handlers under the catch-all.
+   * (Empty scopes between your ops and this one cost nothing — the chassis
+   * floor-jumps to the next populated scope.)
    */
   fallbackScope?: number;
   /**
@@ -53,7 +56,7 @@ export default function adapter(options: AdapterOptions = {}): Adapter {
     out = "OPS/web",
     fallback = "index.html",
     fallbackOp = true,
-    fallbackScope = 1000,
+    fallbackScope = 900000,
     apply = false,
     precompress = false,
   } = options;
