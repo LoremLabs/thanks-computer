@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,7 +105,7 @@ func TestRunPushRecordsLocalState(t *testing.T) {
 	}
 	// Status (drift) recomputes localManifestHash(loadLocalStackFiles(...)); the
 	// recorded hash must match it so the stack reads "(clean)" right after push.
-	localFiles, ferr := loadLocalStackFiles(filepath.Join(root, "OPS", "api"))
+	localFiles, ferr := loadLocalStackFiles(root, "api")
 	if ferr != nil {
 		t.Fatalf("loadLocalStackFiles: %v", ferr)
 	}

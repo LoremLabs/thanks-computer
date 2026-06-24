@@ -175,7 +175,7 @@ Flags:
 		// "any local file is dirty" behavior — protects in-flight
 		// edits the user hasn't committed back to the chassis yet.
 		saved, _ := state.Load(dir, stack)
-		clean, err := localStackClean(stackDir, saved)
+		clean, err := localStackClean(dir, stack, saved)
 		if err != nil {
 			fmt.Fprintf(stderr, "pull: check workspace %s: %v\n", stackDir, err)
 			return 1
@@ -265,7 +265,8 @@ func stackDirty(stackDir string) (bool, string) {
 //     if any files exist locally we can't prove they match the chassis,
 //     so refuse.
 //   - saved set → compute local manifest_hash; clean iff hashes match.
-func localStackClean(stackDir string, saved *state.State) (bool, error) {
+func localStackClean(dir, name string, saved *state.State) (bool, error) {
+	stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(name))
 	if _, err := os.Stat(stackDir); os.IsNotExist(err) {
 		return true, nil
 	} else if err != nil {
@@ -276,60 +277,52 @@ func localStackClean(stackDir string, saved *state.State) (bool, error) {
 		dirty, _ := stackDirty(stackDir)
 		return !dirty, nil
 	}
-	files, err := loadLocalStackFiles(stackDir)
+	files, err := loadLocalStackFiles(dir, name)
 	if err != nil {
 		return false, err
 	}
 	return localManifestHash(files) == saved.ManifestHash, nil
 }
 
-// loadLocalStackFiles walks stackDir and returns the file set in the
-// same shape opsToFiles emits: <scope>/<name>.txcl and the two
-// well-known mock-*.json filenames. Anything else is skipped, matching
-// the chassis-side path whitelist (validateStackFilePath). Paths are
-// stackDir-relative with forward slashes so they round-trip through
-// the same manifest-hashing logic the server uses.
-func loadLocalStackFiles(stackDir string) ([]client.StackFile, error) {
-	var out []client.StackFile
-	err := filepath.WalkDir(stackDir, func(p string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(stackDir, p)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		// Only this stack's OWN rules — `<scope>/<name>` (exactly one
-		// slash). A file under a deeper subdir (e.g. "_mail/0/accept.txcl"
-		// seen from the parent `test-01` dir) belongs to a NESTED stack
-		// that bundle.Walk groups separately; excluding it here keeps a
-		// parent stack's manifest from absorbing its children — otherwise
-		// adding a nested stack makes the parent read "edited since pull".
-		if strings.Count(rel, "/") != 1 {
-			return nil
-		}
-		base := filepath.Base(rel)
-		switch {
-		case strings.HasSuffix(base, ".txcl"):
-		case base == "mock-request.json" || base == "mock-response.json":
-		default:
-			return nil
-		}
-		content, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		out = append(out, client.StackFile{Path: rel, Content: string(content)})
-		return nil
-	})
+// loadLocalStackFiles reconstructs one stack's file set EXACTLY as `apply` /
+// `push` upload it, so a cleanliness hash matches the manifest the push
+// recorded. That manifest is `localManifestHash(opsToFiles + collectFileAssets)`:
+//   - opsToFiles keys ops by the WALKER's normalized form — NUMERIC scope +
+//     FLATTENED name (e.g. "100/slug.txcl", "100/sub_op.txcl") — not the raw
+//     on-disk path ("0100_LABEL/slug.txcl", "0100_LABEL/sub/op.txcl").
+//   - collectFileAssets adds the stack's own FILES/** ("FILES/<rel>").
+//
+// An earlier disk-walk implementation read raw paths, so it matched only stacks
+// using plain-numeric single-level scope dirs. Every labeled-scope-dir
+// (`<NNNN>_LABEL/`), nested-op, or FILES-bearing stack falsely read
+// "edited since pull" even right after a clean push. Walking with bundle.Walk
+// (the same walker the push uses) and routing through opsToFiles makes the two
+// bases identical. dir is the workspace root (holds OPS/); name is the stack.
+func loadLocalStackFiles(dir, name string) ([]client.StackFile, error) {
+	ops, err := bundle.Walk(dir)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	files := opsToFiles(opsForStack(ops, name))
+	// The stack's own static assets (FILES/**), on the same basis the push
+	// records them. collectFileAssets walks only this stack's top-level FILES/
+	// (not a nested sub-stack's _mail/FILES/), matching opsToFiles scoping.
+	assets, err := collectFileAssets(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
+	if err != nil {
+		return nil, err
+	}
+	return append(files, assets...), nil
+}
+
+// opsForStack narrows a full bundle.Walk result to a single stack's ops.
+func opsForStack(ops []bundle.Op, name string) []bundle.Op {
+	var out []bundle.Op
+	for _, op := range ops {
+		if op.Stack == name {
+			out = append(out, op)
+		}
+	}
+	return out
 }
 
 // runDraft: `txco draft <stack> [--activate] [<dir>]`.

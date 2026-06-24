@@ -67,15 +67,23 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 		saved, _ := state.Load(dir, name)
 		if saved != nil {
 			d.Local = fmt.Sprintf("v%d", saved.VersionNumber)
-			// Prefer reading from disk so we pick up any local edits
-			// the caller may not have plumbed through localOps.
+			// Cleanliness = does local content match the manifest the push
+			// recorded? Build the file set EXACTLY as the push does —
+			// opsToFiles over this stack's walked ops (numeric scope + flattened
+			// name) plus its own FILES/** — reusing the fresh localOps the
+			// caller already walked (no re-walk). Reading raw disk paths instead
+			// made labeled-scope-dir / nested-op / FILES stacks falsely read
+			// "edited since pull". See loadLocalStackFiles.
 			stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(name))
-			files, ferr := loadLocalStackFiles(stackDir)
-			if ferr == nil && saved.ManifestHash != "" {
-				if localManifestHash(files) == saved.ManifestHash {
-					d.Local += " (clean)"
-				} else {
-					d.Local += " (edited since pull)"
+			files := opsToFiles(opsForStack(localOps, name))
+			if assets, aerr := collectFileAssets(stackDir); aerr == nil {
+				files = append(files, assets...)
+				if saved.ManifestHash != "" {
+					if localManifestHash(files) == saved.ManifestHash {
+						d.Local += " (clean)"
+					} else {
+						d.Local += " (edited since pull)"
+					}
 				}
 			}
 		}

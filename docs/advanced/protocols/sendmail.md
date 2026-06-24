@@ -23,14 +23,14 @@ Required: `subject`, `body` (HTML), `from`.
 | Field | Meaning |
 |---|---|
 | `to` | One address, a list, or a list of `{address, vars}` objects for per-recipient personalization |
-| `vars` | Shared template variables; `{{.name}}`-style markers in `subject`/`body` render per recipient (missing keys render empty) |
+| `vars` | Shared template variables; `{{.name}}`-style markers in `subject`/`body` render per recipient (missing keys render empty). Also exposed to the shell as `{{.Vars.name}}` — e.g. a per-send link in a custom `templates.html` |
 | `text` | Explicit plaintext part; omitted, it's derived from the HTML body |
 | `cc` / `bcc` | Flat address lists added to every message (`cc` visible, `bcc` envelope-only) |
 | `reply_to` | Dedicated Reply-To field |
 | `headers` | Extra headers map — structural/signing/loop-guard headers are denylisted (use `reply_to`, not a raw header) |
 | `envelope_from` | MAIL FROM / Return-Path override. Defaults to `from`. Set `"<>"` for a null reverse-path — the RFC 3834 posture for auto-replies (no bounce loops) |
 | `campaign` | Label for rate-limit and audit grouping |
-| `templates.html` | A custom HTML template to wrap the `body` in, replacing the bundled default. Same slots: `{{.Subject}}`, `{{.Body}}`, `{{.Preheader}}`. Omitted → the default template |
+| `templates.html` | A custom HTML template to wrap the `body` in, replacing the bundled default. Slots: `{{.Subject}}`, `{{.Body}}`, `{{.Preheader}}`, and `{{.Vars.x}}` for any `vars`. Omitted → the default template |
 
 The HTML body is wrapped in a responsive, CSS-inlined shell — the bundled default, or a
 `templates.html` you supply (see below) — and messages are DKIM-signed.
@@ -40,7 +40,8 @@ The HTML body is wrapped in a responsive, CSS-inlined shell — the bundled defa
 By default the `body` is dropped into a built-in responsive shell. To control the whole
 email (your own header, footer, branding, responsive `@media` styles), pass a complete
 HTML document as `templates.html` with the same `{{.Body}}` / `{{.Subject}}` /
-`{{.Preheader}}` slots the default uses:
+`{{.Preheader}}` slots the default uses (plus `{{.Vars.x}}` for any per-send `vars`,
+e.g. a `{{.Vars.nexturl}}` button href):
 
 ```txcl
 # load a template shipped in the stack's FILES, then send with it

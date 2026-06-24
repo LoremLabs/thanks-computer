@@ -38,6 +38,7 @@ type shellData struct {
 	Subject   string
 	Preheader string
 	Body      htmltemplate.HTML // trusted: the tenant's own body, already rendered
+	Vars      map[string]any    // per-recipient vars (the same set subject/body see), for {{.Vars.x}}
 }
 
 // renderSubject renders the subject line as a text/template over the
@@ -90,31 +91,32 @@ func renderBody(bodySrc string, vars map[string]any) (htmltemplate.HTML, error) 
 
 // renderDefault wraps an already-rendered body in the default shell,
 // producing the full HTML document.
-func renderDefault(subject string, body htmltemplate.HTML, preheader string) (string, error) {
+func renderDefault(subject string, body htmltemplate.HTML, preheader string, vars map[string]any) (string, error) {
 	t, err := defaultShell()
 	if err != nil {
 		return "", err
 	}
-	return execShell(t, subject, body, preheader)
+	return execShell(t, subject, body, preheader, vars)
 }
 
 // parseShell parses a caller-supplied shell template — e.g.
 // `_sendmail.templates.html`, a (Maizzle-built) shell a stack ships in its FILES
 // and reads at send time. Same contract as the bundled default: Go html/template
-// with {{.Subject}} / {{.Body}} / {{.Preheader}}. Parse once per send (the body
-// and subject it wraps are per-recipient); execute via renderShell.
+// with {{.Subject}} / {{.Body}} / {{.Preheader}}, plus {{.Vars.x}} for any
+// per-send `_sendmail.vars` (e.g. a per-recipient link). Parse once per send (the
+// body and subject it wraps are per-recipient); execute via renderShell.
 func parseShell(src string) (*htmltemplate.Template, error) {
 	return htmltemplate.New("shell").Parse(src)
 }
 
 // renderShell wraps an already-rendered body in a pre-parsed custom shell.
-func renderShell(t *htmltemplate.Template, subject string, body htmltemplate.HTML, preheader string) (string, error) {
-	return execShell(t, subject, body, preheader)
+func renderShell(t *htmltemplate.Template, subject string, body htmltemplate.HTML, preheader string, vars map[string]any) (string, error) {
+	return execShell(t, subject, body, preheader, vars)
 }
 
-func execShell(t *htmltemplate.Template, subject string, body htmltemplate.HTML, preheader string) (string, error) {
+func execShell(t *htmltemplate.Template, subject string, body htmltemplate.HTML, preheader string, vars map[string]any) (string, error) {
 	var buf bytes.Buffer
-	if err := t.Execute(&buf, shellData{Subject: subject, Preheader: preheader, Body: body}); err != nil {
+	if err := t.Execute(&buf, shellData{Subject: subject, Preheader: preheader, Body: body, Vars: vars}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

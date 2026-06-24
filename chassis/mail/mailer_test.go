@@ -505,7 +505,7 @@ func TestRenderAndCompose(t *testing.T) {
 	if err != nil || !strings.Contains(string(body), "Hi Bob") {
 		t.Fatalf("renderBody: %q %v", body, err)
 	}
-	full, err := renderDefault("Subj", body, "")
+	full, err := renderDefault("Subj", body, "", nil)
 	if err != nil || !strings.Contains(full, "Hi Bob") || !strings.Contains(full, "Subj") {
 		t.Fatalf("renderDefault: %v", err)
 	}
@@ -519,17 +519,19 @@ func TestRenderShellCustom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl, err := parseShell(`<!doctype html><title>{{.Subject}}</title><main>{{.Body}}</main><i>DRIPCHROME</i>`)
+	tmpl, err := parseShell(`<!doctype html><title>{{.Subject}}</title><main>{{.Body}}</main>` +
+		`<a href="{{.Vars.nexturl}}">next</a><i>DRIPCHROME</i>`)
 	if err != nil {
 		t.Fatalf("parseShell: %v", err)
 	}
-	out, err := renderShell(tmpl, "Subj", body, "")
+	out, err := renderShell(tmpl, "Subj", body, "",
+		map[string]any{"nexturl": "https://www.dripl.it/drip?t=abc-123"})
 	if err != nil {
 		t.Fatalf("renderShell: %v", err)
 	}
-	// The custom shell wraps the (var-rendered) body and subject, and is NOT the
-	// default shell.
-	for _, want := range []string{"Subj", "Hi Bob", "DRIPCHROME"} {
+	// The custom shell wraps the (var-rendered) body + subject, interpolates a
+	// per-send var ({{.Vars.nexturl}}) into the button href, and is NOT the default.
+	for _, want := range []string{"Subj", "Hi Bob", "DRIPCHROME", `href="https://www.dripl.it/drip?t=abc-123"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("custom shell output missing %q:\n%s", want, out)
 		}

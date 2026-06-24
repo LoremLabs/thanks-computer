@@ -239,9 +239,9 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 			} else {
 				bodyHTML = string(bh)
 				if customShell != nil {
-					full, rerr = renderShell(customShell, subj, bh, "")
+					full, rerr = renderShell(customShell, subj, bh, "", r.vars)
 				} else {
-					full, rerr = renderDefault(subj, bh, "")
+					full, rerr = renderDefault(subj, bh, "", r.vars)
 				}
 			}
 			if rerr == nil {
