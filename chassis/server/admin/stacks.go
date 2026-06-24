@@ -61,6 +61,10 @@ type stackFile struct {
 	Path        string `json:"path"`
 	Content     string `json:"content,omitempty"`
 	ContentHash string `json:"content_hash"`
+	// Encoding is "base64" when Content is base64-encoded (non-UTF-8 binary
+	// assets the JSON wire would mangle). Decoded to raw bytes before
+	// hashing/storing; empty = raw UTF-8 text.
+	Encoding string `json:"encoding,omitempty"`
 }
 
 type versionDetail struct {
@@ -1111,6 +1115,19 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		seen[f.Path] = true
+		// Binary assets arrive base64-encoded (the wire is JSON/UTF-8); decode to raw
+		// bytes BEFORE hashing + storing, so the stored content and its hash (the
+		// content-addressed store key) are the real file bytes.
+		if f.Encoding == "base64" {
+			raw, derr := base64.StdEncoding.DecodeString(f.Content)
+			if derr != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid_base64",
+					map[string]any{"index": i, "path": f.Path, "err": derr.Error()})
+				return
+			}
+			f.Content = string(raw)
+			f.Encoding = ""
+		}
 		f.ContentHash = sha256Hex(f.Content)
 	}
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
@@ -562,10 +564,11 @@ func opsToFiles(ops []bundle.Op) []client.StackFile {
 // (symlinks) are skipped (mirrors the static index's "."-prefix exclusion
 // and collectStackFiles). An absent FILES/ dir yields nil, no error.
 //
-// NOTE: content travels as a JSON/TEXT string, so non-UTF-8 binary assets
-// can be mangled on this path (the documented dev/inline limitation — the
-// fleet S3 path carries raw bytes). Keep workspace FILES/ textual until the
-// stack_files column is BLOB.
+// Binary (non-UTF-8) assets are base64-encoded over the wire (Content +
+// Encoding:"base64"); the server decodes to raw bytes before hashing/storing, so
+// the JSON transport stays valid UTF-8 and the content-addressed bytes are exact.
+// (SQLite stores the raw bytes fine; for Postgres HA the stack_files content column
+// should become BYTEA — not yet live.)
 func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 	filesDir := filepath.Join(stackDir, "FILES")
 	info, err := os.Stat(filesDir)
@@ -595,11 +598,19 @@ func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 			return rerr
 		}
 		ch := sha256.Sum256(content)
-		out = append(out, client.StackFile{
+		sf := client.StackFile{
 			Path:        filepath.ToSlash(rel),
 			Content:     string(content),
-			ContentHash: hex.EncodeToString(ch[:]),
-		})
+			ContentHash: hex.EncodeToString(ch[:]), // over the RAW bytes
+		}
+		// Binary (non-UTF-8) assets — images, fonts — would be corrupted by JSON's
+		// invalid-UTF-8 → U+FFFD rewrite, so base64-encode them for the wire; the
+		// server decodes back to raw bytes before hashing/storing.
+		if !utf8.Valid(content) {
+			sf.Content = base64.StdEncoding.EncodeToString(content)
+			sf.Encoding = "base64"
+		}
+		out = append(out, sf)
 		return nil
 	})
 	if walkErr != nil {
@@ -619,8 +630,15 @@ func localManifestHash(files []client.StackFile) string {
 	type pair struct{ path, hash string }
 	pairs := make([]pair, 0, len(files))
 	for _, f := range files {
-		ch := sha256.Sum256([]byte(f.Content))
-		pairs = append(pairs, pair{f.Path, hex.EncodeToString(ch[:])})
+		// Hash the RAW bytes so it matches the server (which hashes raw, after
+		// base64-decoding binary). collectFileAssets set ContentHash over raw; prefer
+		// it. Ops carry no hash, but their Content is UTF-8 text (== raw) → recompute.
+		hash := f.ContentHash
+		if hash == "" {
+			ch := sha256.Sum256([]byte(f.Content))
+			hash = hex.EncodeToString(ch[:])
+		}
+		pairs = append(pairs, pair{f.Path, hash})
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].path < pairs[j].path })
 	h := sha256.New()

@@ -41,6 +41,10 @@ type StackFile struct {
 	Path        string `json:"path"`
 	Content     string `json:"content,omitempty"`
 	ContentHash string `json:"content_hash"`
+	// Encoding is "base64" when Content is base64-encoded — used for non-UTF-8
+	// binary assets (images, fonts) that JSON would otherwise mangle. Empty =
+	// raw UTF-8 text. The server decodes base64 before hashing/storing.
+	Encoding string `json:"encoding,omitempty"`
 }
 
 type VersionDetail struct {
