@@ -204,15 +204,21 @@ func routeBody(in []byte) string {
 	}
 	raw := "{}"
 	raw, _ = sjson.Set(raw, "_txc.goto", to)
-	// Tenant is ESTABLISHED once — at ingress/boot, when none is set yet — and may
+	// Tenant is ESTABLISHED once — at the _sys→concrete boot handoff — and may
 	// only be re-affirmed afterward. A (tenant) op can re-run route to re-pin the
 	// STACK for cross-stack dispatch, but it must NOT be able to SWITCH the tenant
 	// via `SET @route.tenant=other`. route is the only path that can set
-	// `_txc.tenant` (EMIT + untrusted op output are blocked), so `cur` is always
-	// the established tenant and this invariant holds inductively. On a switch
-	// attempt we omit it, so the per-scope merge keeps the established value.
+	// `_txc.tenant` (EMIT + untrusted op output are blocked).
+	//
+	// The "unestablished" current value is EITHER empty OR the system tenant:
+	// dispatchEnvelope stamps `_txc.tenant=_sys` on every request before the boot
+	// pipeline, so at boot/100 `cur` is "_sys", not "". Promoting from "" or `_sys`
+	// is the one-way _sys→concrete handoff maybeRetenant relies on; a CONCRETE
+	// `cur` that differs from the proposal is a switch attempt, so it's omitted and
+	// the per-scope merge keeps the established value. (Allowing only cur=="" here
+	// silently dropped the boot promotion and broke ALL tenant routing.)
 	if tn := gjson.GetBytes(in, "_txc.route.tenant"); tn.Exists() && tn.String() != "" {
-		if cur := gjson.GetBytes(in, "_txc.tenant").String(); cur == "" || cur == tn.String() {
+		if cur := gjson.GetBytes(in, "_txc.tenant").String(); cur == "" || cur == tenants.SystemTenantSlug || cur == tn.String() {
 			raw, _ = sjson.Set(raw, "_txc.tenant", tn.String())
 		}
 	}

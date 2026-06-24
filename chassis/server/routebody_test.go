@@ -3,23 +3,37 @@ package server
 import (
 	"testing"
 
+	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/tidwall/gjson"
 )
 
 // TestRouteBodyTenantGate locks the tenant boundary at txco://route: the tenant
-// is established once (boot, when none is set) and may only be re-affirmed — a
-// tenant op cannot SWITCH tenants via `SET @route.tenant=other; EXEC txco://route`.
-// The stack re-pin / goto still work, so cross-stack dispatch is unaffected.
+// is established once (the _sys→concrete boot handoff) and may only be
+// re-affirmed — a tenant op cannot SWITCH tenants via
+// `SET @route.tenant=other; EXEC txco://route`. The stack re-pin / goto still
+// work, so cross-stack dispatch is unaffected.
 func TestRouteBodyTenantGate(t *testing.T) {
 	tenant := func(out string) gjson.Result { return gjson.Get(out, "_txc.tenant") }
 
-	// establish: no current tenant → route sets it (the ingress/boot case).
-	out := routeBody([]byte(`{"_txc":{"route":{"to":"x/0","tenant":"acme"}}}`))
+	// establish (the REAL ingress/boot case): dispatchEnvelope stamps
+	// `_txc.tenant=_sys` before the boot pipeline, so the current value at
+	// boot/100 is "_sys", NOT empty. route must promote the proposed tenant —
+	// this is the one-way _sys→concrete handoff maybeRetenant relies on. A
+	// regression that allowed only cur=="" silently dropped this, so the jump
+	// into the tenant stack never happened and every routed request fell back to
+	// the empty `{}` projection.
+	out := routeBody([]byte(`{"_txc":{"tenant":"` + tenants.SystemTenantSlug + `","route":{"to":"x/0","tenant":"acme"}}}`))
 	if gjson.Get(out, "_txc.goto").String() != "x/0" {
 		t.Fatalf("goto not promoted: %s", out)
 	}
 	if tenant(out).String() != "acme" {
-		t.Fatalf("establish: tenant should be set to acme; %s", out)
+		t.Fatalf("establish from _sys: tenant should be promoted to acme; %s", out)
+	}
+
+	// establish from empty (defensive — a non-boot caller with no tenant set).
+	out = routeBody([]byte(`{"_txc":{"route":{"to":"x/0","tenant":"acme"}}}`))
+	if tenant(out).String() != "acme" {
+		t.Fatalf("establish from empty: tenant should be set to acme; %s", out)
 	}
 
 	// re-affirm: route.tenant == current → keeps it.
