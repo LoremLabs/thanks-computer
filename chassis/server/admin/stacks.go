@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
@@ -915,6 +916,7 @@ func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, incl
 		return nil, err
 	}
 	defer rows.Close()
+	emptyHash := sha256Hex("")
 	var out []stackFile
 	for rows.Next() {
 		var f stackFile
@@ -927,7 +929,28 @@ func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, incl
 			f.ContentHash = sha256Hex(content)
 		}
 		if includeContent {
-			f.Content = content
+			// A materialised version strips the content column — the bytes live in the
+			// filecas (a 0-byte stub here is why `txco pull` wrote empty files). Resolve
+			// them from the CAS, like handleCatFile. An empty hash is a genuinely-empty
+			// file, not a stripped one → leave it empty, don't touch the CAS.
+			if content == "" && f.ContentHash != "" && f.ContentHash != emptyHash {
+				if c.fcas == nil {
+					return nil, fmt.Errorf("loadVersionFiles %s: fingerprint-only but no filecas on this node", f.Path)
+				}
+				b, gerr := c.fcas.Get(ctx, f.ContentHash)
+				if gerr != nil {
+					return nil, fmt.Errorf("loadVersionFiles %s (cas %s): %w", f.Path, f.ContentHash, gerr)
+				}
+				content = string(b)
+			}
+			// Non-UTF-8 (binary) bytes go base64 so json.Marshal can't rewrite them to
+			// U+FFFD; the client decodes before writing to disk.
+			if utf8.Valid([]byte(content)) {
+				f.Content = content
+			} else {
+				f.Content = base64.StdEncoding.EncodeToString([]byte(content))
+				f.Encoding = "base64"
+			}
 		}
 		out = append(out, f)
 	}

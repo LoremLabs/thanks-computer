@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/pflag"
 
@@ -208,7 +209,18 @@ Flags:
 			fmt.Fprintf(stderr, "pull: mkdir %s: %v\n", filepath.Dir(full), err)
 			return 1
 		}
-		if err := os.WriteFile(full, []byte(f.Content), 0o644); err != nil {
+		// Binary assets arrive base64-encoded (paired with the server's encode on the
+		// version-detail wire); decode to the real bytes before writing.
+		data := []byte(f.Content)
+		if f.Encoding == "base64" {
+			decoded, derr := base64.StdEncoding.DecodeString(f.Content)
+			if derr != nil {
+				fmt.Fprintf(stderr, "pull: decode %s: %v\n", full, derr)
+				return 1
+			}
+			data = decoded
+		}
+		if err := os.WriteFile(full, data, 0o644); err != nil {
 			fmt.Fprintf(stderr, "pull: write %s: %v\n", full, err)
 			return 1
 		}
@@ -444,10 +456,14 @@ func collectStackFiles(stackDir string) ([]client.StackFile, error) {
 		if err != nil {
 			return err
 		}
-		out = append(out, client.StackFile{
-			Path:    filepath.ToSlash(rel),
-			Content: string(content),
-		})
+		sf := client.StackFile{Path: filepath.ToSlash(rel), Content: string(content)}
+		// Binary (non-UTF-8) assets → base64 for the JSON wire (the server decodes);
+		// otherwise JSON's invalid-UTF-8 → U+FFFD rewrite corrupts them.
+		if !utf8.Valid(content) {
+			sf.Content = base64.StdEncoding.EncodeToString(content)
+			sf.Encoding = "base64"
+		}
+		out = append(out, sf)
 		return nil
 	})
 	if err != nil {
