@@ -522,13 +522,13 @@ func TestExecAIUnsupportedSubOpErrors(t *testing.T) {
 		Stack:     "site",
 		Scope:     100,
 		Name:      "c",
-		Resonator: &resonator.Resonator{Exec: "ai://embed"},
+		Resonator: &resonator.Resonator{Exec: "ai://transcribe"},
 		Input:     `{}`,
 		Meta:      `{"prompt":"x"}`,
 	}
 	pl, err := pu.ExecAI(context.Background(), op)
 	if err == nil {
-		t.Fatalf("expected error for ai://embed in v1; got payload %s", pl.Raw)
+		t.Fatalf("expected error for ai://transcribe in v1; got payload %s", pl.Raw)
 	}
 	if got := gjson.Get(pl.Raw, "chat.error.code").String(); got != chat.CodeUnsupportedSub {
 		t.Errorf("error code = %q, want %q", got, chat.CodeUnsupportedSub)

@@ -76,7 +76,12 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 	if err != nil {
 		return chatErrorPayload(op, "", "", "", err), err
 	}
-	if subOp != aiSubOpChat {
+	switch subOp {
+	case aiSubOpEmbed:
+		return pu.execEmbed(ctx, op)
+	case aiSubOpChat:
+		// fall through to the chat path below
+	default:
 		uerr := &chat.UnsupportedSubOpError{SubOp: subOp}
 		return chatErrorPayload(op, "", "", "", uerr), uerr
 	}

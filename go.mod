@@ -22,7 +22,7 @@ require (
 	github.com/kvtools/valkeyrie v1.0.0
 	github.com/lestrrat-go/jwx/v2 v2.1.2
 	github.com/libdns/libdns v1.1.1
-	github.com/mattn/go-sqlite3 v1.10.0
+	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/miekg/dns v1.1.72
 	github.com/mr-tron/base58 v1.1.2
 	github.com/oklog/ulid/v2 v2.1.1
