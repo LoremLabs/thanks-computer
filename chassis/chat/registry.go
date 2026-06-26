@@ -82,7 +82,17 @@ func Resolve(providerHint string, cfg Config) (Backend, string, error) {
 	if len(registrationOrder) == 0 {
 		return nil, "", &NoBackendError{Registered: nil}
 	}
+	// Empty provider → the default backend. Registration order is import-order
+	// dependent (gofmt sorts the blank imports), so it is NOT a stable default
+	// once more than one backend is linked. Prefer the documented v1 default
+	// (openrouter) when it's present so linking a second backend (e.g. openai)
+	// stays purely additive — provider-less chats keep their prior backend.
+	// Deliberate per-call routing across backends is a `provider=` override (or
+	// the deferred capability-selection PR).
 	first := registrationOrder[0]
+	if _, ok := registry["openrouter"]; ok {
+		first = "openrouter"
+	}
 	b, err := registry[first](cfg)
 	if err != nil {
 		return nil, "", err

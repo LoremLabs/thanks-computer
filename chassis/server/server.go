@@ -21,6 +21,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/bgservice"
+	_ "github.com/loremlabs/thanks-computer/chassis/chat/openai"     // registers the "openai" ai://chat backend
 	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter" // registers the "openrouter" ai://chat backend
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
