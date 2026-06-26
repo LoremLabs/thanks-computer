@@ -156,19 +156,3 @@ txco data rm books --yes           # drop a whole collection (explicit; apply ne
 Removing a pack file from your tree **stops managing** its collection — it does
 not delete it. Tearing a collection down is the deliberate `txco data rm`.
 
-## Backends
-
-The store is durable and bounded — never an in-process index that a restart
-reloads or a large upload could OOM. Two backends sit behind one interface:
-
-- **Bundled** — SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec) in a
-  dedicated file (`--vector-db-path`). Per-node: each node seeds its own copy
-  from the deploy. Great for a read-only catalog; the default.
-- **Shared (HA)** — PostgreSQL + `pgvector`, set with `--vector-postgres-dsn`.
-  One store across every node, so runtime writes and seeds are visible fleet-wide;
-  the seed reconciles once, on the control plane.
-
-Both are exact (brute-force) nearest-neighbour in v1 — correct, and fine into the
-~100k-vector range; the crossover to approximate search is scale or HA, not
-catalog size. Embeddings need a provider key in prod (the `OPENAI_KEY` secret for
-the OpenAI backend); see [AI § embeddings](./ai.md#embeddings--exec-aiembed).
