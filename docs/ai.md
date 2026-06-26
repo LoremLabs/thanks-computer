@@ -50,6 +50,37 @@ merges the validated object as `.schema_validated_payload`. On
 failure — or any provider error — the op contributes `.chat.error`
 instead, and your next step's rules can resonate on that.
 
+## Embeddings — `EXEC "ai://embed"`
+
+Where `ai://chat` returns prose, `ai://embed` returns a **vector** — the numeric
+fingerprint of a piece of text, for semantic search. It's the companion to the
+[vector store](./vectors.md): embed the query, then search.
+
+```txcl
+WITH provider = "openai",
+     model    = "text-embedding-3-small",
+     text     = "a cozy book for a rainy afternoon"
+EXEC "ai://embed"
+```
+
+The vector merges in under `_embed.vector` (a float array), alongside
+`_embed.{model, dimensions, tokens}`. Embed many strings in one call with
+`WITH texts = [ … ]` → `_embed.vectors` (one per input). On any provider error
+the op contributes `_embed.error` instead, and your next step can resonate on it.
+
+Two backends ship in the box:
+
+- **`provider = "ollama"`** (the dev default) — a local [Ollama](https://ollama.com)
+  running `nomic-embed-text`, no API key. Point it with `--embed-ollama-base-url`.
+- **`provider = "openai"`** — OpenAI's embedding models
+  (`text-embedding-3-small` / `-large`); needs the per-tenant secret `OPENAI_KEY`
+  (stored the same way as `OPENROUTER_KEY` below). `WITH dimensions = N` requests a
+  shortened vector where the model supports it.
+
+Pick one embedding model per [collection](./vectors.md#collections) and stay on it
+— vectors are only comparable within the same embedding space, so a collection
+pins its model and rejects a mismatched upsert.
+
 ## Set the API key
 
 `ai://chat` routes through [OpenRouter](https://openrouter.ai), so the chassis

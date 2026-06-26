@@ -103,10 +103,14 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, `
 Usage: txco apply [flags] [<dir>]
 
-Walk <dir>/OPS/ for *.txcl resonator files, resolve any "op://NAME" references
-using the selected target's operations map, validate each resonator, and push
-the bundle to that target's chassis admin endpoint. Deploys (creates + activates
-a version for) every stack in the tree — use `+"`txco push <stack>`"+` for one stack.
+Walk <dir>/OPS/ for *.txcl operation files, resolve any "op://NAME" references
+using the selected target's operations map, validate each, and push the bundle to
+that target's chassis admin endpoint. Deploys (creates + activates a version for)
+every stack in the tree — use `+"`txco push <stack>`"+` for one stack.
+
+Deploys CODE only — operations and FILES/. A stack's VECTORS/+KV/ store-seed
+packs are carried forward untouched; deploy them with `+"`txco data apply`"+` (data
+is opt-in, so a checkout without the data packs still deploys fine).
 
 <dir> defaults to ".".
 

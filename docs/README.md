@@ -35,19 +35,21 @@ Read in order, or jump to what you need:
    when it fires and what it contributes.
 6. **[Continuations](./continuations.md)** — built for waiting: how an
    operation suspends a flow and calls back to resume it.
-7. **[AI](./ai.md)** — `ai://chat`: a model as an operation, prompts
-   that read the document, structured output.
-8. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
+7. **[AI](./ai.md)** — `ai://chat` and `ai://embed`: a model as an operation,
+   prompts that read the document, structured output, embeddings.
+8. **[Vectors](./vectors.md)** — the vector store: semantic search as
+   operations, and deploying a catalog declaratively with `txco data`.
+9. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
    fact.
-9. **[Schemas](./schemas.md)** — optionally write down the shape a
-   stack reads and writes, for humans and machines.
-10. **[Packages](./packages.md)** — share a working department; install
+10. **[Schemas](./schemas.md)** — optionally write down the shape a
+    stack reads and writes, for humans and machines.
+11. **[Packages](./packages.md)** — share a working department; install
     someone else's.
-11. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
+12. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
     runs its DNS: mail records, reputation keys, TLS, handled.
-12. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
+13. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
     stacks, domains, secrets, people, and usage, walled per tenant.
-13. **[Running a chassis](./running.md)** — `txco serve` and the
+14. **[Running a chassis](./running.md)** — `txco serve` and the
     author–apply loop, on your own machine.
 
 Building stacks day to day? The **[authoring guides](./authoring/README.md)**
