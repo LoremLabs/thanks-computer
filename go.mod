@@ -3,6 +3,7 @@ module github.com/loremlabs/thanks-computer
 go 1.25.0
 
 require (
+	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/atotto/clipboard v0.1.4
 	github.com/bep/debounce v1.2.0
 	github.com/caddyserver/certmagic v0.25.3

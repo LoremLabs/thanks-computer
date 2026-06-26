@@ -67,6 +67,9 @@ import (
 	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 	"github.com/loremlabs/thanks-computer/chassis/usage"
+	"github.com/loremlabs/thanks-computer/chassis/vector"
+	pgvector "github.com/loremlabs/thanks-computer/chassis/vector/pgvector"
+	sqlitevec "github.com/loremlabs/thanks-computer/chassis/vector/sqlitevec"
 )
 
 // defaultEntryStage is where every request enters the chassis: the
@@ -1166,6 +1169,42 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return kvCAS(ctx, kvHandle, in)
 		}))
+
+	// Durable tenant vector store (txco://vector/{collection,upsert,search,
+	// delete}). Default backend is the bundled SQLite + sqlite-vec file; when
+	// vector-postgres-dsn is set, a shared PostgreSQL + pgvector store (HA /
+	// multi-node) is used instead — its pgx driver is registered by the
+	// overlay/production build, not the open-core chassis. Tenant-scoped via
+	// processor.TenantScope; collections are tenant-level (shared across
+	// stacks), unlike the per-stack KV namespace. On open failure the ops stay
+	// unregistered (report "op not found") rather than crash the chassis.
+	var vstore vector.Store
+	var verr error
+	if conf.VectorPostgresDSN != "" {
+		vstore, verr = pgvector.New(conf.VectorPostgresDSN)
+	} else {
+		vstore, verr = sqlitevec.New(conf.VectorDBPath)
+	}
+	if verr != nil {
+		pu.Logger.Warn("txco://vector disabled: " + verr.Error())
+	} else {
+		pu.Handle([]byte("txco://vector/collection"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return vectorCollection(ctx, vstore, in)
+			}))
+		pu.Handle([]byte("txco://vector/upsert"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return vectorUpsert(ctx, vstore, in)
+			}))
+		pu.Handle([]byte("txco://vector/search"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return vectorSearch(ctx, vstore, in)
+			}))
+		pu.Handle([]byte("txco://vector/delete"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return vectorDelete(ctx, vstore, in)
+			}))
+	}
 
 	// Computed-secret core ops. These consume cleartext from
 	// op.Secrets (plumbed onto ctx by processor.ExecCore) and emit
