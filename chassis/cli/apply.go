@@ -35,6 +35,10 @@ type applyOpts struct {
 	*targetFlags
 	dryRun, noValidate, jsonOut bool
 	timeout                     time.Duration
+	// retries is the number of extra attempts (beyond the first) for each
+	// transient per-stack step — gateway 502/504s and `database is locked`
+	// 500s under load. 0 disables retry. See retryStep / applyOps.
+	retries int
 }
 
 // spin animates a braille spinner on a TTY while fn runs, then clears the line.
@@ -61,6 +65,56 @@ func spin(w io.Writer, msg string, fn func() error) error {
 	err := fn()
 	close(stop)
 	fmt.Fprint(w, "\r\x1b[2K")
+	return err
+}
+
+// retryBackoffBase is the initial inter-attempt delay in retryStep (it doubles
+// each retry, capped at 8s). A package var only so tests can shrink it; not
+// user-facing.
+var retryBackoffBase = time.Second
+
+// retryStep runs fn, retrying transient failures (gateway 5xx, `database is
+// locked`, network blips — see client.IsRetryable) up to `retries` extra times
+// with exponential backoff (1s, 2s, 4s, capped at 8s). `verify`, when non-nil,
+// is consulted BEFORE every attempt: if it reports the work already landed
+// server-side, retryStep returns nil without (re-)running fn. That is what
+// turns a false 502 — the edge timing out in front of an activate that actually
+// committed — into a success, and it avoids re-running an expensive activate
+// that already took effect. Retry/why lines go to stderr; ctx cancellation is
+// honoured between attempts. Fatal (non-retryable) errors return immediately.
+func retryStep(ctx context.Context, stderr io.Writer, label string, retries int, verify func() bool, fn func() error) error {
+	backoff := retryBackoffBase
+	var err error
+	for attempt := 0; attempt <= retries; attempt++ {
+		if verify != nil && verify() {
+			if attempt > 0 {
+				fmt.Fprintf(stderr, "  %s: already applied (verified server-side) — continuing\n", label)
+			}
+			return nil
+		}
+		if err = fn(); err == nil {
+			return nil
+		}
+		if !client.IsRetryable(err) || attempt == retries {
+			break
+		}
+		fmt.Fprintf(stderr, "  %s: %v\n  ↻ retrying in %s (%d/%d)\n",
+			label, err, backoff.Round(time.Second), attempt+1, retries)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if backoff < 8*time.Second {
+			backoff *= 2
+		}
+	}
+	// Final check: the last attempt may have 502'd at the edge while landing
+	// server-side. Don't report a failure the server actually accepted.
+	if verify != nil && verify() {
+		fmt.Fprintf(stderr, "  %s: applied despite error (verified server-side)\n", label)
+		return nil
+	}
 	return err
 }
 
@@ -97,6 +151,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate (push+activate even if the chassis flags errors)")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (array of per-stack deploy results)")
 	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
+	fs.IntVar(&opts.retries, "retries", 10, "retry each transient per-stack failure this many times with backoff before recording it and moving on; a failed run is resumable (re-run skips applied stacks)")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response (method, URL, status, error body) to stderr. Equivalent to TXCO_VERBOSE=1, which works for ANY txco command.")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -169,6 +224,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opts.noValidate, "no-validate", false, "skip server-side validation before activate")
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (the deploy result object)")
 	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
+	fs.IntVar(&opts.retries, "retries", 3, "retry a transient failure (gateway 5xx, `database is locked`) this many times with backoff before giving up")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response to stderr (TXCO_VERBOSE=1)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -352,6 +408,11 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	// `apply`/`push` are push+activate sugar over the versioned control plane.
 	stacks := groupOpsByStack(ops)
 	results := make([]deployResult, 0, len(stacks))
+	// failures collects stacks that exhausted their retries so one bad stack
+	// no longer aborts the whole run: we record it, keep going, and report the
+	// set at the end. apply is idempotent (unchanged stacks short-circuit), so
+	// simply re-running resumes where this run left off.
+	var failures []string
 	for _, stack := range sortedKeys(stacks) {
 		files := opsToFiles(stacks[stack])
 		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
@@ -397,7 +458,12 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		}
 
 		tPhase := time.Now()
-		versionNumber, err := c.CreateDraft(ctx, stack, "active")
+		var versionNumber int64
+		err := retryStep(ctx, stderr, fmt.Sprintf("%s create-draft", stack), opts.retries, nil, func() error {
+			var e error
+			versionNumber, e = c.CreateDraft(ctx, stack, "active")
+			return e
+		})
 		phase("create-draft", tPhase)
 		if err != nil {
 			// Name the EFFECTIVE endpoint actually dialed — i.e.
@@ -408,20 +474,24 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			// endpoint (compare `txco auth whoami`).
 			fmt.Fprintf(stderr, "%s: %s: create draft: %v\n  (endpoint %s; txco.yaml target %q)\n",
 				cmd, stack, err, clientTarget.Addr, resolved.Name)
-			return 1
+			failures = append(failures, stack)
+			continue
 		}
 		tPhase = time.Now()
-		if err := spin(progress, fmt.Sprintf("uploading %d files → %s v%d", len(files), stack, versionNumber), func() error {
-			// "code": replace rules + FILES, carry the stack's store-seed packs
-			// forward untouched. Data is opt-in via `txco data apply`.
-			_, e := c.PutDraftFilesScoped(ctx, stack, versionNumber, files, "code")
-			return e
-		}); err != nil {
-			phase("upload", tPhase)
-			fmt.Fprintf(stderr, "%s: %s: upload files for v%d: %v\n", cmd, stack, versionNumber, err)
-			return 1
-		}
+		err = retryStep(ctx, stderr, fmt.Sprintf("%s upload v%d", stack, versionNumber), opts.retries, nil, func() error {
+			return spin(progress, fmt.Sprintf("uploading %d files → %s v%d", len(files), stack, versionNumber), func() error {
+				// "code": replace rules + FILES, carry the stack's store-seed packs
+				// forward untouched. Data is opt-in via `txco data apply`.
+				_, e := c.PutDraftFilesScoped(ctx, stack, versionNumber, files, "code")
+				return e
+			})
+		})
 		phase("upload", tPhase)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %s: upload files for v%d: %v\n", cmd, stack, versionNumber, err)
+			failures = append(failures, stack)
+			continue
+		}
 		// Pre-activate validation: run the same checks the chassis
 		// would run on activate, but surface them before we flip the
 		// pointer. On failure we leave the draft on the chassis so the
@@ -429,15 +499,22 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		// manually via the admin UI after investigating.
 		if !opts.noValidate {
 			var vresp *client.ValidateResponse
-			if err := spin(progress, fmt.Sprintf("validating %s v%d", stack, versionNumber), func() error {
-				var e error
-				vresp, e = c.ValidateVersion(ctx, stack, versionNumber)
-				return e
-			}); err != nil {
+			err = retryStep(ctx, stderr, fmt.Sprintf("%s validate v%d", stack, versionNumber), opts.retries, nil, func() error {
+				return spin(progress, fmt.Sprintf("validating %s v%d", stack, versionNumber), func() error {
+					var e error
+					vresp, e = c.ValidateVersion(ctx, stack, versionNumber)
+					return e
+				})
+			})
+			if err != nil {
 				fmt.Fprintf(stderr, "%s: %s: validate v%d: %v\n", cmd, stack, versionNumber, err)
-				return 1
+				failures = append(failures, stack)
+				continue
 			}
 			if vresp != nil && !vresp.OK {
+				// A validation failure is FATAL, not transient — re-running won't
+				// help. Stop the whole apply so the user fixes it (the
+				// retry/continue path is only for transient gateway/lock errors).
 				fmt.Fprintf(stderr, "%s: %s v%d: validation failed (%d error%s); not activating.\n",
 					cmd, stack, versionNumber, len(vresp.Errors), pluralS(len(vresp.Errors)))
 				for _, e := range vresp.Errors {
@@ -449,16 +526,40 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		}
 		tPhase = time.Now()
 		var act *client.ActivateResponse
-		if err := spin(progress, fmt.Sprintf("activating %s v%d", stack, versionNumber), func() error {
-			var e error
-			act, e = c.Activate(ctx, stack, versionNumber)
-			return e
-		}); err != nil {
-			phase("activate", tPhase) // time even on the 502 — this is the one we care about
-			fmt.Fprintf(stderr, "%s: %s: activate v%d: %v\n", cmd, stack, versionNumber, err)
-			return 1
+		// activate is the slow step that 502s at the edge for large stacks even
+		// though it lands server-side. `activated` (a cheap GetStack read)
+		// short-circuits both the retry AND the expensive re-activation when the
+		// target version is already active — turning a false 502 into a success.
+		// Stack versions are immutable, so a just-minted versionNumber can only
+		// already be active if a prior run/attempt activated it: race-free.
+		activated := func() bool {
+			rec, e := c.GetStack(ctx, stack)
+			return e == nil && rec != nil && rec.ActiveVersion != nil && *rec.ActiveVersion == versionNumber
 		}
-		phase("activate", tPhase)
+		err = retryStep(ctx, stderr, fmt.Sprintf("%s activate v%d", stack, versionNumber), opts.retries, activated, func() error {
+			return spin(progress, fmt.Sprintf("activating %s v%d", stack, versionNumber), func() error {
+				var e error
+				act, e = c.Activate(ctx, stack, versionNumber)
+				return e
+			})
+		})
+		phase("activate", tPhase) // time even on the 502 — this is the one we care about
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %s: activate v%d: %v\n", cmd, stack, versionNumber, err)
+			failures = append(failures, stack)
+			continue
+		}
+		if act == nil {
+			// retryStep's verify confirmed the version is active without us ever
+			// seeing the ActivateResponse — the activate 502'd at the edge but
+			// committed server-side. Synthesize the minimal result so the
+			// bookkeeping below (local state, results, output) runs unchanged.
+			// Prior version + structured URL are unknown here; `txco status`
+			// reconciles them on the next run.
+			act = &client.ActivateResponse{VersionNumber: versionNumber}
+			fmt.Fprintf(stderr, "%s: %s v%d: activate response lost (gateway timeout) but version is active server-side — recorded.\n",
+				cmd, stack, versionNumber)
+		}
 		// Record local state so `txco status` shows this stack in sync. Push
 		// deployed the LOCAL files as v<act.VersionNumber>, so the workspace now
 		// mirrors that version's content exactly — the same invariant a fresh
@@ -503,6 +604,15 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			fmt.Fprintf(stderr, "%s: encode json: %v\n", cmd, err)
 			return 1
 		}
+	}
+	// Stacks that exhausted their retries don't abort the run, but they do make
+	// it a non-zero exit and a re-runnable resume point. The "applied stacks are
+	// skipped" promise holds because apply short-circuits unchanged stacks.
+	if len(failures) > 0 {
+		fmt.Fprintf(stderr, "\n%s: %d of %d stack%s failed after retries: %s\n",
+			cmd, len(failures), len(stacks), pluralS(len(stacks)), strings.Join(failures, ", "))
+		fmt.Fprintf(stderr, "%s: re-run to resume — already-applied stacks are skipped as unchanged.\n", cmd)
+		return 1
 	}
 	return 0
 }
