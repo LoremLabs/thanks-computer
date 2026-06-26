@@ -21,8 +21,8 @@ import (
 //
 //   - 5xx → zap.Warn  (server-side fault; demands operator awareness)
 //   - 4xx → zap.Debug (client-side issue; not worth WARN noise but
-//                      surfaces at --verbose for the same debugging
-//                      flow)
+//     surfaces at --verbose for the same debugging
+//     flow)
 //   - 2xx/3xx → not logged
 //
 // What's NOT touched:

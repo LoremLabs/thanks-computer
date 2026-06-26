@@ -25,8 +25,8 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
-	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
+	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )

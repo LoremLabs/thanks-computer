@@ -134,6 +134,12 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) vector.Store) {
 			t.Fatalf("idempotent upsert changed count: %d", len(got))
 		}
 
+		// ListIDs sees all three before the delete (the reconciler's
+		// desired-state input).
+		if all, err := s.ListIDs(ctx, tenant, coll); err != nil || !sameSet(all, []string{"a", "b", "c"}) {
+			t.Fatalf("ListIDs before delete: %v err=%v want [a b c]", all, err)
+		}
+
 		// delete
 		if n, err := s.Delete(ctx, tenant, coll, []string{"a", "b"}); err != nil || n != 2 {
 			t.Fatalf("delete: n=%d err=%v", n, err)
@@ -141,6 +147,10 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) vector.Store) {
 		got, _ = s.Search(ctx, tenant, coll, []float32{1, 0, 0, 0}, 10, vector.Filter{})
 		if !sameSet(ids(got), []string{"c"}) {
 			t.Fatalf("after delete: %v want [c]", ids(got))
+		}
+		// ListIDs reflects the delete.
+		if all, err := s.ListIDs(ctx, tenant, coll); err != nil || !sameSet(all, []string{"c"}) {
+			t.Fatalf("ListIDs after delete: %v err=%v want [c]", all, err)
 		}
 	})
 
@@ -176,6 +186,55 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) vector.Store) {
 		got, _ = s.Search(ctx, other, coll, []float32{1, 0, 0, 0}, 10, vector.Filter{})
 		if !sameSet(ids(got), []string{"only-globex"}) {
 			t.Fatalf("globex search: %v want [only-globex]", ids(got))
+		}
+	})
+
+	t.Run("ListAndDropCollection", func(t *testing.T) {
+		const lt = "listtenant"
+		if err := s.EnsureCollection(ctx, lt, vector.Collection{Name: "alpha", EmbeddingModel: "m", Dimensions: dim, Metric: vector.MetricCosine}); err != nil {
+			t.Fatalf("ensure alpha: %v", err)
+		}
+		if err := s.EnsureCollection(ctx, lt, vector.Collection{Name: "beta", EmbeddingModel: "m", Dimensions: dim, Metric: vector.MetricCosine}); err != nil {
+			t.Fatalf("ensure beta: %v", err)
+		}
+		if _, err := s.Upsert(ctx, lt, "alpha", []vector.Item{
+			{ID: "x", Vector: []float32{1, 0, 0, 0}}, {ID: "y", Vector: []float32{0, 1, 0, 0}},
+		}); err != nil {
+			t.Fatalf("upsert alpha: %v", err)
+		}
+
+		cols, err := s.ListCollections(ctx, lt)
+		if err != nil {
+			t.Fatalf("list collections: %v", err)
+		}
+		var names []string
+		for _, c := range cols {
+			names = append(names, c.Name)
+		}
+		if !sameSet(names, []string{"alpha", "beta"}) {
+			t.Fatalf("ListCollections: %v want [alpha beta]", names)
+		}
+
+		// Drop alpha (2 items); beta untouched.
+		if n, err := s.DropCollection(ctx, lt, "alpha"); err != nil || n != 2 {
+			t.Fatalf("drop alpha: n=%d err=%v want 2", n, err)
+		}
+		if _, found, _ := s.DescribeCollection(ctx, lt, "alpha"); found {
+			t.Fatal("alpha still present after drop")
+		}
+		if _, found, _ := s.DescribeCollection(ctx, lt, "beta"); !found {
+			t.Fatal("beta should survive alpha's drop")
+		}
+		// Dropping a missing collection is a no-op, not an error.
+		if n, err := s.DropCollection(ctx, lt, "alpha"); err != nil || n != 0 {
+			t.Fatalf("re-drop alpha: n=%d err=%v want 0/nil", n, err)
+		}
+		// A re-created collection of the same name starts empty.
+		if err := s.EnsureCollection(ctx, lt, vector.Collection{Name: "alpha", Dimensions: dim, Metric: vector.MetricCosine}); err != nil {
+			t.Fatalf("re-ensure alpha: %v", err)
+		}
+		if ids, _ := s.ListIDs(ctx, lt, "alpha"); len(ids) != 0 {
+			t.Fatalf("re-created alpha not empty: %v", ids)
 		}
 	})
 }

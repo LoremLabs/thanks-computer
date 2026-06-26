@@ -192,10 +192,10 @@ func TestComputeCopyText(t *testing.T) {
 	}
 
 	cases := []struct {
-		name      string
-		node      *tview.TreeNode
-		scope     selectScope
-		want      string
+		name  string
+		node  *tview.TreeNode
+		scope selectScope
+		want  string
 	}{
 		// Single-scalar array (the case from the user's example).
 		{

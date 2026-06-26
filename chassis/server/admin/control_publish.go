@@ -34,6 +34,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
 
@@ -96,12 +97,14 @@ func (c *Controller) readStackFilesForArtifact(
 			rows.Close()
 			return nil, err
 		}
-		// FILES/** static assets travel as a fingerprint, not bytes: ensure
-		// the bytes are in the shared CAS, then ship only ContentHash so
-		// data-plane nodes resolve them lazily (and never inline them).
-		// Rule/fixture files stay inline. Single-node deployments never call
-		// this (gated on FeedSink != nop), so the file/disk CAS is fine there.
-		if strings.HasPrefix(path, "FILES/") {
+		// CAS-backed bytes travel as a fingerprint, not inline: FILES/** static
+		// assets AND store-seed packs (VECTORS/, KV/ — potentially large
+		// pre-computed vectors). Ensure the bytes are in the shared CAS, then
+		// ship only ContentHash so data-plane nodes resolve them lazily (and
+		// never inline them into the in-memory runtime DB). Rule/fixture files
+		// stay inline. Single-node deployments never call this (gated on
+		// FeedSink != nop), so the file/disk CAS is fine there.
+		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) {
 			if hash == "" {
 				hash = sha256Hex(content)
 			}
@@ -165,12 +168,14 @@ func (c *Controller) readStackFilesForArtifact(
 	return out, nil
 }
 
-// priorActiveFileHashes returns the set of FILES/* content hashes that the
-// stack's CURRENT active version already materialised into the shared CAS.
-// readStackFilesForArtifact runs BEFORE the activation tx flips active_version,
-// so this is the prior version's set — and a new version's file whose hash is
-// in it is provably already in the CAS, so it needs no CAS round-trip at all.
-// Best-effort: an empty/nil set just routes everything through Exists-then-Put.
+// priorActiveFileHashes returns the set of CAS-backed content hashes that the
+// stack's CURRENT active version already materialised into the shared CAS —
+// FILES/* static assets and VECTORS//KV/ store-seed packs alike (all three ride
+// the shared CAS). readStackFilesForArtifact runs BEFORE the activation tx flips
+// active_version, so this is the prior version's set — and a new version's file
+// whose hash is in it is provably already in the CAS, so it needs no CAS
+// round-trip at all. Best-effort: an empty/nil set just routes everything
+// through Exists-then-Put.
 func (c *Controller) priorActiveFileHashes(
 	ctx context.Context, tenantID, stackName string,
 ) map[string]struct{} {
@@ -179,7 +184,8 @@ func (c *Controller) priorActiveFileHashes(
 		  FROM stack_files sf
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
-		   AND sf.path LIKE 'FILES/%' AND sf.content_hash <> ''`,
+		   AND sf.content_hash <> ''
+		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%')`,
 		tenantID, stackName)
 	if err != nil {
 		return nil

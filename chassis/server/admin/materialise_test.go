@@ -40,9 +40,11 @@ func (s *countingStore) Put(_ context.Context, _ string, _ []byte) error {
 	atomic.AddInt32(&s.puts, 1)
 	return s.putErr
 }
-func (s *countingStore) Exists(_ context.Context, hash string) (bool, error) { return s.exists[hash], nil }
-func (s *countingStore) Get(_ context.Context, _ string) ([]byte, error)     { return nil, nil }
-func (s *countingStore) Name() string                                        { return "counting" }
+func (s *countingStore) Exists(_ context.Context, hash string) (bool, error) {
+	return s.exists[hash], nil
+}
+func (s *countingStore) Get(_ context.Context, _ string) ([]byte, error) { return nil, nil }
+func (s *countingStore) Name() string                                    { return "counting" }
 
 // Unchanged content (hash already present) is skipped — only the delta is Put.
 func TestMaterialiseFilesSkipsExisting(t *testing.T) {

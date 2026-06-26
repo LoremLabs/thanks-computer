@@ -199,6 +199,16 @@ var cronChildren = []node{
 	},
 }
 
+// dataChildren mirrors chassis/cli/data.go (`txco data`).
+var dataChildren = []node{
+	{Name: "apply", Desc: "Deploy local VECTORS/+KV/ packs (code carried forward, then reconciled)"},
+	{Name: "pull", Desc: "Materialise the live store into local packs"},
+	{Name: "ls", Desc: "List the tenant's vector collections"},
+	{Name: "show", Desc: "Show a collection's pin + item IDs"},
+	{Name: "diff", Desc: "Compare a local pack to the live store"},
+	{Name: "rm", Desc: "Drop a whole collection (explicit teardown)"},
+}
+
 // snapshotChildren mirrors chassis/cli/snapshot.go.
 var snapshotChildren = []node{
 	{Name: "export", Desc: "Export a chassis-state snapshot"},
@@ -282,6 +292,7 @@ var cliCommandTree = []node{
 	{Name: "mcp", Desc: "MCP subcommands", Children: mcpChildren},
 	{Name: "config", Desc: "Config shortcuts (alias namespace for auth)", Children: configChildren},
 	{Name: "dns", Desc: "DNS zone + record management", Children: dnsChildren},
+	{Name: "data", Desc: "Deploy + inspect declarative store-seed packs (VECTORS/, KV/)", Children: dataChildren},
 	{Name: "cron", Desc: "Cron subcommands (timezone config)", Children: cronChildren},
 	{Name: "room", Desc: "Enter a room — send a message to a shared context (also: thanks)", Flags: []string{"room", "tenant", "profile", "addr", "target", "user", "pass"}},
 	{Name: "admin", Desc: "Operator-facing chassis maintenance", Children: adminChildren},

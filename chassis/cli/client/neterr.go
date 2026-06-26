@@ -113,4 +113,3 @@ func chassisHostFromAddr(addr string) string {
 	// stuffs that into u.Path.
 	return strings.TrimPrefix(addr, "/")
 }
-

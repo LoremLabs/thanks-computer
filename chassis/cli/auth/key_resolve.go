@@ -451,7 +451,6 @@ func makeFreshFileEnrollmentKey(path string, stderr io.Writer) (*EnrollmentKey, 
 	}, nil
 }
 
-
 // generateFreshKey produces a brand-new ed25519 key in memory and
 // returns the path it will be persisted to. If the default name is
 // already taken on disk, behaviour depends on the terminal:

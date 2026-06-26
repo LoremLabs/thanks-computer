@@ -32,6 +32,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 )
 
 // cursorVar is the varvals key holding the highest applied ControlVersion.
@@ -406,11 +407,13 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 	for _, f := range art.Files {
 		content := f.Content
 		hash := f.ContentHash
-		if strings.HasPrefix(f.Path, "FILES/") && hash != "" {
-			// Fingerprint-only FILES/ asset: the bytes live in the shared
+		if (strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path)) && hash != "" {
+			// Fingerprint-only CAS-backed asset (FILES/ static asset or a
+			// VECTORS//KV/ store-seed pack): the bytes live in the shared
 			// content-addressed store, so don't inline them here — keeps the
-			// node's in-memory runtime DB free of tenant file bytes. The
-			// static serve path resolves them lazily by content_hash.
+			// node's in-memory runtime DB free of tenant file/pack bytes. The
+			// static serve path (FILES/) and the store-seed reconciler (packs)
+			// resolve them lazily by content_hash.
 			content = ""
 		} else if hash == "" {
 			hash = sha256Hex([]byte(content))
@@ -442,6 +445,16 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 		c.pu.Logger.Warn("dbcache reload after apply failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}
+
+	// Materialise declarative store-seed packs (VECTORS/, KV/) into this node's
+	// runtime stores — post-commit, synchronous (this applier is already a
+	// background worker draining events serially). origin=false: a data-plane
+	// node reconciles its PER-NODE stores (sqlite-vec) from the CAS-resolved
+	// packs but skips SHARED stores (pgvector), which the control plane seeded
+	// once. ev.BaseVersion is the prior active version → change-driven reconcile
+	// skips unchanged packs. Best-effort: ReconcileStorePacks logs, never fails.
+	c.admin.ReconcileStorePacks(ctx, art.TenantID, art.Stack, art.Version, ev.BaseVersion, false)
+
 	c.pu.Logger.Info("control-event applied: stack.activated",
 		zap.String("event_id", ev.EventID),
 		zap.String("tenant", art.TenantID), zap.String("stack", art.Stack),

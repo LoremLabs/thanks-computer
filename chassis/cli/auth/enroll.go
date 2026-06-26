@@ -25,9 +25,9 @@ const defaultChassisURL = "http://localhost:8081"
 // semantics ("I already have a key, enroll it") while allowing
 // users to opt into the other backends explicitly.
 //
-//   no flag        → file at $TXCO_HOME/keys/<name>.ed25519 (current)
-//   --ssh-agent    → enroll an ssh-agent key
-//   --ssh-key PATH → enroll an existing key at PATH
+//	no flag        → file at $TXCO_HOME/keys/<name>.ed25519 (current)
+//	--ssh-agent    → enroll an ssh-agent key
+//	--ssh-key PATH → enroll an existing key at PATH
 //
 // If you want full auto-detect (ssh-agent first, etc.), use
 // `bootstrap-local` instead.

@@ -430,10 +430,10 @@ func TestExplainEnrollErrAddsHint(t *testing.T) {
 		t.Fatalf("explainEnrollErr returned nil")
 	}
 	want := []string{
-		"--auth-dev-enroll-secret",  // the "no secret configured" branch
-		"txco auth invite",          // the "already enrolled, onboard via invite" branch
-		"txco auth accept",          // the invitee side of the invite flow
-		"txco auth rotate-key",      // the "replace your current key" alternative
+		"--auth-dev-enroll-secret", // the "no secret configured" branch
+		"txco auth invite",         // the "already enrolled, onboard via invite" branch
+		"txco auth accept",         // the invitee side of the invite flow
+		"txco auth rotate-key",     // the "replace your current key" alternative
 	}
 	for _, w := range want {
 		if !strings.Contains(out.Error(), w) {

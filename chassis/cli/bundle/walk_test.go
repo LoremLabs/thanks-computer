@@ -150,10 +150,10 @@ func TestWalkSlashedStackName(t *testing.T) {
 	}
 
 	want := map[k]string{
-		{"website", 100, "resonator"}:                `EXEC "http://web/100"`,
-		{"website/canary", 100, "resonator"}:         `EXEC "http://canary/100"`,
-		{"website/canary/eu", 200, "resonator"}:      `EXEC "http://canary-eu/200"`,
-		{"department/canary", 100, "triage"}:         `EXEC "http://dept-canary"`,
+		{"website", 100, "resonator"}:           `EXEC "http://web/100"`,
+		{"website/canary", 100, "resonator"}:    `EXEC "http://canary/100"`,
+		{"website/canary/eu", 200, "resonator"}: `EXEC "http://canary-eu/200"`,
+		{"department/canary", 100, "triage"}:    `EXEC "http://dept-canary"`,
 	}
 	if len(got) != len(want) {
 		t.Errorf("got %d records, want %d", len(got), len(want))

@@ -211,13 +211,13 @@ func (c *Controller) handleDevEnroll(w http.ResponseWriter, r *http.Request) {
 // --- whoami ----------------------------------------------------------------
 
 type whoamiResponse struct {
-	Source       string              `json:"source"`
-	ActorID      string              `json:"actor_id,omitempty"`
-	KeyID        string              `json:"key_id,omitempty"`
-	Label        string              `json:"label,omitempty"`
-	SuperAdmin   bool                `json:"super_admin,omitempty"`
-	Capabilities []string            `json:"capabilities"`
-	Memberships  []whoamiMembership  `json:"memberships,omitempty"`
+	Source       string             `json:"source"`
+	ActorID      string             `json:"actor_id,omitempty"`
+	KeyID        string             `json:"key_id,omitempty"`
+	Label        string             `json:"label,omitempty"`
+	SuperAdmin   bool               `json:"super_admin,omitempty"`
+	Capabilities []string           `json:"capabilities"`
+	Memberships  []whoamiMembership `json:"memberships,omitempty"`
 }
 
 // whoamiMembership is the per-tenant slice rendered into the whoami
@@ -326,9 +326,9 @@ func (c *Controller) handleListActors(w http.ResponseWriter, r *http.Request) {
 // --- revocation -------------------------------------------------------------
 
 type revokeResponse struct {
-	Revoked   bool   `json:"revoked"`
-	ActorID   string `json:"actor_id,omitempty"`
-	KeyID     string `json:"key_id,omitempty"`
+	Revoked bool   `json:"revoked"`
+	ActorID string `json:"actor_id,omitempty"`
+	KeyID   string `json:"key_id,omitempty"`
 }
 
 func (c *Controller) handleRevokeActor(w http.ResponseWriter, r *http.Request) {

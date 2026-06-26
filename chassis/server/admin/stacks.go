@@ -31,6 +31,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/opname"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 )
@@ -42,9 +43,15 @@ import (
 type stackRecord struct {
 	Name          string `json:"name"`
 	ActiveVersion *int64 `json:"active_version,omitempty"` // version_number, nil if no active version
-	ManifestHash  string `json:"manifest_hash,omitempty"`  // active version's manifest hash; lets a client skip a no-op push
-	CreatedAt     string `json:"created_at"`
-	MintHostname  bool   `json:"mint_hostname"` // false = headless (no auto-minted routing URL); see `txco stack set --no-host`
+	ManifestHash  string `json:"manifest_hash,omitempty"`  // active version's manifest hash (ALL files); lets a client skip a no-op push
+	// CodeManifestHash is the active version's manifest over CODE files only
+	// (rules + FILES, excluding the VECTORS/+KV/ store-seed packs). Because
+	// `txco apply` is code-only and a dev may not have the packs locally, the
+	// no-op short-circuit compares the local code manifest to THIS, not the
+	// all-files ManifestHash (which a pack-bearing stack would never match).
+	CodeManifestHash string `json:"code_manifest_hash,omitempty"`
+	CreatedAt        string `json:"created_at"`
+	MintHostname     bool   `json:"mint_hostname"` // false = headless (no auto-minted routing URL); see `txco stack set --no-host`
 }
 
 type versionRecord struct {
@@ -112,6 +119,13 @@ type stackSettingsResponse struct {
 
 type putFilesRequest struct {
 	Files []stackFile `json:"files"`
+	// Manage selects which file categories this upload is authoritative for; the
+	// rest are PRESERVED from the cloned draft. Data is opt-in: `txco apply`
+	// sends "code" (replace rules + FILES, carry store-seed packs forward);
+	// `txco data apply` sends "data" (replace VECTORS/+KV/ packs, carry code
+	// forward). "" / "all" replaces everything — the historical full-deploy
+	// behavior, used by `txco dev` and any pre-flag client.
+	Manage string `json:"manage,omitempty"`
 }
 
 type putFilesResponse struct {
@@ -257,6 +271,47 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// codeManifestHash computes the manifest over the stack's ACTIVE version CODE
+// files (rules + FILES), excluding the VECTORS/+KV/ store-seed packs. It is the
+// basis the code-only `txco apply` no-op short-circuit compares against — a
+// pack-bearing stack's all-files ManifestHash would never match a code-only
+// local file set, so without this every code re-apply would needlessly re-mint a
+// version. Returns "" (no error) when the stack has no active version.
+func (c *Controller) codeManifestHash(ctx context.Context, tenantID, name string) (string, error) {
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+		SELECT sf.path, sf.content, sf.content_hash
+		  FROM stack_files sf
+		  JOIN stacks s ON s.active_version = sf.version_id
+		 WHERE s.tenant_id = ? AND s.name = ?
+		   AND sf.path NOT LIKE 'VECTORS/%' AND sf.path NOT LIKE 'KV/%'`,
+		tenantID, name)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var files []stackFile
+	any := false
+	for rows.Next() {
+		any = true
+		var f stackFile
+		var content string
+		if err := rows.Scan(&f.Path, &content, &f.ContentHash); err != nil {
+			return "", err
+		}
+		if f.ContentHash == "" {
+			f.ContentHash = sha256Hex(content)
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if !any {
+		return "", nil // no active version (or no files) → no code manifest to compare
+	}
+	return computeManifestHash(files), nil
+}
+
 // validateStackFilePath enforces the same rules at every endpoint that
 // writes stack_files. Paths get materialised to disk by `txco pull`,
 // so they must be safe relative paths: no absolute form, no `..`/`.`
@@ -334,6 +389,20 @@ func validateStackFilePath(p string) error {
 	// serve time, not from the name. Their bytes are content-addressed in the
 	// filecas store on activation, not materialised into ops.
 	if strings.HasPrefix(p, "FILES/") {
+		return nil
+	}
+
+	// VECTORS/** and KV/** are declarative store-seed packs (NDJSON),
+	// reconciled into the vector / KV stores on activation rather than served
+	// or materialised into ops (see chassis/storeseed). Their bytes are
+	// content-addressed like FILES/. We require a single name segment with the
+	// .jsonl extension — "VECTORS/<collection>.jsonl", "KV/<namespace>.jsonl" —
+	// so the collection/namespace each pack owns is unambiguous (no nesting).
+	if storeseed.KindForPath(p) != "" {
+		if storeseed.PackName(p) == "" {
+			return fmt.Errorf("store-seed packs must be a single %q file directly under %s/ or %s/ (got %q)",
+				storeseed.PackExt, storeseed.DirVectors, storeseed.DirKV, p)
+		}
 		return nil
 	}
 
@@ -477,6 +546,12 @@ func (c *Controller) handleGetStack(w http.ResponseWriter, r *http.Request) {
 	}
 	if av.Valid {
 		rec.ActiveVersion = &av.Int64
+		// Code-only manifest for the no-op short-circuit (data is opt-in; the
+		// client deploys CODE and compares against this, not the all-files hash).
+		// Best-effort: a compute error just omits it, falling back to a deploy.
+		if cmh, cerr := c.codeManifestHash(r.Context(), ac.TenantID, name); cerr == nil {
+			rec.CodeManifestHash = cmh
+		}
 	}
 	rec.ManifestHash = mh.String
 	rec.MintHostname = mint != 0
@@ -1190,9 +1265,21 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Clear existing files and re-insert.
-	if _, err := tx.ExecContext(r.Context(),
-		`DELETE FROM stack_files WHERE version_id = ?`, versionID); err != nil {
+	// Clear the managed category's existing files and re-insert. The draft was
+	// cloned from the active version, so the UNmanaged category's rows survive
+	// (carried forward): "code" preserves the store-seed packs, "data" preserves
+	// the code, "" / "all" replaces everything. This is what makes data opt-in —
+	// a `txco apply` (code) never strips a stack's packs.
+	delQuery := `DELETE FROM stack_files WHERE version_id = ?`
+	switch req.Manage {
+	case "code":
+		delQuery = `DELETE FROM stack_files WHERE version_id = ?
+			   AND NOT (path LIKE 'VECTORS/%' OR path LIKE 'KV/%')`
+	case "data":
+		delQuery = `DELETE FROM stack_files WHERE version_id = ?
+			   AND (path LIKE 'VECTORS/%' OR path LIKE 'KV/%')`
+	}
+	if _, err := tx.ExecContext(r.Context(), delQuery, versionID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "clear_files", map[string]any{"err": err.Error()})
 		return
 	}
@@ -1464,6 +1551,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	for _, rf := range rawFiles {
 		if strings.HasPrefix(rf.path, "FILES/") {
 			continue // static asset → filecas (above), not an ops row
+		}
+		if storeseed.IsPackPath(rf.path) {
+			continue // store-seed pack → reconciled post-commit, not an ops row
 		}
 		pf, ok := parseStackPath(rf.path)
 		if !ok {
@@ -1819,6 +1909,26 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				zap.String("err", err.Error()))
 		}
 	}()
+
+	// Materialise declarative store-seed packs (VECTORS/, KV/) into the runtime
+	// stores — post-commit + async, like the reload above: the packs are durable
+	// in the CAS and the reconcile does store I/O that must not block the
+	// activate response. origin=true (this is the control plane), so shared
+	// stores (pgvector) are reconciled here while data-plane appliers skip them.
+	// r.Context() is canceled when the handler returns, so detach cancellation
+	// (the tenant scope is passed explicitly; no request values are needed).
+	// priorVersion = the version that was active before this flip, so reconcile
+	// only touches packs that actually changed (a code deploy changes none).
+	if c.storeReconciler != nil {
+		var priorVersion int64
+		if currentActiveID.Valid && currentActiveID.Int64 != targetVersionID {
+			if pn, perr := c.versionNumberFor(r.Context(), currentActiveID.Int64); perr == nil {
+				priorVersion = pn
+			}
+		}
+		ssCtx := context.WithoutCancel(r.Context())
+		go c.ReconcileStorePacks(ssCtx, ac.TenantID, name, req.VersionNumber, priorVersion, true)
+	}
 
 	resp := activateResponse{VersionNumber: req.VersionNumber}
 	if currentActiveID.Valid && currentActiveID.Int64 != targetVersionID {

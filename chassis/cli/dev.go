@@ -454,6 +454,14 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect FILES/: %w", stack, aerr)
 		}
 		files = append(files, assets...)
+		// `dev` is a full local mirror (manage="all"): deploy + reconcile the
+		// store-seed packs too, so a developer's local VECTORS/+KV/ are live
+		// against the dev chassis without a separate `txco data apply`.
+		packs, perr := collectStorePacks(filepath.Join(dir, "OPS", stack))
+		if perr != nil {
+			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
+		}
+		files = append(files, packs...)
 		localHash := localManifestHash(files)
 
 		// Fast paths against the chassis's current active version:
@@ -649,6 +657,12 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			return fmt.Errorf("%s: collect FILES/: %w", stack, aerr)
 		}
 		files = append(files, assets...)
+		// Full local mirror — include store-seed packs (see the watch loop above).
+		packs, perr := collectStorePacks(filepath.Join(dir, "OPS", stack))
+		if perr != nil {
+			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
+		}
+		files = append(files, packs...)
 		if n, ok := state.drafts[stack]; ok {
 			if _, err := c.PutDraftFiles(ctx, stack, n, files); err == nil {
 				fmt.Fprintf(stdout, "[watch] %s v%d updated (%d files)\n", stack, n, len(files))

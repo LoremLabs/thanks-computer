@@ -319,6 +319,86 @@ func (s *Store) Delete(ctx context.Context, tenant, collection string, ids []str
 	return int(n), nil
 }
 
+func (s *Store) ListIDs(ctx context.Context, tenant, collection string) ([]string, error) {
+	_, table, err := s.lookup(ctx, tenant, collection)
+	if err != nil {
+		return nil, err
+	}
+	// table is a hex-only identifier (tableNameFor) — safe to interpolate.
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM %s", table))
+	if err != nil {
+		return nil, fmt.Errorf("pgvector: list ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) ListCollections(ctx context.Context, tenant string) ([]vector.Collection, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, embedding_model, dimensions, metric FROM vector_collections WHERE tenant=$1 ORDER BY name`, tenant)
+	if err != nil {
+		return nil, fmt.Errorf("pgvector: list collections: %w", err)
+	}
+	defer rows.Close()
+	var out []vector.Collection
+	for rows.Next() {
+		var (
+			c      vector.Collection
+			metric string
+		)
+		if err := rows.Scan(&c.Name, &c.EmbeddingModel, &c.Dimensions, &metric); err != nil {
+			return nil, err
+		}
+		c.Metric = vector.Metric(metric)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DropCollection(ctx context.Context, tenant, name string) (int, error) {
+	_, found, err := s.DescribeCollection(ctx, tenant, name)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, nil // missing collection → nothing to drop
+	}
+	s.mu.RLock()
+	table := s.cache[cacheKey(tenant, name)].table
+	s.mu.RUnlock()
+
+	var n int
+	// table is a hex-only identifier (tableNameFor) — safe to interpolate.
+	_ = s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&n)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", table)); err != nil {
+		return 0, fmt.Errorf("pgvector: drop items table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vector_collections WHERE tenant=$1 AND name=$2`, tenant, name); err != nil {
+		return 0, fmt.Errorf("pgvector: deregister collection: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	delete(s.cache, cacheKey(tenant, name))
+	s.mu.Unlock()
+	return n, nil
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 
 // encodeVector renders a float32 slice as pgvector's text literal "[a,b,c]"

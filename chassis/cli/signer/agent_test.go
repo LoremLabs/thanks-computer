@@ -105,16 +105,16 @@ type fakeAgent struct {
 	err  error
 }
 
-func (f *fakeAgent) List() ([]*agent.Key, error)                       { return f.keys, nil }
+func (f *fakeAgent) List() ([]*agent.Key, error) { return f.keys, nil }
 func (f *fakeAgent) Sign(_ ssh.PublicKey, _ []byte) (*ssh.Signature, error) {
 	return f.sig, f.err
 }
-func (f *fakeAgent) Add(agent.AddedKey) error            { return errors.New("unsupported") }
-func (f *fakeAgent) Remove(ssh.PublicKey) error          { return errors.New("unsupported") }
-func (f *fakeAgent) RemoveAll() error                    { return errors.New("unsupported") }
-func (f *fakeAgent) Lock([]byte) error                   { return errors.New("unsupported") }
-func (f *fakeAgent) Unlock([]byte) error                 { return errors.New("unsupported") }
-func (f *fakeAgent) Signers() ([]ssh.Signer, error)      { return nil, errors.New("unsupported") }
+func (f *fakeAgent) Add(agent.AddedKey) error       { return errors.New("unsupported") }
+func (f *fakeAgent) Remove(ssh.PublicKey) error     { return errors.New("unsupported") }
+func (f *fakeAgent) RemoveAll() error               { return errors.New("unsupported") }
+func (f *fakeAgent) Lock([]byte) error              { return errors.New("unsupported") }
+func (f *fakeAgent) Unlock([]byte) error            { return errors.New("unsupported") }
+func (f *fakeAgent) Signers() ([]ssh.Signer, error) { return nil, errors.New("unsupported") }
 
 // newFakeAgentWithKey builds a fakeAgent that lists the given pubkey
 // as an Ed25519 entry but returns a caller-specified signature when

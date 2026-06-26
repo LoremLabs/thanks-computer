@@ -160,17 +160,17 @@ func (c *Controller) handleCreateInvitation(w http.ResponseWriter, r *http.Reque
 // --- list ------------------------------------------------------------------
 
 type invitationView struct {
-	InvitationID string  `json:"invitation_id"`
-	Label        string  `json:"label,omitempty"`
-	Kind         string  `json:"kind,omitempty"`
+	InvitationID string   `json:"invitation_id"`
+	Label        string   `json:"label,omitempty"`
+	Kind         string   `json:"kind,omitempty"`
 	Capabilities []string `json:"capabilities"`
-	CreatedBy    string  `json:"created_by"`
-	CreatedAt    string  `json:"created_at"`
-	ExpiresAt    string  `json:"expires_at"`
-	ConsumedAt   *string `json:"consumed_at,omitempty"`
-	ConsumedBy   string  `json:"consumed_by,omitempty"`
-	RevokedAt    *string `json:"revoked_at,omitempty"`
-	Status       string  `json:"status"`
+	CreatedBy    string   `json:"created_by"`
+	CreatedAt    string   `json:"created_at"`
+	ExpiresAt    string   `json:"expires_at"`
+	ConsumedAt   *string  `json:"consumed_at,omitempty"`
+	ConsumedBy   string   `json:"consumed_by,omitempty"`
+	RevokedAt    *string  `json:"revoked_at,omitempty"`
+	Status       string   `json:"status"`
 }
 
 type listInvitationsResponse struct {

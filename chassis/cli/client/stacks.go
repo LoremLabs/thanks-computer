@@ -18,7 +18,12 @@ type StackRecord struct {
 	Name          string `json:"name"`
 	ActiveVersion *int64 `json:"active_version,omitempty"`
 	ManifestHash  string `json:"manifest_hash,omitempty"`
-	CreatedAt     string `json:"created_at"`
+	// CodeManifestHash is the active version's manifest over CODE files only
+	// (rules + FILES, no VECTORS/+KV/ packs). `txco apply` is code-only, so its
+	// no-op short-circuit compares the local code manifest to THIS. Empty from an
+	// older server → the client falls back to a normal deploy. See handleGetStack.
+	CodeManifestHash string `json:"code_manifest_hash,omitempty"`
+	CreatedAt        string `json:"created_at"`
 	// MintHostname: false = headless (activate mints no auto routing URL),
 	// true = mints one. Pointer so an OLDER server that doesn't send the
 	// field decodes to nil ("unknown") rather than a misleading false — a
@@ -69,7 +74,8 @@ type createDraftResp struct {
 }
 
 type putFilesReq struct {
-	Files []StackFile `json:"files"`
+	Files  []StackFile `json:"files"`
+	Manage string      `json:"manage,omitempty"` // "code" | "data" | "all" (default)
 }
 
 type PutFilesResponse struct {
@@ -322,9 +328,18 @@ func (c *Client) CreateDraft(ctx context.Context, name, from string) (int64, err
 	return out.VersionNumber, nil
 }
 
-// PutDraftFiles: PUT /stacks/{name}/versions/{n}/files
+// PutDraftFiles: PUT /stacks/{name}/versions/{n}/files — replaces the whole
+// file set (manage="all"). Used by `txco dev` (full local mirror).
 func (c *Client) PutDraftFiles(ctx context.Context, name string, versionNumber int64, files []StackFile) (*PutFilesResponse, error) {
-	body, err := json.Marshal(putFilesReq{Files: files})
+	return c.PutDraftFilesScoped(ctx, name, versionNumber, files, "")
+}
+
+// PutDraftFilesScoped is PutDraftFiles with an explicit manage scope: "code"
+// replaces rules + FILES and carries the store-seed packs forward; "data"
+// replaces VECTORS/+KV/ packs and carries the code forward; "" / "all" replaces
+// everything. This is how data stays opt-in — `txco apply` uses "code".
+func (c *Client) PutDraftFilesScoped(ctx context.Context, name string, versionNumber int64, files []StackFile, manage string) (*PutFilesResponse, error) {
+	body, err := json.Marshal(putFilesReq{Files: files, Manage: manage})
 	if err != nil {
 		return nil, err
 	}

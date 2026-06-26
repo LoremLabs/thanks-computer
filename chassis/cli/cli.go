@@ -158,6 +158,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runConfig(rest, stdout, stderr), true
 	case "dns":
 		return runDNS(rest, stdout, stderr), true
+	case "data":
+		return runData(rest, stdout, stderr), true
 	case "cron":
 		return runCron(rest, stdout, stderr), true
 	case "room":

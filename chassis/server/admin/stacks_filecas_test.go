@@ -34,3 +34,32 @@ func TestValidateStackFilePathFILES(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateStackFilePathStoreSeed(t *testing.T) {
+	valid := []string{
+		"VECTORS/books.jsonl",
+		"VECTORS/rag-memory.jsonl",
+		"KV/config.jsonl",
+		"KV/seed.jsonl",
+	}
+	for _, p := range valid {
+		if err := validateStackFilePath(p); err != nil {
+			t.Errorf("validateStackFilePath(%q) = %v, want nil", p, err)
+		}
+	}
+
+	invalid := []string{
+		"VECTORS/books.json",         // wrong extension (.json, not .jsonl)
+		"VECTORS/nested/books.jsonl", // packs may not nest — name must be one segment
+		"VECTORS",                    // bare dir, no pack
+		"VECTORS/",                   // empty name
+		"KV/a/b.jsonl",               // nested
+		"KV/data.txt",                // wrong extension
+		"vectors/books.jsonl",        // case-sensitive: lower-case dir is not the channel
+	}
+	for _, p := range invalid {
+		if err := validateStackFilePath(p); err == nil {
+			t.Errorf("validateStackFilePath(%q) = nil, want error", p)
+		}
+	}
+}

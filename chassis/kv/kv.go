@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kvtools/valkeyrie/store"
@@ -162,6 +163,47 @@ func (k *KV) Delete(ctx context.Context, tenant, ns, key string) error {
 		return derr
 	}
 	return nil
+}
+
+// ListKeys returns the user keys currently stored under (tenant, ns) — the
+// namespace view the declarative store-seed reconciler needs to find which
+// managed keys a re-applied pack dropped. Lazily-expired keys are filtered
+// (parity with Get); order is unspecified; an empty namespace yields nil.
+// The composed <tenant>/<ns>/ prefix is stripped so callers get bare user keys.
+func (k *KV) ListKeys(ctx context.Context, tenant, ns string) ([]string, error) {
+	if k == nil || k.s == nil {
+		return nil, errors.New("kv: store not configured")
+	}
+	if !segOK(tenant) {
+		return nil, fmt.Errorf("kv: invalid tenant scope")
+	}
+	if !segOK(ns) {
+		return nil, fmt.Errorf("kv: invalid namespace %q", ns)
+	}
+	prefix := tenant + "/" + ns + "/"
+	pairs, err := k.s.List(ctx, prefix, nil)
+	if err != nil {
+		if errors.Is(err, store.ErrKeyNotFound) {
+			return nil, nil // namespace has no keys
+		}
+		return nil, err
+	}
+	var keys []string
+	for _, p := range pairs {
+		// Backends differ on whether List returns full or directory-relative
+		// keys; TrimPrefix yields the bare user key either way. A residual '/'
+		// would mean a deeper path (segOK forbids '/' in user keys) — skip it.
+		key := strings.TrimPrefix(p.Key, prefix)
+		if key == "" || strings.ContainsRune(key, '/') {
+			continue
+		}
+		var w wrapper
+		if json.Unmarshal(p.Value, &w) == nil && k.expired(w) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
 }
 
 // Incr atomically adds delta to an integer value (creating it at delta if

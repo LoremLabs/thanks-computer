@@ -25,7 +25,7 @@ type CloudToken struct {
 	IDToken      string    `json:"id_token,omitempty"`
 	TokenType    string    `json:"token_type,omitempty"`
 	Scope        string    `json:"scope,omitempty"`
-	Expiry       time.Time `json:"expiry"`      // absolute = obtained_at + expires_in
+	Expiry       time.Time `json:"expiry"` // absolute = obtained_at + expires_in
 	ObtainedAt   time.Time `json:"obtained_at"`
 	Subject      string    `json:"subject"` // e.g. email:matt@example.com
 	Email        string    `json:"email,omitempty"`

@@ -24,6 +24,7 @@ import (
 	computeapi "github.com/loremlabs/thanks-computer/chassis/cli/op"
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 )
 
@@ -365,17 +366,21 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			}
 		}
 
-		// No-op short-circuit: if the local content is byte-identical to the
-		// stack's ACTIVE version (same manifest hash), a push would mint a new
-		// version that changes nothing. Skip create→upload→activate entirely so
-		// no version number is consumed. Authoritative — asks the chassis for
-		// the active hash — so it's immune to stale local state. Best-effort:
-		// any lookup error, or no active version / empty hash, falls through to
-		// a normal push. Safe by construction: the hashes only match on
-		// identical content, so this can never skip a real change.
+		// No-op short-circuit: if the local CODE is byte-identical to the stack's
+		// ACTIVE version, a push would mint a new version that changes nothing.
+		// Skip create→upload→activate entirely so no version number is consumed.
+		// `apply` is code-only (data is opt-in via `txco data apply`), so we
+		// compare against the server's CODE-only manifest — the all-files
+		// ManifestHash would never match a pack-bearing stack's code-only local
+		// set, defeating the short-circuit. Authoritative + best-effort: any
+		// lookup error, no active version, or an older server that omits
+		// CodeManifestHash falls through to a normal push. Safe by construction:
+		// the hashes only match on identical code, so this never skips a real
+		// change (and a changed-but-undeployed local pack is correctly ignored —
+		// it deploys via `txco data apply`).
 		if rec, rerr := c.GetStack(ctx, stack); rerr == nil && rec != nil &&
-			rec.ActiveVersion != nil && rec.ManifestHash != "" &&
-			rec.ManifestHash == localManifestHash(files) {
+			rec.ActiveVersion != nil && rec.CodeManifestHash != "" &&
+			rec.CodeManifestHash == localManifestHash(files) {
 			results = append(results, deployResult{
 				Stack: stack, Version: *rec.ActiveVersion,
 				Files: len(files), Activated: false, Unchanged: true,
@@ -403,7 +408,9 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		}
 		tPhase = time.Now()
 		if err := spin(progress, fmt.Sprintf("uploading %d files → %s v%d", len(files), stack, versionNumber), func() error {
-			_, e := c.PutDraftFiles(ctx, stack, versionNumber, files)
+			// "code": replace rules + FILES, carry the stack's store-seed packs
+			// forward untouched. Data is opt-in via `txco data apply`.
+			_, e := c.PutDraftFilesScoped(ctx, stack, versionNumber, files, "code")
 			return e
 		}); err != nil {
 			phase("upload", tPhase)
@@ -556,13 +563,12 @@ func opsToFiles(ops []bundle.Op) []client.StackFile {
 }
 
 // collectFileAssets walks <stackDir>/FILES/** and returns one StackFile per
-// asset, path-prefixed "FILES/<rel>" (slash-separated). These are the
-// tenant's static assets — served by txco://static / content-addressed in
-// the filecas store on activation — which the resonator bundle (opsToFiles)
-// does not carry. Callers append the result to opsToFiles output so apply /
-// dev publish assets alongside rules. Dotfiles/dotdirs and irregular files
-// (symlinks) are skipped (mirrors the static index's "."-prefix exclusion
-// and collectStackFiles). An absent FILES/ dir yields nil, no error.
+// asset, path-prefixed "FILES/<rel>". These are the tenant's static assets
+// (served by txco://static / content-addressed on activation) — part of the
+// CODE deploy, alongside the rule bundle (opsToFiles). It deliberately does NOT
+// collect the store-seed packs (VECTORS/, KV/): data is opt-in and moves through
+// `txco data apply` (collectStorePacks), not the code path. Dotfiles/dotdirs and
+// irregular files (symlinks) are skipped. An absent FILES/ dir yields nil.
 //
 // Binary (non-UTF-8) assets are base64-encoded over the wire (Content +
 // Encoding:"base64"); the server decodes to raw bytes before hashing/storing, so
@@ -570,18 +576,43 @@ func opsToFiles(ops []bundle.Op) []client.StackFile {
 // (SQLite stores the raw bytes fine; for Postgres HA the stack_files content column
 // should become BYTEA — not yet live.)
 func collectFileAssets(stackDir string) ([]client.StackFile, error) {
-	filesDir := filepath.Join(stackDir, "FILES")
-	info, err := os.Stat(filesDir)
+	return collectTreeAssets(stackDir, "FILES")
+}
+
+// collectStorePacks walks <stackDir>/{VECTORS,KV}/** and returns the
+// declarative store-seed packs as StackFiles ("VECTORS/<rel>", "KV/<rel>").
+// This is the DATA half of a stack, deployed only by `txco data apply` —
+// `txco apply` (code) never collects these, so a code-only checkout that lacks
+// the packs deploys fine and the live data is carried forward untouched. See
+// chassis/storeseed.
+func collectStorePacks(stackDir string) ([]client.StackFile, error) {
+	var out []client.StackFile
+	for _, top := range []string{storeseed.DirVectors, storeseed.DirKV} {
+		assets, err := collectTreeAssets(stackDir, top)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, assets...)
+	}
+	return out, nil
+}
+
+// collectTreeAssets walks <stackDir>/<topDir>/** and returns one StackFile per
+// regular file, path-prefixed "<topDir>/<rel>". The per-tree worker for
+// collectFileAssets; an absent topDir yields nil, no error.
+func collectTreeAssets(stackDir, topDir string) ([]client.StackFile, error) {
+	treeDir := filepath.Join(stackDir, topDir)
+	info, err := os.Stat(treeDir)
 	if err != nil || !info.IsDir() {
-		return nil, nil // no FILES/ → nothing to collect
+		return nil, nil // no such tree → nothing to collect
 	}
 	var out []client.StackFile
-	walkErr := filepath.WalkDir(filesDir, func(p string, d os.DirEntry, werr error) error {
+	walkErr := filepath.WalkDir(treeDir, func(p string, d os.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
 		if d.IsDir() {
-			if p != filesDir && strings.HasPrefix(filepath.Base(p), ".") {
+			if p != treeDir && strings.HasPrefix(filepath.Base(p), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -589,7 +620,7 @@ func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 		if !d.Type().IsRegular() || strings.HasPrefix(filepath.Base(p), ".") {
 			return nil
 		}
-		rel, rerr := filepath.Rel(stackDir, p) // → "FILES/<...>"
+		rel, rerr := filepath.Rel(stackDir, p) // → "<topDir>/<...>"
 		if rerr != nil {
 			return rerr
 		}

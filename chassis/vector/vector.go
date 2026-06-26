@@ -119,6 +119,24 @@ type Store interface {
 	// Delete removes items by ID. Returns the number removed.
 	Delete(ctx context.Context, tenant, collection string, ids []string) (int, error)
 
+	// ListIDs returns the IDs of every item currently in the collection (order
+	// unspecified). The store-seed reconciler uses it to compute which managed
+	// items a re-applied pack dropped (a seeded collection is owned by its pack,
+	// so reconcile is a desired-state sync: store − pack → delete). Returns
+	// CollectionNotFoundError if the collection doesn't exist.
+	ListIDs(ctx context.Context, tenant, collection string) ([]string, error)
+
+	// ListCollections returns the tenant's collections (pins only, no items),
+	// sorted by name — the inspect surface (`txco vector ls`). Not a hot path.
+	ListCollections(ctx context.Context, tenant string) ([]Collection, error)
+
+	// DropCollection removes a collection and all its items, returning the
+	// number of items removed. A missing collection is not an error (returns 0).
+	// This is the explicit whole-collection teardown the store-seed reconciler
+	// deliberately does NOT perform automatically (removing a pack file stops
+	// managing a collection but doesn't destroy it).
+	DropCollection(ctx context.Context, tenant, name string) (int, error)
+
 	// Close releases the underlying handle.
 	Close() error
 }

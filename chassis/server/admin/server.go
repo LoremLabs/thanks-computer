@@ -29,8 +29,10 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/room"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
 	"github.com/loremlabs/thanks-computer/chassis/serverext"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
+	"github.com/loremlabs/thanks-computer/chassis/vector"
 )
 
 type Controller struct {
@@ -73,6 +75,17 @@ type Controller struct {
 	// unset, activation skips persisting FILES bytes (open-core embedders
 	// that don't configure a store).
 	fcas filecas.Store
+
+	// storeReconciler materialises declarative store-seed packs (VECTORS/, KV/)
+	// into the runtime stores after an activation commits (chassis/storeseed).
+	// Set by SetStoreReconciler from chassis/server/server.go. Nil-safe: when
+	// unset (no seedable store configured), packs ride as inert stack_files.
+	storeReconciler *storeseed.Reconciler
+
+	// vstore backs the vector inspect/teardown admin endpoints (`txco vector
+	// ls/show/diff/rm`). Set by SetVectorStore from chassis/server/server.go.
+	// Nil-safe: when unset, those routes report the store as disabled.
+	vstore vector.Store
 
 	// unsignedThrottle gates /auth/dev/enroll + /auth/invitations/consume
 	// against brute-force probing. Single shared instance so the
@@ -118,6 +131,15 @@ func (c *Controller) SetArtifactStore(s artifact.Store) { c.astore = s }
 // SetFileCAS wires the content-addressed store activation uses to persist
 // tenant FILES/ asset bytes. Nil-safe.
 func (c *Controller) SetFileCAS(s filecas.Store) { c.fcas = s }
+
+// SetStoreReconciler wires the declarative store-seed reconciler the activation
+// path runs (post-commit, best-effort) to materialise VECTORS/ + KV/ packs into
+// the runtime stores. Nil-safe: unset ⇒ packs are inert.
+func (c *Controller) SetStoreReconciler(r *storeseed.Reconciler) { c.storeReconciler = r }
+
+// SetVectorStore wires the vector store the inspect/teardown admin endpoints
+// read (`txco vector ls/show/diff/rm`). Nil-safe.
+func (c *Controller) SetVectorStore(v vector.Store) { c.vstore = v }
 
 // EnableRoomRelay opens the named cross-node room relay and attaches it to the
 // hub so room messages fan out across fleet nodes (the relay's inbound feed is
@@ -448,6 +470,13 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleListRecords).Methods(http.MethodGet)
 	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleCreateRecord).Methods(http.MethodPost)
 	tenantR.HandleFunc("/dns/zones/{origin}/records", c.handleRevokeRecord).Methods(http.MethodDelete)
+
+	// Vector-store inspect + explicit teardown (`txco vector ls/show/diff/rm`).
+	// Tenant-scoped reads of the vector store + the whole-collection drop the
+	// store-seed reconciler deliberately never does. See vector_inspect.go.
+	tenantR.HandleFunc("/vectors", c.handleListVectorCollections).Methods(http.MethodGet)
+	tenantR.HandleFunc("/vectors/{name}", c.handleGetVectorCollection).Methods(http.MethodGet)
+	tenantR.HandleFunc("/vectors/{name}", c.handleDropVectorCollection).Methods(http.MethodDelete)
 
 	// Per-tenant secret store CRUD. Reveal-never is enforced by
 	// response shape: only POST /generate and POST /{name}/rotate-

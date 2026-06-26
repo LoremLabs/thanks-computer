@@ -100,7 +100,7 @@ To inspect a value: there is no reveal command. Rotate the secret
 // Empty input is rejected.
 func readValueFromTTY(label string, stderr io.Writer) (string, error) {
 	val, err := resolveSecret("", stderr) // empty flagValue → TTY prompt
-	_ = label                              // resolveSecret has its own prompt text
+	_ = label                             // resolveSecret has its own prompt text
 	if err != nil {
 		return "", err
 	}

@@ -64,6 +64,9 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed/kvseed"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed/vecseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
@@ -1181,11 +1184,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// unregistered (report "op not found") rather than crash the chassis.
 	var vstore vector.Store
 	var verr error
-	if conf.VectorPostgresDSN != "" {
+	vectorShared := conf.VectorPostgresDSN != "" // pgvector = fleet-shared; sqlite-vec = per-node
+	if vectorShared {
 		vstore, verr = pgvector.New(conf.VectorPostgresDSN)
 	} else {
 		vstore, verr = sqlitevec.New(conf.VectorDBPath)
 	}
+	// storeSeedMaterializers accumulates the store-seed materializers for the
+	// stores that opened successfully; the Reconciler is built from them below
+	// and injected into the admin controller so `txco apply` can declaratively
+	// seed VECTORS/ (and, later, KV/) packs. See chassis/storeseed.
+	var storeSeedMaterializers []storeseed.Materializer
 	if verr != nil {
 		pu.Logger.Warn("txco://vector disabled: " + verr.Error())
 	} else {
@@ -1205,7 +1214,14 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 				return vectorDelete(ctx, vstore, in)
 			}))
+		storeSeedMaterializers = append(storeSeedMaterializers, vecseed.New(vstore, vectorShared))
 	}
+
+	// KV store-seed materializer (KV/<namespace>.jsonl packs). kvHandle is
+	// always constructed above, so this is unconditional. redis = fleet-shared
+	// (reconcile once on the origin); boltdb (default) = per-node.
+	kvShared := conf.KVStore == "redis"
+	storeSeedMaterializers = append(storeSeedMaterializers, kvseed.New(kvHandle, kvShared))
 
 	// Computed-secret core ops. These consume cleartext from
 	// op.Secrets (plumbed onto ctx by processor.ExecCore) and emit
@@ -1253,6 +1269,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Wire the filecas store so activation can persist FILES/ asset bytes
 	// content-addressed. Nil-safe (gated on a configured store).
 	adminCtrl.SetFileCAS(fcas)
+	// Wire the declarative store-seed reconciler so activation materialises
+	// VECTORS/ (+ later KV/) packs into the runtime stores. Built from whatever
+	// seedable stores opened above; nil-safe when none did.
+	if len(storeSeedMaterializers) > 0 {
+		adminCtrl.SetStoreReconciler(storeseed.NewReconciler(storeSeedMaterializers...))
+	}
+	// Wire the vector store for the inspect/teardown endpoints (`txco vector
+	// ls/show/diff/rm`). Only when the store opened (verr == nil).
+	if verr == nil {
+		adminCtrl.SetVectorStore(vstore)
+	}
 	// Cross-node room fan-out (fleet). Empty --room-relay keeps rooms in-process
 	// (single node). A relay-open failure degrades to in-process rather than
 	// crashing — room chat is best-effort, unlike trace/control.
