@@ -39,6 +39,9 @@ type applyOpts struct {
 	// transient per-stack step — gateway 502/504s and `database is locked`
 	// 500s under load. 0 disables retry. See retryStep / applyOps.
 	retries int
+	// skip holds --skip substrings: a stack whose full name contains any of
+	// them is left untouched (not drafted/uploaded/activated). Repeatable.
+	skip []string
 }
 
 // spin animates a braille spinner on a TTY while fn runs, then clears the line.
@@ -152,6 +155,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (array of per-stack deploy results)")
 	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
 	fs.IntVar(&opts.retries, "retries", 10, "retry each transient per-stack failure this many times with backoff before recording it and moving on; a failed run is resumable (re-run skips applied stacks)")
+	fs.StringArrayVar(&opts.skip, "skip", nil, "skip any stack whose name contains this substring (repeatable); e.g. --skip publications")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response (method, URL, status, error body) to stderr. Equivalent to TXCO_VERBOSE=1, which works for ANY txco command.")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -308,6 +312,41 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		ops = filtered
+	}
+
+	// --skip: drop every stack whose name contains a given substring BEFORE any
+	// work touches it — so skipped stacks aren't parsed, linted, op-ref-resolved,
+	// compute-built, listed in --dry-run, or deployed. Substring match, so
+	// `--skip publications` drops the whole publications/ tree.
+	if len(opts.skip) > 0 {
+		skipped := map[string]struct{}{}
+		filtered := make([]bundle.Op, 0, len(ops))
+		for _, op := range ops {
+			if skipMatch(op.Stack, opts.skip) != "" {
+				skipped[op.Stack] = struct{}{}
+				continue
+			}
+			filtered = append(filtered, op)
+		}
+		if n := len(skipped); n > 0 {
+			if n <= 10 {
+				names := make([]string, 0, n)
+				for s := range skipped {
+					names = append(names, s)
+				}
+				sort.Strings(names)
+				fmt.Fprintf(stderr, "%s: skipping %d stack%s (--skip %s): %s\n",
+					cmd, n, pluralS(n), strings.Join(opts.skip, ","), strings.Join(names, ", "))
+			} else {
+				fmt.Fprintf(stderr, "%s: skipping %d stacks matching --skip %s\n",
+					cmd, n, strings.Join(opts.skip, ","))
+			}
+		}
+		ops = filtered
+		if len(ops) == 0 {
+			fmt.Fprintf(stderr, "%s: nothing to deploy — every stack matched --skip.\n", cmd)
+			return 0
+		}
 	}
 
 	// Resolve the selected target so we know which operations map to use
@@ -635,6 +674,18 @@ func sortedKeys(m map[string][]bundle.Op) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// skipMatch reports the first --skip substring contained in the full stack
+// name, or "" if none match. Substring (not glob) by design, so `--skip
+// publications` drops every `publications/<book>` without per-book patterns.
+func skipMatch(stack string, patterns []string) string {
+	for _, p := range patterns {
+		if p != "" && strings.Contains(stack, p) {
+			return p
+		}
+	}
+	return ""
 }
 
 // opsToFiles converts parsed bundle entries (one per resonator) into
