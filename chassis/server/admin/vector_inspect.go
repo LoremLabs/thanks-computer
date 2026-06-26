@@ -42,7 +42,11 @@ func (c *Controller) handleListVectorCollections(w http.ResponseWriter, r *http.
 		writeJSONError(w, http.StatusServiceUnavailable, "vector_store_disabled", nil)
 		return
 	}
-	cols, err := c.vstore.ListCollections(r.Context(), ac.TenantID)
+	// Key by the tenant SLUG — the same identifier the runtime reads with
+	// (processor.TenantScope) and store-seed now reconciles under; the auth
+	// context carries only the id. See storeTenantKey.
+	storeKey := c.storeTenantKey(r.Context(), ac.TenantID)
+	cols, err := c.vstore.ListCollections(r.Context(), storeKey)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "list_collections", map[string]any{"err": err.Error()})
 		return
@@ -54,7 +58,7 @@ func (c *Controller) handleListVectorCollections(w http.ResponseWriter, r *http.
 			Dimensions: col.Dimensions, Metric: string(col.Metric),
 		}
 		// Count is an inspect convenience (catalog-sized); derive from ListIDs.
-		if ids, lerr := c.vstore.ListIDs(r.Context(), ac.TenantID, col.Name); lerr == nil {
+		if ids, lerr := c.vstore.ListIDs(r.Context(), storeKey, col.Name); lerr == nil {
 			v.Count = len(ids)
 		}
 		out = append(out, v)
@@ -79,8 +83,9 @@ func (c *Controller) handleGetVectorCollection(w http.ResponseWriter, r *http.Re
 		writeJSONError(w, http.StatusServiceUnavailable, "vector_store_disabled", nil)
 		return
 	}
+	storeKey := c.storeTenantKey(r.Context(), ac.TenantID)
 	name := mux.Vars(r)["name"]
-	col, found, err := c.vstore.DescribeCollection(r.Context(), ac.TenantID, name)
+	col, found, err := c.vstore.DescribeCollection(r.Context(), storeKey, name)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "describe_collection", map[string]any{"err": err.Error()})
 		return
@@ -89,7 +94,7 @@ func (c *Controller) handleGetVectorCollection(w http.ResponseWriter, r *http.Re
 		writeJSONError(w, http.StatusNotFound, "collection_not_found", map[string]any{"name": name})
 		return
 	}
-	ids, err := c.vstore.ListIDs(r.Context(), ac.TenantID, name)
+	ids, err := c.vstore.ListIDs(r.Context(), storeKey, name)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "list_ids", map[string]any{"err": err.Error()})
 		return
@@ -123,8 +128,9 @@ func (c *Controller) handleDropVectorCollection(w http.ResponseWriter, r *http.R
 		writeJSONError(w, http.StatusServiceUnavailable, "vector_store_disabled", nil)
 		return
 	}
+	storeKey := c.storeTenantKey(r.Context(), ac.TenantID)
 	name := mux.Vars(r)["name"]
-	removed, err := c.vstore.DropCollection(r.Context(), ac.TenantID, name)
+	removed, err := c.vstore.DropCollection(r.Context(), storeKey, name)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "drop_collection", map[string]any{"err": err.Error()})
 		return

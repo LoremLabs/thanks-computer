@@ -211,8 +211,18 @@ func TestOAuthEnrollFirstWithSlug(t *testing.T) {
 		t.Fatalf("actor_id = %v", body["actor_id"])
 	}
 	caps, _ := body["capabilities"].([]any)
-	if len(caps) != 3 {
-		t.Fatalf("capabilities = %v, want 3 owner caps", body["capabilities"])
+	if len(caps) != 4 {
+		t.Fatalf("capabilities = %v, want 4 owner caps", body["capabilities"])
+	}
+	// A tenant owner must be able to manage their own tenant's secrets.
+	hasSecret := false
+	for _, cp := range caps {
+		if s, _ := cp.(string); s == "secret:*:*" {
+			hasSecret = true
+		}
+	}
+	if !hasSecret {
+		t.Fatalf("owner caps missing secret:*:*: %v", body["capabilities"])
 	}
 	// The mapping + tenant now exist.
 	tid, err := e.c.registry.LookupOIDCSubject(context.Background(), testOAuthIssuer, "email:matt@example.com")

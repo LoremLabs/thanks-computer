@@ -25,13 +25,15 @@ func TestVectorInspectHandlers(t *testing.T) {
 	t.Cleanup(func() { _ = vs.Close() })
 	c.SetVectorStore(vs)
 
-	// Seed the store directly (the store-seed path is tested elsewhere).
-	if err := vs.EnsureCollection(ctx, "tnt_default", vector.Collection{
+	// Seed the store directly (the store-seed path is tested elsewhere). The
+	// inspect handlers key by the tenant SLUG ("default") — the same identifier
+	// the runtime + store-seed reconcile use — so seed under the slug, not the id.
+	if err := vs.EnsureCollection(ctx, "default", vector.Collection{
 		Name: "books", EmbeddingModel: "text-embedding-3-small", Dimensions: 3, Metric: vector.MetricCosine,
 	}); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	if _, err := vs.Upsert(ctx, "tnt_default", "books", []vector.Item{
+	if _, err := vs.Upsert(ctx, "default", "books", []vector.Item{
 		{ID: "a", Vector: []float32{1, 0, 0}}, {ID: "b", Vector: []float32{0, 1, 0}},
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)

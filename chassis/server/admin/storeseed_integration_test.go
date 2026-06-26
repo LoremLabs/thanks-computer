@@ -141,3 +141,80 @@ func TestReconcileStorePacksResolvesCAS(t *testing.T) {
 		t.Fatalf("CAS-resolved reconcile: %v want [a]", ids)
 	}
 }
+
+// Regression: the store key is the tenant SLUG, not the tenant_id. The runtime
+// reads the vector store by processor.TenantScope (the slug); a reconcile that
+// keyed by tenant_id would seed a collection the runtime can NEVER find — the
+// prod "collection not found for tenant <slug>" bug. With a tenant whose id≠slug,
+// the collection must land under the slug, not the id.
+func TestReconcileStorePacksKeysBySlug(t *testing.T) {
+	ctx := context.Background()
+	c := newTestController(t, config.Config{})
+	vs := newVecReconciler(t, c)
+
+	if _, err := c.pu.RuntimeDB.ExecContext(ctx,
+		`INSERT INTO tenants (tenant_id, slug, name, created_at) VALUES ('tnt_x','myco','myco','t')`); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	if _, err := c.pu.RuntimeDB.ExecContext(ctx,
+		`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at) VALUES ('stk1','tnt_x','recs',1,'t')`); err != nil {
+		t.Fatalf("seed stack: %v", err)
+	}
+	if _, err := c.pu.RuntimeDB.ExecContext(ctx,
+		`INSERT INTO stack_versions (version_id, stack_id, version_number, status, created_by, created_at) VALUES (1,'stk1',1,'superseded','test','t')`); err != nil {
+		t.Fatalf("seed version: %v", err)
+	}
+	seedVersion(t, c, 1, map[string]string{
+		"VECTORS/books.jsonl": `{"id":"pooh","vector":[1,0,0],"metadata":{},"model":"m"}`,
+	})
+
+	// Reconcile is called with the tenant_ID (the control-plane identifier).
+	c.ReconcileStorePacks(ctx, "tnt_x", "recs", 1, 0 /*prior*/, true)
+
+	if _, found, _ := vs.DescribeCollection(ctx, "myco", "books"); !found {
+		t.Fatal("collection not under slug 'myco' (the runtime key) — keyed by id instead?")
+	}
+	if _, found, _ := vs.DescribeCollection(ctx, "tnt_x", "books"); found {
+		t.Fatal("collection found under id 'tnt_x' — the slug-keying regression is back")
+	}
+}
+
+// Regression: self-healing reconcile. A code-only deploy carries an UNCHANGED
+// pack forward (change-driven would skip), but if the collection is absent from
+// the store — a fresh/wiped node, or the one-time re-key migration — it must
+// re-seed anyway rather than leave the runtime with no collection.
+func TestReconcileStorePacksSelfHealsMissingCollection(t *testing.T) {
+	ctx := context.Background()
+	c := newTestController(t, config.Config{})
+	vs := newVecReconciler(t, c)
+	c.SetVectorStore(vs) // the self-heal presence-probe reads c.vstore (same store in prod)
+
+	if _, err := c.pu.RuntimeDB.ExecContext(ctx,
+		`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at) VALUES ('stk1','acme','recs',2,'t')`); err != nil {
+		t.Fatalf("seed stack: %v", err)
+	}
+	for _, v := range []int64{1, 2} {
+		if _, err := c.pu.RuntimeDB.ExecContext(ctx,
+			`INSERT INTO stack_versions (version_id, stack_id, version_number, status, created_by, created_at) VALUES (?, 'stk1', ?, 'superseded','test','t')`, v, v); err != nil {
+			t.Fatalf("seed v%d: %v", v, err)
+		}
+		seedVersion(t, c, v, map[string]string{ // identical pack across versions
+			"VECTORS/books.jsonl": `{"id":"pooh","vector":[1,0,0],"metadata":{},"model":"m"}`,
+		})
+	}
+
+	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0, true) // first activation → seeds
+	if _, found, _ := vs.DescribeCollection(ctx, "acme", "books"); !found {
+		t.Fatal("v1 did not seed the collection")
+	}
+
+	// Simulate a wiped node / re-key migration: the collection is gone, but the
+	// pack content is identical to the prior version (change-driven would skip).
+	if _, err := vs.DropCollection(ctx, "acme", "books"); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	c.ReconcileStorePacks(ctx, "acme", "recs", 2, 1 /*prior, unchanged pack*/, true)
+	if _, found, _ := vs.DescribeCollection(ctx, "acme", "books"); !found {
+		t.Fatal("self-heal failed: unchanged pack + missing collection was not re-seeded")
+	}
+}

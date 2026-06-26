@@ -24,12 +24,18 @@ import (
 // commits, from both the control-plane admin handler (origin=true) and the
 // data-plane applier (origin=false, in package controlapply — hence exported).
 //
-// Change-driven: only packs whose content-hash differs from the prior active
-// version (priorVersion) are reconciled. A code-only deploy (`txco apply`)
-// carries every pack forward unchanged → empty diff → ZERO store I/O (not even a
-// CAS fetch). priorVersion <= 0, or any diff failure, falls back to reconciling
-// every pack (safe: reconcile is idempotent; correct for a first activation or a
-// freshly-bootstrapped node whose store is empty).
+// Store key = the tenant SLUG. The runtime keys every store by the slug
+// (processor.TenantScope), but the control plane only has the tenant_id in hand;
+// keying the reconcile by the id would seed under a different identifier than the
+// runtime reads (collection-not-found at search time). storeTenantKey resolves
+// it. stack_files queries below stay on tenant_id — that's the durable DB FK.
+//
+// Change-driven, self-healing: a pack is reconciled when its content-hash differs
+// from the prior active version (priorVersion) OR when its target is absent from
+// the store. A code-only deploy (`txco apply`) carries packs forward unchanged
+// and the targets already exist → empty set → no item reconcile (just a cheap
+// presence probe per vector pack). priorVersion <= 0, or any diff failure,
+// reconciles every pack (correct for a first activation / a fresh or wiped node).
 //
 // Best-effort by contract: it logs and swallows every error so a slow or failing
 // store never stalls or rolls back a deploy — the pack bytes are durable in the
@@ -38,13 +44,21 @@ func (c *Controller) ReconcileStorePacks(ctx context.Context, tenantID, stack st
 	if c.storeReconciler == nil {
 		return
 	}
-	changed, canDiff := c.changedPackPaths(ctx, tenantID, stack, version, priorVersion)
-	if canDiff && len(changed) == 0 {
-		return // nothing changed since the prior active version — no data work
-	}
+	storeKey := c.storeTenantKey(ctx, tenantID)
 	var filter map[string]struct{} // nil ⇒ reconcile every pack
-	if canDiff {
-		filter = changed
+	if changed, canDiff := c.changedPackPaths(ctx, tenantID, stack, version, priorVersion); canDiff {
+		// Union the content-changed packs with any whose store target is missing
+		// (re-key migration, fresh/wiped node) so self-healing beats the skip.
+		filter = map[string]struct{}{}
+		for p := range changed {
+			filter[p] = struct{}{}
+		}
+		for p := range c.missingVectorPacks(ctx, tenantID, storeKey, stack, version) {
+			filter[p] = struct{}{}
+		}
+		if len(filter) == 0 {
+			return // nothing changed AND nothing missing — no data work
+		}
 	}
 	packs, err := c.loadStorePacks(ctx, tenantID, stack, version, filter)
 	if err != nil {
@@ -56,7 +70,7 @@ func (c *Controller) ReconcileStorePacks(ctx context.Context, tenantID, stack st
 	if len(packs) == 0 {
 		return
 	}
-	scope := storeseed.Scope{Tenant: tenantID, Stack: stack, Version: version}
+	scope := storeseed.Scope{Tenant: storeKey, Stack: stack, Version: version}
 	if err := c.storeReconciler.Reconcile(ctx, scope, packs, origin); err != nil {
 		c.pu.Logger.Warn("store-seed: reconcile failed (activation unaffected; retried next apply)",
 			zap.String("tenant", tenantID), zap.String("stack", stack),
@@ -65,9 +79,55 @@ func (c *Controller) ReconcileStorePacks(ctx context.Context, tenantID, stack st
 		return
 	}
 	c.pu.Logger.Info("store-seed: reconciled",
-		zap.String("tenant", tenantID), zap.String("stack", stack),
-		zap.Int64("version", version), zap.Bool("origin", origin),
-		zap.Int("packs", len(packs)))
+		zap.String("tenant", tenantID), zap.String("store_key", storeKey),
+		zap.String("stack", stack), zap.Int64("version", version),
+		zap.Bool("origin", origin), zap.Int("packs", len(packs)))
+}
+
+// storeTenantKey resolves the tenant SLUG that keys the vector + KV stores, so
+// the control-plane reconcile + inspect endpoints key the same way the runtime
+// reads (processor.TenantScope is the slug). On a lookup miss — a test fixture
+// with no tenant row, or a not-yet-replicated tenant on a fresh follower — it
+// falls back to the id so behaviour stays internally consistent (and the next
+// apply/reload, by when the row has replicated, self-heals via missingVectorPacks).
+func (c *Controller) storeTenantKey(ctx context.Context, tenantID string) string {
+	if c.tenants != nil {
+		if t, err := c.tenants.Lookup(ctx, tenantID); err == nil && t != nil && t.Slug != "" {
+			return t.Slug
+		}
+	}
+	return tenantID
+}
+
+// missingVectorPacks returns the VECTORS/ pack paths whose collection is absent
+// from the store under storeKey — so a re-key migration or a fresh/wiped node
+// re-seeds even when the pack CONTENT is unchanged (the change-driven diff would
+// otherwise skip it). The probe is a single cheap DescribeCollection per vector
+// pack (collection metadata, not the items). KV packs have no collection concept
+// to probe, so they stay purely change-driven (a fresh node still seeds them on
+// first activation, where priorVersion<=0 reconciles everything).
+func (c *Controller) missingVectorPacks(ctx context.Context, tenantID, storeKey, stack string, version int64) map[string]struct{} {
+	out := map[string]struct{}{}
+	if c.vstore == nil {
+		return out
+	}
+	hashes, err := c.packHashes(ctx, tenantID, stack, version)
+	if err != nil {
+		return out
+	}
+	for path := range hashes {
+		if storeseed.KindForPath(path) != storeseed.KindVector {
+			continue
+		}
+		name := storeseed.PackName(path)
+		if name == "" {
+			continue
+		}
+		if _, found, derr := c.vstore.DescribeCollection(ctx, storeKey, name); derr == nil && !found {
+			out[path] = struct{}{}
+		}
+	}
+	return out
 }
 
 // loadStorePacks loads the store-seed packs (VECTORS/, KV/) attached to the
