@@ -37,6 +37,7 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/open"    // registers the "open" policy
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/private" // registers the "private" policy
 	_ "github.com/loremlabs/thanks-computer/chassis/embed/ollama"   // registers the "ollama" ai://embed backend
+	_ "github.com/loremlabs/thanks-computer/chassis/embed/openai"   // registers the "openai" ai://embed backend
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/feed"
 	_ "github.com/loremlabs/thanks-computer/chassis/feed/filesource" // registers the "file" backend
