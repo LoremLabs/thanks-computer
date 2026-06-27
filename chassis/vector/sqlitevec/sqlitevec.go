@@ -57,7 +57,7 @@ func New(dbPath string) (*Store, error) {
 			return nil, fmt.Errorf("sqlitevec: create dir %s: %w", dir, err)
 		}
 	}
-	dsn := "file:" + dbPath + "?mode=rwc&_journal_mode=WAL&_busy_timeout=5000"
+	dsn := "file:" + dbPath + "?mode=rwc&_journal_mode=WAL&_busy_timeout=15000"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitevec: open %s: %w", dbPath, err)

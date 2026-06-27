@@ -111,12 +111,15 @@ func readVarval(dbPath, key string) (string, error) {
 // Since the chassis runs SQLite in WAL mode (chassis/app/app.go), that
 // reader must coexist:
 //
-//   - _busy_timeout=5000 — wait out a checkpoint or commit-lock the
+//   - _busy_timeout=15000 — wait out a checkpoint or commit-lock the
 //                          live writer is holding instead of failing
 //                          instantly. The bare sqlite3dump.Dump(path)
 //                          open had NO busy_timeout — fine for a cold
 //                          DB, but it can spuriously error against a
-//                          live WAL writer mid-checkpoint.
+//                          live WAL writer mid-checkpoint. 15s gives a
+//                          large stack activation's write lock time to
+//                          clear (the runtime DB uses 30s; a snapshot is
+//                          a read and can fail more cheaply).
 //   - mode=ro            — pure read; never let the dumper mutate the
 //                          live DB. A WAL reader attaches via the
 //                          existing -shm/-wal the chassis maintains and
@@ -127,7 +130,7 @@ func readVarval(dbPath, key string) (string, error) {
 // pre-existing (the old bare Dump had the same limitation), and out of
 // scope here — the dominant path is a live or cleanly-stopped chassis.
 func liveReadDSN(dbPath string) string {
-	return "file:" + dbPath + "?mode=ro&_busy_timeout=5000"
+	return "file:" + dbPath + "?mode=ro&_busy_timeout=15000"
 }
 
 // Export dumps runtimeDBPath into a self-contained artifact + manifest.

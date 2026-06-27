@@ -490,13 +490,21 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 //     creates `.db-wal` + `.db-shm` files next
 //     to the main `.db`; cleaned on graceful
 //     shutdown.
-//   - _busy_timeout=5000  — 5s patience on a busy file lock. In WAL
-//     mode readers don't block writers and
-//     writers serialize via the WAL's commit
-//     lock, so realistic contention is short.
-//     5s is a generous safety net for the worst
-//     case (e.g. brief checkpoint stalls under
-//     burst load).
+//   - _busy_timeout=30000 — 30s patience on a busy file lock. In WAL
+//     mode readers don't block writers, but only
+//     ONE writer holds the commit lock at a time,
+//     and the runtime DB has multiple writers (the
+//     admin apply path AND the control-event
+//     applier, which re-applies the node's own
+//     published events). A large stack activation
+//     holds BEGIN IMMEDIATE across materialise +
+//     N-file inserts for tens of seconds, so a
+//     concurrent writer waiting behind it blew the
+//     old 5s budget and surfaced as
+//     "database is locked" 5xx during bulk apply.
+//     30s rides through a typical large activate;
+//     the rare worse case is covered by the CLI
+//     apply's retry-with-backoff.
 //
 // Why NOT cache=shared: shared-cache mode introduces a SECOND lock
 // class — TABLE-level (SQLITE_LOCKED, error code 6) — that exists on
@@ -511,8 +519,14 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 // this same *sql.DB handle (via sqlite3dump.DumpDB), not to open the
 // file fresh — a second uncoordinated connection in WAL mode races
 // the .db-shm state and 500s on first boot. See dbcache.DbCache.Source.
+// sqliteBusyTimeoutMs is the per-connection lock-wait budget (see the
+// _busy_timeout note on openSQLiteOrDie). 30s so a writer rides through a large
+// stack activation's BEGIN IMMEDIATE instead of failing with "database is
+// locked"; the CLI apply's retry covers anything longer.
+const sqliteBusyTimeoutMs = 30000
+
 func openSQLiteOrDie(logger *zap.Logger, dsn, kind string) *sql.DB {
-	full := fmt.Sprintf("%s?mode=rwc&_journal_mode=WAL&_busy_timeout=%d", dsn, 5000)
+	full := fmt.Sprintf("%s?mode=rwc&_journal_mode=WAL&_busy_timeout=%d", dsn, sqliteBusyTimeoutMs)
 	db, err := sql.Open("sqlite3", full)
 	if err != nil {
 		logger.Fatal("db open err",

@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -402,15 +403,22 @@ func runAdminResync(args []string, stdout, stderr io.Writer) int {
 	user := fs.String("user", "", "basic-auth user")
 	pass := fs.String("pass", "", "basic-auth password")
 	profile := fs.String("profile", "", "signing profile (defaults to the active profile)")
+	timeout := fs.Duration("timeout", 5*time.Minute, "max time to wait for the resync to commit server-side; resync re-emits ALL of a tenant's state (one artifact upload per stack), so a large tenant needs minutes")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
 Usage: txco admin resync --tenant <slug> [flags]
 
 Re-emit a tenant's current control-plane state (its row + hostnames + active
-stack versions) as fresh fleet-sync events, so any replica that missed an event
-converges. Non-destructive: only upserts are emitted, never deletes, so it's
-safe to re-run.
+stack versions + secrets) as fresh fleet-sync events, so any replica that missed
+an event converges. Non-destructive: only upserts are emitted, never deletes, so
+it's safe to re-run.
+
+This re-emits ALL of the tenant's state and uploads one artifact per stack
+BEFORE responding, so it can take minutes on a large tenant — raise --timeout if
+it's cut short. The work commits server-side regardless; a client timeout does
+not roll it back (the pump keeps draining). Replicas then converge on their
+next poll.
 
 Needs a super_admin signing profile (it's a chassis-wide control operation).
 A full fleet rebuild is a snapshot bootstrap, not a resync.
@@ -428,7 +436,7 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
-	c := client.New(clientTarget)
+	c := client.NewWithTimeout(clientTarget, *timeout)
 	resp, err := c.FleetResync(context.Background(), client.FleetResyncRequest{TenantSlug: *tenant})
 	if err != nil {
 		auth.PrintCLIError(stderr, requestErrorMessage("admin resync", clientTarget, *profile, err))
@@ -438,9 +446,10 @@ Flags:
 		fmt.Fprintf(stdout, "Fleet sync is disabled on this chassis (--feed-sink=nop); nothing to resync.\n")
 		return 0
 	}
-	fmt.Fprintf(stdout, "Resynced tenant %q — queued %d tenant, %d hostname, %d dns-zone, %d stack event(s).\n",
+	fmt.Fprintf(stdout, "Resynced tenant %q — queued %d tenant, %d hostname, %d dns-zone, %d cron, %d secret, %d stack event(s).\n",
 		resp.TenantSlug, resp.Events.TenantCreated, resp.Events.HostnameBound,
-		resp.Events.DNSZoneUpserted, resp.Events.StackActivated)
+		resp.Events.DNSZoneUpserted, resp.Events.CronSettingsUpserted,
+		resp.Events.SecretChanged, resp.Events.StackActivated)
 	fmt.Fprintf(stdout, "Replicas converge on their next poll.\n")
 	return 0
 }
