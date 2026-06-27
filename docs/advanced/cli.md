@@ -57,12 +57,22 @@ they send unsigned and the open dev chassis accepts. So
 `bootstrap-local`. A **remote** chassis still requires enrollment; a local chassis
 running in signed mode returns a clear 401.
 
+To save the repetition, **`txco dev` auto-registers a `dev` profile** pointing at
+the chassis it just started (with `default_tenant: default`), so you can use the
+named selector everywhere instead of spelling out the URL + tenant:
+
+```sh
+txco apply dev                              # deploy to the dev chassis
+txco auth tenant secrets set SHH_KEY dev # set a secret on it (tenant: default)
+txco ui dev                                 # open the dev admin UI
+```
+
 ## Run & develop
 
 | Command | What it does |
 |---|---|
 | `txco serve` | Boot the chassis ([runtime reference](./serve.md)) |
-| `txco dev` | The dev loop: boots your `txco.yaml` apps + an ephemeral chassis, watches `OPS/*.txcl` and compute `.js/.ts` files, re-applies on save. `--ui` adds the admin-UI Vite server; `--tcp` / `--dns` add those heads |
+| `txco dev` | The dev loop: boots your `txco.yaml` apps + an ephemeral chassis, watches `OPS/*.txcl` and compute `.js/.ts` files, re-applies on save. Registers a keyless [`dev` profile](#local-dev-no-key-required) for the chassis. `--ui` adds the admin-UI Vite server; `--tcp` / `--dns` add those heads |
 | `txco demo` | Ephemeral chassis + browser playground with a guided curriculum (build/web/mail/async/mcp tracks) |
 | `txco init <stack>` | Scaffold `OPS/<stack>/…`; `--from github:…\|oci:…\|dir:…` scaffolds from a template |
 | `txco doctor` | Diagnose local setup: home dir, profile, keys, chassis reachability, version sync (`--offline` skips remote checks) |

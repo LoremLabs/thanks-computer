@@ -83,6 +83,11 @@ export interface Stack {
     // activated (a brand-new stack whose first draft is unactivated).
     active_version?: number
     created_at: string
+    // Active version's activation time — the "recently worked on" signal
+    // the sidebar sorts its recent set by. Absent for draft-only stacks.
+    // The server returns the list already recency-ordered (active newest
+    // first, drafts trailing by name).
+    activated_at?: string
 }
 
 export interface Version {

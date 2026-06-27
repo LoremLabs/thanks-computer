@@ -437,7 +437,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	}
 
 	clientTarget := resolveTarget(dir, opts.Target, opts.Addr, opts.User, opts.Pass, opts.Profile)
-	clientTarget.Tenant = resolveTenant(opts.Tenant, opts.Profile)
+	clientTarget.Tenant = resolveTenant(opts.Tenant, effectiveProfile(opts.Target, opts.Profile))
 
 	// Show the target and (for a non-local chassis) confirm before any write —
 	// dry-run already returned above, so this only gates real pushes.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
@@ -55,6 +56,10 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// A trailing positional selects the target too: `txco ui dev`.
+	if *targetSel == "" {
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, urlFlag, profile)
 	resolvedProfile, err := ResolveProfile(*profile)
@@ -62,23 +67,49 @@ Flags:
 		PrintCLIErrorf(stderr, "auth login: %v", err)
 		return 1
 	}
+
+	// Resolve the chassis URL FIRST, so we know local-vs-remote before deciding
+	// whether a signed session is even possible. ActiveNone (logged out, no
+	// profile) still resolves a URL — from --url/--target or the localhost
+	// default — so "just open the UI" works with no identity at all.
+	var target client.Target
 	if resolvedProfile == ActiveNone {
-		// "Logged out" profile + no signing key — bootstrap can't be
-		// signed. Send the user back to `bootstrap-local`.
-		PrintCLIError(stderr, "auth login: no signing key configured; run `txco auth bootstrap-local` first")
-		return 1
+		url := strings.TrimSpace(*urlFlag)
+		if url == "" {
+			url = defaultChassisURL
+		}
+		target = client.Target{Addr: url}
+	} else {
+		target, err = buildSignedTarget(resolvedProfile, *urlFlag)
+		if err != nil {
+			PrintCLIErrorf(stderr, "auth login: %v", err)
+			return 1
+		}
 	}
 
-	target, err := buildSignedTarget(resolvedProfile, *urlFlag)
-	if err != nil {
-		PrintCLIErrorf(stderr, "auth login: %v", err)
-		return 1
+	// "Just show me the admin UI." When there's no key to sign with and the
+	// chassis is local, the signed browser-session bootstrap can't run (it needs
+	// an enrolled actor) and doesn't need to — an open dev chassis serves
+	// /admin/ without a session. So open it directly. This is the keyless `dev`
+	// profile path: both `txco ui` (dev profile active) and `txco ui dev` land
+	// here. The user asked to see the UI; they don't care about keys.
+	if target.Auth == nil && LocalChassis(target.Addr) {
+		adminURL := strings.TrimRight(target.Addr, "/") + "/admin/"
+		if *noOpen {
+			fmt.Fprintf(stdout, "Open the admin UI here (open dev chassis — no sign-in needed):\n\n  %s\n\n", adminURL)
+			return 0
+		}
+		if err := openBrowser(adminURL); err != nil {
+			PrintCLIErrorf(stderr, "auth login: couldn't open browser (%v); open this URL instead:\n\n  %s", err, adminURL)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Opened the admin UI at %s (open dev chassis — no sign-in needed).\n", adminURL)
+		return 0
 	}
-	if target.Auth == nil && !LocalChassis(target.Addr) {
-		// buildSignedTarget falls through to unsigned when no key is
-		// available — make that explicit so the user knows what to do.
-		// A LOCAL/open chassis (txco dev) accepts unsigned, so don't pre-refuse
-		// there; only require a key for a remote chassis.
+
+	// No key against a REMOTE chassis: a browser session needs an enrolled
+	// identity, so point the user at bootstrap-local.
+	if target.Auth == nil {
 		PrintCLIError(stderr, "auth login: no signing key configured; run `txco auth bootstrap-local` first")
 		return 1
 	}

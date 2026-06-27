@@ -174,6 +174,21 @@ func buildSignedTarget(name, urlOverride string) (client.Target, error) {
 		return client.Target{Addr: url}, nil
 	}
 
+	// Keyless profile (no key_id) — e.g. the `dev` profile that `txco dev`
+	// auto-registers for its local chassis. Against a LOCAL chassis that's
+	// fine: the open dev chassis accepts unsigned admin requests, so we send
+	// unsigned. Mirrors the deploy resolver (which already tolerates a keyless
+	// profile) and the LocalChassis relaxation in the tenant/secret commands.
+	// For a REMOTE chassis it's an error — prod requires a real key, and
+	// silently sending unsigned would only earn a 401. Checked before
+	// LoadSignerForMetaPath, which would otherwise reject "no key_id" outright.
+	if meta.KeyID == "" {
+		if LocalChassis(url) {
+			return client.Target{Addr: url}, nil
+		}
+		return client.Target{}, fmt.Errorf("profile %q has no signing key; run `txco auth bootstrap-local` to enroll one for %s", name, url)
+	}
+
 	s, err := LoadSignerForMetaPath(metaPath)
 	if err != nil {
 		return client.Target{}, err

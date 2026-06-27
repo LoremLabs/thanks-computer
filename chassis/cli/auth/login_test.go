@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -45,4 +46,53 @@ func TestLoginIdentitySummary(t *testing.T) {
 			t.Errorf("summary %q should still carry the chassis URL", got)
 		}
 	})
+}
+
+// TestLoginKeylessLocalOpensAdminUI: against a keyless local profile (the `dev`
+// profile `txco dev` registers), `txco ui` / `auth login` skips the signed
+// browser-session bootstrap — which needs an enrolled actor — and just points
+// at /admin/ on the open chassis. --no-open keeps it network-free.
+func TestLoginKeylessLocalOpensAdminUI(t *testing.T) {
+	withHome(t)
+	if _, _, err := EnsureDevProfile(DevProfileName, "http://localhost:8081", DefaultTenantSlug); err != nil {
+		t.Fatalf("EnsureDevProfile: %v", err)
+	}
+
+	// Case 1: dev profile active, no positional — `txco ui`.
+	if err := WriteActiveProfile(DevProfileName); err != nil {
+		t.Fatalf("WriteActiveProfile: %v", err)
+	}
+	var out, errb bytes.Buffer
+	if code := runLogin([]string{"--no-open"}, &out, &errb); code != 0 {
+		t.Fatalf("runLogin(--no-open) = %d, stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "http://localhost:8081/admin/") {
+		t.Errorf("expected /admin/ URL, got stdout=%q stderr=%q", out.String(), errb.String())
+	}
+
+	// Case 2: dev selected via positional — `txco ui dev` — regardless of active.
+	if err := WriteActiveProfile("none"); err != nil {
+		t.Fatalf("WriteActiveProfile(none): %v", err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := runLogin([]string{"--no-open", DevProfileName}, &out, &errb); code != 0 {
+		t.Fatalf("runLogin(--no-open dev) = %d, stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "http://localhost:8081/admin/") {
+		t.Errorf("positional: expected /admin/ URL, got stdout=%q stderr=%q", out.String(), errb.String())
+	}
+}
+
+// TestLoginKeylessRemoteErrors: no key against a REMOTE chassis still demands an
+// identity — a browser session can't be minted unsigned.
+func TestLoginKeylessRemoteErrors(t *testing.T) {
+	withHome(t)
+	if err := WriteActiveProfile("none"); err != nil {
+		t.Fatalf("WriteActiveProfile(none): %v", err)
+	}
+	var out, errb bytes.Buffer
+	if code := runLogin([]string{"--no-open", "--url", "https://admin.example.com:8081"}, &out, &errb); code == 0 {
+		t.Fatalf("expected non-zero exit for keyless remote, got 0; stdout=%q", out.String())
+	}
 }

@@ -78,7 +78,7 @@ Flags:
 		return 1
 	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
 	c := client.New(clientTarget)
 
 	fc, err := c.CatFile(context.Background(), stack, filePath)
@@ -143,7 +143,7 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
 	c := client.New(clientTarget)
 
 	ctx := context.Background()
@@ -391,7 +391,7 @@ Flags:
 		return 1
 	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
 	c := client.New(clientTarget)
 
 	ctx := context.Background()
@@ -519,7 +519,7 @@ Flags:
 		return 1
 	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
 	c := client.New(clientTarget)
 
 	ctx := context.Background()
@@ -611,7 +611,7 @@ Flags:
 		return 1
 	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
 	c := client.New(clientTarget)
 
 	act, err := c.DeactivateStack(context.Background(), stack)
@@ -670,7 +670,7 @@ Flags:
 		return 1
 	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
 	c := client.New(clientTarget)
 
 	versions, err := c.ListVersions(context.Background(), stack)

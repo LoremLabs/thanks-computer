@@ -94,13 +94,13 @@ func registerVectorFlags(fs *flag.FlagSet) vectorFlags {
 
 func (f vectorFlags) client() *client.Client {
 	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
-	t.Tenant = resolveTenant(*f.tenant, *f.profile)
+	t.Tenant = resolveTenant(*f.tenant, effectiveProfile(*f.target, *f.profile))
 	return client.New(t)
 }
 
 func (f vectorFlags) clientWithTimeout(d time.Duration) *client.Client {
 	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
-	t.Tenant = resolveTenant(*f.tenant, *f.profile)
+	t.Tenant = resolveTenant(*f.tenant, effectiveProfile(*f.target, *f.profile))
 	return client.NewWithTimeout(t, d)
 }
 

@@ -80,7 +80,7 @@ Flags:
 	// this the client falls back to the seeded "default" tenant, where a
 	// non-super-admin has no membership → 403 capability_denied even though
 	// they can read traces in their own tenant.
-	t.Tenant = resolveTenant(*tenant, *profile)
+	t.Tenant = resolveTenant(*tenant, effectiveProfile(*target, *profile))
 	c := client.New(t)
 	// Trace reads are tenant-scoped by default (the caller's membership caps
 	// apply, like every other CLI command). A super-admin should see every

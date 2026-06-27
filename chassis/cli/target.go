@@ -225,6 +225,32 @@ func resolveTenant(flag, profileFlag string) string {
 	return auth.ResolveTenant(flag, profileFlag)
 }
 
+// effectiveProfile is the profile that tenant resolution should consult given
+// the chassis selector flags. It mirrors resolveTarget's signProfile precedence
+// so the tenant follows the SAME identity as the chassis URL + signature:
+//   - an explicit --profile wins;
+//   - else a --target / positional that names a PROFILE (not a raw URL) supplies
+//     it (the `txco apply dev` case — a named chassis carries its own tenant);
+//   - else "" → the active profile (auth.ResolveTenant's own fallback).
+//
+// Without this, a selector like `txco apply dev` resolved the chassis URL from
+// the dev profile but the tenant from the ACTIVE (e.g. cloud) profile — the
+// prod-mankins leak. A txco.yaml target of the same name still wins for the
+// chassis URL inside resolveTarget; it carries no tenant, so here it falls
+// through to "" unless a profile of that name also exists.
+func effectiveProfile(targetName, profile string) string {
+	if profile != "" {
+		return profile
+	}
+	if targetName == "" || looksLikeURL(targetName) {
+		return ""
+	}
+	if auth.ProfileChassisURL(targetName) != "" {
+		return targetName
+	}
+	return ""
+}
+
 // loadSigner returns a signed-request backend when one is configured,
 // or nil to fall through to basic / open. Thin wrapper around
 // auth.LoadSignerForActiveProfile (and LoadSignerForMetaPath for the

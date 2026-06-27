@@ -28,7 +28,7 @@ func runClientCmd(h clientcmd.Handler, args []string, stdout, stderr io.Writer) 
 			if t.Addr == "" {
 				return nil, fmt.Errorf("no chassis configured (pass --addr or run `txco login`)")
 			}
-			t.Tenant = resolveTenant(globals["tenant"], globals["profile"])
+			t.Tenant = resolveTenant(globals["tenant"], effectiveProfile(globals["target"], globals["profile"]))
 			return client.New(t), nil
 		},
 		OpenURL: openBrowser,

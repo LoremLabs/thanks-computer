@@ -83,7 +83,7 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
+	clientTarget.Tenant = resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
 	c := client.New(clientTarget)
 	ctx := context.Background()
 	remoteOps, err := c.ListOps(ctx, "")

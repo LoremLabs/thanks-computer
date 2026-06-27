@@ -30,7 +30,9 @@ type targetFlags struct {
 // bindTargetFlags registers the standard chassis-target flags on fs and returns
 // the struct their values land in (after fs.Parse). Consume them via the
 // existing resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-// and resolveTenant(tf.Tenant, tf.Profile).
+// and resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile)) — the
+// effectiveProfile wrap makes the tenant follow a --target/positional profile
+// selector, not just the active profile.
 //
 // Usage strings deliberately avoid back-quotes: pflag treats a back-quoted word
 // as the flag's value placeholder, which would mangle `--target string` into

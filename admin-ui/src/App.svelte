@@ -8,7 +8,7 @@
     import Button from './components/Button.svelte'
     import Login from './components/Login.svelte'
     import OpDetail from './components/OpDetail.svelte'
-    import OpTree from './components/OpTree.svelte'
+    import StackNav from './components/StackNav.svelte'
     import SecretDetail from './components/SecretDetail.svelte'
     import SecretsList from './components/SecretsList.svelte'
     import SessionIndicator from './components/SessionIndicator.svelte'
@@ -370,7 +370,7 @@
         <!-- Desktop sidebar: in-flow at md+ only. -->
         <aside class="hidden w-72 shrink-0 overflow-y-auto border-r border-neutral-200 bg-white md:block">
             <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} />
-            <OpTree
+            <StackNav
                 ops={store.state.ops}
                 selectedId={store.state.selectedId}
                 selectedStack={store.state.selectedStack}
@@ -396,7 +396,7 @@
             aria-hidden={!sidebarOpen}
         >
             <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} />
-            <OpTree
+            <StackNav
                 ops={store.state.ops}
                 selectedId={store.state.selectedId}
                 selectedStack={store.state.selectedStack}

@@ -82,7 +82,7 @@ func registerRoomFlags(fs *flag.FlagSet) roomFlags {
 
 func (f roomFlags) client() *client.Client {
 	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
-	t.Tenant = resolveTenant(*f.tenant, *f.profile)
+	t.Tenant = resolveTenant(*f.tenant, effectiveProfile(*f.target, *f.profile))
 	return client.New(t)
 }
 

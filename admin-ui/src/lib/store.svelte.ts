@@ -75,6 +75,16 @@ function cacheKey(stack: string, n: number): string {
     return `${stack}:${n}`
 }
 
+// How many stacks the ops tree loads + shows by default. The rest stay
+// one search away (searchStacks spans the full list). Keeps a big tenant's
+// first paint cheap; opening more stacks accumulates them in the tree.
+const RECENT_LIMIT = 12
+
+// Max stack-search results rendered at once — searching still spans every
+// stack; this only caps the rendered list so a 2-char query on a thousand-
+// stack tenant doesn't paint a thousand rows.
+const SEARCH_LIMIT = 50
+
 // mapLimit runs fn over items with at most `limit` calls in flight,
 // preserving input order in the result. Keeps a wide fan-out (one fetch
 // per stack on a big tenant) from saturating the browser's per-host
@@ -194,6 +204,12 @@ function createStore() {
         // `stacks` is the tenant's stack directory. Each row carries
         // the active_version pointer. Refreshed by refresh().
         stacks: [] as Stack[],
+        // The stacks whose ops are loaded into state.ops and shown in the
+        // tree. On a big tenant we default-load only the RECENT_LIMIT most-
+        // recently-activated stacks (state.stacks arrives recency-ordered);
+        // search spans ALL of state.stacks and opening a result pins it here.
+        // Bounds the ops fan-out to O(visible) instead of O(all stacks).
+        visibleStacks: [] as string[],
         // Per-stack full version history (drafts + superseded). Fetched
         // lazily — on the first stack-select that needs it (currently:
         // when the user opens the versions-list page or the version
@@ -318,35 +334,16 @@ function createStore() {
             }
             const stacks = await listStacks(state.currentTenant)
             state.stacks = stacks
-            // Seed currentVersionByStack: keep an existing selection
-            // if the user has one and it's still valid; otherwise
-            // default to active_version. Stacks without an active
-            // version yet (drafts only) fall back to their newest
-            // version_number so the sidebar still has something to
-            // show — costs one extra fetch per unactivated stack on
-            // first load.
-            const needNewest: string[] = []
-            for (const s of stacks) {
-                const existing = state.currentVersionByStack[s.name]
-                if (existing && existing > 0) continue
-                if (typeof s.active_version === 'number') {
-                    state.currentVersionByStack[s.name] = s.active_version
-                } else {
-                    needNewest.push(s.name)
-                }
-            }
-            if (needNewest.length > 0) {
-                await Promise.all(
-                    needNewest.map(async (name) => {
-                        const vs = await listVersions(state.currentTenant, name)
-                        state.versionsByStack[name] = vs
-                        if (vs.length > 0) {
-                            // listVersions returns newest first (server orders DESC).
-                            state.currentVersionByStack[name] = vs[0].version_number
-                        }
-                    })
-                )
-            }
+            // Default the tree to the RECENT_LIMIT most-recent stacks
+            // (server returns them recency-ordered), unioned with any the
+            // user had already pinned this session that still exist (so a
+            // manual refresh doesn't drop a stack opened via search). The
+            // rest are reachable through search. rebuildOps seeds each
+            // visible stack's version lazily — no all-stacks fan-out.
+            const exists = new Set(stacks.map((s) => s.name))
+            const recent = stacks.slice(0, RECENT_LIMIT).map((s) => s.name)
+            const pinned = state.visibleStacks.filter((n) => exists.has(n))
+            state.visibleStacks = [...new Set([...recent, ...pinned])]
             await rebuildOps()
             state.loadedAt = new Date()
         } catch (e) {
@@ -420,27 +417,76 @@ function createStore() {
         return d
     }
 
-    // rebuildOps: for every stack with a selected version, fetch (if
-    // needed) its detail and concat the resulting Op[]. Sets
-    // state.ops once at the end so the UI only re-renders once.
-    //
-    // Fetches 'ops' content only (txcl + mock JSON) — the ops view never
-    // renders FILES/ assets, so pulling them would force a full-book R2
-    // download per stack. And caps in-flight fetches: a big tenant has
-    // hundreds of stacks, and firing every request at once saturates the
-    // browser's ~6-connection pool, making the slow ones cancel mid-flight.
-    async function rebuildOps() {
-        const targets: Array<{ name: string; n: number }> = []
-        for (const s of state.stacks) {
-            const n = state.currentVersionByStack[s.name]
-            if (!n) continue
-            targets.push({ name: s.name, n })
+    // ensureStackVersion resolves which version number to display for a
+    // stack, seeding currentVersionByStack: an existing selection wins,
+    // else the active version, else (draft-only) the newest version fetched
+    // lazily. Only called for VISIBLE stacks, so the draft-newest fetch is
+    // O(visible) — not the old O(all stacks) fan-out on every refresh.
+    async function ensureStackVersion(name: string): Promise<number | null> {
+        const existing = state.currentVersionByStack[name]
+        if (existing && existing > 0) return existing
+        const rec = state.stacks.find((s) => s.name === name)
+        if (rec && typeof rec.active_version === 'number') {
+            state.currentVersionByStack[name] = rec.active_version
+            return rec.active_version
         }
-        const chunks = await mapLimit(targets, 6, async (t) => {
-            const v = await ensureVersionLoaded(t.name, t.n, 'ops')
-            return v ? versionToOps(v, t.name) : []
+        const vs = await listVersions(state.currentTenant, name)
+        state.versionsByStack[name] = vs
+        if (vs.length > 0) {
+            // listVersions returns newest first (server orders DESC).
+            state.currentVersionByStack[name] = vs[0].version_number
+            return vs[0].version_number
+        }
+        return null
+    }
+
+    // rebuildOps: for every VISIBLE stack, fetch (if needed) its detail and
+    // concat the resulting Op[]. Sets state.ops once at the end so the UI
+    // only re-renders once.
+    //
+    // Scope is state.visibleStacks (the recent set + anything pinned via
+    // search) — NOT every stack — so a big tenant doesn't load hundreds of
+    // versions to paint the tree. Fetches 'ops' content only (txcl + mock
+    // JSON; the ops view never renders FILES/ assets, which would force a
+    // full-book R2 download per stack) and caps in-flight fetches so a wide
+    // fan-out can't saturate the browser's ~6-connection pool.
+    async function rebuildOps() {
+        const exists = new Set(state.stacks.map((s) => s.name))
+        const names = state.visibleStacks.filter((n) => exists.has(n))
+        const chunks = await mapLimit(names, 6, async (name) => {
+            const n = await ensureStackVersion(name)
+            if (!n) return []
+            const v = await ensureVersionLoaded(name, n, 'ops')
+            return v ? versionToOps(v, name) : []
         })
         state.ops = chunks.flat()
+    }
+
+    // pinStack adds a stack to the visible set and loads its ops on demand.
+    // Idempotent: a no-op if already visible. This is how a search result
+    // (or a deep link to a non-recent stack) enters the tree.
+    function pinStack(name: string) {
+        if (!name || state.visibleStacks.includes(name)) return
+        state.visibleStacks = [...state.visibleStacks, name]
+        // Fire-and-forget: ensureVersionLoaded caches, so this rebuild only
+        // actually fetches the newly-pinned stack; the rest cache-hit.
+        void rebuildOps()
+    }
+
+    // searchStacks filters the FULL stack list (every stack, not just the
+    // visible set) by case-insensitive name substring, capped at
+    // SEARCH_LIMIT rendered rows. Returns recency-ordered (state.stacks is).
+    function searchStacks(query: string): Stack[] {
+        const q = query.trim().toLowerCase()
+        if (!q) return []
+        const out: Stack[] = []
+        for (const s of state.stacks) {
+            if (s.name.toLowerCase().includes(q)) {
+                out.push(s)
+                if (out.length >= SEARCH_LIMIT) break
+            }
+        }
+        return out
     }
 
     // setStackVersion: switch which version of `stack` the UI is
@@ -452,6 +498,11 @@ function createStore() {
             return // already current and cached
         }
         state.currentVersionByStack[stack] = n
+        // Ensure it's in the tree (deep link / version switch on a stack
+        // outside the recent set) — rebuildOps only renders visible stacks.
+        if (!state.visibleStacks.includes(stack)) {
+            state.visibleStacks = [...state.visibleStacks, stack]
+        }
         // 'ops' — this load feeds rebuildOps, which renders ops, not assets.
         await ensureVersionLoaded(stack, n, 'ops')
         await rebuildOps()
@@ -485,6 +536,7 @@ function createStore() {
         state.selectedStack = ''
         state.showVersionsList = ''
         state.stacks = []
+        state.visibleStacks = []
         state.versionsByStack = {}
         state.currentVersionByStack = {}
         state.versionCache = {}
@@ -619,6 +671,10 @@ function createStore() {
     }
 
     function selectStack(stack: string | null) {
+        // Pin first: a search result (or any not-yet-loaded stack) must
+        // enter the visible set and load its ops before it can be shown.
+        // No-op when already visible.
+        if (stack) pinStack(stack)
         state.selectedStack = stack || ''
         state.selectedId = ''
         state.showVersionsList = ''
@@ -790,8 +846,13 @@ function createStore() {
         state.showDemo = false
         if (h.stack && typeof h.version === 'number') {
             // The hash carries an explicit version pin; honor it.
-            // Fire-and-forget: setStackVersion fetches + rebuilds ops.
+            // Fire-and-forget: setStackVersion fetches + rebuilds ops
+            // (and pins the stack into the visible set).
             setStackVersion(h.stack, h.version)
+        } else if (h.stack) {
+            // Deep link without a version — pin so a stack outside the
+            // recent set still loads its ops (and op-detail) for the link.
+            pinStack(h.stack)
         }
         if (h.page === 'versions' && h.stack && !state.versionsByStack[h.stack]) {
             refreshVersions(h.stack)
@@ -1289,6 +1350,7 @@ function createStore() {
         refreshVersions,
         revokeSecret,
         rotateSecret,
+        searchStacks,
         selectOp,
         selectStack,
         setStackVersion,

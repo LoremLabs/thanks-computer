@@ -65,7 +65,7 @@ func registerCronFlags(fs *flag.FlagSet) cronFlags {
 
 func (f cronFlags) client() *client.Client {
 	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
-	t.Tenant = resolveTenant(*f.tenant, *f.profile)
+	t.Tenant = resolveTenant(*f.tenant, effectiveProfile(*f.target, *f.profile))
 	return client.New(t)
 }
 

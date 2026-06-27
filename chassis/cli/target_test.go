@@ -230,6 +230,59 @@ func TestResolveTargetNameOrURL(t *testing.T) {
 	}
 }
 
+// TestEffectiveProfile pins the tenant-follows-the-selector fix: a --target /
+// positional that names a profile feeds tenant resolution, so `txco apply dev`
+// uses the dev profile's tenant instead of leaking the active profile's.
+func TestEffectiveProfile(t *testing.T) {
+	for _, k := range []string{"TXCO_ADMIN_ADDR", "TXCO_ADMIN_USER", "TXCO_ADMIN_PASS"} {
+		t.Setenv(k, "")
+	}
+	home := t.TempDir()
+	t.Setenv("TXCO_HOME", home)
+	t.Setenv("TXCO_PROFILE", "")
+
+	writeMeta := func(name, json string) {
+		mp, err := auth.MetaPath(name)
+		if err != nil {
+			t.Fatalf("MetaPath(%s): %v", name, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(mp), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(mp, []byte(json), 0o644); err != nil {
+			t.Fatalf("write meta %s: %v", name, err)
+		}
+	}
+	// A keyless dev profile (tenant default) + an active "cloud" with a different tenant.
+	writeMeta("dev", `{"chassis_url":"http://localhost:8081","default_tenant":"default"}`)
+	writeMeta("cloud", `{"actor_id":"a","key_id":"k","chassis_url":"https://cloud.example","default_tenant":"prod-mankins"}`)
+	if err := auth.WriteActiveProfile("cloud"); err != nil {
+		t.Fatalf("WriteActiveProfile: %v", err)
+	}
+
+	cases := []struct{ target, profile, want string }{
+		{"dev", "", "dev"},              // a target naming a profile supplies it
+		{"", "", ""},                    // nothing → active profile (caller's fallback)
+		{"https://x:8081", "", ""},      // a raw URL is not a profile
+		{"dev", "explicit", "explicit"}, // an explicit --profile wins
+		{"unknownname", "", ""},         // a name that's no profile → active fallback
+	}
+	for _, c := range cases {
+		if got := effectiveProfile(c.target, c.profile); got != c.want {
+			t.Errorf("effectiveProfile(%q,%q) = %q, want %q", c.target, c.profile, got, c.want)
+		}
+	}
+
+	// Integration: the tenant now follows `--target dev` instead of active cloud.
+	if got := resolveTenant("", effectiveProfile("dev", "")); got != "default" {
+		t.Errorf("tenant for `apply dev` = %q, want default (the leak is fixed)", got)
+	}
+	// A bare command still follows the active profile's tenant.
+	if got := resolveTenant("", effectiveProfile("", "")); got != "prod-mankins" {
+		t.Errorf("bare tenant = %q, want prod-mankins (active profile)", got)
+	}
+}
+
 // TestResolveFullTargetMergesOps covers the operations-map merge: target
 // overrides win over top-level defaults; ops only in the default carry
 // through; ops only in the override are added.

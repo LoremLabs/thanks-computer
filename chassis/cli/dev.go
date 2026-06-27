@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
@@ -229,6 +230,7 @@ Flags:
 	var chassisProc *devpkg.Process
 	chassisURL := resolved.Chassis
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
+	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
 		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
@@ -238,6 +240,18 @@ Flags:
 		// Override the resolved target's chassis URL so apply/diff
 		// inside this process talks to the spawned chassis.
 		resolved.Chassis = chassisURL
+
+		// Register a keyless `dev` profile pointing at this chassis so the
+		// developer gets a named target — `txco apply dev`, `txco ui dev`,
+		// `txco auth tenant secrets set X dev` — without `bootstrap-local`.
+		// Not made active, so prod/cloud commands are untouched. Do it now (so
+		// the profile exists before the initial apply), but defer the
+		// user-facing line to the banner below. Non-fatal: the loop still works
+		// via `--target <url>` if this can't be written.
+		var perr error
+		if devProfileAction, _, perr = auth.EnsureDevProfile(auth.DevProfileName, chassisURL, auth.DefaultTenantSlug); perr != nil {
+			fmt.Fprintf(stderr, "[txco] note: couldn't register %q profile: %v\n", auth.DevProfileName, perr)
+		}
 	}
 
 	// Forward drain signals to the chassis child. `txco dev` is a
@@ -402,6 +416,21 @@ Flags:
 		fmt.Fprintf(stdout, "[txco] dev loop running (Ctrl-C to stop). chassis: %s\n", chassisURL)
 		if uiDevURL != "" {
 			fmt.Fprintf(stdout, "[txco]   admin UI (HMR): %s\n", uiDevURL)
+		}
+	}
+	// Profile lines: we registered a keyless `dev` profile but deliberately did
+	// NOT make it active — the active profile is global, persistent state, so
+	// flipping it would hijack prod commands in other shells and outlive this
+	// session. Advertise the named selector, then (when you're on a different
+	// profile) nudge — don't force — the opt-in that drops the selector entirely.
+	if !*noChassis {
+		if devProfileAction == auth.DevProfileWrote || devProfileAction == auth.DevProfileCurrent {
+			fmt.Fprintf(stdout, "[txco]   profile %q → %s (tenant %s) — e.g. `txco apply %s`\n",
+				auth.DevProfileName, chassisURL, auth.DefaultTenantSlug, auth.DevProfileName)
+		}
+		if active, _ := auth.ReadActiveProfile(); active != auth.DevProfileName && active != auth.ActiveNone {
+			fmt.Fprintf(stdout, "[txco]   tip: active profile is %q — run `txco auth profile use %s` so plain\n", active, auth.DevProfileName)
+			fmt.Fprintf(stdout, "[txco]        `txco apply` / `txco ui` hit this chassis (then `txco auth profile use %s` to switch back).\n", active)
 		}
 	}
 	select {

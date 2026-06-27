@@ -51,7 +51,11 @@ type stackRecord struct {
 	// all-files ManifestHash (which a pack-bearing stack would never match).
 	CodeManifestHash string `json:"code_manifest_hash,omitempty"`
 	CreatedAt        string `json:"created_at"`
-	MintHostname     bool   `json:"mint_hostname"` // false = headless (no auto-minted routing URL); see `txco stack set --no-host`
+	// ActivatedAt is the active version's activation time — the "recently
+	// worked on" signal the admin UI sorts its recent-stacks set by. Empty
+	// for a stack with no active version yet (draft-only).
+	ActivatedAt  string `json:"activated_at,omitempty"`
+	MintHostname bool   `json:"mint_hostname"` // false = headless (no auto-minted routing URL); see `txco stack set --no-host`
 }
 
 type versionRecord struct {
@@ -483,12 +487,16 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "tenant_unresolved", nil)
 		return
 	}
+	// Recency-ordered: active (activated_at non-null) stacks first, newest
+	// activation first; draft-only stacks (no active version) trail, name-
+	// ordered. The admin UI takes the first N as its "recent" set and keeps
+	// the full list for search.
 	rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
-		`SELECT s.name, sv.version_number, sv.manifest_hash, s.created_at, s.mint_hostname
+		`SELECT s.name, sv.version_number, sv.manifest_hash, sv.activated_at, s.created_at, s.mint_hostname
 		   FROM stacks s
 		   LEFT JOIN stack_versions sv ON sv.version_id = s.active_version
 		  WHERE s.tenant_id = ?
-		  ORDER BY s.name`, ac.TenantID)
+		  ORDER BY sv.activated_at IS NULL, sv.activated_at DESC, s.name`, ac.TenantID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "query_failed", map[string]any{"err": err.Error()})
 		return
@@ -498,9 +506,9 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rec stackRecord
 		var av sql.NullInt64
-		var mh sql.NullString
+		var mh, aa sql.NullString
 		var mint int64
-		if err := rows.Scan(&rec.Name, &av, &mh, &rec.CreatedAt, &mint); err != nil {
+		if err := rows.Scan(&rec.Name, &av, &mh, &aa, &rec.CreatedAt, &mint); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "scan_failed", map[string]any{"err": err.Error()})
 			return
 		}
@@ -508,6 +516,7 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 			rec.ActiveVersion = &av.Int64
 		}
 		rec.ManifestHash = mh.String
+		rec.ActivatedAt = aa.String
 		rec.MintHostname = mint != 0
 		out = append(out, rec)
 	}
