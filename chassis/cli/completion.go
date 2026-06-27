@@ -270,8 +270,8 @@ var cliCommandTree = []node{
 	{Name: "draft", Desc: "Stage a draft version of a stack (no activate)"},
 	{Name: "activate", Desc: "Activate a draft version"},
 	{Name: "deactivate", Desc: "Retire a stack (activate an empty version; inverse of activate)"},
-	{Name: "stack", Desc: "Stack-level settings (e.g. set --no-host)", Children: []node{
-		{Name: "set", Desc: "Change stack settings (--no-host / --host)", Flags: []string{"no-host", "host", "force", "json"}},
+	{Name: "stack", Desc: "Stack-level settings (e.g. set web=false)", Children: []node{
+		{Name: "set", Desc: "Change stack settings (web=true|false; --match for bulk)", Flags: []string{"force", "match", "json"}},
 	}},
 	{Name: "versions", Desc: "List stack versions"},
 	{Name: "edit", Desc: "Edit a rule and apply on save"},

@@ -14,9 +14,12 @@ func TestRunStackSetFlagValidation(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"both flags", []string{"--no-host", "--host", "s"}, 2},
-		{"neither flag", []string{"s"}, 2},
-		{"missing stack arg", []string{"--no-host"}, 2},
+		{"missing setting", []string{"s"}, 2},        // bare stack, no web=
+		{"missing target", []string{"web=false"}, 2}, // setting, no stack/--match
+		{"stack and match", []string{"web=false", "s", "--match", "p"}, 2},
+		{"bad web value", []string{"web=maybe", "s"}, 2},
+		{"unknown setting", []string{"foo=bar", "s"}, 2},
+		{"extra positional", []string{"web=false", "a", "b"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

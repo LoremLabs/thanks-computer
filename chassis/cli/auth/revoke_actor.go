@@ -64,7 +64,7 @@ Flags:
 		fmt.Fprintf(stderr, "auth revoke-actor: %v\n", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		fmt.Fprintln(stderr, "auth revoke-actor: no signing key configured; revoke requires authentication")
 		return 1
 	}

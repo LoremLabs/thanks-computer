@@ -596,3 +596,51 @@ func (c *Client) SetStackHostMint(ctx context.Context, name string, mint, force 
 	}
 	return &out, nil
 }
+
+type batchStackSettingsReq struct {
+	Match        string `json:"match"`
+	MintHostname *bool  `json:"mint_hostname,omitempty"`
+	Force        bool   `json:"force,omitempty"`
+}
+
+// BatchStackSettingsResponse is the result of a bulk mint-gate flip.
+type BatchStackSettingsResponse struct {
+	Matched      int      `json:"matched"`       // number of stacks whose gate was set
+	MintHostname bool     `json:"mint_hostname"` // the value applied
+	RevokedHosts []string `json:"revoked_hosts,omitempty"`
+}
+
+// BatchSetStackHostMint flips the auto-URL gate on EVERY stack whose name
+// contains `match`, via POST /stacks/settings — the bulk sibling of
+// SetStackHostMint, done in one server tx + one reload. Like the per-stack call,
+// mint=false on stacks that already have live URLs requires force=true (the
+// server returns 409 "live_url_exists" — with a `count` + sample `stacks` —
+// otherwise) and revokes those hosts.
+func (c *Client) BatchSetStackHostMint(ctx context.Context, match string, mint, force bool) (*BatchStackSettingsResponse, error) {
+	body, err := json.Marshal(batchStackSettingsReq{Match: match, MintHostname: &mint, Force: force})
+	if err != nil {
+		return nil, err
+	}
+	endpoint := c.scopedURL("/stacks/settings")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(req, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out BatchStackSettingsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode batch stack settings: %w", err)
+	}
+	return &out, nil
+}

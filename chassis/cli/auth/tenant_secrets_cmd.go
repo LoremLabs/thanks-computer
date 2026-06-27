@@ -136,6 +136,9 @@ func runSecretsSet(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `secrets set NAME staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
@@ -148,7 +151,7 @@ func runSecretsSet(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant secrets set: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant secrets set: no signing key configured")
 		return 1
 	}
@@ -211,6 +214,9 @@ func runSecretsGenerate(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `secrets set NAME staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
@@ -223,7 +229,7 @@ func runSecretsGenerate(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant secrets generate: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant secrets generate: no signing key configured")
 		return 1
 	}
@@ -271,6 +277,9 @@ func runSecretsRotate(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `secrets set NAME staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
@@ -283,7 +292,7 @@ func runSecretsRotate(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant secrets rotate: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant secrets rotate: no signing key configured")
 		return 1
 	}
@@ -341,7 +350,7 @@ func runSecretsList(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant secrets list: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant secrets list: no signing key configured")
 		return 1
 	}
@@ -386,6 +395,9 @@ func runSecretsShow(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `secrets set NAME staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
@@ -398,7 +410,7 @@ func runSecretsShow(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant secrets show: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant secrets show: no signing key configured")
 		return 1
 	}
@@ -443,6 +455,9 @@ func runSecretsDescribe(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `secrets set NAME staging`
+		*targetSel = trailingPositional(fs)
+	}
 	// `--set` not provided → reject. Updating description-to-empty is
 	// allowed if the operator explicitly passes --set="".
 	wasSet := false
@@ -467,7 +482,7 @@ func runSecretsDescribe(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant secrets describe: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant secrets describe: no signing key configured")
 		return 1
 	}
@@ -502,6 +517,9 @@ func runSecretsRevoke(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `secrets set NAME staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
@@ -514,7 +532,7 @@ func runSecretsRevoke(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant secrets revoke: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant secrets revoke: no signing key configured")
 		return 1
 	}

@@ -1,6 +1,21 @@
 package auth
 
-import "strings"
+import (
+	"flag"
+	"strings"
+)
+
+// trailingPositional returns the first leftover positional after a command has
+// consumed its primary arg and re-parsed trailing flags. The commands do
+// `name := fs.Arg(0); fs.Parse(fs.Args()[1:])`, and that second Parse re-bases
+// indices — so a post-primary positional lands at Arg(0). Used as the positional
+// target selector, e.g. `txco auth tenant secrets set OPENAI_KEY staging`.
+func trailingPositional(fs *flag.FlagSet) string {
+	if fs.NArg() > 0 {
+		return fs.Arg(0)
+	}
+	return ""
+}
 
 // looksLikeURL reports whether a --target value is a raw admin endpoint (a
 // scheme like "http://…" or a host:port — both contain ":") rather than a bare

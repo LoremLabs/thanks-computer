@@ -77,7 +77,7 @@ Flags:
 		fmt.Fprintf(stderr, "auth tenants: %v\n", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		fmt.Fprintln(stderr, "auth tenants: no signing key configured; listing requires authentication")
 		return 1
 	}
@@ -213,6 +213,9 @@ Flags:
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
@@ -225,7 +228,7 @@ Flags:
 		fmt.Fprintf(stderr, "auth tenant create: %v\n", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		fmt.Fprintln(stderr, "auth tenant create: no signing key configured; creating a tenant requires super_admin authentication")
 		return 1
 	}
@@ -291,7 +294,7 @@ Flags:
 		fmt.Fprintf(stderr, "auth tenant members: %v\n", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		fmt.Fprintln(stderr, "auth tenant members: no signing key configured; listing requires authentication")
 		return 1
 	}
@@ -434,6 +437,9 @@ Flags:
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 	if strings.TrimSpace(*caps) == "" {
 		fmt.Fprintln(stderr, "auth tenant grant: --caps is required")
 		fs.Usage()
@@ -460,7 +466,7 @@ Flags:
 		fmt.Fprintf(stderr, "auth tenant grant: %v\n", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		fmt.Fprintln(stderr, "auth tenant grant: no signing key configured")
 		return 1
 	}
@@ -575,7 +581,7 @@ func runHostnamesList(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant hostnames list: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant hostnames list: no signing key configured")
 		return 1
 	}
@@ -645,7 +651,7 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 			PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
 			return 1
 		}
-		if target.Auth == nil {
+		if target.Auth == nil && !LocalChassis(target.Addr) {
 			PrintCLIError(stderr, "auth tenant hostnames add: no signing key configured")
 			return 1
 		}
@@ -676,6 +682,9 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 	// --stack is now OPTIONAL. Without it, the hostname is claimed
 	// unattached: the tenant can verify ownership now and attach it
 	// to a stack later via `attach`. With it, this verb is the
@@ -693,7 +702,7 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant hostnames add: no signing key configured")
 		return 1
 	}
@@ -811,6 +820,9 @@ func runHostnamesAttach(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 	if strings.TrimSpace(*stack) == "" {
 		PrintCLIError(stderr, "auth tenant hostnames attach: --stack is required")
 		return 2
@@ -827,7 +839,7 @@ func runHostnamesAttach(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant hostnames attach: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant hostnames attach: no signing key configured")
 		return 1
 	}
@@ -881,6 +893,9 @@ func runHostnamesChallenge(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 	if *method != "dns-txt" && *method != "http-01" {
 		PrintCLIError(stderr, "auth tenant hostnames challenge: --method must be 'dns-txt' or 'http-01'")
 		return 2
@@ -897,7 +912,7 @@ func runHostnamesChallenge(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant hostnames challenge: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant hostnames challenge: no signing key configured")
 		return 1
 	}
@@ -952,6 +967,9 @@ func runHostnamesVerify(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
@@ -964,7 +982,7 @@ func runHostnamesVerify(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant hostnames verify: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant hostnames verify: no signing key configured")
 		return 1
 	}
@@ -999,6 +1017,9 @@ func runHostnamesRemove(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
@@ -1011,7 +1032,7 @@ func runHostnamesRemove(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant hostnames remove: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant hostnames remove: no signing key configured")
 		return 1
 	}
@@ -1053,6 +1074,9 @@ func runHostnamesStatus(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
@@ -1065,7 +1089,7 @@ func runHostnamesStatus(args []string, stdout, stderr io.Writer) int {
 		PrintCLIErrorf(stderr, "auth tenant hostnames status: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		PrintCLIError(stderr, "auth tenant hostnames status: no signing key configured")
 		return 1
 	}
@@ -1191,6 +1215,9 @@ Flags:
 	if err := fs.Parse(fs.Args()[1:]); err != nil {
 		return 2
 	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `... grant ACTOR staging`
+		*targetSel = trailingPositional(fs)
+	}
 
 	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
@@ -1203,7 +1230,7 @@ Flags:
 		fmt.Fprintf(stderr, "auth tenant revoke: %v\n", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		fmt.Fprintln(stderr, "auth tenant revoke: no signing key configured")
 		return 1
 	}

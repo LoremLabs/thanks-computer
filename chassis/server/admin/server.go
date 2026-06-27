@@ -427,6 +427,11 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}", c.handleGetVersion).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}/cat", c.handleCatFile).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}/settings", c.handlePatchStackSettings).Methods(http.MethodPatch)
+	// Bulk sibling of the per-stack settings PATCH: flip mint_hostname across
+	// every stack matching a substring in one tx + one reload. POST + no {name}
+	// segment, so it can't collide with the per-stack routes (different method
+	// from the bare GET below; all PATCH/POST per-stack routes have a suffix).
+	tenantR.HandleFunc("/stacks/settings", c.handleBatchStackSettings).Methods(http.MethodPost)
 	tenantR.HandleFunc("/stacks/{name:.+}", c.handleGetStack).Methods(http.MethodGet)
 
 	// Content-addressed compute artifacts (op:// computes). Upload is

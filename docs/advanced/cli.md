@@ -29,6 +29,11 @@ anything containing `/`) or an existing directory is taken as the workspace dir
 instead, so `txco apply ./sub staging` sets both. (`txco push` takes the stack
 first: `txco push api staging`.)
 
+The mutating `auth` / `tenant` commands accept it as a trailing positional too —
+`txco auth tenant secrets set OPENAI_KEY staging`, `txco auth tenant grant ACTOR staging`.
+These are stdlib-flag-parsed, so any flags must come *before* the trailing target
+(`secrets set NAME --tenant t staging`, not `… staging --tenant t`).
+
 `--url` / `--addr` (raw URL) and `--profile` (signing identity) still work as
 lower-level overrides — `--target` is just the one spelling unified across the
 deploy and `auth` / `tenant` families. With `--target` omitted, the active
@@ -42,6 +47,15 @@ target and asks to confirm — `--yes` skips it, and a non-interactive shell
 without `--yes` fails closed. So a stray `secrets set` / `hostnames add` can't
 silently land on prod. Local chassis (localhost / loopback / `*.localhost`)
 never prompt.
+
+### Local dev: no key required
+
+Against a **local** chassis (`localhost` / loopback / `*.localhost` — e.g. the
+`txco dev` chassis), `auth` / `tenant` commands don't need an enrolled signing key:
+they send unsigned and the open dev chassis accepts. So
+`txco auth tenant secrets set OPENAI_KEY` just works locally with no
+`bootstrap-local`. A **remote** chassis still requires enrollment; a local chassis
+running in signed mode returns a clear 401.
 
 ## Run & develop
 

@@ -74,9 +74,11 @@ Flags:
 		PrintCLIErrorf(stderr, "auth login: %v", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		// buildSignedTarget falls through to unsigned when no key is
 		// available — make that explicit so the user knows what to do.
+		// A LOCAL/open chassis (txco dev) accepts unsigned, so don't pre-refuse
+		// there; only require a key for a remote chassis.
 		PrintCLIError(stderr, "auth login: no signing key configured; run `txco auth bootstrap-local` first")
 		return 1
 	}

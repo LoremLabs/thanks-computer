@@ -41,7 +41,7 @@ Flags:
 		fmt.Fprintf(stderr, "auth invitations: %v\n", err)
 		return 1
 	}
-	if target.Auth == nil {
+	if target.Auth == nil && !LocalChassis(target.Addr) {
 		fmt.Fprintln(stderr, "auth invitations: no signing key configured; listing requires authentication")
 		return 1
 	}

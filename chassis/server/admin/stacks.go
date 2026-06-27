@@ -704,6 +704,209 @@ func (c *Controller) handlePatchStackSettings(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, stackSettingsResponse{MintHostname: mint != 0, RevokedHosts: revoked})
 }
 
+type batchStackSettingsRequest struct {
+	// Match selects stacks whose name CONTAINS this substring — the same
+	// semantics as the CLI `--match` / `apply --skip`. Required + non-empty: an
+	// empty match would hit every stack, too blunt to do by accident.
+	Match string `json:"match"`
+	// MintHostname: nil → 400; false → headless; true → re-enable. Applied to
+	// every matched stack (same per-stack semantics as patchStackSettingsRequest).
+	MintHostname *bool `json:"mint_hostname,omitempty"`
+	// Force authorizes revoking live routing hosts when going headless. Without
+	// it, a batch that would tear down ANY live URL is refused (409) so a bulk
+	// --no-host can't silently break links.
+	Force bool `json:"force,omitempty"`
+}
+
+type batchStackSettingsResponse struct {
+	Matched      int      `json:"matched"`       // stacks whose mint_hostname was set
+	MintHostname bool     `json:"mint_hostname"` // the value applied
+	RevokedHosts []string `json:"revoked_hosts,omitempty"`
+}
+
+// handleBatchStackSettings: POST /v1/tenants/{t}/stacks/settings
+//
+// The bulk sibling of handlePatchStackSettings: flips mint_hostname on EVERY
+// stack whose name contains `match`, in a SINGLE transaction with a SINGLE
+// dbcache reload — so headless-ing a large family (e.g. all `publications/*`)
+// costs one tx + one reload instead of one per stack (1400 reloads would hammer
+// the runtime DB). Going headless with `force` revokes each matched stack's live
+// routing hosts the same fleet-safe way the per-stack path does (queued
+// hostname.revoked events, applied across the fleet). Without force, a batch
+// that would revoke ANY live host is refused (409) naming a sample, so a bulk
+// --no-host can't quietly tear down URLs.
+func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "opstack:*:update"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusBadRequest, "tenant_unresolved", nil)
+		return
+	}
+	var req batchStackSettingsRequest
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_json", map[string]any{"err": err.Error()})
+			return
+		}
+	}
+	if req.MintHostname == nil {
+		writeJSONError(w, http.StatusBadRequest, "no_settings", map[string]any{"reason": "no settings provided (expected mint_hostname)"})
+		return
+	}
+	if strings.TrimSpace(req.Match) == "" {
+		writeJSONError(w, http.StatusBadRequest, "empty_match", map[string]any{"reason": "match is required (an empty match would hit every stack)"})
+		return
+	}
+	goingHeadless := !*req.MintHostname
+
+	// Resolve matched stacks by substring on name — read the tenant's set and
+	// filter in Go so the match is byte-identical to the CLI `--match`/`--skip`
+	// semantics (and sidesteps SQL LIKE-escaping of the user's substring).
+	type matchedStack struct{ id, name string }
+	rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
+		`SELECT stack_id, name FROM stacks WHERE tenant_id = ? ORDER BY name`, ac.TenantID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "list_stacks", map[string]any{"err": err.Error()})
+		return
+	}
+	var matched []matchedStack
+	for rows.Next() {
+		var ms matchedStack
+		if err := rows.Scan(&ms.id, &ms.name); err != nil {
+			rows.Close()
+			writeJSONError(w, http.StatusInternalServerError, "scan_stacks", map[string]any{"err": err.Error()})
+			return
+		}
+		if strings.Contains(ms.name, req.Match) {
+			matched = append(matched, ms)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeJSONError(w, http.StatusInternalServerError, "list_stacks", map[string]any{"err": err.Error()})
+		return
+	}
+	rows.Close()
+	if len(matched) == 0 {
+		writeJSONError(w, http.StatusNotFound, "no_match", map[string]any{"match": req.Match})
+		return
+	}
+
+	// Going headless on stacks with live URLs is destructive — gather the hosts
+	// BEFORE the tx so the force-check is a clean precondition, and refuse the
+	// WHOLE batch without --force (don't half-apply).
+	hostsByStack := map[string][]tenants.Hostname{}
+	var withLive []string
+	if goingHeadless {
+		for _, ms := range matched {
+			hosts, herr := c.listManagedStackHosts(r.Context(), ac.TenantID, ms.name)
+			if herr != nil {
+				writeJSONError(w, http.StatusInternalServerError, "lookup_hosts", map[string]any{"err": herr.Error(), "stack": ms.name})
+				return
+			}
+			if len(hosts) > 0 {
+				hostsByStack[ms.name] = hosts
+				withLive = append(withLive, ms.name)
+			}
+		}
+		if len(withLive) > 0 && !req.Force {
+			sample := withLive
+			if len(sample) > 10 {
+				sample = sample[:10]
+			}
+			writeJSONError(w, http.StatusConflict, "live_url_exists", map[string]any{
+				"count":  len(withLive),
+				"stacks": sample,
+				"hint":   "matched stacks have live URLs; re-run with --force to revoke them and go headless",
+			})
+			return
+		}
+		// Revoking is a distinct capability — require it on the forced path.
+		if len(withLive) > 0 {
+			if err := policy.RequireCapability(r.Context(), "hostname:*:write"); err != nil {
+				auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+				return
+			}
+		}
+	}
+
+	nowT := time.Now().UTC()
+	mint := 0
+	if *req.MintHostname {
+		mint = 1
+	}
+
+	// One tx for the whole batch: atomic, and a single write-lock hold + single
+	// reload instead of one per stack. (If a tenant ever has a match set large
+	// enough that this lock-hold matters, chunking is the follow-up — busy_timeout
+	// is 30s and these are sub-second row updates, so one tx is fine in practice.)
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, ms := range matched {
+		if _, err := tx.ExecContext(r.Context(),
+			`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND name = ?`,
+			mint, ac.TenantID, ms.name); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "update_settings", map[string]any{"err": err.Error(), "stack": ms.name})
+			return
+		}
+	}
+	revoked := make([]string, 0)
+	if goingHeadless && req.Force {
+		for _, ms := range matched {
+			for _, h := range hostsByStack[ms.name] {
+				if err := c.revokeManagedHostTx(r.Context(), tx, ac.TenantID, h, nowT); err != nil {
+					writeJSONError(w, http.StatusInternalServerError, "revoke_host", map[string]any{"err": err.Error(), "hostname": h.Hostname})
+					return
+				}
+				revoked = append(revoked, h.Hostname)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+
+	// A revoke changes data-plane routing (the resolver reads tenant_hostnames),
+	// so refresh the cache ONCE for the whole batch. The column flip alone needs
+	// no reload (mint_hostname is read only at activate).
+	if len(revoked) > 0 {
+		if err := c.pu.Dbc.Reload(); err != nil {
+			c.pu.Logger.Warn("dbcache reload after batch stack-headless revoke failed; FS watcher will retry",
+				zap.String("err", err.Error()))
+		}
+	}
+
+	c.pu.Logger.Info("batch stack settings applied",
+		zap.String("tenant", ac.TenantID),
+		zap.String("match", req.Match),
+		zap.Int("matched", len(matched)),
+		zap.Bool("mint", mint != 0),
+		zap.Int("revoked", len(revoked)),
+		zap.String("user", authedUser(r)))
+
+	writeJSON(w, http.StatusOK, batchStackSettingsResponse{
+		Matched:      len(matched),
+		MintHostname: mint != 0,
+		RevokedHosts: revoked,
+	})
+}
+
 // listManagedStackHosts returns the live chassis-minted routing hosts bound to
 // (tenant, stack) — the structured-host-suffix and delegated-zone rows that the
 // activate path auto-mints. Custom/user-bound hostnames (other created_by) are
