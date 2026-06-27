@@ -17,6 +17,7 @@ func runRevokeInvitation(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	name := fs.String("name", defaultKeyName, fmt.Sprintf("signing key name under %s/keys/", HomePathPretty()))
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug the invitation belongs to (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
@@ -41,6 +42,7 @@ Flags:
 	}
 	invID := fs.Arg(0)
 
+	applyTargetSelectorName(*targetSel, url, name)
 	target, err := buildSignedTarget(*name, *url)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth revoke-invitation: %v\n", err)

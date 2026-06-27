@@ -32,6 +32,7 @@ import {
     type ValidateResponse,
     type Version,
     type VersionDetail,
+    type VersionInclude,
 } from './api'
 import type { TraceStreamEvent } from './traceStream'
 import { opId, type Op } from './types'
@@ -72,6 +73,28 @@ interface Selection {
 
 function cacheKey(stack: string, n: number): string {
     return `${stack}:${n}`
+}
+
+// mapLimit runs fn over items with at most `limit` calls in flight,
+// preserving input order in the result. Keeps a wide fan-out (one fetch
+// per stack on a big tenant) from saturating the browser's per-host
+// connection pool, which is what makes the slow requests cancel.
+async function mapLimit<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<R>
+): Promise<R[]> {
+    const out = new Array<R>(items.length)
+    let next = 0
+    async function worker() {
+        while (next < items.length) {
+            const i = next++
+            out[i] = await fn(items[i])
+        }
+    }
+    const workers = Math.max(1, Math.min(limit, items.length))
+    await Promise.all(Array.from({ length: workers }, worker))
+    return out
 }
 
 // Wall-clock for a stack's slice of a trace. Prefers timestamps so
@@ -185,6 +208,12 @@ function createStore() {
         // ensureVersionLoaded; never evicted in this phase (workspaces
         // we care about have a handful of stacks × handful of versions).
         versionCache: {} as Record<string, VersionDetail>,
+        // Remembers how much content each versionCache entry holds: an
+        // 'ops' entry has txcl + mock bodies but FILES/ asset bytes
+        // stripped (what rebuildOps fetches); 'content' is the full set
+        // (diff line-renderer / editor). Lets a later full-content reader
+        // upgrade an ops-only entry instead of reusing its stripped files.
+        versionCacheInclude: {} as Record<string, VersionInclude>,
         // Cache of /diff responses keyed by "<stack>:<v1>:<v2>". The
         // server-side response is just per-file hashes + change tags
         // so this is tiny per entry; never evicted in this phase.
@@ -351,14 +380,29 @@ function createStore() {
     }
 
     // ensureVersionLoaded fetches (stack, n) into versionCache if not
-    // already present. Idempotent.
-    async function ensureVersionLoaded(stack: string, n: number): Promise<VersionDetail | null> {
+    // already present at the requested completeness. Idempotent.
+    //
+    // include defaults to 'content' (full bytes) so diff/editor callers are
+    // unchanged; the ops view passes 'ops' to skip the per-stack FILES/ asset
+    // download from the CAS. A cached 'content' entry satisfies any request; an
+    // 'ops' entry only satisfies an 'ops' request, so a later 'content' reader
+    // re-fetches rather than reuse asset-stripped files.
+    async function ensureVersionLoaded(
+        stack: string,
+        n: number,
+        include: VersionInclude = 'content'
+    ): Promise<VersionDetail | null> {
         if (!stack || !n) return null
         const key = cacheKey(stack, n)
         const hit = state.versionCache[key]
-        if (hit) return hit
-        const detail = await getVersion(state.currentTenant, stack, n)
-        if (detail) state.versionCache[key] = detail
+        if (hit && (state.versionCacheInclude[key] === 'content' || include === 'ops')) {
+            return hit
+        }
+        const detail = await getVersion(state.currentTenant, stack, n, include)
+        if (detail) {
+            state.versionCache[key] = detail
+            state.versionCacheInclude[key] = include
+        }
         return detail
     }
 
@@ -379,18 +423,23 @@ function createStore() {
     // rebuildOps: for every stack with a selected version, fetch (if
     // needed) its detail and concat the resulting Op[]. Sets
     // state.ops once at the end so the UI only re-renders once.
+    //
+    // Fetches 'ops' content only (txcl + mock JSON) — the ops view never
+    // renders FILES/ assets, so pulling them would force a full-book R2
+    // download per stack. And caps in-flight fetches: a big tenant has
+    // hundreds of stacks, and firing every request at once saturates the
+    // browser's ~6-connection pool, making the slow ones cancel mid-flight.
     async function rebuildOps() {
-        const pending: Array<Promise<Op[]>> = []
+        const targets: Array<{ name: string; n: number }> = []
         for (const s of state.stacks) {
             const n = state.currentVersionByStack[s.name]
             if (!n) continue
-            pending.push(
-                ensureVersionLoaded(s.name, n).then((v) =>
-                    v ? versionToOps(v, s.name) : []
-                )
-            )
+            targets.push({ name: s.name, n })
         }
-        const chunks = await Promise.all(pending)
+        const chunks = await mapLimit(targets, 6, async (t) => {
+            const v = await ensureVersionLoaded(t.name, t.n, 'ops')
+            return v ? versionToOps(v, t.name) : []
+        })
         state.ops = chunks.flat()
     }
 
@@ -403,7 +452,8 @@ function createStore() {
             return // already current and cached
         }
         state.currentVersionByStack[stack] = n
-        await ensureVersionLoaded(stack, n)
+        // 'ops' — this load feeds rebuildOps, which renders ops, not assets.
+        await ensureVersionLoaded(stack, n, 'ops')
         await rebuildOps()
         // Keep the URL in sync only when this stack is the selection.
         // Otherwise we're pre-loading silently (e.g. on initial refresh).
@@ -438,6 +488,7 @@ function createStore() {
         state.versionsByStack = {}
         state.currentVersionByStack = {}
         state.versionCache = {}
+        state.versionCacheInclude = {}
         // Secrets are tenant-scoped too — drop the cache and reload.
         state.secrets = []
         state.secretsLoaded = false

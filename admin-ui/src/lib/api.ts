@@ -151,16 +151,23 @@ export async function listVersions(
     return body?.versions ?? []
 }
 
+// include selects how much file content the server inlines:
+//   'ops'     — only op/mock bodies (txcl + mock JSON); FILES/ assets are
+//               listed but their bytes are NOT fetched from the CAS. This is
+//               all the ops view needs, and it avoids a full-book R2 download
+//               per stack — the fan-out that 500s the ops tab on big tenants.
+//   'content' — every file body (the editor / diff line-renderer / txco pull).
+export type VersionInclude = 'ops' | 'content'
+
 export async function getVersion(
     tenant: string,
     name: string,
-    versionNumber: number
+    versionNumber: number,
+    include: VersionInclude = 'ops'
 ): Promise<VersionDetail | null> {
     if (!tenant || !name || !versionNumber) return null
-    // include=content opt-in: the server omits file bodies otherwise.
-    // The version_adapter needs the txcl + mock JSON to render ops.
     return getJSON<VersionDetail>(
-        `/v1/tenants/${encodeURIComponent(tenant)}/stacks/${encodeURIComponent(name)}/versions/${versionNumber}?include=content`
+        `/v1/tenants/${encodeURIComponent(tenant)}/stacks/${encodeURIComponent(name)}/versions/${versionNumber}?include=${include}`
     )
 }
 

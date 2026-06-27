@@ -48,6 +48,7 @@ func runTenants(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -65,6 +66,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth tenants: %v\n", err)
@@ -173,6 +175,7 @@ func runTenantCreate(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	displayName := fs.String("display-name", "", "human-readable name for the tenant")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
@@ -211,6 +214,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth tenant create: %v\n", err)
@@ -257,6 +261,7 @@ func runTenantMembers(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug whose members to list")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -275,6 +280,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth tenant members: %v\n", err)
@@ -320,6 +326,7 @@ func runMemberships(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -336,6 +343,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth memberships: %v\n", err)
@@ -390,6 +398,7 @@ func runTenantGrant(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug to grant in")
 	caps := fs.String("caps", "", "comma-separated capabilities (e.g. \"opstack:*:read,actor:*:read\")")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
@@ -440,6 +449,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth tenant grant: %v\n", err)
@@ -547,12 +557,14 @@ func runHostnamesList(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug whose hostnames to list")
 	history := fs.Bool("history", false, "include revoked rows")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames list: %v", err)
@@ -604,6 +616,7 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug to claim the hostname in")
 	stack := fs.String("stack", "", "stack within the tenant the hostname routes to")
 	mint := fs.Bool("mint", false, "mint a structured (auto-generated) hostname for --stack instead of claiming a given one (verified + DKIM, no DNS setup)")
@@ -621,6 +634,7 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 			PrintCLIError(stderr, "auth tenant hostnames add --mint: --stack is required")
 			return 2
 		}
+		applyTargetSelector(*targetSel, url, profile)
 		resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 		if err != nil {
 			PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
@@ -668,6 +682,7 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 	// create+attach shortcut for tenants who already know the
 	// routing target.
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
@@ -781,6 +796,7 @@ func runHostnamesAttach(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug owning the hostname")
 	stack := fs.String("stack", "", "stack the hostname should route to (required)")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
@@ -800,6 +816,7 @@ func runHostnamesAttach(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames attach: %v", err)
@@ -838,6 +855,7 @@ func runHostnamesChallenge(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug owning the hostname")
 	// dns-txt is the default because it works before DNS is pointed
 	// at the chassis — useful for ahead-of-cutover verification. The
@@ -868,6 +886,7 @@ func runHostnamesChallenge(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames challenge: %v", err)
@@ -920,6 +939,7 @@ func runHostnamesVerify(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug owning the hostname")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -933,6 +953,7 @@ func runHostnamesVerify(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames verify: %v", err)
@@ -964,6 +985,7 @@ func runHostnamesRemove(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug owning the hostname")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	if err := fs.Parse(args); err != nil {
@@ -978,6 +1000,7 @@ func runHostnamesRemove(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames remove: %v", err)
@@ -1017,6 +1040,7 @@ func runHostnamesStatus(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug owning the hostname")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -1030,6 +1054,7 @@ func runHostnamesStatus(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames status: %v", err)
@@ -1138,6 +1163,7 @@ func runTenantRevoke(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug to revoke from")
 	force := fs.Bool("y", false, "skip the confirmation prompt")
 	fs.Usage = func() {
@@ -1166,6 +1192,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, *name)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth tenant revoke: %v\n", err)

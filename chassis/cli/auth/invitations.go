@@ -18,6 +18,7 @@ func runInvitations(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	name := fs.String("name", defaultKeyName, fmt.Sprintf("signing key name under %s/keys/", HomePathPretty()))
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug to list invitations for (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -34,6 +35,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelectorName(*targetSel, url, name)
 	target, err := buildSignedTarget(*name, *url)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth invitations: %v\n", err)

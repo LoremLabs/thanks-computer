@@ -50,7 +50,7 @@ func TestLoadVersionFilesResolvesCASAndEncodesBinary(t *testing.T) {
 	ins("FILES/a.txt", "hello", sha256Hex("hello")) // inline text → raw
 	ins("FILES/empty", "", sha256Hex(""))           // genuinely empty → stays empty, NO CAS
 
-	got, err := c.loadVersionFiles(context.Background(), vid, true)
+	got, err := c.loadVersionFiles(context.Background(), vid, contentAll)
 	if err != nil {
 		t.Fatalf("loadVersionFiles: %v", err)
 	}
@@ -73,5 +73,52 @@ func TestLoadVersionFilesResolvesCASAndEncodesBinary(t *testing.T) {
 	// hit would ErrNotFound and fail loadVersionFiles. Reaching here = it was skipped.
 	if e := by["FILES/empty"]; e.Content != "" || e.Encoding != "" {
 		t.Errorf("empty = %q/%q, want empty/raw", e.Content, e.Encoding)
+	}
+}
+
+// contentOps resolves op/mock bodies (non-FILES/ paths) from the CAS but must
+// NOT touch FILES/ asset bytes — that asset fan-out is exactly the full-book R2
+// download the ops view was needlessly triggering per stack. The asset hash is
+// absent from mapStore, so any CAS read for it would ErrNotFound and fail the
+// call; reaching the assertions proves the asset was skipped.
+func TestLoadVersionFilesContentOpsSkipsAssets(t *testing.T) {
+	c := newTestController(t, config.Config{})
+	const txcl = "WHEN @x EMIT .y=1"
+	txclHash := sha256Hex(txcl)
+	// Only the op source is in the CAS; the asset's hash is deliberately absent.
+	c.fcas = &mapStore{m: map[string][]byte{txclHash: []byte(txcl)}}
+
+	const vid = 4343
+	ins := func(path, content, hash string) {
+		if _, err := c.pu.RuntimeDB.ExecContext(context.Background(),
+			`INSERT INTO stack_files (version_id, path, content, content_hash) VALUES (?,?,?,?)`,
+			vid, path, content, hash); err != nil {
+			t.Fatalf("insert %s: %v", path, err)
+		}
+	}
+	ins("0100_QUERY/query.txcl", "", txclHash)                        // op source, stripped → resolve from CAS
+	ins("FILES/_data/seq-692.md", "", sha256Hex("a-whole-book-here")) // asset, stripped → must be SKIPPED
+
+	got, err := c.loadVersionFiles(context.Background(), vid, contentOps)
+	if err != nil {
+		t.Fatalf("loadVersionFiles(contentOps): %v", err)
+	}
+	by := map[string]stackFile{}
+	for _, f := range got {
+		by[f.Path] = f
+	}
+	if op := by["0100_QUERY/query.txcl"]; op.Content != txcl {
+		t.Errorf("op txcl = %q, want %q (should resolve from CAS)", op.Content, txcl)
+	}
+	// Asset listed (path + hash) but body omitted; CAS never consulted.
+	asset, ok := by["FILES/_data/seq-692.md"]
+	if !ok {
+		t.Fatalf("asset row missing from listing")
+	}
+	if asset.Content != "" {
+		t.Errorf("asset content = %q, want empty (FILES/ skipped under contentOps)", asset.Content)
+	}
+	if asset.ContentHash == "" {
+		t.Errorf("asset content_hash dropped; want it listed for diff/etag")
 	}
 }

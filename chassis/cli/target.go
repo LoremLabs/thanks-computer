@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 
@@ -142,7 +143,24 @@ func (t ResolvedTarget) AsClientTarget() client.Target {
 // Signing credentials are attached by loadSigner — when the resolved
 // profile has a key the resulting Target.Auth signs every outgoing
 // request and basic-auth is ignored.
+// looksLikeURL reports whether a --target value is a raw admin endpoint rather
+// than a name. A scheme ("http://…") or a host:port ("localhost:8081") has a
+// ":"; a bare txco.yaml target / profile name ("staging", "cloud") does not.
+func looksLikeURL(v string) bool {
+	v = strings.TrimSpace(v)
+	return v != "" && strings.Contains(v, ":")
+}
+
 func resolveTarget(dir, targetName, addr, user, pass, profile string) client.Target {
+	// --target may be a raw admin URL rather than a NAME — treat it like an
+	// explicit --addr so `txco apply --target http://host:8081` works without a
+	// txco.yaml. A bare name ("staging"/"cloud") falls through to be resolved
+	// below as a txco.yaml target, else a profile.
+	if addr == "" && looksLikeURL(targetName) {
+		addr = targetName
+		targetName = ""
+	}
+
 	t := resolveFullTarget(dir, targetName)
 	target := t.AsClientTarget()
 
@@ -178,13 +196,21 @@ func resolveTarget(dir, targetName, addr, user, pass, profile string) client.Tar
 	// and an explicit --addr/TXCO_ADMIN_ADDR still win — so local dev inside a
 	// workspace is unaffected: its configured target overrides the active
 	// profile.
+	//   1. --target <name> as a PROFILE — a named chassis carries its own
+	//      chassis_url AND signing key (the git-remote feel: `txco apply cloud`).
+	//      Only when --profile wasn't given separately.
+	//   2. else the --profile / active profile's chassis_url.
+	signProfile := profile
 	if !explicitAddr && !t.ChassisExplicit {
-		if u := auth.ProfileChassisURL(profile); u != "" {
+		if u := auth.ProfileChassisURL(targetName); targetName != "" && profile == "" && u != "" {
+			target.Addr = u
+			signProfile = targetName
+		} else if u := auth.ProfileChassisURL(profile); u != "" {
 			target.Addr = u
 		}
 	}
 
-	if s := loadSigner(profile); s != nil {
+	if s := loadSigner(signProfile); s != nil {
 		target.Auth = s
 	}
 

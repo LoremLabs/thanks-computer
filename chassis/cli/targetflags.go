@@ -36,7 +36,8 @@ type targetFlags struct {
 func bindTargetFlags(fs *pflag.FlagSet) *targetFlags {
 	tf := &targetFlags{}
 	fs.StringVar(&tf.Target, "target", "", "target name from txco.yaml (default: the config's target, or dev)")
-	fs.StringVar(&tf.Addr, "addr", "", "chassis admin endpoint (overrides the target's chassis URL)")
+	fs.StringVar(&tf.Addr, "addr", "", "raw chassis admin URL (overrides the target's chassis URL)")
+	fs.StringVar(&tf.Addr, "url", "", "alias for --addr (raw chassis admin URL)")
 	fs.StringVar(&tf.User, "user", "", "basic auth user (overrides the target's user)")
 	fs.StringVar(&tf.Pass, "pass", "", "basic auth password (overrides the target's pass)")
 	fs.StringVar(&tf.Profile, "profile", "", fmt.Sprintf("signing profile (TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))

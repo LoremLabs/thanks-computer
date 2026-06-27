@@ -30,6 +30,7 @@ func runLogin(args []string, stdout, stderr io.Writer) int {
 	urlFlag := fs.String("url", "", "chassis admin endpoint (defaults to the meta file's chassis_url, or http://localhost:8081)")
 	tenant := fs.String("tenant", "", "tenant slug to scope the session to (defaults to TXCO_TENANT, then the meta's default_tenant, then \"default\")")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	noOpen := fs.Bool("no-open", false, "print the URL instead of opening it in a browser")
 	label := fs.String("label", "", "human-readable label for the session (shown in `auth sessions list`)")
 	fs.Usage = func() {
@@ -55,6 +56,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, urlFlag, profile)
 	resolvedProfile, err := ResolveProfile(*profile)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth login: %v", err)

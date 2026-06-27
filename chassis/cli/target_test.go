@@ -182,6 +182,54 @@ targets:
 	})
 }
 
+// TestResolveTargetNameOrURL covers the Phase 2 unification: --target accepts a
+// raw URL, OR a profile name (a "named chassis"), with a txco.yaml target of the
+// same name taking precedence.
+func TestResolveTargetNameOrURL(t *testing.T) {
+	for _, k := range []string{"TXCO_ADMIN_ADDR", "TXCO_ADMIN_USER", "TXCO_ADMIN_PASS"} {
+		t.Setenv(k, "")
+	}
+	home := t.TempDir()
+	t.Setenv("TXCO_HOME", home)
+	t.Setenv("TXCO_PROFILE", "")
+	// A profile named "cloud" with a bound chassis_url.
+	mp, err := auth.MetaPath("cloud")
+	if err != nil {
+		t.Fatalf("MetaPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(mp), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(mp,
+		[]byte(`{"actor_id":"a","key_id":"k","chassis_url":"https://cloud.example"}`), 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	// --target as a raw URL (scheme) → used as the endpoint.
+	if got := resolveTarget(t.TempDir(), "https://raw.example:8081", "", "", "", ""); got.Addr != "https://raw.example:8081" {
+		t.Errorf("--target URL: got %q, want https://raw.example:8081", got.Addr)
+	}
+	// --target as a host:port (no scheme) → also a URL.
+	if got := resolveTarget(t.TempDir(), "127.0.0.1:9999", "", "", "", ""); got.Addr != "127.0.0.1:9999" {
+		t.Errorf("--target host:port: got %q, want 127.0.0.1:9999", got.Addr)
+	}
+	// --target naming a PROFILE → that profile's chassis_url.
+	if got := resolveTarget(t.TempDir(), "cloud", "", "", "", ""); got.Addr != "https://cloud.example" {
+		t.Errorf("--target profile: got %q, want https://cloud.example", got.Addr)
+	}
+	// A txco.yaml target of the same name wins over the profile.
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "txco.yaml"),
+		[]byte("targets:\n  cloud:\n    chassis: http://from-yaml\n"), 0o644)
+	if got := resolveTarget(dir, "cloud", "", "", "", ""); got.Addr != "http://from-yaml" {
+		t.Errorf("txco.yaml target beats profile: got %q, want http://from-yaml", got.Addr)
+	}
+	// An unknown name (not a URL / txco.yaml target / profile) → localhost default.
+	if got := resolveTarget(t.TempDir(), "nope", "", "", "", ""); got.Addr != "http://localhost:8081" {
+		t.Errorf("unknown target: got %q, want localhost", got.Addr)
+	}
+}
+
 // TestResolveFullTargetMergesOps covers the operations-map merge: target
 // overrides win over top-level defaults; ops only in the default carry
 // through; ops only in the override are added.

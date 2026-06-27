@@ -26,6 +26,7 @@ func runRevokeActor(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	name := fs.String("name", defaultKeyName, fmt.Sprintf("signing key name under %s/keys/", HomePathPretty()))
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug the actor belongs to (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
 	actorIDFlag := fs.String("actor-id", "", "actor id to revoke (required; or pass as positional arg)")
 	iAmSure := fs.Bool("i-am-sure", false, "confirm self-revoke (otherwise refused to prevent bricking the active key)")
@@ -57,6 +58,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelectorName(*targetSel, url, name)
 	target, err := buildSignedTarget(*name, *url)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth revoke-actor: %v\n", err)

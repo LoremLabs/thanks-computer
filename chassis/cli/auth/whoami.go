@@ -23,6 +23,7 @@ func runWhoami(args []string, stdout, stderr io.Writer) int {
 	addrFlag := fs.String("addr", "", "alias of --url (the chassis admin endpoint, matching the workspace commands)")
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -47,6 +48,17 @@ Flags:
 	if profileFlag == "" {
 		profileFlag = *name
 	}
+	// --addr is an alias of --url so the endpoint flag spells the same as the
+	// workspace commands (esp. for the top-level `txco whoami`). --addr wins
+	// when both are set.
+	endpoint := *urlFlag
+	if *addrFlag != "" {
+		endpoint = *addrFlag
+	}
+	// --target is the canonical selector: a profile name → the profile, a raw
+	// URL → the endpoint (each only when not already set explicitly).
+	applyTargetSelector(*targetSel, &endpoint, &profileFlag)
+
 	resolvedProfile, err := ResolveProfile(profileFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth whoami: %v\n", err)
@@ -57,14 +69,6 @@ Flags:
 		// report source=open. Tells the user "you're currently
 		// not signing" in the same shape as any other whoami.
 		resolvedProfile = ""
-	}
-
-	// --addr is an alias of --url so the endpoint flag spells the same as the
-	// workspace commands (esp. for the top-level `txco whoami`). --addr wins
-	// when both are set.
-	endpoint := *urlFlag
-	if *addrFlag != "" {
-		endpoint = *addrFlag
 	}
 
 	target, err := buildSignedTarget(resolvedProfile, endpoint)

@@ -827,7 +827,9 @@ func (c *Controller) handleListVersions(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleGetVersion: GET /v1/tenants/{t}/stacks/{name}/versions/{n}
-// Query: ?include=content to inline file contents.
+// Query: ?include=content inlines every file body (txco pull / editor);
+// ?include=ops inlines only op/mock bodies and skips FILES/ assets (the ops
+// view, which never renders assets — avoids a full-book R2 fan-out per stack).
 func (c *Controller) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 	if err := policy.RequireCapability(r.Context(), "opstack:*:read"); err != nil {
 		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
@@ -884,8 +886,14 @@ func (c *Controller) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	v.IsActive = activeVersionID.Valid && activeVersionID.Int64 == vID
 
-	includeContent := r.URL.Query().Get("include") == "content"
-	files, err := c.loadVersionFiles(r.Context(), vID, includeContent)
+	mode := contentNone
+	switch r.URL.Query().Get("include") {
+	case "content":
+		mode = contentAll
+	case "ops":
+		mode = contentOps
+	}
+	files, err := c.loadVersionFiles(r.Context(), vID, mode)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "file_load_failed", map[string]any{"err": err.Error()})
 		return
@@ -983,7 +991,38 @@ func (c *Controller) handleCatFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, includeContent bool) ([]stackFile, error) {
+// contentMode selects which file bodies loadVersionFiles resolves. Asset bytes
+// live in the content-addressed store (R2 in prod), so resolving them is a
+// network fetch per file. The ops view renders only txcl + mock JSON and ignores
+// every FILES/ asset, so it must NOT force a full-book download per stack — that
+// fan-out (one GET per asset × every stack) is what saturates the connection pool
+// and turns client-cancelled requests into file_load_failed 500s.
+//
+//	contentNone — list paths + hashes only (no CAS reads)
+//	contentOps  — resolve op/mock bodies (non-FILES/ paths); skip FILES/ assets
+//	contentAll  — resolve every file body (txco pull / editor / validate)
+type contentMode int
+
+const (
+	contentNone contentMode = iota
+	contentOps
+	contentAll
+)
+
+// wantsBytes reports whether path's body should be resolved under this mode.
+// Op/mock sources are stored without a FILES/ prefix; runtime assets carry it.
+func (m contentMode) wantsBytes(path string) bool {
+	switch m {
+	case contentAll:
+		return true
+	case contentOps:
+		return !strings.HasPrefix(path, "FILES/")
+	default:
+		return false
+	}
+}
+
+func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, mode contentMode) ([]stackFile, error) {
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
 		`SELECT path, content, content_hash FROM stack_files
 		  WHERE version_id = ? ORDER BY path`, versionID)
@@ -1003,7 +1042,7 @@ func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, incl
 			// Backfilled rows have empty hashes; compute lazily.
 			f.ContentHash = sha256Hex(content)
 		}
-		if includeContent {
+		if mode.wantsBytes(f.Path) {
 			// A materialised version strips the content column — the bytes live in the
 			// filecas (a 0-byte stub here is why `txco pull` wrote empty files). Resolve
 			// them from the CAS, like handleCatFile. An empty hash is a genuinely-empty
@@ -2013,7 +2052,7 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	files, err := c.loadVersionFiles(r.Context(), versionID, true)
+	files, err := c.loadVersionFiles(r.Context(), versionID, contentAll)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "file_load_failed", map[string]any{"err": err.Error()})
 		return

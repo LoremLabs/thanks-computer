@@ -53,6 +53,7 @@ func runSessionsList(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	urlFlag := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -63,6 +64,7 @@ func runSessionsList(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, urlFlag, profile)
 	target, err := resolveSignedTenantTarget(*profile, *urlFlag, *tenant)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth sessions list: %v", err)
@@ -97,6 +99,7 @@ func runSessionsRevoke(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	urlFlag := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
@@ -117,6 +120,7 @@ func runSessionsRevoke(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, urlFlag, profile)
 	target, err := resolveSignedTenantTarget(*profile, *urlFlag, *tenant)
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth sessions revoke: %v", err)

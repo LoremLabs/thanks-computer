@@ -116,6 +116,7 @@ func runSecretsSet(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	desc := fs.String("description", "", "operator-visible description")
@@ -136,6 +137,7 @@ func runSecretsSet(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets set: %v", err)
@@ -193,6 +195,7 @@ func runSecretsGenerate(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	desc := fs.String("description", "", "operator-visible description")
@@ -209,6 +212,7 @@ func runSecretsGenerate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets generate: %v", err)
@@ -250,6 +254,7 @@ func runSecretsRotate(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	generate := fs.Bool("generate", false, "mint a random value instead of prompting (prints once)")
@@ -267,6 +272,7 @@ func runSecretsRotate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets rotate: %v", err)
@@ -319,10 +325,12 @@ func runSecretsList(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets list: %v", err)
@@ -364,6 +372,7 @@ func runSecretsShow(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	if err := fs.Parse(args); err != nil {
@@ -378,6 +387,7 @@ func runSecretsShow(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets show: %v", err)
@@ -416,6 +426,7 @@ func runSecretsDescribe(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	newDesc := fs.String("set", "", "new description text (required)")
@@ -445,6 +456,7 @@ func runSecretsDescribe(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets describe: %v", err)
@@ -475,6 +487,7 @@ func runSecretsRevoke(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
@@ -490,6 +503,7 @@ func runSecretsRevoke(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	applyTargetSelector(*targetSel, url, profile)
 	resolvedProfile, err := resolveProfileForTenant(*profile, "")
 	if err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets revoke: %v", err)

@@ -18,6 +18,7 @@ func runRevoke(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	name := fs.String("name", defaultKeyName, "key name to authenticate with")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
 	keyID := fs.String("key-id", "", "key id to revoke (required)")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
@@ -40,6 +41,7 @@ Flags:
 		return 2
 	}
 
+	applyTargetSelectorName(*targetSel, url, name)
 	target, err := buildSignedTarget(*name, *url)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth revoke-key: %v\n", err)
