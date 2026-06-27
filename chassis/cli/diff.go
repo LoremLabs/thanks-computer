@@ -43,7 +43,11 @@ Flags:
 		return 2
 	}
 
-	dir, err := workspaceDir(fs.Arg(0))
+	dirArg, targetArg := splitDirTarget(fs.Args())
+	if targetArg != "" && tf.Target == "" {
+		tf.Target = targetArg
+	}
+	dir, err := workspaceDir(dirArg)
 	if err != nil {
 		fmt.Fprintf(stderr, "diff: resolve dir: %v\n", err)
 		return 1

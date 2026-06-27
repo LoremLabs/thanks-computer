@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/spf13/pflag"
 
@@ -44,6 +46,45 @@ func bindTargetFlags(fs *pflag.FlagSet) *targetFlags {
 	fs.StringVar(&tf.Tenant, "tenant", "", "tenant slug (TXCO_TENANT, then meta's default_tenant, then \"default\")")
 	fs.BoolVar(&tf.Yes, "yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	return tf
+}
+
+// isWorkspacePathArg reports whether a positional names a filesystem path (a
+// workspace dir) rather than a target name. True for path-like spellings
+// (".", "..", "./x", "../x", "/x", "~…", anything containing "/") or an existing
+// directory. A bare token that is NOT a directory is taken as a target name — a
+// form that previously just errored as a missing dir, so reading it as a target
+// is purely additive (never changes a command that works today).
+func isWorkspacePathArg(s string) bool {
+	if s == "" {
+		return false
+	}
+	if s == "." || s == ".." ||
+		strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") ||
+		strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") ||
+		strings.ContainsRune(s, '/') {
+		return true
+	}
+	if fi, err := os.Stat(s); err == nil && fi.IsDir() {
+		return true
+	}
+	return false
+}
+
+// splitDirTarget classifies positional args into an optional workspace dir and
+// an optional target name (see isWorkspacePathArg). The first of each kind wins;
+// either may be "". This lets `txco apply staging` (target), the historical
+// `txco apply ./sub` (dir), and `txco apply ./sub staging` (both) all work.
+func splitDirTarget(args []string) (dir, target string) {
+	for _, a := range args {
+		if isWorkspacePathArg(a) {
+			if dir == "" {
+				dir = a
+			}
+		} else if target == "" {
+			target = a
+		}
+	}
+	return dir, target
 }
 
 // workspaceDir resolves the workspace directory for a command: the explicit

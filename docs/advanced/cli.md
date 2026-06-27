@@ -1,10 +1,41 @@
 # CLI — The `txco` command
 
 _The complete command surface, grouped by what you're doing. Every
-command supports `--help` for full flags; common deploy flags
-(`--target`, `--tenant`, `--json`) repeat across the family._
+command supports `--help` for full flags. The chassis selector `--target`
+(see [Selecting a chassis](#selecting-a-chassis---target)) plus `--tenant` /
+`--json` repeat across the family._
 
 <img width="625" height="630" alt="image" src="https://github.com/user-attachments/assets/a1355625-98a4-461d-a446-d43688f14b2f" />
+
+## Selecting a chassis (`--target`)
+
+Every command that talks to a chassis takes **`--target`** — the single flag for
+*which chassis*. It accepts, highest precedence first:
+
+1. a **workspace target** from `txco.yaml` (`targets:` — also carries that env's ops / mock policy)
+2. a **profile** name — a "named chassis" carrying its own `chassis_url` **and** signing key
+3. a **raw admin URL** (`--target https://host:8081`)
+
+```sh
+txco apply cloud                          # a profile (or txco.yaml target) named "cloud"
+txco status --target staging
+txco auth tenant secrets set OPENAI_KEY --target dev
+txco apply --target https://chassis:8081  # a raw URL works too
+```
+
+`--url` / `--addr` (raw URL) and `--profile` (signing identity) still work as
+lower-level overrides — `--target` is just the one spelling unified across the
+deploy and `auth` / `tenant` families. With `--target` omitted, the active
+profile (after `txco login`) supplies the default; otherwise it's
+`http://localhost:8081`.
+
+### Write-guard
+
+A command that **mutates** a **non-local** chassis first prints the resolved
+target and asks to confirm — `--yes` skips it, and a non-interactive shell
+without `--yes` fails closed. So a stray `secrets set` / `hostnames add` can't
+silently land on prod. Local chassis (localhost / loopback / `*.localhost`)
+never prompt.
 
 ## Run & develop
 

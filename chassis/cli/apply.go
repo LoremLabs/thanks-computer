@@ -184,9 +184,16 @@ Flags:
 		_ = os.Setenv("TXCO_VERBOSE", "1")
 	}
 
+	// Positionals are a workspace dir and/or a target name: a path-like or
+	// existing-directory arg is the dir; a bare non-directory token is the
+	// target (so `txco apply staging` works). An explicit --target wins.
+	dirArg, targetArg := splitDirTarget(fs.Args())
+	if targetArg != "" && opts.Target == "" {
+		opts.Target = targetArg
+	}
 	// workspaceDir resolves <dir> (or cwd) then walks up to the OPS/ root so
 	// `txco apply` works from anywhere in the tree.
-	dir, err := workspaceDir(fs.Arg(0))
+	dir, err := workspaceDir(dirArg)
 	if err != nil {
 		fmt.Fprintf(stderr, "apply: resolve dir: %v\n", err)
 		return 1
@@ -258,7 +265,13 @@ Flags:
 	}
 	stack := fs.Arg(0)
 
-	dir, err := workspaceDir(fs.Arg(1))
+	// After the required <stack>, remaining positionals are a workspace dir
+	// and/or a target name (`txco push api staging`). An explicit --target wins.
+	dirArg, targetArg := splitDirTarget(fs.Args()[1:])
+	if targetArg != "" && opts.Target == "" {
+		opts.Target = targetArg
+	}
+	dir, err := workspaceDir(dirArg)
 	if err != nil {
 		fmt.Fprintf(stderr, "push: resolve dir: %v\n", err)
 		return 1
