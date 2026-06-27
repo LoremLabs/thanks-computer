@@ -160,7 +160,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco apply [flags] [<dir>]
+Usage: txco apply [flags] [<dir>] [<target>]
 
 Walk <dir>/OPS/ for *.txcl operation files, resolve any "op://NAME" references
 using the selected target's operations map, validate each, and push the bundle to
@@ -171,7 +171,8 @@ Deploys CODE only — operations and FILES/. A stack's VECTORS/+KV/ store-seed
 packs are carried forward untouched; deploy them with `+"`txco data apply`"+` (data
 is opt-in, so a checkout without the data packs still deploys fine).
 
-<dir> defaults to ".".
+<dir> defaults to "."; a bare <target> (e.g. "staging", or a profile name)
+selects the chassis. A path-like arg or an existing directory is the <dir>.
 
 Flags:
 `)
@@ -226,7 +227,7 @@ Flags:
 // `txco push api` deploys byte-identically to what `txco apply` would do for
 // the api stack. `txco draft <stack>` stages without activating.
 //
-//	txco push <stack> [<dir>]
+//	txco push <stack> [<dir>] [<target>]
 func runPush(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("push", pflag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -240,7 +241,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco push <stack> [<dir>]
+Usage: txco push <stack> [<dir>] [<target>]
 
 Deploy a single stack — the inverse of `+"`txco pull <stack>`"+`. Builds
 OPS/<stack>/ (resolving op:// refs + colocated computes), validates, and
@@ -260,7 +261,7 @@ Flags:
 		_ = os.Setenv("TXCO_VERBOSE", "1")
 	}
 	if fs.NArg() < 1 {
-		fmt.Fprint(stderr, "push: missing <stack> argument\n\nUsage: txco push <stack> [<dir>]\n")
+		fmt.Fprint(stderr, "push: missing <stack> argument\n\nUsage: txco push <stack> [<dir>] [<target>]\n")
 		return 2
 	}
 	stack := fs.Arg(0)

@@ -30,7 +30,7 @@ func runDiff(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco diff [flags] [<dir>]
+Usage: txco diff [flags] [<dir>] [<target>]
 
 Compare local <dir>/OPS/ against a chassis admin endpoint. Reports rules
 that would be added or changed by 'txco apply'. <dir> defaults to ".".

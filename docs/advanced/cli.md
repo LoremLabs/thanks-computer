@@ -23,6 +23,12 @@ txco auth tenant secrets set OPENAI_KEY --target dev
 txco apply --target https://chassis:8081  # a raw URL works too
 ```
 
+On the deploy verbs (`apply`, `push`, `status`, `diff`) the target may also be a
+**bare positional** — `txco apply staging`. A path-like arg (`.`, `./x`, `/x`, or
+anything containing `/`) or an existing directory is taken as the workspace dir
+instead, so `txco apply ./sub staging` sets both. (`txco push` takes the stack
+first: `txco push api staging`.)
+
 `--url` / `--addr` (raw URL) and `--profile` (signing identity) still work as
 lower-level overrides — `--target` is just the one spelling unified across the
 deploy and `auth` / `tenant` families. With `--target` omitted, the active

@@ -26,7 +26,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
-Usage: txco status [flags] [<dir>]
+Usage: txco status [flags] [<dir>] [<target>]
 
 Print per-stack version drift between the local workspace and the
 chassis. Shows whether each stack is in-sync, ahead/behind, or
