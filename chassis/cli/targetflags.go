@@ -19,6 +19,10 @@ type targetFlags struct {
 	Pass    string
 	Profile string
 	Tenant  string
+	// Yes skips the confirmation prompt a mutating command shows before it
+	// writes to a NON-local chassis (see confirmMutation / auth.ConfirmTarget).
+	// Harmless on read-only commands (diff/status) that never confirm.
+	Yes bool
 }
 
 // bindTargetFlags registers the standard chassis-target flags on fs and returns
@@ -37,6 +41,7 @@ func bindTargetFlags(fs *pflag.FlagSet) *targetFlags {
 	fs.StringVar(&tf.Pass, "pass", "", "basic auth password (overrides the target's pass)")
 	fs.StringVar(&tf.Profile, "profile", "", fmt.Sprintf("signing profile (TXCO_PROFILE, then %s/active, then \"local\")", auth.HomePathPretty()))
 	fs.StringVar(&tf.Tenant, "tenant", "", "tenant slug (TXCO_TENANT, then meta's default_tenant, then \"default\")")
+	fs.BoolVar(&tf.Yes, "yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	return tf
 }
 

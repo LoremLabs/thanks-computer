@@ -774,6 +774,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	filecasDir := filepath.Join(devDir, "filecas")
 	feedDir := filepath.Join(devDir, "feed")
 	secretKeyPath := filepath.Join(devDir, "secrets", "txco-master.key")
+	vectorDBPath := filepath.Join(devDir, "vector", "vector.db")
 
 	// Hard-coded path overrides: workspace-scoped state has to land
 	// under .txco/dev/, otherwise chassis defaults would litter the
@@ -793,6 +794,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		"TXCO_FILECAS_STORE_FILE_DIR=" + filecasDir,
 		"TXCO_FEED_SOURCE_FILE_DIR=" + feedDir,
 		"TXCO_SECRET_MASTER_KEY=" + secretKeyPath,
+		"TXCO_VECTOR_DB_PATH=" + vectorDBPath,
 	}
 
 	// Personality set. We pin it to cron+web+admin and add the heavier

@@ -29,6 +29,7 @@ func runRevokeActor(args []string, stdout, stderr io.Writer) int {
 	tenant := fs.String("tenant", "", "tenant slug the actor belongs to (defaults to TXCO_TENANT, then meta's default_tenant, then \"default\")")
 	actorIDFlag := fs.String("actor-id", "", "actor id to revoke (required; or pass as positional arg)")
 	iAmSure := fs.Bool("i-am-sure", false, "confirm self-revoke (otherwise refused to prevent bricking the active key)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -66,6 +67,10 @@ Flags:
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, *name)
+	if err := ConfirmTargetStd(*name, target.Addr, *yes, false, stderr); err != nil {
+		fmt.Fprintf(stderr, "auth revoke-actor: %v\n", err)
+		return 1
+	}
 
 	ctx := context.Background()
 	c := client.New(target)

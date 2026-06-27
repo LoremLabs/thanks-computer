@@ -104,6 +104,15 @@ func (f vectorFlags) clientWithTimeout(d time.Duration) *client.Client {
 	return client.NewWithTimeout(t, d)
 }
 
+// confirm guards a mutating data command: shows the target and prompts (or
+// fails closed) before modifying a non-local chassis, unless assumeYes. See
+// confirmMutation.
+func (f vectorFlags) confirm(assumeYes bool, stderr io.Writer) error {
+	resolved := resolveFullTarget(".", *f.target)
+	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
+	return confirmMutation(resolved.Name, t.Addr, assumeYes, *f.jsonOut, stderr)
+}
+
 // --- ls ---------------------------------------------------------------
 
 func runVectorLs(args []string, stdout, stderr io.Writer) int {
@@ -332,6 +341,7 @@ func runDataApply(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	f := registerVectorFlags(fs)
 	timeout := fs.Duration("timeout", 5*time.Minute, "per-request timeout (raise for large packs)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -368,6 +378,10 @@ Flags:
 		return 1
 	}
 
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "data apply: %v\n", err)
+		return 1
+	}
 	c := f.clientWithTimeout(*timeout)
 	ctx := context.Background()
 

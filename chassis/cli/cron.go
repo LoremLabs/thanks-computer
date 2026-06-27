@@ -69,6 +69,14 @@ func (f cronFlags) client() *client.Client {
 	return client.New(t)
 }
 
+// confirm guards a mutating cron command: shows the target and prompts (or
+// fails closed) before modifying a non-local chassis, unless assumeYes.
+func (f cronFlags) confirm(assumeYes bool, stderr io.Writer) error {
+	resolved := resolveFullTarget(".", *f.target)
+	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
+	return confirmMutation(resolved.Name, t.Addr, assumeYes, false, stderr)
+}
+
 // cliCronConfigDTO mirrors the admin cronConfigDTO.
 type cliCronConfigDTO struct {
 	Timezone   string `json:"timezone"`
@@ -116,6 +124,7 @@ func runCronConfigSet(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	tzFlag := fs.String("timezone", "", `IANA timezone (e.g. Asia/Tokyo); empty clears → UTC`)
 	f := registerCronFlags(fs)
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco cron config set timezone <IANA zone>\n   or: txco cron config set --timezone <IANA zone>\n\nFlags:\n")
@@ -144,6 +153,10 @@ func runCronConfigSet(args []string, stdout, stderr io.Writer) int {
 	}
 
 	req := map[string]string{"timezone": strings.TrimSpace(tz)}
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "cron config set: %v\n", err)
+		return 1
+	}
 	var dto cliCronConfigDTO
 	if err := f.client().DoScoped(context.Background(), "PUT", "/cron/config", req, &dto); err != nil {
 		fmt.Fprintf(stderr, "cron config set: %v\n", err)

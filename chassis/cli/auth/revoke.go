@@ -19,6 +19,7 @@ func runRevoke(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", "", "chassis admin endpoint (defaults to meta's chassis_url)")
 	name := fs.String("name", defaultKeyName, "key name to authenticate with")
 	keyID := fs.String("key-id", "", "key id to revoke (required)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -46,6 +47,11 @@ Flags:
 	}
 	if target.Auth == nil {
 		fmt.Fprintln(stderr, "auth revoke-key: no signing key configured; revoke requires authentication")
+		return 1
+	}
+
+	if err := ConfirmTargetStd(*name, target.Addr, *yes, false, stderr); err != nil {
+		fmt.Fprintf(stderr, "auth revoke-key: %v\n", err)
 		return 1
 	}
 

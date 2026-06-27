@@ -98,6 +98,7 @@ func runSessionsRevoke(args []string, stdout, stderr io.Writer) int {
 	urlFlag := fs.String("url", "", "chassis admin endpoint")
 	profile := fs.String("profile", "", "profile name")
 	tenant := fs.String("tenant", "", "tenant slug")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco auth sessions revoke <session_id> [flags]\n\nFlags:\n")
@@ -118,6 +119,10 @@ func runSessionsRevoke(args []string, stdout, stderr io.Writer) int {
 
 	target, err := resolveSignedTenantTarget(*profile, *urlFlag, *tenant)
 	if err != nil {
+		PrintCLIErrorf(stderr, "auth sessions revoke: %v", err)
+		return 1
+	}
+	if err := ConfirmTargetStd(*profile, target.Addr, *yes, false, stderr); err != nil {
 		PrintCLIErrorf(stderr, "auth sessions revoke: %v", err)
 		return 1
 	}

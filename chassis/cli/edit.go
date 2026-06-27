@@ -70,6 +70,10 @@ Flags:
 		fmt.Fprintf(stderr, "edit: resolve dir: %v\n", err)
 		return 1
 	}
+	if err := confirmMutationTF(dir, tf, false, stderr); err != nil {
+		auth.PrintCLIErrorf(stderr, "edit: %v", err)
+		return 1
+	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
 	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)

@@ -119,6 +119,7 @@ func runAdminTenantSuspend(args []string, stdout, stderr io.Writer) int {
 	user := fs.String("user", "", "basic-auth user")
 	pass := fs.String("pass", "", "basic-auth password")
 	profile := fs.String("profile", "", "signing profile (defaults to the active profile)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -144,6 +145,10 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
+	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+		auth.PrintCLIErrorf(stderr, "admin tenant suspend: %v", err)
+		return 1
+	}
 	st, err := client.New(clientTarget).SuspendTenant(context.Background(), slug,
 		client.SuspendTenantRequest{DenyStatus: *status, DenyReason: *reason})
 	if err != nil {
@@ -243,6 +248,7 @@ func runAdminTenantResume(args []string, stdout, stderr io.Writer) int {
 	user := fs.String("user", "", "basic-auth user")
 	pass := fs.String("pass", "", "basic-auth password")
 	profile := fs.String("profile", "", "signing profile (defaults to the active profile)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -268,6 +274,10 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
+	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+		auth.PrintCLIErrorf(stderr, "admin tenant resume: %v", err)
+		return 1
+	}
 	st, err := client.New(clientTarget).ResumeTenant(context.Background(), slug)
 	if err != nil {
 		auth.PrintCLIError(stderr, requestErrorMessage("admin tenant resume", clientTarget, *profile, err))
@@ -290,6 +300,7 @@ func runAdminTenantLimits(args []string, stdout, stderr io.Writer) int {
 	user := fs.String("user", "", "basic-auth user")
 	pass := fs.String("pass", "", "basic-auth password")
 	profile := fs.String("profile", "", "signing profile (defaults to the active profile)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -339,6 +350,10 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
+	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+		auth.PrintCLIErrorf(stderr, "admin tenant limits: %v", err)
+		return 1
+	}
 	st, err := client.New(clientTarget).SetTenantLimits(context.Background(), slug, req)
 	if err != nil {
 		auth.PrintCLIError(stderr, requestErrorMessage("admin tenant limits", clientTarget, *profile, err))
@@ -404,6 +419,7 @@ func runAdminResync(args []string, stdout, stderr io.Writer) int {
 	pass := fs.String("pass", "", "basic-auth password")
 	profile := fs.String("profile", "", "signing profile (defaults to the active profile)")
 	timeout := fs.Duration("timeout", 5*time.Minute, "max time to wait for the resync to commit server-side; resync re-emits ALL of a tenant's state (one artifact upload per stack), so a large tenant needs minutes")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -436,6 +452,10 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
+	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+		auth.PrintCLIErrorf(stderr, "admin resync: %v", err)
+		return 1
+	}
 	c := client.NewWithTimeout(clientTarget, *timeout)
 	resp, err := c.FleetResync(context.Background(), client.FleetResyncRequest{TenantSlug: *tenant})
 	if err != nil {

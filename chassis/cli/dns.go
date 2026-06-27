@@ -93,6 +93,14 @@ func (f dnsFlags) client() *client.Client {
 	return client.New(t)
 }
 
+// confirm guards a mutating dns command: shows the target and prompts (or
+// fails closed) before modifying a non-local chassis, unless assumeYes.
+func (f dnsFlags) confirm(assumeYes bool, stderr io.Writer) error {
+	resolved := resolveFullTarget(".", *f.target)
+	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
+	return confirmMutation(resolved.Name, t.Addr, assumeYes, false, stderr)
+}
+
 // parsePositional parses args, then (if a leading positional is present)
 // re-parses the remaining args so flags may follow the positional —
 // e.g. `zone create ops.example.com --mode manual`.
@@ -172,6 +180,7 @@ func runDNSZoneCreate(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	f := registerDNSFlags(fs)
 	mode := fs.String("mode", "", "zone mode: pattern (default, synthesized) | manual (materialized-only)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco dns zone create [flags] <origin>\n\nFlags:\n")
@@ -184,6 +193,10 @@ func runDNSZoneCreate(args []string, stdout, stderr io.Writer) int {
 	if origin == "" {
 		fmt.Fprintln(stderr, "dns zone create: <origin> is required (e.g. ops.example.com)")
 		return 2
+	}
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "dns zone create: %v\n", err)
+		return 1
 	}
 	res, err := f.client().CreateZone(context.Background(), origin, strings.TrimSpace(*mode))
 	if err != nil {
@@ -254,6 +267,7 @@ func runDNSZoneDelete(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("dns zone delete", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	f := registerDNSFlags(fs)
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco dns zone delete [flags] <origin>\n\nFlags:\n")
@@ -266,6 +280,10 @@ func runDNSZoneDelete(args []string, stdout, stderr io.Writer) int {
 	if origin == "" {
 		fmt.Fprintln(stderr, "dns zone delete: <origin> is required")
 		return 2
+	}
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "dns zone delete: %v\n", err)
+		return 1
 	}
 	if err := f.client().RevokeZone(context.Background(), origin); err != nil {
 		fmt.Fprintf(stderr, "dns zone delete: %v\n", err)
@@ -331,6 +349,7 @@ func runDNSConfigSet(args []string, stdout, stderr io.Writer) int {
 	mx := fs.String("mx", "", "mail exchanger hostname (the LMTP head's public name)")
 	mxpri := fs.Int("mx-priority", 10, "MX preference value")
 	ttl := fs.Int("ttl", 60, "synthesized record TTL in seconds")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco dns config set [flags]\n\nOnly the flags you pass are changed. Flags:\n")
@@ -365,6 +384,10 @@ func runDNSConfigSet(args []string, stdout, stderr io.Writer) int {
 	if set["ttl"] {
 		v := *ttl
 		patch.TTL = &v
+	}
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "dns config set: %v\n", err)
+		return 1
 	}
 	cfg, err := f.client().PutDNSConfig(context.Background(), patch)
 	if err != nil {
@@ -404,6 +427,7 @@ func runDNSRecordAdd(args []string, stdout, stderr io.Writer) int {
 	rtype := fs.String("type", "", "record type: NS|A|AAAA|MX|TXT")
 	rdata := fs.String("rdata", "", "record data in zone-file form (e.g. '10 mail.example.com.' for MX)")
 	ttl := fs.Int64("ttl", -1, "record TTL in seconds (default: inherit zone default)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco dns record add [flags] <origin> --type <T> --rdata <V>\n\nFlags:\n")
@@ -416,6 +440,10 @@ func runDNSRecordAdd(args []string, stdout, stderr io.Writer) int {
 	if origin == "" || strings.TrimSpace(*rtype) == "" || strings.TrimSpace(*rdata) == "" {
 		fmt.Fprintln(stderr, "dns record add: <origin>, --type and --rdata are required")
 		return 2
+	}
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "dns record add: %v\n", err)
+		return 1
 	}
 	if err := f.client().CreateRecord(context.Background(), origin, *name, *rtype, *ttl, *rdata); err != nil {
 		fmt.Fprintf(stderr, "dns record add: %v\n", err)
@@ -465,6 +493,7 @@ func runDNSRecordRm(args []string, stdout, stderr io.Writer) int {
 	f := registerDNSFlags(fs)
 	name := fs.String("name", "@", "record name (relative label, or @ for apex)")
 	rtype := fs.String("type", "", "record type: NS|A|AAAA|MX|TXT")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, "\nUsage: txco dns record rm [flags] <origin> --type <T>\n\nFlags:\n")
@@ -477,6 +506,10 @@ func runDNSRecordRm(args []string, stdout, stderr io.Writer) int {
 	if origin == "" || strings.TrimSpace(*rtype) == "" {
 		fmt.Fprintln(stderr, "dns record rm: <origin> and --type are required")
 		return 2
+	}
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "dns record rm: %v\n", err)
+		return 1
 	}
 	if err := f.client().RevokeRecord(context.Background(), origin, *name, *rtype); err != nil {
 		fmt.Fprintf(stderr, "dns record rm: %v\n", err)

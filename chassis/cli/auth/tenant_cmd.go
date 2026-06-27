@@ -174,6 +174,7 @@ func runTenantCreate(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
 	displayName := fs.String("display-name", "", "human-readable name for the tenant")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -222,6 +223,10 @@ Flags:
 	}
 	if target.Auth == nil {
 		fmt.Fprintln(stderr, "auth tenant create: no signing key configured; creating a tenant requires super_admin authentication")
+		return 1
+	}
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant create: %v", err)
 		return 1
 	}
 	t, err := client.New(target).CreateTenant(context.Background(), client.CreateTenantRequest{
@@ -387,6 +392,7 @@ func runTenantGrant(args []string, stdout, stderr io.Writer) int {
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
 	tenant := fs.String("tenant", "", "tenant slug to grant in")
 	caps := fs.String("caps", "", "comma-separated capabilities (e.g. \"opstack:*:read,actor:*:read\")")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -449,6 +455,10 @@ Flags:
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant grant: %v", err)
+		return 1
+	}
 
 	m, err := client.New(target).GrantMember(context.Background(), client.GrantMemberRequest{
 		ActorID:      actorID,
@@ -597,6 +607,7 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 	tenant := fs.String("tenant", "", "tenant slug to claim the hostname in")
 	stack := fs.String("stack", "", "stack within the tenant the hostname routes to")
 	mint := fs.Bool("mint", false, "mint a structured (auto-generated) hostname for --stack instead of claiming a given one (verified + DKIM, no DNS setup)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -625,6 +636,10 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+		if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+			PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
+			return 1
+		}
 		res, err := client.New(target).MintHostname(context.Background(), strings.TrimSpace(*stack))
 		if err != nil {
 			PrintCLIErrorf(stderr, "auth tenant hostnames add --mint: %v", err)
@@ -668,6 +683,10 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant hostnames add: %v", err)
+		return 1
+	}
 
 	cli := client.New(target)
 	h, err := cli.AddHostname(context.Background(), client.AddHostnameRequest{
@@ -764,6 +783,7 @@ func runHostnamesAttach(args []string, stdout, stderr io.Writer) int {
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
 	tenant := fs.String("tenant", "", "tenant slug owning the hostname")
 	stack := fs.String("stack", "", "stack the hostname should route to (required)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -795,6 +815,10 @@ func runHostnamesAttach(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant hostnames attach: %v", err)
+		return 1
+	}
 
 	h, err := client.New(target).AttachHostname(context.Background(), hostname, strings.TrimSpace(*stack))
 	if err != nil {
@@ -941,6 +965,7 @@ func runHostnamesRemove(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", fmt.Sprintf("profile name (defaults to TXCO_PROFILE, then %s/active, then \"local\")", HomePathPretty()))
 	name := fs.String("name", "", "alias for --profile (kept for back-compat)")
 	tenant := fs.String("tenant", "", "tenant slug owning the hostname")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -968,6 +993,10 @@ func runHostnamesRemove(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant hostnames remove: %v", err)
+		return 1
+	}
 
 	if err := client.New(target).RemoveHostname(context.Background(), hostname); err != nil {
 		PrintCLIErrorf(stderr, "auth tenant hostnames remove: %v", err)
@@ -1152,6 +1181,7 @@ Flags:
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	fmt.Fprintf(stderr, "→ %s (%s)\n", resolvedProfile, target.Addr)
 
 	if !*force {
 		fmt.Fprintf(stderr, "revoke %s's membership in tenant %s? [y/N]: ", actorID, target.Tenant)

@@ -386,6 +386,10 @@ Flags:
 		return 1
 	}
 
+	if err := confirmMutationTF(dir, tf, false, stderr); err != nil {
+		fmt.Fprintf(stderr, "draft: %v\n", err)
+		return 1
+	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
 	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
@@ -510,6 +514,10 @@ Flags:
 		fmt.Fprintf(stderr, "activate: resolve dir: %v\n", err)
 		return 1
 	}
+	if err := confirmMutationTF(dir, tf, false, stderr); err != nil {
+		fmt.Fprintf(stderr, "activate: %v\n", err)
+		return 1
+	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
 	clientTarget.Tenant = resolveTenant(tf.Tenant, tf.Profile)
 	c := client.New(clientTarget)
@@ -596,6 +604,10 @@ Flags:
 	dir, err := workspaceDir("")
 	if err != nil {
 		fmt.Fprintf(stderr, "deactivate: resolve dir: %v\n", err)
+		return 1
+	}
+	if err := confirmMutationTF(dir, tf, false, stderr); err != nil {
+		fmt.Fprintf(stderr, "deactivate: %v\n", err)
 		return 1
 	}
 	clientTarget := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)

@@ -119,6 +119,7 @@ func runSecretsSet(args []string, stdout, stderr io.Writer) int {
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	desc := fs.String("description", "", "operator-visible description")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -150,6 +151,10 @@ func runSecretsSet(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant secrets set: %v", err)
+		return 1
+	}
 
 	value, err := readValueFromTTY(name, stderr)
 	if err != nil {
@@ -249,6 +254,7 @@ func runSecretsRotate(args []string, stdout, stderr io.Writer) int {
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
 	generate := fs.Bool("generate", false, "mint a random value instead of prompting (prints once)")
 	byteLen := fs.Int("byte-len", 32, "number of random bytes (only with --generate)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -276,6 +282,10 @@ func runSecretsRotate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant secrets rotate: %v", err)
+		return 1
+	}
 	cli := client.New(target)
 
 	if *generate {
@@ -467,6 +477,7 @@ func runSecretsRevoke(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "", "profile name")
 	tenant := fs.String("tenant", "", "tenant slug")
 	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -494,6 +505,10 @@ func runSecretsRevoke(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+	if err := ConfirmTargetStd(resolvedProfile, target.Addr, *yes, false, stderr); err != nil {
+		PrintCLIErrorf(stderr, "auth tenant secrets revoke: %v", err)
+		return 1
+	}
 
 	if err := client.New(target).RevokeSecret(context.Background(), name, *stack); err != nil {
 		PrintCLIErrorf(stderr, "auth tenant secrets revoke: %v", err)

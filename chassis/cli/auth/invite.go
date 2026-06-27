@@ -25,6 +25,7 @@ func runInvite(args []string, stdout, stderr io.Writer) int {
 	kind := fs.String("kind", "human", "actor kind written to the new actor row")
 	ttl := fs.Duration("ttl", 24*time.Hour, "how long the token is valid; server caps at 7d")
 	caps := fs.String("caps", "", "comma-separated capabilities the invitee receives (e.g. \"opstack:*:read,actor:*:read\"); empty defaults to admin:all")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
@@ -61,6 +62,11 @@ Flags:
 	if err != nil {
 		fmt.Fprintf(stderr, "auth invite: %v\n", err)
 		return 2
+	}
+
+	if err := ConfirmTargetStd(*name, target.Addr, *yes, false, stderr); err != nil {
+		fmt.Fprintf(stderr, "auth invite: %v\n", err)
+		return 1
 	}
 
 	resp, err := client.New(target).CreateInvitation(context.Background(), client.CreateInvitationRequest{
