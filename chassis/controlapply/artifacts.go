@@ -34,6 +34,14 @@ var tableWhitelist = map[string]map[string]bool{
 		"tenant_runtime_state": true, // designed-not-shipped; skipped if absent
 		"dns_zones":            true, // delegated-zone state; lets a data-plane node re-derive routing hosts + (with the dns head) serve the zone
 		"cron_settings":        true, // per-tenant cron timezone; lets every node localize @cron.* consistently
+		// Per-tenant secret store. The two tables ride together: the parent
+		// (tenant_secrets) carries identity + active key_version, the child
+		// (tenant_secret_versions) carries the encrypted blob columns. Their
+		// ciphertext is decryptable on every node ONLY when the fleet shares one
+		// master key (TXCO_SECRET_MASTER_KEY_B64) — see secrets/master_key.go.
+		// version rows carry BLOB columns via the {"$b64":…} coerce convention.
+		"tenant_secrets":         true,
+		"tenant_secret_versions": true,
 	},
 	dbAuth: {
 		"actors":            true,

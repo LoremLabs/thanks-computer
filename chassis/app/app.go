@@ -217,14 +217,26 @@ func Run(bi BuildInfo) int {
 	//
 	// See internal docs/todo-secret-store.md §3 + docs/runbook-secret-store.md.
 	var secretsResolver *secrets.Resolver
-	if conf.SecretMasterKeyPath != "" {
-		mk, mkErr := secrets.LoadOrMintFileMasterKey(conf.SecretMasterKeyPath, func(path string) {
-			logger.Info("secret store: minted new master key — BACK THIS UP; losing it makes every stored secret unrecoverable",
-				zap.String("path", path))
-		})
+	if conf.SecretMasterKeyPath != "" || conf.SecretMasterKeyB64 != "" {
+		// A fleet-shared inline key (TXCO_SECRET_MASTER_KEY_B64) takes
+		// precedence over the per-node auto-minted file: it's what makes
+		// fleet-synced secrets decryptable on every node. Single-node
+		// deployments leave it unset and keep the file key.
+		var mk secrets.MasterKeyProvider
+		var mkErr error
+		mkSource := conf.SecretMasterKeyPath
+		if conf.SecretMasterKeyB64 != "" {
+			mk, mkErr = secrets.NewInlineMasterKey(conf.SecretMasterKeyB64)
+			mkSource = "inline:TXCO_SECRET_MASTER_KEY_B64"
+		} else {
+			mk, mkErr = secrets.LoadOrMintFileMasterKey(conf.SecretMasterKeyPath, func(path string) {
+				logger.Info("secret store: minted new master key — BACK THIS UP; losing it makes every stored secret unrecoverable",
+					zap.String("path", path))
+			})
+		}
 		if mkErr != nil {
 			logger.Warn("secret store disabled: master key load failed",
-				zap.String("path", conf.SecretMasterKeyPath),
+				zap.String("source", mkSource),
 				zap.String("err", mkErr.Error()))
 		} else {
 			store := secrets.NewStore(runtimeDB, mk)
@@ -244,7 +256,7 @@ func Run(bi BuildInfo) int {
 			}
 			secretsResolver = secrets.NewResolver(store, slugToID)
 			logger.Info("secret store enabled",
-				zap.String("path", conf.SecretMasterKeyPath),
+				zap.String("source", mkSource),
 				zap.Int("key_version", mk.Version()))
 		}
 	}

@@ -44,6 +44,7 @@ type fleetResyncCounts struct {
 	StackActivated       int `json:"stack_activated"`
 	DNSZoneUpserted      int `json:"dns_zone_upserted"`
 	CronSettingsUpserted int `json:"cron_settings_upserted"`
+	SecretChanged        int `json:"secret_changed"`
 }
 
 type fleetResyncResponse struct {
@@ -149,6 +150,7 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 		zap.Int("hostname_bound", counts.HostnameBound),
 		zap.Int("dns_zone_upserted", counts.DNSZoneUpserted),
 		zap.Int("cron_settings_upserted", counts.CronSettingsUpserted),
+		zap.Int("secret_changed", counts.SecretChanged),
 		zap.Int("stack_activated", counts.StackActivated))
 
 	writeJSON(w, http.StatusOK, fleetResyncResponse{
@@ -228,6 +230,43 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 			}
 			pending = append(pending, resyncEvent{eventType: controlevent.TypeCronSettingsUpserted, tenantID: t.TenantID, ref: cRef, sum: cSum})
 			counts.CronSettingsUpserted++
+		}
+
+		// secret.changed for each ACTIVE secret — the parent row + its active
+		// version row (encrypted blobs travel as-is). Decryptable on the
+		// receiving node only when the fleet shares one master key
+		// (TXCO_SECRET_MASTER_KEY_B64); this is the backfill/recovery path for
+		// new or lagging nodes. Version row queued before parent (see Syncer).
+		if c.pu.Secrets != nil {
+			resyncRows, serr := c.pu.Secrets.Store().ListForResync(ctx, t.TenantID)
+			if serr != nil {
+				return nil, counts, fmt.Errorf("tenant %s secrets: %w", t.TenantID, serr)
+			}
+			for _, rr := range resyncRows {
+				vArt := controlevent.RowsArtifact{
+					DB: "runtime", Table: "tenant_secret_versions", Op: "upsert",
+					Rows: []map[string]any{rr.VersionRow},
+				}
+				vRef, vSum, _, verr := c.fleetUploadArtifact(ctx,
+					fmt.Sprintf("rows/tenant_secret_versions/%s", rr.VersionID), vArt)
+				if verr != nil {
+					return nil, counts, fmt.Errorf("secret version %s: %w", rr.VersionID, verr)
+				}
+				pending = append(pending, resyncEvent{eventType: controlevent.TypeSecretChanged, tenantID: t.TenantID, ref: vRef, sum: vSum})
+				counts.SecretChanged++
+
+				pArt := controlevent.RowsArtifact{
+					DB: "runtime", Table: "tenant_secrets", Op: "upsert",
+					Rows: []map[string]any{rr.ParentRow},
+				}
+				pRef, pSum, _, perr := c.fleetUploadArtifact(ctx,
+					fmt.Sprintf("rows/tenant_secrets/%s", rr.SecretID), pArt)
+				if perr != nil {
+					return nil, counts, fmt.Errorf("secret parent %s: %w", rr.SecretID, perr)
+				}
+				pending = append(pending, resyncEvent{eventType: controlevent.TypeSecretChanged, tenantID: t.TenantID, ref: pRef, sum: pSum})
+				counts.SecretChanged++
+			}
 		}
 
 		// stack.activated for each stack with an active version. active_version

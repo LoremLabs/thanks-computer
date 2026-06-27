@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -579,7 +580,14 @@ func (c *Controller) applyRows(ctx context.Context, ev controlevent.Event, art R
 }
 
 // coerce normalizes a JSON-decoded value for SQLite binding: integral
-// float64 → int64, bool → 0/1, everything else unchanged.
+// float64 → int64, bool → 0/1, a {"$b64":"…"} wrapper → raw []byte (so
+// BLOB columns round-trip — JSON has no byte type, and binding the base64
+// TEXT would corrupt the stored bytes), everything else unchanged.
+//
+// The {"$b64":…} convention is how the producer ships binary columns (the
+// secret store's nonce/ciphertext/wrapped_dek/dek_nonce). A malformed wrapper
+// (bad base64, extra keys) falls through unchanged so upsert fails loudly on
+// the type mismatch rather than silently storing garbage.
 func coerce(v any) any {
 	switch t := v.(type) {
 	case float64:
@@ -592,6 +600,15 @@ func coerce(v any) any {
 			return 1
 		}
 		return 0
+	case map[string]any:
+		if len(t) == 1 {
+			if enc, ok := t["$b64"].(string); ok {
+				if raw, err := base64.StdEncoding.DecodeString(enc); err == nil {
+					return raw
+				}
+			}
+		}
+		return v
 	default:
 		return v
 	}

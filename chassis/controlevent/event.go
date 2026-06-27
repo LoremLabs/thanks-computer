@@ -52,6 +52,17 @@ const (
 	// op=upsert; clearing a timezone is an upsert with timezone=''). Lets every
 	// node localize a tenant's @cron.* wall-clock fields consistently.
 	TypeCronSettingsUpserted = "cron.settings.upserted"
+	// TypeSecretChanged carries a tenant_secrets OR tenant_secret_versions row
+	// (RowsArtifact, op=upsert). A create/rotate emits two of these — the
+	// version row first, then the parent — so a consumer never briefly sees a
+	// parent pointing at an absent version. Decryptable fleet-wide only when the
+	// master key is shared (TXCO_SECRET_MASTER_KEY_B64). The blob columns travel
+	// base64-wrapped ({"$b64":…}); see controlapply.coerce.
+	TypeSecretChanged = "secret.changed"
+	// TypeSecretRevoked carries a tenant_secrets row with revoked_at set
+	// (RowsArtifact, op=upsert — the consumer's INSERT OR REPLACE flips it
+	// inactive, mirroring dns.zone revocation). No version row travels.
+	TypeSecretRevoked = "secret.revoked"
 )
 
 var knownTypes = map[string]bool{
@@ -61,6 +72,7 @@ var knownTypes = map[string]bool{
 	TypeKeyChanged: true, TypeMembershipChanged: true,
 	TypeEntitlementUpdated: true, TypeSystemOpstack: true,
 	TypeDNSZoneUpserted: true, TypeCronSettingsUpserted: true,
+	TypeSecretChanged: true, TypeSecretRevoked: true,
 }
 
 // Event is the control-plane event contract.

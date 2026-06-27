@@ -62,6 +62,11 @@ type Store struct {
 	DB *sql.DB
 	MK MasterKeyProvider
 
+	// syncer, when non-nil, fleet-publishes every write so other nodes'
+	// local copies converge. Installed via SetSyncer during admin wiring;
+	// nil = single-node (no producer work). See sync.go.
+	syncer Syncer
+
 	// now is a clock seam for tests. Defaults to time.Now.UTC.
 	now func() time.Time
 }
@@ -106,6 +111,28 @@ func (s *Store) CreateSecret(ctx context.Context,
 		return nil, fmt.Errorf("secrets: encrypt: %w", err)
 	}
 
+	meta := &SecretMetadata{
+		SecretID:    secretID,
+		TenantID:    tenantID,
+		Stack:       copyStringPtr(stack),
+		Name:        name,
+		Description: description,
+		CreatedAt:   createdAt,
+		CreatedBy:   createdBy,
+		KeyVersion:  keyVer,
+		VersionNo:   versionNo,
+	}
+
+	// Fleet-publish: upload the row artifacts (pre-tx) and get the in-tx
+	// outbox closure so the secret and its propagation commit atomically.
+	// nil when single-node. version row first, then parent (see Syncer).
+	inTx, err := s.publishUpsert(ctx, tenantID,
+		versionRowMap(versionID, secretID, versionNo, es, createdAt),
+		parentRowMap(meta))
+	if err != nil {
+		return nil, fmt.Errorf("secrets: fleet publish: %w", err)
+	}
+
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: begin tx: %w", err)
@@ -135,21 +162,17 @@ func (s *Store) CreateSecret(ctx context.Context,
 		return nil, fmt.Errorf("secrets: insert tenant_secret_versions: %w", err)
 	}
 
+	if inTx != nil {
+		if err := inTx(tx); err != nil {
+			return nil, fmt.Errorf("secrets: fleet outbox: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("secrets: commit: %w", err)
 	}
 
-	return &SecretMetadata{
-		SecretID:    secretID,
-		TenantID:    tenantID,
-		Stack:       copyStringPtr(stack),
-		Name:        name,
-		Description: description,
-		CreatedAt:   createdAt,
-		CreatedBy:   createdBy,
-		KeyVersion:  keyVer,
-		VersionNo:   versionNo,
-	}, nil
+	return meta, nil
 }
 
 // GenerateSecret mints byteLen random bytes (raw — caller may choose
@@ -214,6 +237,42 @@ func (s *Store) ListSecrets(ctx context.Context, tenantID string) ([]*SecretMeta
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// ListForResync returns the fleet-sync row payloads for every ACTIVE secret
+// in the tenant (parent row + its active version row). Cleartext is never
+// produced — the encrypted blob columns travel as-is. Producer-side only:
+// the admin resync path re-emits these so lagging/new nodes converge.
+func (s *Store) ListForResync(ctx context.Context, tenantID string) ([]ResyncRow, error) {
+	metas, err := s.ListSecrets(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ResyncRow, 0, len(metas))
+	for _, m := range metas {
+		var versionID, createdAtStr string
+		var nonce, ciphertext, wrappedDEK, dekNonce []byte
+		err := s.DB.QueryRowContext(ctx, `
+			SELECT version_id, nonce, ciphertext, wrapped_dek, dek_nonce, created_at
+			FROM tenant_secret_versions
+			WHERE secret_id = ? AND version_no = ? AND revoked_at IS NULL`,
+			m.SecretID, m.VersionNo).Scan(&versionID, &nonce, &ciphertext, &wrappedDEK, &dekNonce, &createdAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("secrets: resync load version %s v%d: %w", m.SecretID, m.VersionNo, err)
+		}
+		es := &EncryptedSecret{
+			Nonce: nonce, Ciphertext: ciphertext,
+			WrappedDEK: wrappedDEK, DEKNonce: dekNonce, KeyVersion: m.KeyVersion,
+		}
+		createdAt, _ := time.Parse(time.RFC3339, createdAtStr)
+		out = append(out, ResyncRow{
+			SecretID:   m.SecretID,
+			VersionID:  versionID,
+			ParentRow:  parentRowMap(m),
+			VersionRow: versionRowMap(versionID, m.SecretID, m.VersionNo, es, createdAt),
+		})
+	}
+	return out, nil
 }
 
 // MaterializeSecretForOp is the runtime resolution path. Performs
@@ -296,18 +355,47 @@ func (s *Store) UpdateSecretDescription(ctx context.Context,
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
-	res, err := s.DB.ExecContext(ctx, `
+	// Load the full active row first: the fleet REPLACE artifact needs every
+	// column (a description-only patch would otherwise blank created_at etc.).
+	meta, err := s.lookupMetadataExact(ctx, tenantID, stack, name)
+	if err != nil {
+		return nil, err // ErrSecretNotFound bubbles
+	}
+	meta.Description = newDescription
+
+	// Parent-only change → nil version row.
+	inTx, err := s.publishUpsert(ctx, tenantID, nil, parentRowMap(meta))
+	if err != nil {
+		return nil, fmt.Errorf("secrets: fleet publish: %w", err)
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE tenant_secrets
 		SET description = ?
-		WHERE tenant_id = ? AND COALESCE(stack,'') = COALESCE(?,'')
-		      AND name = ? AND revoked_at IS NULL`,
-		newDescription, tenantID, nilIfEmptyStack(stack), name)
+		WHERE secret_id = ? AND revoked_at IS NULL`,
+		newDescription, meta.SecretID)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: update description: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return nil, ErrSecretNotFound
+	}
+
+	if inTx != nil {
+		if err := inTx(tx); err != nil {
+			return nil, fmt.Errorf("secrets: fleet outbox: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("secrets: commit: %w", err)
 	}
 	return s.lookupMetadataExact(ctx, tenantID, stack, name)
 }
@@ -328,42 +416,32 @@ func (s *Store) RotateSecret(ctx context.Context,
 		return nil, fmt.Errorf("secrets: empty value")
 	}
 
-	tx, err := s.DB.BeginTx(ctx, nil)
+	// Load the full current row + the global max version BEFORE the write tx
+	// so the fleet artifact uploads pre-tx. The secret store is the only
+	// producer with a version counter; rotations are rare, serialized
+	// operator actions, so reading max(version_no) here (vs inside the tx) is
+	// safe. The parent REPLACE artifact needs every column, so we load full
+	// metadata rather than the old (secret_id, key_version) projection.
+	meta0, err := s.lookupMetadataExact(ctx, tenantID, stack, name)
 	if err != nil {
-		return nil, fmt.Errorf("secrets: begin tx: %w", err)
+		return nil, err // ErrSecretNotFound bubbles
 	}
-	defer tx.Rollback()
+	secretID := meta0.SecretID
 
-	// Look up the active parent row inside the tx.
-	var secretID string
-	var keyVer int
-	err = tx.QueryRowContext(ctx, `
-		SELECT secret_id, key_version
-		FROM tenant_secrets
-		WHERE tenant_id = ? AND COALESCE(stack,'') = COALESCE(?,'')
-		      AND name = ? AND revoked_at IS NULL`,
-		tenantID, nilIfEmptyStack(stack), name).Scan(&secretID, &keyVer)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrSecretNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("secrets: lookup for rotate: %w", err)
-	}
-
-	// New version number = max(version_no) + 1.
+	// New version number = max(version_no) + 1 (over ALL versions, incl.
+	// revoked, so a number is never reused).
 	var maxVer sql.NullInt64
-	err = tx.QueryRowContext(ctx, `
-		SELECT MAX(version_no) FROM tenant_secret_versions WHERE secret_id = ?`,
-		secretID).Scan(&maxVer)
-	if err != nil {
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT MAX(version_no) FROM tenant_secret_versions WHERE secret_id = ?`,
+		secretID).Scan(&maxVer); err != nil {
 		return nil, fmt.Errorf("secrets: max version: %w", err)
 	}
 	versionNo := int(maxVer.Int64) + 1
 	rotatedAt := s.now()
 
-	// Use the CURRENT MK version (in case MK was rotated since the
-	// row was first encrypted). PR 2 always == previous keyVer
-	// because online MK rotation is Phase 2.
+	// Use the CURRENT MK version (in case MK was rotated since the row was
+	// first encrypted). PR 2 always == previous because online MK rotation
+	// is Phase 2.
 	newKeyVer := s.MK.Version()
 	es, err := Encrypt(s.MK, newValue,
 		outerAAD(tenantID, secretID, versionNo, name, newKeyVer),
@@ -371,8 +449,26 @@ func (s *Store) RotateSecret(ctx context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("secrets: encrypt rotated: %w", err)
 	}
-
 	versionID := "sec_v_" + hxid.NewTimeSort().String()
+
+	// Post-rotate parent row (full row for the consumer's INSERT OR REPLACE).
+	newMeta := *meta0
+	newMeta.VersionNo = versionNo
+	newMeta.KeyVersion = newKeyVer
+	newMeta.LastRotatedAt = &rotatedAt
+	inTx, err := s.publishUpsert(ctx, tenantID,
+		versionRowMap(versionID, secretID, versionNo, es, rotatedAt),
+		parentRowMap(&newMeta))
+	if err != nil {
+		return nil, fmt.Errorf("secrets: fleet publish: %w", err)
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO tenant_secret_versions
 			(version_id, secret_id, version_no, nonce, ciphertext, wrapped_dek, dek_nonce, created_at)
@@ -390,6 +486,12 @@ func (s *Store) RotateSecret(ctx context.Context,
 		rotatedAt.Format(time.RFC3339), newKeyVer, secretID)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: bump rotated_at: %w", err)
+	}
+
+	if inTx != nil {
+		if err := inTx(tx); err != nil {
+			return nil, fmt.Errorf("secrets: fleet outbox: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -429,12 +531,31 @@ func (s *Store) RevokeSecret(ctx context.Context,
 	if err := validateName(name); err != nil {
 		return err
 	}
-	res, err := s.DB.ExecContext(ctx, `
+	// Load the full active row first: the fleet REPLACE artifact needs every
+	// column (with revoked_at now set), and this confirms existence.
+	meta, err := s.lookupMetadataExact(ctx, tenantID, stack, name)
+	if err != nil {
+		return err // ErrSecretNotFound bubbles
+	}
+	revokedAt := s.now()
+	meta.RevokedAt = &revokedAt
+
+	inTx, err := s.publishRevoke(ctx, tenantID, parentRowMap(meta))
+	if err != nil {
+		return fmt.Errorf("secrets: fleet publish: %w", err)
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("secrets: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE tenant_secrets
 		SET revoked_at = ?
-		WHERE tenant_id = ? AND COALESCE(stack,'') = COALESCE(?,'')
-		      AND name = ? AND revoked_at IS NULL`,
-		s.now().Format(time.RFC3339), tenantID, nilIfEmptyStack(stack), name)
+		WHERE secret_id = ? AND revoked_at IS NULL`,
+		revokedAt.Format(time.RFC3339), meta.SecretID)
 	if err != nil {
 		return fmt.Errorf("secrets: revoke: %w", err)
 	}
@@ -442,7 +563,14 @@ func (s *Store) RevokeSecret(ctx context.Context,
 	if n == 0 {
 		return ErrSecretNotFound
 	}
-	return nil
+
+	if inTx != nil {
+		if err := inTx(tx); err != nil {
+			return fmt.Errorf("secrets: fleet outbox: %w", err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 // --- helpers ---

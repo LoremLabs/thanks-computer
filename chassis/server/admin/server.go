@@ -126,7 +126,18 @@ func NewController(ctx context.Context, pu *processor.Unit) *Controller {
 // to publish event payloads when fleet-sync producer is enabled. The
 // chassis boot calls this after opening the artifact store; handlers
 // guard internally on FeedSink != nop before touching it.
-func (c *Controller) SetArtifactStore(s artifact.Store) { c.astore = s }
+//
+// This is also where the Controller registers itself as the secret
+// store's fleet Syncer (so create/rotate/revoke fan out): it's the
+// "this node is a producer" hook. The PublishSecret* methods self-gate
+// on fleetEnabled(), so registering here is safe even on a single-node
+// chassis (they no-op). nil Secrets (feature off) ⇒ nothing to wire.
+func (c *Controller) SetArtifactStore(s artifact.Store) {
+	c.astore = s
+	if c.pu != nil && c.pu.Secrets != nil {
+		c.pu.Secrets.Store().SetSyncer(c)
+	}
+}
 
 // SetFileCAS wires the content-addressed store activation uses to persist
 // tenant FILES/ asset bytes. Nil-safe.

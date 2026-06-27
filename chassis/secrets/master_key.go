@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -117,6 +118,49 @@ func LoadOrMintFileMasterKey(path string, notifyMint func(path string)) (*FileMa
 		notifyMint(path)
 	}
 	return NewFileMasterKey(path)
+}
+
+// NewInlineMasterKey builds a MasterKeyProvider from a base64-encoded
+// 32-byte key (the chassis reads it from TXCO_SECRET_MASTER_KEY_B64).
+//
+// This is the FLEET seam: a per-node FileMasterKey is auto-minted random
+// per machine, so secrets encrypted on one node can't be decrypted on
+// another — which makes fleet-syncing the secret store impossible. Giving
+// every node the SAME inline key (one value in the shared env) lets
+// replicated ciphertext decrypt everywhere. Empty input is reported as
+// missing (caller treats it as "fall back to the file key"); a present but
+// malformed/wrong-length value is a hard error (fail loud, don't silently
+// auto-mint a divergent key). std or raw base64, padded or not, are accepted.
+func NewInlineMasterKey(b64 string) (*FileMasterKey, error) {
+	if b64 == "" {
+		return nil, ErrMasterKeyMissing
+	}
+	raw, err := decodeKeyB64(b64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: TXCO_SECRET_MASTER_KEY_B64: %v", ErrMasterKeyMalformed, err)
+	}
+	defer Zero(raw)
+	if len(raw) != masterKeySize {
+		return nil, fmt.Errorf("%w: inline master key must decode to %d bytes, got %d",
+			ErrMasterKeyMalformed, masterKeySize, len(raw))
+	}
+	mk := &FileMasterKey{version: 1}
+	copy(mk.key[:], raw)
+	return mk, nil
+}
+
+// decodeKeyB64 accepts the four common base64 flavours (std/url ×
+// padded/raw) so operators aren't tripped by which encoder produced the key.
+func decodeKeyB64(s string) ([]byte, error) {
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if raw, err := enc.DecodeString(s); err == nil {
+			return raw, nil
+		}
+	}
+	return nil, fmt.Errorf("not valid base64")
 }
 
 // MintFileMasterKey writes 32 fresh random bytes to path with 0600
