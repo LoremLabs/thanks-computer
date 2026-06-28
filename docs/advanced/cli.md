@@ -91,6 +91,7 @@ The CLI verbs map onto that flow:
 | `txco activate <stack>` | Flip the active-version pointer (defaults to newest draft). Activating an older version = rollback |
 | `txco versions <stack>` | List a stack's versions, active one marked |
 | `txco diff [dir]` | Compare local `OPS/` against the running chassis |
+| `txco lint [dir]` | Validate the `OPS/` tree **offline** (no chassis): name collisions, mis-placed files, txcl parse, unconditional-loop warnings; `--list` prints the op graph; exit 1 on errors (CI-friendly) |
 | `txco status [dir]` | Per-stack drift summary; exit 1 on divergence (CI-friendly) |
 | `txco edit <stack> <path>` | `$EDITOR` one file of a draft, PATCH it back |
 

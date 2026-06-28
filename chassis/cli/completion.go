@@ -263,6 +263,7 @@ var cliCommandTree = []node{
 	{Name: "init", Desc: "Scaffold a new stack"},
 	{Name: "apply", Desc: "Push the local workspace to a chassis"},
 	{Name: "diff", Desc: "Show pending workspace changes vs chassis"},
+	{Name: "lint", Desc: "Validate the local OPS/ tree offline (collisions, txcl parse)", Flags: []string{"list", "json"}},
 	{Name: "status", Desc: "Show local workspace + chassis status"},
 	{Name: "pull", Desc: "Fetch a stack's rules from the chassis"},
 	{Name: "cat", Desc: "Print a deployed stack's file (manifest → CAS); debugging probe", Flags: []string{"json"}},

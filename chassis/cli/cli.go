@@ -80,6 +80,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return jsonErrWrap(rest, stdout, stderr, runApply), true
 	case "diff":
 		return jsonErrWrap(rest, stdout, stderr, runDiff), true
+	case "lint":
+		// Offline validation of the local OPS/ tree (no chassis): the same
+		// walker apply uses + a strict txcl parse of every rule. See lint.go.
+		return jsonErrWrap(rest, stdout, stderr, runLint), true
 	case "status":
 		return jsonErrWrap(rest, stdout, stderr, runStatus), true
 	case "pull":
@@ -303,6 +307,7 @@ func printUsage(w io.Writer) {
 			{"data <command>", muted("Deploy + inspect VECTORS/+KV/ store-seed packs (apply/pull/ls/show/diff/rm)")},
 			{"activate <stack>", muted("Flip a stack's active version (defaults to most recent draft)")},
 			{"diff [<dir>]", muted("Compare local OPS/ tree against a chassis admin endpoint")},
+			{"lint [<dir>]", muted("Validate the local OPS/ tree offline — collisions, mis-placed files, txcl parse (exit 1 on issues)")},
 			{"status [<dir>]", muted("Per-stack version drift between local and chassis (exit 1 on divergence)")},
 			{"versions <stack>", muted("List versions for a stack with active marker")},
 		}},
