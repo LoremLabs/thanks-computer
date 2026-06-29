@@ -441,7 +441,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 
 	// Show the target and (for a non-local chassis) confirm before any write —
 	// dry-run already returned above, so this only gates real pushes.
-	if err := confirmMutation(resolved.Name, clientTarget.Addr, opts.Yes, opts.jsonOut, stderr); err != nil {
+	if err := confirmMutation(resolveTargetLabel(dir, opts.Target, opts.Addr, opts.Profile), clientTarget.Addr, clientTarget.Tenant, opts.Yes, opts.jsonOut, stderr); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
 		return 1
 	}

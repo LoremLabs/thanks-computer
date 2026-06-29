@@ -17,16 +17,22 @@ import (
 // Read-only commands don't call this. The heavy lifting (local-chassis
 // detection, prompt, fail-closed) lives in auth.ConfirmTarget so the auth
 // family can guard with identical behavior.
-func confirmMutation(name, addr string, assumeYes, jsonOut bool, stderr io.Writer) error {
-	return auth.ConfirmTarget(name, addr, assumeYes, auth.StdinIsTTY() && !jsonOut, os.Stdin, stderr)
+// confirmMutation guards a mutating command. name is the resolved destination
+// label (use resolveTargetLabel so it reflects the profile/target actually
+// chosen, not a stale "dev" default), addr the chassis URL, tenant the tenant
+// the write lands in ("" to omit). See auth.ConfirmTargetT for the banner +
+// prompt semantics.
+func confirmMutation(name, addr, tenant string, assumeYes, jsonOut bool, stderr io.Writer) error {
+	return auth.ConfirmTargetT(name, addr, tenant, assumeYes, auth.StdinIsTTY() && !jsonOut, os.Stdin, stderr)
 }
 
 // confirmMutationTF is the targetFlags-driven convenience over confirmMutation:
-// it resolves the target name + endpoint from the workspace + flags the same way
-// the command will, so call sites stay one line. Call it after the workspace dir
-// is known and before the first write.
+// it resolves the destination label, endpoint, and tenant from the workspace +
+// flags the same way the command will, so call sites stay one line. Call it
+// after the workspace dir is known and before the first write.
 func confirmMutationTF(dir string, tf *targetFlags, jsonOut bool, stderr io.Writer) error {
-	resolved := resolveFullTarget(dir, tf.Target)
+	label := resolveTargetLabel(dir, tf.Target, tf.Addr, tf.Profile)
 	ct := resolveTarget(dir, tf.Target, tf.Addr, tf.User, tf.Pass, tf.Profile)
-	return confirmMutation(resolved.Name, ct.Addr, tf.Yes, jsonOut, stderr)
+	tenant := resolveTenant(tf.Tenant, effectiveProfile(tf.Target, tf.Profile))
+	return confirmMutation(label, ct.Addr, tenant, tf.Yes, jsonOut, stderr)
 }

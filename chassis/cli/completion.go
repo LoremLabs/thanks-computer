@@ -281,6 +281,7 @@ var cliCommandTree = []node{
 	{Name: "trace", Desc: "Inspect request traces"},
 	{Name: "snapshot", Desc: "Snapshot subcommands", Children: snapshotChildren},
 	{Name: "auth", Desc: "Auth + identity management", Children: authChildren},
+	{Name: "use", Desc: "Switch the active signing profile (alias for 'auth profile use')"},
 	{Name: "whoami", Desc: "Show the chassis's view of your identity (alias for 'auth whoami')", Flags: []string{"url", "profile", "name"}},
 	{Name: "ui", Desc: "Open the chassis admin UI, signed in (alias for 'auth login')", Flags: []string{"profile", "tenant", "url", "no-open", "label"}},
 	{Name: "login", Desc: "Sign in to the thanks-computer cloud"},

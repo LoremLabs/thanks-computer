@@ -145,7 +145,7 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
-	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+	if err := confirmMutation(resolveTargetLabel(".", *target, *addr, *profile), clientTarget.Addr, clientTarget.Tenant, *yes, false, stderr); err != nil {
 		auth.PrintCLIErrorf(stderr, "admin tenant suspend: %v", err)
 		return 1
 	}
@@ -274,7 +274,7 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
-	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+	if err := confirmMutation(resolveTargetLabel(".", *target, *addr, *profile), clientTarget.Addr, clientTarget.Tenant, *yes, false, stderr); err != nil {
 		auth.PrintCLIErrorf(stderr, "admin tenant resume: %v", err)
 		return 1
 	}
@@ -350,7 +350,7 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
-	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+	if err := confirmMutation(resolveTargetLabel(".", *target, *addr, *profile), clientTarget.Addr, clientTarget.Tenant, *yes, false, stderr); err != nil {
 		auth.PrintCLIErrorf(stderr, "admin tenant limits: %v", err)
 		return 1
 	}
@@ -452,7 +452,7 @@ Flags:
 	}
 
 	clientTarget := resolveTarget(".", *target, *addr, *user, *pass, *profile)
-	if err := confirmMutation(resolveFullTarget(".", *target).Name, clientTarget.Addr, *yes, false, stderr); err != nil {
+	if err := confirmMutation(resolveTargetLabel(".", *target, *addr, *profile), clientTarget.Addr, clientTarget.Tenant, *yes, false, stderr); err != nil {
 		auth.PrintCLIErrorf(stderr, "admin resync: %v", err)
 		return 1
 	}

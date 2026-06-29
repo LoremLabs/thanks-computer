@@ -127,6 +127,12 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// chassis's view of the active identity. Users reflexively type
 		// `txco whoami`, so route it instead of erroring as unknown.
 		return auth.Dispatch(append([]string{"whoami"}, rest...), stdout, stderr), true
+	case "use":
+		// Top-level convenience alias for `auth profile use` — switch the
+		// active signing profile (e.g. `txco use dev`, `txco use cloud`).
+		// Users reach for "use this identity", not a verb nested two levels
+		// under `auth`; mirrors the `whoami`/`ui` aliases.
+		return auth.Dispatch(append([]string{"profile", "use"}, rest...), stdout, stderr), true
 	case "ui":
 		// Top-level convenience alias for `auth login` — signs a browser
 		// session with the active profile's key and opens the chassis admin
@@ -318,6 +324,7 @@ func printUsage(w io.Writer) {
 		}},
 		{"Identity & access", []row{
 			{"auth <command>", muted("Manage signing keys for the admin API")},
+			{"use <profile>", muted("Switch the active signing profile (alias for ") + hint("`txco auth profile use`") + muted(")")},
 			{"ui", muted("Open the chassis admin UI in your browser, signed in via your profile")},
 			{"login", muted("Sign in to the thanks-computer cloud")},
 			{"logout", muted("Sign out of the thanks-computer cloud")},

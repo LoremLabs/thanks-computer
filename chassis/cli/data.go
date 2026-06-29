@@ -108,9 +108,10 @@ func (f vectorFlags) clientWithTimeout(d time.Duration) *client.Client {
 // fails closed) before modifying a non-local chassis, unless assumeYes. See
 // confirmMutation.
 func (f vectorFlags) confirm(assumeYes bool, stderr io.Writer) error {
-	resolved := resolveFullTarget(".", *f.target)
+	label := resolveTargetLabel(".", *f.target, *f.addr, *f.profile)
 	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
-	return confirmMutation(resolved.Name, t.Addr, assumeYes, *f.jsonOut, stderr)
+	tenant := resolveTenant(*f.tenant, effectiveProfile(*f.target, *f.profile))
+	return confirmMutation(label, t.Addr, tenant, assumeYes, *f.jsonOut, stderr)
 }
 
 // --- ls ---------------------------------------------------------------

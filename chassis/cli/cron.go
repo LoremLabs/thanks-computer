@@ -72,9 +72,10 @@ func (f cronFlags) client() *client.Client {
 // confirm guards a mutating cron command: shows the target and prompts (or
 // fails closed) before modifying a non-local chassis, unless assumeYes.
 func (f cronFlags) confirm(assumeYes bool, stderr io.Writer) error {
-	resolved := resolveFullTarget(".", *f.target)
+	label := resolveTargetLabel(".", *f.target, *f.addr, *f.profile)
 	t := resolveTarget(".", *f.target, *f.addr, *f.user, *f.pass, *f.profile)
-	return confirmMutation(resolved.Name, t.Addr, assumeYes, false, stderr)
+	tenant := resolveTenant(*f.tenant, effectiveProfile(*f.target, *f.profile))
+	return confirmMutation(label, t.Addr, tenant, assumeYes, false, stderr)
 }
 
 // cliCronConfigDTO mirrors the admin cronConfigDTO.

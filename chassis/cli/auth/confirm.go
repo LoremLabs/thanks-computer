@@ -72,9 +72,22 @@ func ConfirmTargetStd(name, chassisURL string, assumeYes, jsonOut bool, stderr i
 //     pass --yes — so a piped/CI invocation never silently mutates a remote
 //     chassis.
 func ConfirmTarget(name, chassisURL string, assumeYes, interactive bool, stdin io.Reader, stderr io.Writer) error {
-	label := chassisURL
+	return ConfirmTargetT(name, chassisURL, "", assumeYes, interactive, stdin, stderr)
+}
+
+// ConfirmTargetT is ConfirmTarget plus the tenant the command will write to,
+// surfaced in the banner as "→ name (url, tenant T)" so the operator sees BOTH
+// the chassis and the tenant before a remote write. tenant "" omits the clause
+// (and keeps ConfirmTarget's output byte-for-byte). Same prompt/fail-closed
+// semantics as ConfirmTarget.
+func ConfirmTargetT(name, chassisURL, tenant string, assumeYes, interactive bool, stdin io.Reader, stderr io.Writer) error {
+	endpoint := chassisURL
+	if tenant != "" {
+		endpoint = fmt.Sprintf("%s, tenant %s", chassisURL, tenant)
+	}
+	label := endpoint
 	if name != "" {
-		label = fmt.Sprintf("%s (%s)", name, chassisURL)
+		label = fmt.Sprintf("%s (%s)", name, endpoint)
 	}
 	fmt.Fprintf(stderr, "→ %s\n", label)
 

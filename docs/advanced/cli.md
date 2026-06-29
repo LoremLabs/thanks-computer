@@ -118,7 +118,7 @@ The CLI verbs map onto that flow:
 | `txco auth init` / `enroll` / `rotate-key` / `revoke-key` / `revoke-actor` | Key lifecycle |
 | `txco auth whoami` (alias `txco whoami`) | What the chassis thinks you are |
 | `txco auth invite` / `invitations` / `revoke-invitation` / `accept --token …` | Teammate onboarding |
-| `txco auth profiles` / `profile {use,show,remove}` | Named identities (AWS-style); also aliased under `txco config` |
+| `txco auth profiles` / `profile {use,show,remove}` (alias `txco use <profile>`) | Named identities; also aliased under `txco config` |
 | `txco auth tenants` / `tenant {create,members,grant,revoke}` | Tenant management |
 | `txco auth tenant hostnames {add,attach,verify,challenge,list,remove}` | Hostname bindings ([ingress](../routing.md)) |
 | `txco auth tenant secrets {set,generate,list,show,describe,rotate,revoke}` | ([Secret store](./runbook-secret-store.md)) |

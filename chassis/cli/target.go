@@ -295,6 +295,39 @@ func loadSigner(profileFlag string) signer.Signer {
 // merged operations map, and mock policy — for the given workspace and
 // target name. Falls back to a synthesized localhost target if no config
 // is present.
+// resolveTargetLabel returns the human label for a resolved deploy destination:
+// the name resolveTarget actually used to choose the chassis URL + signing key,
+// so a confirm banner can't read "dev" while it's about to write to a profile's
+// remote (prod) chassis. Precedence mirrors resolveTarget exactly:
+//
+//   - a raw URL passed as the target, or an explicit --addr / TXCO_ADMIN_ADDR:
+//     no name — the URL shown alongside is the honest identifier.
+//   - a txco.yaml target (or legacy flat addr): its configured name.
+//   - otherwise the PROFILE that supplied the chassis_url — a positional
+//     target-name-as-profile, then --profile, then the active profile.
+//   - else the localhost default ("dev").
+func resolveTargetLabel(dir, targetName, addr, profile string) string {
+	if addr == "" && looksLikeURL(targetName) {
+		return ""
+	}
+	t := resolveFullTarget(dir, targetName)
+	if t.ChassisExplicit {
+		return t.Name
+	}
+	if addr != "" || os.Getenv("TXCO_ADMIN_ADDR") != "" {
+		return ""
+	}
+	if targetName != "" && profile == "" && auth.ProfileChassisURL(targetName) != "" {
+		return targetName
+	}
+	if auth.ProfileChassisURL(profile) != "" {
+		if name, err := auth.ResolveProfile(profile); err == nil && name != "" && name != auth.ActiveNone {
+			return name
+		}
+	}
+	return t.Name
+}
+
 func resolveFullTarget(dir, targetName string) ResolvedTarget {
 	cfg := loadWorkspaceConfig(dir)
 	return resolveFullTargetFromConfig(cfg, targetName)

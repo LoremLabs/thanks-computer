@@ -63,3 +63,31 @@ func TestConfirmTarget(t *testing.T) {
 		t.Errorf("expected target announcement, got %q", buf.String())
 	}
 }
+
+func TestConfirmTargetT(t *testing.T) {
+	const remote = "https://prod.example.com"
+
+	// With a tenant, the banner shows it alongside the URL.
+	var buf bytes.Buffer
+	_ = ConfirmTargetT("cloud", remote, "prod-mankins", true, false, strings.NewReader(""), &buf)
+	got := buf.String()
+	if !strings.Contains(got, "cloud") || !strings.Contains(got, remote) || !strings.Contains(got, "tenant prod-mankins") {
+		t.Errorf("expected name + url + tenant, got %q", got)
+	}
+
+	// Empty tenant keeps ConfirmTarget's output byte-for-byte (no "tenant" clause).
+	var a, b bytes.Buffer
+	_ = ConfirmTargetT("cloud", remote, "", true, false, strings.NewReader(""), &a)
+	_ = ConfirmTarget("cloud", remote, true, false, strings.NewReader(""), &b)
+	if a.String() != b.String() {
+		t.Errorf("empty-tenant output drifted: %q vs %q", a.String(), b.String())
+	}
+	if strings.Contains(a.String(), "tenant") {
+		t.Errorf("empty tenant should omit the clause, got %q", a.String())
+	}
+
+	// Tenant is cosmetic — a local chassis still never prompts.
+	if err := ConfirmTargetT("dev", "http://localhost:8081", "default", false, false, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("local chassis should not prompt even with a tenant: %v", err)
+	}
+}
