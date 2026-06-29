@@ -6,8 +6,7 @@
 // brute-force-ranks with sqlite-vec's vec_distance_cosine() scalar function
 // and pushes the metadata filter into a parameterized WHERE before ranking.
 // No vec0 virtual table, no ANN, no recall tuning — fine into the ~100k-vector
-// range, and swappable for vec0/ANN or pgvector behind the vector.Store
-// interface when HA or scale demands it.
+// range, and swappable for vec0/ANN behind the vector.Store interface.
 package sqlitevec
 
 import (
@@ -33,6 +32,12 @@ func init() {
 	// (this store's pool) exposes vec_*() functions. Process-global and
 	// idempotent; harmless to other DBs, which simply gain unused functions.
 	sqlite_vec.Auto()
+
+	// Register as the bundled "sqlite" vector backend (the default
+	// --vector-store).
+	vector.Register("sqlite", func(cfg vector.Config) (vector.Store, error) {
+		return New(cfg.DBPath)
+	})
 }
 
 // Store is the sqlite-vec-backed vector.Store.
@@ -47,6 +52,10 @@ type cachedColl struct {
 	coll  vector.Collection
 	table string
 }
+
+// Shared reports false: the bundled SQLite backend is per-node (each node owns
+// its own vector.db file), so the store-seed reconciler runs on every node.
+func (s *Store) Shared() bool { return false }
 
 // New opens (creating if absent) the vector database at dbPath and verifies
 // sqlite-vec is loaded. The DSN mirrors the chassis runtime convention (WAL +

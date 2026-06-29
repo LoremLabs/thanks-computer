@@ -62,6 +62,7 @@ in an opstack's flows into the protocol.
 | [Email — receiving](./lmtp.md) | in |
 | [Email — sending](./sendmail.md) | out |
 | [Cron](./cron.md) | in |
+| [Scheduled](./scheduled.md) | in, time shifted — `txco://schedule` enqueues, fires later into `_scheduled` |
 | [TCP](./tcp.md) | bidirectional |
 | [MCP](./mcp.md) (agent tools) | out, in as diy |
 | [DNS](./dns.md) | not a stack input. authoritative answers for delegated zones. |

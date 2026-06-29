@@ -53,6 +53,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/ops"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
+	"github.com/loremlabs/thanks-computer/chassis/scheduled"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
@@ -61,6 +62,7 @@ import (
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
 	mailmapp "github.com/loremlabs/thanks-computer/chassis/server/personality/mailmap"
+	scheduledp "github.com/loremlabs/thanks-computer/chassis/server/personality/scheduled"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
@@ -73,8 +75,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 	"github.com/loremlabs/thanks-computer/chassis/usage"
 	"github.com/loremlabs/thanks-computer/chassis/vector"
-	pgvector "github.com/loremlabs/thanks-computer/chassis/vector/pgvector"
-	sqlitevec "github.com/loremlabs/thanks-computer/chassis/vector/sqlitevec"
+	_ "github.com/loremlabs/thanks-computer/chassis/vector/sqlitevec" // registers the bundled "sqlite" vector backend
 )
 
 // defaultEntryStage is where every request enters the chassis: the
@@ -169,6 +170,23 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			raw, _ = sjson.Set(raw, "_txc.route.ingress", "room")
 			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
 			raw, _ = sjson.Set(raw, "_txc.route.to", "_room/0")
+			return raw
+		}
+	}
+	// Scheduled event. The scheduled personality fires a claimed due event,
+	// stamping the target slug in `_txc.scheduled.tenant` (trusted: from the
+	// stored row's tenant, pinned at enqueue from processor.TenantScope, never
+	// client input). Propose a route into that tenant's `_scheduled/0` — the
+	// same sanctioned _sys→tenant pin as cron/room. The tenant's stack reads
+	// the stored job off `@scheduled.payload.*`.
+	if gjson.GetBytes(in, "_txc.src").String() == "scheduled" {
+		if st := gjson.GetBytes(in, "_txc.scheduled.tenant").String(); st != "" {
+			raw := "{}"
+			raw, _ = sjson.Set(raw, "_txc.route.tenant", st)
+			raw, _ = sjson.Set(raw, "_txc.route.stack", "_scheduled")
+			raw, _ = sjson.Set(raw, "_txc.route.ingress", "scheduled")
+			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
+			raw, _ = sjson.Set(raw, "_txc.route.to", "_scheduled/0")
 			return raw
 		}
 	}
@@ -720,7 +738,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1176,21 +1194,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		}))
 
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
-	// delete}). Default backend is the bundled SQLite + sqlite-vec file; when
-	// vector-postgres-dsn is set, a shared PostgreSQL + pgvector store (HA /
-	// multi-node) is used instead — its pgx driver is registered by the
-	// overlay/production build, not the open-core chassis. Tenant-scoped via
+	// delete}). The backend is selected by --vector-store (default "sqlite",
+	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
 	// processor.TenantScope; collections are tenant-level (shared across
 	// stacks), unlike the per-stack KV namespace. On open failure the ops stay
 	// unregistered (report "op not found") rather than crash the chassis.
-	var vstore vector.Store
-	var verr error
-	vectorShared := conf.VectorPostgresDSN != "" // pgvector = fleet-shared; sqlite-vec = per-node
-	if vectorShared {
-		vstore, verr = pgvector.New(conf.VectorPostgresDSN)
-	} else {
-		vstore, verr = sqlitevec.New(conf.VectorDBPath)
-	}
+	vstore, verr := vector.Open(conf.VectorStore, vector.Config{DBPath: conf.VectorDBPath})
 	// storeSeedMaterializers accumulates the store-seed materializers for the
 	// stores that opened successfully; the Reconciler is built from them below
 	// and injected into the admin controller so `txco apply` can declaratively
@@ -1215,7 +1224,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 				return vectorDelete(ctx, vstore, in)
 			}))
-		storeSeedMaterializers = append(storeSeedMaterializers, vecseed.New(vstore, vectorShared))
+		storeSeedMaterializers = append(storeSeedMaterializers, vecseed.New(vstore, vstore.Shared()))
 	}
 
 	// KV store-seed materializer (KV/<namespace>.jsonl packs). kvHandle is
@@ -1260,6 +1269,18 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return mailer.Send(ctx, processor.TenantScope(ctx), in)
 		}))
+
+	// `txco://schedule`: enqueue (or cancel/reschedule) a future event into the
+	// scheduled_events store. Registered only when the scheduled personality
+	// opened a store (--db-scheduled-dsn). The closure passes the PINNED tenant
+	// (processor.TenantScope) — a scheduled event must fire for the tenant that
+	// enqueued it, never a mutable `_txc.tenant`. See chassis/server/schedule.go.
+	if scheduledStore != nil {
+		pu.Handle([]byte("txco://schedule"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return scheduleOp(ctx, scheduledStore, in)
+			}))
+	}
 
 	// start controllers
 	adminCtrl := admin.NewController(ctx, pu)
@@ -1334,6 +1355,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 
 	controllers := []controller{
 		cronp.NewController(ctx, pu, cq),
+		scheduledp.NewController(ctx, pu, scheduledStore),
 		tcp.NewController(ctx, pu),
 		webCtrl,
 		adminCtrl,

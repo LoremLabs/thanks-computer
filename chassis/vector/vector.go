@@ -10,17 +10,20 @@
 // **Durable and bounded, not in-RAM.** A platform store must not hold tenants'
 // embeddings in process memory — a restart would reload everything and a large
 // upload would OOM the node. Vectors live on disk in a dedicated store (the
-// bundled backend is SQLite + sqlite-vec; a pgvector backend slots in behind
-// this same interface for HA/scale). A search is a local index read, the store
-// doing its job — like txco://kv hitting BoltDB.
+// bundled backend is SQLite + sqlite-vec; another backend slots in behind this
+// same interface). A search is a local index read, the store doing its job —
+// like txco://kv hitting BoltDB.
 //
 // **v1 is exact, not approximate.** The bundled backend brute-force-scans with
 // sqlite-vec's distance functions and pushes metadata filters into the SQL
 // WHERE before ranking. No ANN, no recall tuning. Fine into the ~100k-vector
-// range; the crossover to ANN/pgvector is HA or scale, not catalog size.
+// range; the crossover to ANN is scale, not catalog size.
 package vector
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Metric is the distance metric a collection is compared under. v1 supports
 // cosine only; the field exists so a collection pins it and a future backend
@@ -137,6 +140,47 @@ type Store interface {
 	// managing a collection but doesn't destroy it).
 	DropCollection(ctx context.Context, tenant, name string) (int, error)
 
+	// Shared reports whether this backend is shared across nodes (the store-seed
+	// reconciler runs once on the origin) versus per-node (reconciled on every
+	// node). The bundled SQLite backend is per-node (returns false).
+	Shared() bool
+
 	// Close releases the underlying handle.
 	Close() error
+}
+
+// Config carries backend-selecting options resolved from chassis config. A
+// backend reads only the fields it needs (the bundled SQLite backend uses
+// DBPath). Adding a field here doesn't affect existing backends (same posture
+// as cron.Config).
+type Config struct {
+	// DBPath is the bundled SQLite backend's file path (--vector-db-path).
+	DBPath string
+}
+
+// Constructor builds a Store from resolved config.
+type Constructor func(Config) (Store, error)
+
+// registry maps backend name → constructor. The bundled "sqlite" backend
+// registers itself (chassis/vector/sqlitevec init()); additional backends
+// register the same way.
+var registry = map[string]Constructor{}
+
+// Register adds a backend constructor. Called from a backend package's init().
+func Register(name string, c Constructor) {
+	registry[name] = c
+}
+
+// Open constructs the named backend. Unknown name is a startup error listing
+// what is available (so a misconfigured --vector-store fails loudly).
+func Open(name string, cfg Config) (Store, error) {
+	c, ok := registry[name]
+	if !ok {
+		avail := make([]string, 0, len(registry))
+		for k := range registry {
+			avail = append(avail, k)
+		}
+		return nil, fmt.Errorf("vector: unknown store %q (available: %v)", name, avail)
+	}
+	return c(cfg)
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/repl"
+	"github.com/loremlabs/thanks-computer/chassis/scheduled"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/server"
 	"github.com/loremlabs/thanks-computer/chassis/snapshot"
@@ -278,6 +279,27 @@ func Run(bi BuildInfo) int {
 			zap.String("personalities", conf.Personalities))
 	}
 
+	// scheduled_events DB — the durable queue the `scheduled` personality
+	// polls + claims and that txco://schedule writes to. Opened only when the
+	// scheduled personality is active (a node not participating in scheduling
+	// has nothing to enqueue or fire). A postgres:// --db-scheduled-dsn makes
+	// it the shared fleet store so every node claims against one table; the
+	// in-tree default is a local SQLite file (single-node-correct). The
+	// dialect seam + pgx driver are reused from the auth path.
+	var scheduledStore *scheduled.Store
+	if strings.Contains(conf.Personalities, "scheduled") {
+		st, serr := scheduled.Open(conf.ScheduledStore, scheduled.Config{DBPath: conf.ScheduledDBPath})
+		if serr != nil {
+			logger.Fatal("scheduled store open failed",
+				zap.String("store", conf.ScheduledStore), zap.String("err", serr.Error()))
+		}
+		defer st.Close()
+		scheduledStore = st
+	} else {
+		logger.Info("skipping scheduled store open — scheduled personality not active",
+			zap.String("personalities", conf.Personalities))
+	}
+
 	logger.Info("db setup") // feedback here proved helpful in debugging file locking for db
 
 	// Setup read-only db cache. The cache dumps THROUGH the chassis's
@@ -372,7 +394,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)
@@ -550,22 +572,27 @@ const (
 	authPGPingTimeout     = 5 * time.Second
 )
 
-// openAuthDBOrDie opens the auth DB and returns its SQL dialect. A
-// postgres:// (or postgresql://) DSN selects a shared Postgres store for
-// an HA control plane — opened via the `pgx` database/sql driver, which
-// a downstream overlay blank-imports (the chassis never compiles a
-// Postgres driver; SQLite stays the in-tree default and only built-in
-// driver). Anything else is the historical local SQLite file,
-// byte-for-byte unchanged.
+// openAuthDBOrDie opens the auth DB and returns its SQL dialect.
+func openAuthDBOrDie(logger *zap.Logger, dsn string) (*sql.DB, registry.Dialect) {
+	return openSharedDBOrDie(logger, dsn, "auth")
+}
+
+// openSharedDBOrDie opens a control-plane DB that rides the SQLite↔Postgres
+// dialect seam and returns its dialect. A postgres:// (or postgresql://) DSN
+// selects a shared Postgres store for an HA control plane — opened via the
+// `pgx` database/sql driver, which a downstream overlay blank-imports (the
+// chassis never compiles a Postgres driver; SQLite stays the in-tree default
+// and only built-in driver). Anything else is the historical local SQLite
+// file, byte-for-byte unchanged. `kind` ("auth" / "scheduled") labels logs.
 //
 // The DSN is logged redacted (it may carry a Postgres password).
-func openAuthDBOrDie(logger *zap.Logger, dsn string) (*sql.DB, registry.Dialect) {
+func openSharedDBOrDie(logger *zap.Logger, dsn, kind string) (*sql.DB, registry.Dialect) {
 	d := registry.DialectForDSN(dsn)
 	if d == registry.Postgres {
 		db, err := sql.Open("pgx", dsn)
 		if err != nil {
 			logger.Fatal("db open err",
-				zap.String("kind", "auth"),
+				zap.String("kind", kind),
 				zap.String("dsn", config.RedactDSN(dsn)),
 				zap.String("dberr", err.Error()))
 		}
@@ -589,17 +616,17 @@ func openAuthDBOrDie(logger *zap.Logger, dsn string) (*sql.DB, registry.Dialect)
 		pingCtx, cancel := context.WithTimeout(context.Background(), authPGPingTimeout)
 		defer cancel()
 		if perr := db.PingContext(pingCtx); perr != nil {
-			logger.Fatal("auth Postgres unreachable",
-				zap.String("kind", "auth"),
+			logger.Fatal("shared Postgres unreachable",
+				zap.String("kind", kind),
 				zap.String("dsn", config.RedactDSN(dsn)),
 				zap.String("dberr", perr.Error()))
 		}
-		logger.Info("auth.db on shared Postgres (HA control plane)",
+		logger.Info(kind+".db on shared Postgres (HA control plane)",
 			zap.String("dsn", config.RedactDSN(dsn)),
 			zap.Int("max_open_conns", authPGMaxOpenConns))
 		return db, d
 	}
-	return openSQLiteOrDie(logger, dsn, "auth"), registry.SQLite
+	return openSQLiteOrDie(logger, dsn, kind), registry.SQLite
 }
 
 // applyMigrationsOrDie sweeps a per-DB migration directory once and

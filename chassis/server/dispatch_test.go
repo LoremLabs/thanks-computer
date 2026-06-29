@@ -191,6 +191,39 @@ func TestDetectTenantBodyRoomNoTenantUnchanged(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyScheduled: a fired scheduled event (src=scheduled with a
+// trusted _txc.scheduled.tenant stamped by the scheduled personality from the
+// stored row) proposes a route into that tenant's _scheduled/0, even though the
+// resolver would miss.
+func TestDetectTenantBodyScheduled(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"scheduled","scheduled":{"tenant":"acme","payload":{"kind":"drip"}}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_scheduled/0" {
+		t.Errorf("_txc.route.to = %q, want _scheduled/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.stack").String(); got != "_scheduled" {
+		t.Errorf("_txc.route.stack = %q, want _scheduled", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "scheduled" {
+		t.Errorf("_txc.route.ingress = %q, want scheduled", got)
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+}
+
+// A scheduled event with no _txc.scheduled.tenant must NOT take the scheduled
+// branch — it falls through to the resolver (here a miss → "{}").
+func TestDetectTenantBodyScheduledNoTenantUnchanged(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"scheduled","scheduled":{"payload":{}}}}`)); body != "{}" {
+		t.Errorf("scheduled body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyMiss: on a resolver miss the transform returns
 // `{}` (no proposal), so the gated route op is skipped and _sys/boot
 // scope 1000 serves the 404.
