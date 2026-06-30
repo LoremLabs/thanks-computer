@@ -98,6 +98,19 @@ func (s *Store) CreateSecret(ctx context.Context,
 		return nil, fmt.Errorf("secrets: empty value")
 	}
 
+	// Active-uniqueness guard, enforced in code so it holds even on runtime
+	// DBs whose 0008 predates the `tenant_secrets_active_name_idx` partial
+	// unique index (those never built it, so the INSERT below wouldn't raise
+	// a UNIQUE violation — duplicate ACTIVE rows would silently accumulate and
+	// the resolver would pick one arbitrarily). An existing active row in this
+	// exact scope means "rotate, don't duplicate": return ErrSecretExists so
+	// the caller (the CLI `set`) falls through to RotateSecret.
+	if _, err := s.lookupMetadataExact(ctx, tenantID, stack, name); err == nil {
+		return nil, ErrSecretExists
+	} else if !errors.Is(err, ErrSecretNotFound) {
+		return nil, err
+	}
+
 	secretID := "sec_" + hxid.NewTimeSort().String()
 	versionID := "sec_v_" + hxid.NewTimeSort().String()
 	const versionNo = 1
@@ -577,6 +590,13 @@ func (s *Store) RevokeSecret(ctx context.Context,
 
 // lookupMetadataExact reads one active row by (tenant_id, stack, name).
 // Used by both admin reads and the materialization path.
+//
+// The active-uniqueness index guarantees at most one matching row, but
+// older runtime DBs that never built it (0008 predates the index line)
+// can hold duplicate active rows. The ORDER BY ... LIMIT 1 makes the pick
+// deterministic there too — newest-created wins (secret_id breaks a
+// same-second tie) — so a re-`set` is the value that resolves, and
+// rotate/revoke/show all target the same current row.
 func (s *Store) lookupMetadataExact(ctx context.Context,
 	tenantID string, stack *string, name string,
 ) (*SecretMetadata, error) {
@@ -587,7 +607,9 @@ func (s *Store) lookupMetadataExact(ctx context.Context,
 		                 WHERE v.secret_id = s.secret_id AND v.revoked_at IS NULL), 0) AS version_no
 		FROM tenant_secrets s
 		WHERE s.tenant_id = ? AND COALESCE(s.stack,'') = COALESCE(?,'')
-		      AND s.name = ? AND s.revoked_at IS NULL`,
+		      AND s.name = ? AND s.revoked_at IS NULL
+		ORDER BY s.created_at DESC, s.secret_id DESC
+		LIMIT 1`,
 		tenantID, nilIfEmptyStack(stack), name)
 	m, err := scanMetadata(row)
 	if errors.Is(err, sql.ErrNoRows) {
