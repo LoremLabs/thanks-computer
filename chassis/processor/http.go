@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +72,28 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 		method = "POST"
 	}
 	sendBody := method == "POST" || method == "PUT" || method == "PATCH"
+
+	// Body content-type: JSON by default (the envelope is the body).
+	// `WITH body_encoding="urlencoded"` instead form-encodes a JSON object
+	// from the envelope into application/x-www-form-urlencoded — the shape
+	// vendor REST APIs like Stripe require (they reject JSON). `WITH
+	// body_path="_form_input"` selects which object to encode (defaults to
+	// the whole input); nested objects/arrays use bracket notation
+	// (line_items[0][price]=…). Header overlays still run last, so an
+	// operator can override Content-Type.
+	contentType := "application/json"
+	if sendBody {
+		switch strings.ToLower(strings.TrimSpace(gjson.Get(op.Meta, "body_encoding").String())) {
+		case "urlencoded", "form":
+			src := bodyForWire
+			if bp := normalizeEnvelopePath(gjson.Get(op.Meta, "body_path").String()); bp != "" {
+				src = []byte(gjson.GetBytes(bodyForWire, bp).Raw)
+			}
+			bodyForWire = []byte(formEncode(src))
+			contentType = "application/x-www-form-urlencoded"
+		}
+	}
+
 	var reqBody io.Reader
 	if sendBody {
 		reqBody = bytes.NewBuffer(bodyForWire)
@@ -96,7 +121,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 
 	req.Header.Set("User-Agent", ua)
 	if sendBody {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	// Apply secret-bound header overlays last so the operator's
 	// declaration wins over chassis defaults (e.g. operator can
@@ -160,6 +185,62 @@ func normalizeEnvelopePath(p string) string {
 		p = "_txc." + strings.TrimPrefix(p[1:], ".")
 	}
 	return strings.TrimPrefix(p, ".")
+}
+
+// formEncode serializes a JSON value into an
+// application/x-www-form-urlencoded body using bracket notation for
+// nesting — the convention Stripe / Rails / PHP expect:
+//
+//	{"a":"hi","b":" x"}                       -> a=hi&b=%20x
+//	{"metadata":{"email":"a@b"}}              -> metadata[email]=a%40b
+//	{"items":[{"price":"p1"},{"price":"p2"}]} -> items[0][price]=p1&items[1][price]=p2
+//
+// Object keys and all values are percent-encoded RFC-3986 style (space ->
+// %20), which Stripe accepts; the bracket delimiters in keys stay literal
+// so the vendor parser reconstructs the structure. Pairs are emitted in
+// deterministic (sorted) order — wire order is irrelevant to form parsers,
+// and determinism keeps the output testable. Empty/whitespace input yields
+// "".
+func formEncode(raw []byte) string {
+	var pairs []string
+	var walk func(prefix string, v gjson.Result)
+	walk = func(prefix string, v gjson.Result) {
+		switch {
+		case v.IsObject():
+			v.ForEach(func(k, val gjson.Result) bool {
+				seg := formEscape(k.String())
+				if prefix == "" {
+					walk(seg, val)
+				} else {
+					walk(prefix+"["+seg+"]", val)
+				}
+				return true
+			})
+		case v.IsArray():
+			i := 0
+			v.ForEach(func(_, val gjson.Result) bool {
+				walk(prefix+"["+strconv.Itoa(i)+"]", val)
+				i++
+				return true
+			})
+		default:
+			// Scalar leaf. A top-level scalar (no key) has nowhere to go in
+			// a form body, so it's dropped; nested scalars emit key=value.
+			if prefix != "" {
+				pairs = append(pairs, prefix+"="+formEscape(v.String()))
+			}
+		}
+	}
+	walk("", gjson.ParseBytes(raw))
+	sort.Strings(pairs)
+	return strings.Join(pairs, "&")
+}
+
+// formEscape percent-encodes a urlencoded key segment or value RFC-3986
+// style: like url.QueryEscape but emitting space as %20 (not +), which is
+// unambiguous and accepted by Stripe and other form parsers.
+func formEscape(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
 // AsyncEnvelope is the `_txc` block handed to an async worker so it can
