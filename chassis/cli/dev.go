@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +28,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	devpkg "github.com/loremlabs/thanks-computer/chassis/cli/dev"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 )
@@ -62,6 +66,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	watch := fs.Bool("watch", true, "watch sources and hot-reload: compute edits rebuild + reactivate; OPS edits push to a per-stack draft. On by default (that's what `dev` is for); pass --watch=false to disable.")
+	watchIgnore := fs.StringArray("watch-ignore", nil, "glob pattern (repeatable) whose matching directories are pruned from the watcher — CPU saver in big workspaces. A pattern with `/` matches a dir's path under OPS/ (e.g. `publications/*/FILES`); a bare name matches anywhere (e.g. `node_modules`). Per-stack FILES/ trees are pruned by default; add `dev.watch.includeFiles: true` to txco.yaml to watch them.")
 	apply := fs.Bool("apply", true, "push local OPS/ + computes and activate on startup (manifest-aware; skips stacks already in sync). On by default; pass --apply=false to leave chassis state untouched (e.g. when iterating via the admin UI).")
 	forceOpstacks := fs.Bool("force-opstacks", false, "overwrite an existing opstacks/ with the embedded system-opstack template (default: scaffold only if opstacks/ is absent)")
 	verbose := fs.Bool("verbose", false, "verbose logs from the spawned chassis (TXCO_LOG_LEVEL=debug). Default INFO. A parent TXCO_LOG_LEVEL still wins unless --verbose is set.")
@@ -343,11 +348,27 @@ Flags:
 		var applyMu sync.Mutex
 
 		if _, err := os.Stat(opsDir); err == nil {
-			fmt.Fprintf(stdout, "[watch] watching %s (.txcl/.json → draft; colocated .js → rebuild + activate)\n", opsDir)
+			// Watcher tuning: prune big/irrelevant subtrees so the polling
+			// watcher doesn't lstat tens of thousands of built assets 10×/sec.
+			// FILES/ asset trees are excluded by default (see Options.IncludeFiles);
+			// txco.yaml `dev.watch.ignore` + --watch-ignore add more.
+			watchOpts := devpkg.Options{
+				Debounce:     500 * time.Millisecond,
+				Ignore:       append(append([]string{}, cfg.Dev.Watch.Ignore...), (*watchIgnore)...),
+				IncludeFiles: cfg.Dev.Watch.IncludeFiles,
+			}
+			filesNote := "FILES/ excluded"
+			if watchOpts.IncludeFiles {
+				filesNote = "FILES/ included"
+			}
+			if len(watchOpts.Ignore) > 0 {
+				filesNote += "; ignoring " + strings.Join(watchOpts.Ignore, ", ")
+			}
+			fmt.Fprintf(stdout, "[watch] watching %s (.txcl/.json → draft; colocated .js → rebuild + activate; %s)\n", opsDir, filesNote)
 			state := newDevWatchState()
 			// .txcl/.json → sticky draft (no auto-activation; activate to publish).
 			go func() {
-				err := devpkg.WatchOps(ctx, opsDir, 500*time.Millisecond, func() {
+				err := devpkg.WatchOps(ctx, opsDir, watchOpts, func() {
 					applyMu.Lock()
 					defer applyMu.Unlock()
 					freshOps, err := bundle.Walk(dir)
@@ -369,7 +390,7 @@ Flags:
 			// (unlike the draft-only .txcl/.json watch). devApply is
 			// manifest-aware, so only the stack whose digest changed re-versions.
 			go func() {
-				err := devpkg.WatchColocatedComputes(ctx, opsDir, 500*time.Millisecond, func() {
+				err := devpkg.WatchColocatedComputes(ctx, opsDir, watchOpts, func() {
 					applyMu.Lock()
 					defer applyMu.Unlock()
 					fmt.Fprintln(stdout, "[watch] compute source changed — rebuilding")
@@ -594,11 +615,12 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 // perspective if a second save lands while the first is in flight).
 type devWatchState struct {
 	mu     sync.Mutex
-	drafts map[string]int64 // stack name → current draft version_number
+	drafts map[string]int64  // stack name → current draft version_number
+	fps    map[string]string // stack name → last-pushed source fingerprint
 }
 
 func newDevWatchState() *devWatchState {
-	return &devWatchState{drafts: map[string]int64{}}
+	return &devWatchState{drafts: map[string]int64{}, fps: map[string]string{}}
 }
 
 // recordDevURLs queries the dev chassis for each stack's structured
@@ -680,20 +702,35 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	for _, stack := range sortedKeys(stacks) {
+		stackDir := filepath.Join(dir, "OPS", stack)
+		// Skip stacks whose source didn't change since our last push — one edit
+		// re-pushes one stack, not all 60. The fingerprint is cheap: op contents
+		// (already in memory from the walk) + a STAT-only walk of FILES/, VECTORS/,
+		// KV/ (no asset content read). First fire after startup has no recorded
+		// fingerprint, so every stack syncs once, then incrementally.
+		fp, ferr := stackSourceFingerprint(stacks[stack], stackDir)
+		if ferr != nil {
+			return fmt.Errorf("%s: fingerprint: %w", stack, ferr)
+		}
+		if state.fps[stack] == fp {
+			continue
+		}
+
 		files := opsToFiles(stacks[stack])
-		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
+		assets, aerr := collectFileAssets(stackDir)
 		if aerr != nil {
 			return fmt.Errorf("%s: collect FILES/: %w", stack, aerr)
 		}
 		files = append(files, assets...)
 		// Full local mirror — include store-seed packs (see the watch loop above).
-		packs, perr := collectStorePacks(filepath.Join(dir, "OPS", stack))
+		packs, perr := collectStorePacks(stackDir)
 		if perr != nil {
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
 		files = append(files, packs...)
 		if n, ok := state.drafts[stack]; ok {
 			if _, err := c.PutDraftFiles(ctx, stack, n, files); err == nil {
+				state.fps[stack] = fp
 				fmt.Fprintf(stdout, "[watch] %s v%d updated (%d files)\n", stack, n, len(files))
 				continue
 			} else if !isVersionNotDraftErr(err) {
@@ -711,10 +748,63 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			return fmt.Errorf("%s: put files for v%d: %w", stack, n, err)
 		}
 		state.drafts[stack] = n
+		state.fps[stack] = fp
 		fmt.Fprintf(stdout, "[watch] %s new draft v%d (%d files) — run `txco activate %s` to publish\n",
 			stack, n, len(files), stack)
 	}
 	return nil
+}
+
+// stackSourceFingerprint cheaply fingerprints a stack's on-disk source so the
+// watch loop can skip stacks that didn't change. It hashes the op files
+// (opsToFiles is pure in-memory — the .txcl text is already loaded) plus a
+// STAT-only walk (path + size + mtime, never reading content) of the stack's
+// FILES/, VECTORS/, and KV/ asset trees. Mirrors the dirs collectFileAssets /
+// collectStorePacks read, so any change they'd pick up changes the fingerprint
+// — without paying their per-file content reads on every watcher fire.
+func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
+	h := sha256.New()
+	// Op half: content-hash the op files (cheap; small UTF-8 text in memory).
+	for _, f := range opsToFiles(ops) { // already sorted by Path
+		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
+	}
+	// Asset half: stat-only walk of the same trees the collectors read.
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV} {
+		treeDir := filepath.Join(stackDir, top)
+		info, err := os.Stat(treeDir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		walkErr := filepath.WalkDir(treeDir, func(p string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			base := filepath.Base(p)
+			if d.IsDir() {
+				if p != treeDir && strings.HasPrefix(base, ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !d.Type().IsRegular() || strings.HasPrefix(base, ".") {
+				return nil
+			}
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			rel, rerr := filepath.Rel(stackDir, p)
+			if rerr != nil {
+				return rerr
+			}
+			fmt.Fprintf(h, "f\x00%s\x00%d\x00%d\n", filepath.ToSlash(rel), fi.Size(), fi.ModTime().UnixNano())
+			return nil
+		})
+		if walkErr != nil {
+			return "", walkErr
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // isVersionNotDraftErr reports whether `err` is the 409 the chassis

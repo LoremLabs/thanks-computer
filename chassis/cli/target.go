@@ -36,6 +36,9 @@ type workspaceConfig struct {
 	Operations map[string]operationConfig `yaml:"operations" json:"operations,omitempty"`
 	Targets    map[string]targetConfig    `yaml:"targets" json:"targets,omitempty"`
 
+	// Dev configures the `txco dev` loop (watcher tuning, …).
+	Dev devConfig `yaml:"dev" json:"dev,omitempty"`
+
 	// Registry configures package-ref resolution (default registry + namespace
 	// for bare `name@ver` refs). PARSED in Phase 1 so a `registry:` block is
 	// valid; the resolver that consumes it (bare/namespaced ref → concrete OCI
@@ -78,6 +81,26 @@ type appConfig struct {
 	Path   string `yaml:"path" json:"path"`
 	Start  string `yaml:"start" json:"start"`
 	Health string `yaml:"health" json:"health"`
+}
+
+// devConfig is the txco.yaml `dev:` block — developer-loop tuning.
+type devConfig struct {
+	Watch watchConfig `yaml:"watch" json:"watch,omitempty"`
+}
+
+// watchConfig tunes the `txco dev` file watcher.
+type watchConfig struct {
+	// Ignore lists glob patterns whose matching directories are pruned from the
+	// watch (CPU saver in big workspaces). A pattern with a "/" matches a dir's
+	// path relative to OPS/ (e.g. "publications/*/FILES"); a bare pattern
+	// matches a dir's base name anywhere (e.g. "node_modules", "sources").
+	Ignore []string `yaml:"ignore" json:"ignore,omitempty"`
+
+	// IncludeFiles watches the per-stack FILES/ asset trees too. Off by default:
+	// FILES/ holds built assets, not editable source, and polling tens of
+	// thousands of them is the main idle-CPU cost. Set true to hot-reload
+	// hand-edited static assets.
+	IncludeFiles bool `yaml:"includeFiles" json:"includeFiles,omitempty"`
 }
 
 type operationConfig struct {

@@ -25,7 +25,7 @@ func TestWatchOpsDebounces(t *testing.T) {
 
 	var fired int32
 	go func() {
-		_ = WatchOps(ctx, dir, 250*time.Millisecond, func() {
+		_ = WatchOps(ctx, dir, Options{Debounce: 250 * time.Millisecond}, func() {
 			atomic.AddInt32(&fired, 1)
 		})
 	}()
@@ -64,7 +64,7 @@ func TestWatchOpsIgnoresUnrelated(t *testing.T) {
 
 	var fired int32
 	go func() {
-		_ = WatchOps(ctx, dir, 200*time.Millisecond, func() {
+		_ = WatchOps(ctx, dir, Options{Debounce: 200 * time.Millisecond}, func() {
 			atomic.AddInt32(&fired, 1)
 		})
 	}()
@@ -78,6 +78,95 @@ func TestWatchOpsIgnoresUnrelated(t *testing.T) {
 
 	if got := atomic.LoadInt32(&fired); got != 0 {
 		t.Errorf("got %d fires for README.md changes; want 0", got)
+	}
+}
+
+// TestPruneDirs checks the subtree-pruning rules: FILES/ is excluded by
+// default, kept with IncludeFiles, and custom globs match by base name or
+// relative path. A matched directory is reported once and not descended into.
+func TestPruneDirs(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		"www/1000/op",
+		"www/FILES/app/immutable",
+		"publications/white-fang/FILES",
+		"publications/white-fang/1000",
+		"node_modules/pkg",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	abs := func(p string) string { return filepath.Join(root, p) }
+	assertSet := func(name string, got []string, want ...string) {
+		t.Helper()
+		set := map[string]bool{}
+		for _, g := range got {
+			set[g] = true
+		}
+		if len(set) != len(want) {
+			t.Fatalf("%s: pruned %v, want %v", name, got, want)
+		}
+		for _, w := range want {
+			if !set[w] {
+				t.Fatalf("%s: pruned %v, missing %s", name, got, w)
+			}
+		}
+	}
+
+	got, err := pruneDirs(root, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSet("default", got, abs("www/FILES"), abs("publications/white-fang/FILES"))
+
+	got, _ = pruneDirs(root, nil, true)
+	assertSet("includeFiles", got)
+
+	got, _ = pruneDirs(root, []string{"node_modules"}, true)
+	assertSet("bare-name glob", got, abs("node_modules"))
+
+	got, _ = pruneDirs(root, []string{"publications/*/FILES"}, true)
+	assertSet("path glob", got, abs("publications/white-fang/FILES"))
+}
+
+// TestWatchExcludesFilesByDefault: a change to a FILES/ asset (even a .json,
+// which the OPS watcher otherwise acts on) must NOT fire by default, while a
+// real source edit still does.
+func TestWatchExcludesFilesByDefault(t *testing.T) {
+	dir := t.TempDir()
+	filesJSON := filepath.Join(dir, "FILES", "app", "version.json")
+	if err := os.MkdirAll(filepath.Dir(filesJSON), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filesJSON, []byte("v0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rule.txcl"), []byte("v0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var fired int32
+	go func() {
+		_ = WatchOps(ctx, dir, Options{Debounce: 200 * time.Millisecond}, func() { atomic.AddInt32(&fired, 1) })
+	}()
+	time.Sleep(250 * time.Millisecond)
+
+	for i := 0; i < 3; i++ {
+		_ = os.WriteFile(filesJSON, []byte{byte('0' + i)}, 0o644)
+		time.Sleep(40 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if got := atomic.LoadInt32(&fired); got != 0 {
+		t.Fatalf("FILES/ change fired %d times; want 0 (excluded by default)", got)
+	}
+
+	_ = os.WriteFile(filepath.Join(dir, "rule.txcl"), []byte("v1"), 0o644)
+	time.Sleep(500 * time.Millisecond)
+	if got := atomic.LoadInt32(&fired); got < 1 {
+		t.Fatalf("source edit fired %d; want >= 1", got)
 	}
 }
 
@@ -117,7 +206,7 @@ func TestWatchColocatedComputes(t *testing.T) {
 	t.Cleanup(cancel)
 	var fired int32
 	go func() {
-		_ = WatchColocatedComputes(ctx, dir, 250*time.Millisecond, func() { atomic.AddInt32(&fired, 1) })
+		_ = WatchColocatedComputes(ctx, dir, Options{Debounce: 250 * time.Millisecond}, func() { atomic.AddInt32(&fired, 1) })
 	}()
 	time.Sleep(200 * time.Millisecond)
 
