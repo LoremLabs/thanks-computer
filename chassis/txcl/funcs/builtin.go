@@ -57,6 +57,8 @@ func init() {
 	register("split", splitFn)
 	register("join", joinFn)
 	register("substr", substrFn)
+	register("repeat", repeatFn)
+	register("pad", padFn)
 	register("sha256", sha256Fn)
 }
 
@@ -478,6 +480,88 @@ func substrFn(args []any) (any, error) {
 		return nil, fmt.Errorf("&substr: end (%d) exceeds string length (%d)", end, len(s))
 	}
 	return s[start:end], nil
+}
+
+// maxRepeatBytes caps &repeat's output so a data-driven count can't
+// OOM the chassis (or panic strings.Repeat on integer overflow).
+const maxRepeatBytes = 1 << 20 // 1 MiB
+
+// repeatFn returns s concatenated n times — Perl's `x`. n == 0 yields
+// "", negative n halts. The result is capped at maxRepeatBytes so a
+// count sourced from the envelope can't blow up memory; over the cap
+// halts rather than truncating (silent truncation is a footgun).
+func repeatFn(args []any) (any, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("&repeat: expected 2 arguments (s, n), got %d", len(args))
+	}
+	s, ok := args[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("&repeat: first argument must be a string, got %T", args[0])
+	}
+	n, err := toInt("&repeat count", args[1])
+	if err != nil {
+		return nil, err
+	}
+	if n < 0 {
+		return nil, fmt.Errorf("&repeat: negative count not supported (n=%d)", n)
+	}
+	// Guard without computing len(s)*n (which could overflow) — compare
+	// against the cap divided by n instead.
+	if n > 0 && len(s) > maxRepeatBytes/n {
+		return nil, fmt.Errorf("&repeat: result would exceed the %d-byte cap (len=%d, n=%d)", maxRepeatBytes, len(s), n)
+	}
+	return strings.Repeat(s, n), nil
+}
+
+// padFn pads s to a fixed byte width with fill. The SIGN of width picks
+// the side (like C printf's negative-width left-justify): width > 0 pads
+// on the LEFT (the zero-pad-a-number case, "42" → "00042"), width < 0
+// pads on the RIGHT. width == 0 halts — there's no target. If s is
+// already at least abs(width) bytes it's returned unchanged: padding only
+// ever grows, never truncates. fill is repeated then sliced to exactly the
+// bytes needed (multi-char fill: 5 bytes of "ab" → "ababa"). Byte-measured
+// like &substr/&len, so a multi-byte fill can be sliced mid-rune.
+func padFn(args []any) (any, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("&pad: expected 3 arguments (s, width, fill), got %d", len(args))
+	}
+	s, ok := args[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("&pad: first argument must be a string, got %T", args[0])
+	}
+	width, err := toInt("&pad width", args[1])
+	if err != nil {
+		return nil, err
+	}
+	fill, ok := args[2].(string)
+	if !ok {
+		return nil, fmt.Errorf("&pad: fill must be a string, got %T", args[2])
+	}
+	if width == 0 {
+		return nil, fmt.Errorf("&pad: width must be non-zero (positive = left-pad, negative = right-pad)")
+	}
+	left := width > 0
+	target := width
+	if !left {
+		target = -width
+	}
+	if len(s) >= target {
+		return s, nil // already wide enough — never truncate
+	}
+	if fill == "" {
+		return nil, fmt.Errorf("&pad: fill must be non-empty to pad %q to width %d", s, target)
+	}
+	need := target - len(s)
+	var b strings.Builder
+	b.Grow(need)
+	for b.Len() < need {
+		b.WriteString(fill)
+	}
+	pad := b.String()[:need]
+	if left {
+		return pad + s, nil
+	}
+	return s + pad, nil
 }
 
 // sha256Fn returns the lowercase hex digest of the SHA-256 hash of

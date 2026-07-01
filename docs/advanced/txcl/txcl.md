@@ -299,7 +299,10 @@ The path argument is a string literal (or any value that evaluates to a string),
 | `&concat(...)`           | strings → string                 | variadic; non-string args are coerced via `%v`, `nil` becomes empty |
 | `&len(s)`                | string\|array\|object\|nil → int | length of string, array, or map; `nil` is 0                         |
 | `&split(s, sep)`         | string, string → array           | mirrors `strings.Split`; empty sep splits into individual bytes     |
+| `&join(arr, sep)`        | array, string → string           | inverse of `&split`; elements coerced like `&concat` (nil → empty); halts if `arr` isn't an array |
 | `&substr(s, start, end)` | string, int, int → string        | half-open, byte-indexed; halts on out-of-range or negative indices  |
+| `&repeat(s, n)`          | string, int → string             | `s` repeated `n` times (Perl `x`); `n == 0` → `""`; negative `n` halts; capped at 1 MiB |
+| `&pad(s, width, fill)`   | string, int, string → string     | pad `s` to `abs(width)` bytes with `fill`; **positive `width` = left-pad** (`&pad("42",5,"0")` → `"00042"`), **negative = right-pad** (`&pad("hi",-5," ")` → `"hi   "`); `width == 0` halts; never truncates (already-wide `s` passes through); byte-measured |
 | `&sha256(s)`             | string → string                  | lowercase hex digest                                                |
 
 #### Safe variants (`&try_*`)

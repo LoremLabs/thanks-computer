@@ -744,6 +744,92 @@ func TestSubstr_RejectsFractional(t *testing.T) {
 	}
 }
 
+func TestRepeat(t *testing.T) {
+	cases := []struct {
+		name string
+		args []any
+		want string
+	}{
+		{"perl-x", []any{"hi ", int64(2)}, "hi hi "},
+		{"rule", []any{"-", int64(10)}, "----------"},
+		{"zero", []any{"x", int64(0)}, ""},
+		{"float-count", []any{"ab", float64(3)}, "ababab"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := Call("repeat", tc.args)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			if v != tc.want {
+				t.Errorf("got %q, want %q", v, tc.want)
+			}
+		})
+	}
+}
+
+func TestRepeat_NegativeCount(t *testing.T) {
+	if _, err := Call("repeat", []any{"x", int64(-1)}); err == nil {
+		t.Fatal("expected error for negative count")
+	}
+}
+
+func TestRepeat_ExceedsCap(t *testing.T) {
+	// 2 bytes × (cap) would blow past the 1 MiB cap → halt, not truncate.
+	if _, err := Call("repeat", []any{"ab", int64(1 << 20)}); err == nil {
+		t.Fatal("expected error for result exceeding the byte cap")
+	}
+}
+
+func TestPad(t *testing.T) {
+	cases := []struct {
+		name string
+		args []any
+		want string
+	}{
+		{"left-zero-pad", []any{"42", int64(5), "0"}, "00042"},
+		{"right-pad", []any{"hi", int64(-5), " "}, "hi   "},
+		{"already-wide", []any{"already", int64(3), "0"}, "already"},
+		{"exact-width", []any{"abc", int64(3), "0"}, "abc"},
+		{"multi-char-fill", []any{"7", int64(5), "ab"}, "abab7"}, // need 4 fill bytes → "abab"
+		{"float-width", []any{"9", float64(3), "0"}, "009"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := Call("pad", tc.args)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			if v != tc.want {
+				t.Errorf("got %q, want %q", v, tc.want)
+			}
+		})
+	}
+}
+
+func TestPad_ZeroWidth(t *testing.T) {
+	if _, err := Call("pad", []any{"x", int64(0), "0"}); err == nil {
+		t.Fatal("expected error for zero width")
+	}
+}
+
+func TestPad_EmptyFillWhenPaddingNeeded(t *testing.T) {
+	if _, err := Call("pad", []any{"42", int64(5), ""}); err == nil {
+		t.Fatal("expected error for empty fill when padding is needed")
+	}
+}
+
+func TestPad_EmptyFillPassthrough(t *testing.T) {
+	// No padding needed → empty fill is harmless, s passes through.
+	v, err := Call("pad", []any{"already", int64(3), ""})
+	if err != nil {
+		t.Fatalf("pad: %v", err)
+	}
+	if v != "already" {
+		t.Errorf("got %q, want 'already'", v)
+	}
+}
+
 func TestSha256(t *testing.T) {
 	v, err := Call("sha256", []any{"hello"})
 	if err != nil {
