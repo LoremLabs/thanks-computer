@@ -293,13 +293,19 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 }
 
 func (m *Mailer) emitUsage(rid, tenant, stack string) {
+	m.emitUsageSrc(rid, tenant, stack, "sendmail")
+}
+
+// emitUsageSrc writes a billable usage event attributed to `src` (e.g.
+// "sendmail" or "relay"). Nil-safe.
+func (m *Mailer) emitUsageSrc(rid, tenant, stack, src string) {
 	if m.usage == nil {
 		return
 	}
 	m.usage.WriteEvent(usage.UsageEvent{
 		RID:      rid,
 		Tenant:   tenant,
-		Src:      "sendmail",
+		Src:      src,
 		Stack:    stack,
 		Status:   "ok",
 		Billable: true,

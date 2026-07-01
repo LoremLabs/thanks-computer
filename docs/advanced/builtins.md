@@ -23,6 +23,7 @@
 | `txco://read-file` | Read a stack's `FILES/` asset(s) into the document as data (templates, fixtures, config) — the read-into-the-tree counterpart to `static`. See [read-file](./read-file.md). |
 | `txco://web-render` | Read a source path, optionally render Markdown→HTML, set `@web.res.*`, halt. Pages without a backend. |
 | `txco://sendmail` | Render + submit outbound email from the `_sendmail` contract — see [sendmail](./protocols/sendmail.md). |
+| `txco://relay` | Forward an inbound message VERBATIM (the `.forward` primitive) — see [relay](./protocols/relay.md). Only fires from the inbound-mail path (LMTP). |
 | `txco://hmac-sign` | Compute an HMAC signature (key via `WITH secrets.*`). |
 | `txco://hmac-verify` | Verify an HMAC, constant-time; result lands under `@computed.*`. |
 | `txco://basic-auth-encode` | Encode `user:pass` to a basic-auth header value. |

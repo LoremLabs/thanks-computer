@@ -147,6 +147,13 @@ var ctxKeyOpstackSnap = ctxKeyType{name: "opstack-snapshot"}
 // `_txc.tenant` mid-pipeline to escape into another tenant's stacks.
 var ctxKeyTenant = ctxKeyType{name: "tenant-scope"}
 
+// ctxKeySource carries the originating inlet (`_txc.src`, stamped by ingress:
+// "lmtp"/"http"/"cron"/…). Pinned once on the first Run exactly like
+// ctxKeyTenant, so a privileged op can trust "this request really came from
+// inlet X" even if a rule rewrites `_txc.src` mid-pipeline via `SET @src`.
+// See SourceScope — txco://relay gates on it.
+var ctxKeySource = ctxKeyType{name: "source-scope"}
+
 // ctxKeyResumeRun carries the identity of an already-created run while a
 // continuation is being resumed. When present, suspendBarrierScope reuses
 // this run (a later async barrier on the SAME run = new stage docs, not a
@@ -218,6 +225,29 @@ func tenantScope(ctx context.Context) string {
 // the trusted, immutable tenant pinned at first Run — NOT the mutable
 // `_txc.tenant` envelope field, which a mid-pipeline op could overwrite.
 func TenantScope(ctx context.Context) string { return tenantScope(ctx) }
+
+// WithSource pins the request's originating inlet (`_txc.src`) into context.
+// Exposed for tests and out-of-band callers; the data plane pins it itself on
+// the first Run (see Run).
+func WithSource(ctx context.Context, src string) context.Context {
+	return context.WithValue(ctx, ctxKeySource, src)
+}
+
+// sourceScope returns the pinned originating inlet, or "" if unknown
+// (untenanted/system paths, tests that don't pin it).
+func sourceScope(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeySource).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// SourceScope exposes the pinned originating inlet to bundled ops outside this
+// package. Like TenantScope it is captured at first Run from the ingress stamp,
+// so it is the trusted answer to "which inlet started this request" — NOT the
+// mutable `_txc.src` envelope field, which a rule could rewrite via `SET @src`.
+// Privileged egress ops (e.g. txco://relay) gate on it.
+func SourceScope(ctx context.Context) string { return sourceScope(ctx) }
 
 // tenantExists reports whether a non-revoked tenant with this slug
 // exists in the opstack snapshot. Used to validate a boot re-tenant
@@ -394,6 +424,13 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		// tenant even if a rule rewrites `_txc.tenant`.
 		if ctx.Value(ctxKeyTenant) == nil {
 			ctx = WithTenant(ctx, gjson.Get(raw, "_txc.tenant").String())
+		}
+
+		// Pin the originating inlet too (same first-Run, same rationale as
+		// tenant): a later `SET @src` can't fool a privileged op — e.g.
+		// txco://relay only fires when this pinned source is "lmtp".
+		if ctx.Value(ctxKeySource) == nil {
+			ctx = WithSource(ctx, gjson.Get(raw, "_txc.src").String())
 		}
 	}
 

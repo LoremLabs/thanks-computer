@@ -1270,6 +1270,18 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			return mailer.Send(ctx, processor.TenantScope(ctx), in)
 		}))
 
+	// `txco://relay`: the `.forward` primitive — re-send an inbound message
+	// VERBATIM (`_relay.raw`) to a new recipient, no re-compose/re-sign, so the
+	// original DKIM survives. Shares the sendmail Mailer (same relay transport +
+	// campaign guard + From-domain check). Passes BOTH the pinned tenant AND the
+	// pinned SOURCE (processor.SourceScope): relay ships arbitrary bytes out
+	// under a verified return-path, so it must run only from the inbound-mail
+	// path — Relay refuses unless the source is "lmtp".
+	pu.Handle([]byte("txco://relay"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return mailer.Relay(ctx, processor.TenantScope(ctx), processor.SourceScope(ctx), in)
+		}))
+
 	// `txco://schedule`: enqueue (or cancel/reschedule) a future event into the
 	// scheduled_events store. Registered only when the scheduled personality
 	// opened a store (--db-scheduled-dsn). The closure passes the PINNED tenant
