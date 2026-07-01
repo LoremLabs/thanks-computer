@@ -37,6 +37,21 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	in := []byte(op.Input)
 	pu.Logger.Debug("ExecHttp", zap.String("opname", opName), zap.String("input", string(in)))
 
+	// A `WITH url = "<resolved url>"` overrides the literal EXEC target. EXEC must be a
+	// string literal so the scheme dispatches here, but some calls need a URL built at
+	// runtime — e.g. a Stripe GET filtered by a customer id pulled from the envelope. The
+	// override is the txcl-resolved WITH value, so authors write
+	//   WITH url = &concat("https://api.stripe.com/v1/subscriptions?customer=", ._cid)
+	// Constrained to http/https so it can't jump schemes (file://, etc.) or otherwise
+	// escape the egress-guarded HTTPClient used below.
+	if override := strings.TrimSpace(gjson.Get(op.Meta, "url").String()); override != "" {
+		if !strings.HasPrefix(override, "http://") && !strings.HasPrefix(override, "https://") {
+			return event.Payload{Raw: `{}`, Type: event.Null, Meta: `{"error":["http-url-override-scheme"]}`},
+				fmt.Errorf("ExecHTTP: WITH url override must be http(s), got %q", override)
+		}
+		opName = override
+	}
+
 	// Resolve `secrets.*` overlays (no-op when none declared).
 	// Cleartext lives only in `bodyForWire` and `headerOverlays`
 	// from here to req.Body / req.Header below; both are released
