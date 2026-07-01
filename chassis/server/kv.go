@@ -232,6 +232,40 @@ func kvIncr(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }
 
+// kvList writes the user keys under (tenant, namespace) into the envelope at
+// `into` (default `_kv`) as {keys:[…], next:"…", count:n}. Read-only and
+// WINDOWED: at most `limit` keys (default/max kvstore.MaxListLimit) that sort
+// after the `after` cursor; `next` is the cursor to pass on the following call
+// ("" when the namespace is exhausted). There's no per-key prefix scan — the KV
+// NAMESPACE is the prefix, so bucket a listable set (e.g. subscribers) in its
+// own namespace. No `key` param.
+func kvList(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error) {
+	tenant, ns, err := kvScope(ctx, in)
+	if err != nil {
+		return kvErr(err.Error()), err
+	}
+	meta := []byte(operation.MetaFromContext(ctx))
+	after := gjson.GetBytes(meta, "after").String()
+	limit := int(gjson.GetBytes(meta, "limit").Int())
+	keys, next, lerr := k.ListKeysPage(ctx, tenant, ns, after, limit)
+	if lerr != nil {
+		return kvErr(lerr.Error()), lerr
+	}
+	if keys == nil {
+		keys = []string{} // emit [] not null for an empty/exhausted page
+	}
+	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
+	if into == "" {
+		into = "_kv"
+	}
+	blob, _ := json.Marshal(keys)
+	resp := `{}`
+	resp, _ = sjson.SetRaw(resp, into+".keys", string(blob))
+	resp, _ = sjson.Set(resp, into+".next", next)
+	resp, _ = sjson.Set(resp, into+".count", len(keys))
+	return event.Payload{Raw: resp, Type: event.JSON}, nil
+}
+
 // kvErr builds a structured error event.Payload (never includes values —
 // only the human-readable reason).
 func kvErr(msg string) event.Payload {

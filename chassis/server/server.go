@@ -1167,8 +1167,8 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			return readFile(ctx, staticIndex, fcas, in, conf.ReadFileMaxBytes)
 		}))
 
-	// Op-writable tenant KV (txco://kv/get|set|delete|incr) — the only ops
-	// that persist across requests. Backed by the configured KV store (boltdb or
+	// Op-writable tenant KV (txco://kv/get|set|delete|incr|cas|list) — the only
+	// ops that persist across requests. Backed by the configured KV store (boltdb or
 	// redis, via --kvstore). Tenant-scoped via processor.TenantScope; namespace
 	// defaults to the routed stack. See chassis/server/kv.go + chassis/kv.
 	kvHandle := kvstore.New(kv, conf.KVMaxValueBytes, time.Duration(conf.KVMaxTTL)*time.Second)
@@ -1191,6 +1191,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	pu.Handle([]byte("txco://kv/cas"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return kvCAS(ctx, kvHandle, in)
+		}))
+	pu.Handle([]byte("txco://kv/list"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return kvList(ctx, kvHandle, in)
 		}))
 
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,

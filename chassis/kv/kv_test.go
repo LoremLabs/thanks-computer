@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -21,6 +22,84 @@ func newKV(t *testing.T, maxValue int, maxTTL time.Duration) *KV {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return New(s, maxValue, maxTTL)
+}
+
+func TestListKeysPage(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 0, 0)
+
+	// Empty namespace → empty page, no cursor.
+	keys, next, err := k.ListKeysPage(ctx, "t1", "subs", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 || next != "" {
+		t.Fatalf("empty ns: keys=%v next=%q", keys, next)
+	}
+
+	want := []string{"a@x", "b@x", "c@x", "d@x", "e@x"}
+	// Insert out of order to prove the page sorts.
+	for _, kk := range []string{"c@x", "a@x", "e@x", "b@x", "d@x"} {
+		if err := k.Set(ctx, "t1", "subs", kk, json.RawMessage(`{"v":1}`), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Windowed: 2 per page, follow the cursor — each key once, sorted, 3 pages (2+2+1).
+	var got []string
+	cursor := ""
+	pages := 0
+	for {
+		page, nxt, err := k.ListKeysPage(ctx, "t1", "subs", cursor, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) > 2 {
+			t.Fatalf("page over limit: %v", page)
+		}
+		got = append(got, page...)
+		cursor = nxt
+		pages++
+		if cursor == "" {
+			break
+		}
+		if pages > 10 {
+			t.Fatal("pagination did not terminate")
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("collected %v, want %v", got, want)
+	}
+	if pages != 3 {
+		t.Fatalf("expected 3 pages, got %d", pages)
+	}
+
+	// A limit above the max is clamped (not an error): one call returns all 5.
+	all, next2, err := k.ListKeysPage(ctx, "t1", "subs", "", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(all, want) || next2 != "" {
+		t.Fatalf("clamped page: keys=%v next=%q", all, next2)
+	}
+
+	// A cursor at/after the last key yields an empty final page.
+	tail, next3, err := k.ListKeysPage(ctx, "t1", "subs", "e@x", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail) != 0 || next3 != "" {
+		t.Fatalf("past-end: keys=%v next=%q", tail, next3)
+	}
+
+	// A different namespace is isolated (namespace IS the prefix).
+	other, _, err := k.ListKeysPage(ctx, "t1", "elsewhere", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("namespace bleed: %v", other)
+	}
 }
 
 func TestSetGetDelete(t *testing.T) {

@@ -507,6 +507,11 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/secrets/{name}/rotate", c.handleRotateSecret).Methods(http.MethodPost)
 	tenantR.HandleFunc("/secrets/{name}/rotate-generated", c.handleRotateSecretGenerated).Methods(http.MethodPost)
 
+	// Read-only listing of the op-writable KV store, keyed by namespace. Lets an
+	// operator see/export the set an op accumulates (e.g. blog_subscribers).
+	// See chassis/server/admin/kv_endpoints.go.
+	tenantR.HandleFunc("/kv/{namespace}", c.handleListKV).Methods(http.MethodGet)
+
 	// Browse the trace dir written by chassis/trace's FileSink.
 	// Mounted only when trace-mode != off — otherwise the path returns
 	// 404s, and we don't want to mislead by registering a working

@@ -206,6 +206,52 @@ func (c *Client) ListOps(ctx context.Context, prefix string) ([]Op, error) {
 	return out.Ops, nil
 }
 
+// KVListResponse mirrors admin.kvListResponse (GET /kv/{namespace}).
+type KVListResponse struct {
+	Namespace string   `json:"namespace"`
+	Keys      []string `json:"keys"`
+	Next      string   `json:"next,omitempty"`
+	Count     int      `json:"count"`
+}
+
+// ListKV returns a windowed page of user keys under (tenant, namespace) in the
+// op-writable KV store. `after` is the resume cursor (empty = first page);
+// `limit` caps the page (0 = server default). The response's Next is the cursor
+// for the following page ("" when the namespace is exhausted).
+func (c *Client) ListKV(ctx context.Context, namespace, after string, limit int) (*KVListResponse, error) {
+	endpoint := c.scopedURL("/kv/" + url.PathEscape(namespace))
+	q := url.Values{}
+	if after != "" {
+		q.Set("after", after)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if enc := q.Encode(); enc != "" {
+		endpoint += "?" + enc
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out KVListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode kv list response: %w", err)
+	}
+	return &out, nil
+}
+
 // (ImportOps removed — the legacy /ops/import endpoint is retired.
 // CLI callers push via CreateDraft + PutDraftFiles + Activate.)
 

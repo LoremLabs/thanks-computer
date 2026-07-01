@@ -168,6 +168,11 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runConfig(rest, stdout, stderr), true
 	case "dns":
 		return runDNS(rest, stdout, stderr), true
+	case "kv":
+		// Read-only inspection of the op-writable KV store (e.g.
+		// `txco kv list subscribers`). Lives in the auth package to reuse
+		// its signed-target/profile/tenant resolution.
+		return auth.RunKV(rest, stdout, stderr), true
 	case "data":
 		return runData(rest, stdout, stderr), true
 	case "cron":
@@ -332,6 +337,7 @@ func printUsage(w io.Writer) {
 		}},
 		{"Diagnose & connect", []row{
 			{"trace [<rid>]", muted("Render the execution trace for a request (use ") + hint("`txco trace last`") + muted(" for the most recent)")},
+			{"kv list <namespace>", muted("List keys in the op-writable KV store")},
 			{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
 			{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},
 			{"room [--room N] <msg>", muted("Send a message into a room (also installed as ") + hint("thanks") + muted(")")},

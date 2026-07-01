@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,15 @@ const segMax = 256
 
 // casAttempts bounds the compare-and-swap retry loop (Incr, CAS) under contention.
 const casAttempts = 5
+
+// DefaultListLimit / MaxListLimit bound a single ListKeysPage response. The
+// underlying store.List has no native cursor (it returns the whole namespace),
+// so the window caps the RESPONSE size, not the read. Requests above the max are
+// clamped down; a non-positive request uses the default.
+const (
+	DefaultListLimit = 200
+	MaxListLimit     = 200
+)
 
 // KV is a tenant-scoped view over the underlying key-value store.
 type KV struct {
@@ -165,12 +175,10 @@ func (k *KV) Delete(ctx context.Context, tenant, ns, key string) error {
 	return nil
 }
 
-// ListKeys returns the user keys currently stored under (tenant, ns) — the
-// namespace view the declarative store-seed reconciler needs to find which
-// managed keys a re-applied pack dropped. Lazily-expired keys are filtered
-// (parity with Get); order is unspecified; an empty namespace yields nil.
-// The composed <tenant>/<ns>/ prefix is stripped so callers get bare user keys.
-func (k *KV) ListKeys(ctx context.Context, tenant, ns string) ([]string, error) {
+// listKeysAll returns all live (non-expired) user keys under (tenant, ns), order
+// unspecified — the shared read behind ListKeys and ListKeysPage. The composed
+// <tenant>/<ns>/ prefix is stripped so callers get bare user keys.
+func (k *KV) listKeysAll(ctx context.Context, tenant, ns string) ([]string, error) {
 	if k == nil || k.s == nil {
 		return nil, errors.New("kv: store not configured")
 	}
@@ -204,6 +212,49 @@ func (k *KV) ListKeys(ctx context.Context, tenant, ns string) ([]string, error) 
 		keys = append(keys, key)
 	}
 	return keys, nil
+}
+
+// ListKeys returns the user keys currently stored under (tenant, ns) — the
+// namespace view the declarative store-seed reconciler needs to find which
+// managed keys a re-applied pack dropped. Lazily-expired keys are filtered
+// (parity with Get); order is unspecified; an empty namespace yields nil.
+func (k *KV) ListKeys(ctx context.Context, tenant, ns string) ([]string, error) {
+	return k.listKeysAll(ctx, tenant, ns)
+}
+
+// ListKeysPage returns a stable, windowed page of the user keys under
+// (tenant, ns), sorted ascending. It returns up to `limit` keys (clamped to
+// MaxListLimit; a non-positive limit uses DefaultListLimit) that sort strictly
+// AFTER the `after` cursor (empty = from the start), plus `next`: the cursor to
+// pass on the following call, or "" when the namespace is exhausted.
+//
+// The backing store.List has no native cursor (redis SCANs to exhaustion,
+// boltdb walks the bucket), so this fetches all keys then sorts + slices — the
+// window bounds the RESPONSE, not the underlying read. Fine for the modest
+// namespaces this serves; a truly large namespace pays a full in-memory sort per
+// page. Deterministic order makes the `after` cursor a stable resume point even
+// as keys are added/removed between pages.
+func (k *KV) ListKeysPage(ctx context.Context, tenant, ns, after string, limit int) (keys []string, next string, err error) {
+	all, err := k.listKeysAll(ctx, tenant, ns)
+	if err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 || limit > MaxListLimit {
+		limit = DefaultListLimit
+	}
+	sort.Strings(all)
+	// First index strictly greater than the cursor (0 when after == "", since
+	// every non-empty key sorts after "").
+	i := sort.Search(len(all), func(j int) bool { return all[j] > after })
+	end := i + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	page := append([]string(nil), all[i:end]...)
+	if end < len(all) {
+		next = all[end-1] // more remain; resume strictly after the last returned key
+	}
+	return page, next, nil
 }
 
 // Incr atomically adds delta to an integer value (creating it at delta if

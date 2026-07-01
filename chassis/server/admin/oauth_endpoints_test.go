@@ -211,18 +211,25 @@ func TestOAuthEnrollFirstWithSlug(t *testing.T) {
 		t.Fatalf("actor_id = %v", body["actor_id"])
 	}
 	caps, _ := body["capabilities"].([]any)
-	if len(caps) != 4 {
-		t.Fatalf("capabilities = %v, want 4 owner caps", body["capabilities"])
+	if len(caps) != 5 {
+		t.Fatalf("capabilities = %v, want 5 owner caps", body["capabilities"])
 	}
-	// A tenant owner must be able to manage their own tenant's secrets.
-	hasSecret := false
+	// A tenant owner must be able to manage their own tenant's secrets and to
+	// read their own tenant's KV (e.g. list a namespace via the admin API).
+	hasSecret, hasKV := false, false
 	for _, cp := range caps {
-		if s, _ := cp.(string); s == "secret:*:*" {
+		switch s, _ := cp.(string); s {
+		case "secret:*:*":
 			hasSecret = true
+		case "kv:*:*":
+			hasKV = true
 		}
 	}
 	if !hasSecret {
 		t.Fatalf("owner caps missing secret:*:*: %v", body["capabilities"])
+	}
+	if !hasKV {
+		t.Fatalf("owner caps missing kv:*:*: %v", body["capabilities"])
 	}
 	// The mapping + tenant now exist.
 	tid, err := e.c.registry.LookupOIDCSubject(context.Background(), testOAuthIssuer, "email:matt@example.com")
