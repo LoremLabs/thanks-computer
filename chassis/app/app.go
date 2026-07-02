@@ -519,7 +519,7 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 //     admin apply path AND the control-event
 //     applier, which re-applies the node's own
 //     published events). A large stack activation
-//     holds BEGIN IMMEDIATE across materialise +
+//     holds the write lock across materialise +
 //     N-file inserts for tens of seconds, so a
 //     concurrent writer waiting behind it blew the
 //     old 5s budget and surfaced as
@@ -527,6 +527,22 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 //     30s rides through a typical large activate;
 //     the rare worse case is covered by the CLI
 //     apply's retry-with-backoff.
+//   - _txlock=immediate  — (runtime DB only) make database/sql's BeginTx
+//     issue BEGIN IMMEDIATE, so a transaction takes
+//     the RESERVED write lock UP FRONT instead of
+//     starting deferred and upgrading read→write on
+//     its first INSERT. In WAL a lost upgrade returns
+//     SQLITE_BUSY that busy_timeout CANNOT retry — the
+//     instant "database is locked" 500 on
+//     POST /stacks/<name>/draft. Taking RESERVED at
+//     BEGIN means the second writer WAITS on the lock
+//     (governed by _busy_timeout above) rather than
+//     failing the upgrade. This is the driver-level
+//     way to do it: an explicit `Exec("BEGIN
+//     IMMEDIATE")` inside a BeginTx tx just errors
+//     with "cannot start a transaction within a
+//     transaction". Scoped to runtime — auth/scheduled
+//     have no bulk multi-writer path.
 //
 // Why NOT cache=shared: shared-cache mode introduces a SECOND lock
 // class — TABLE-level (SQLITE_LOCKED, error code 6) — that exists on
@@ -543,12 +559,21 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 // the .db-shm state and 500s on first boot. See dbcache.DbCache.Source.
 // sqliteBusyTimeoutMs is the per-connection lock-wait budget (see the
 // _busy_timeout note on openSQLiteOrDie). 30s so a writer rides through a large
-// stack activation's BEGIN IMMEDIATE instead of failing with "database is
-// locked"; the CLI apply's retry covers anything longer.
+// stack activation instead of failing with "database is locked"; the CLI
+// apply's retry covers anything longer.
 const sqliteBusyTimeoutMs = 30000
 
 func openSQLiteOrDie(logger *zap.Logger, dsn, kind string) *sql.DB {
 	full := fmt.Sprintf("%s?mode=rwc&_journal_mode=WAL&_busy_timeout=%d", dsn, sqliteBusyTimeoutMs)
+	if kind == "runtime" {
+		// The runtime DB is the only one with concurrent writers (admin apply
+		// path + the control-event applier). _txlock=immediate makes BeginTx
+		// take the RESERVED lock up front so a lost read→write upgrade can't
+		// return an unretryable SQLITE_BUSY; _busy_timeout then serializes the
+		// writers. See the _txlock note above. Auth/scheduled (which also open
+		// via this helper) have no such path, so they stay deferred.
+		full += "&_txlock=immediate"
+	}
 	db, err := sql.Open("sqlite3", full)
 	if err != nil {
 		logger.Fatal("db open err",

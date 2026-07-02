@@ -2056,22 +2056,15 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		fleetChecksum = sum
 	}
 
-	// BEGIN IMMEDIATE so SQLite takes a RESERVED lock up front; concurrent
-	// activations on the same chassis serialise rather than racing into
-	// a half-applied state.
+	// The runtime DB is opened with _txlock=immediate, so this BeginTx takes
+	// SQLite's RESERVED write lock up front; concurrent activations on the same
+	// chassis serialise (waiting on _busy_timeout) rather than racing into a
+	// half-applied state or failing a read→write upgrade with "database is
+	// locked". See openSQLiteOrDie in chassis/app.
 	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
 		return
-	}
-	if _, err := tx.ExecContext(r.Context(), "BEGIN IMMEDIATE"); err != nil {
-		// SQLite's database/sql driver opens its own implicit tx; the
-		// explicit BEGIN IMMEDIATE inside it fails with "cannot start a
-		// transaction within a transaction". Fall through — the outer
-		// BeginTx already gives us isolation against same-connection
-		// concurrent writers, which is all `dbcache.MaxOpenConns=1`
-		// allows in practice.
-		_ = err
 	}
 	committed := false
 	defer func() {

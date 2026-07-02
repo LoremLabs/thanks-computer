@@ -351,12 +351,13 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 	}
 	now := time.Now().UTC().Format(tsLayout)
 
+	// The runtime DB is opened with _txlock=immediate, so BeginTx takes the
+	// RESERVED write lock up front and this applier serialises against the
+	// admin apply path on _busy_timeout instead of failing a read→write
+	// upgrade with "database is locked". See openSQLiteOrDie in chassis/app.
 	tx, err := c.pu.RuntimeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
-	}
-	if _, err := tx.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		_ = err // outer BeginTx already isolates; matches admin path
 	}
 	committed := false
 	defer func() {
@@ -517,12 +518,13 @@ func (c *Controller) applyRows(ctx context.Context, ev controlevent.Event, art R
 		return err
 	}
 
+	// A runtime-DB target is opened with _txlock=immediate, so BeginTx takes the
+	// RESERVED lock up front (see openSQLiteOrDie in chassis/app); other targets
+	// stay deferred as before. An explicit Exec("BEGIN IMMEDIATE") here would
+	// only error with "within a transaction", so it's gone.
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
-	}
-	if _, err := tx.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		_ = err
 	}
 	committed := false
 	defer func() {
