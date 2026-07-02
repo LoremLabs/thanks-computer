@@ -486,6 +486,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	// `apply`/`push` are push+activate sugar over the versioned control plane.
 	stacks := groupOpsByStack(ops)
 	results := make([]deployResult, 0, len(stacks))
+	green, red, dim, reset := statusColors(stdout)
 	// failures collects stacks that exhausted their retries so one bad stack
 	// no longer aborts the whole run: we record it, keep going, and report the
 	// set at the end. apply is idempotent (unchanged stacks short-circuit), so
@@ -539,13 +540,13 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 				skip, skipVersion = true, *rec.ActiveVersion
 			}
 			if skip {
+				// Unchanged stacks are recorded (for --json and the end-of-run recap)
+				// but NOT printed per-stack — an in-sync stack is noise; only what
+				// actually deployed (or failed) is worth a line.
 				results = append(results, deployResult{
 					Stack: stack, Version: skipVersion,
 					Files: len(files), Activated: false, Unchanged: true,
 				})
-				if !opts.jsonOut {
-					fmt.Fprintf(stdout, "%s v%d unchanged — skipped\n", stack, skipVersion)
-				}
 				continue
 			}
 		}
@@ -583,10 +584,6 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 					Stack: stack, Version: *rec.ActiveVersion,
 					Files: len(files), Activated: false, Unchanged: true,
 				})
-				if !opts.jsonOut {
-					fmt.Fprintf(stdout, "%s v%d unchanged — no changes, not re-versioned\n",
-						stack, *rec.ActiveVersion)
-				}
 				continue
 			}
 		}
@@ -716,11 +713,11 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			continue
 		}
 		if act.PriorVersionNumber != nil {
-			fmt.Fprintf(stdout, "%s v%d activated (was v%d, %d files)\n",
-				stack, act.VersionNumber, *act.PriorVersionNumber, len(files))
+			fmt.Fprintf(stdout, "%s✓%s %s v%d activated (was v%d, %d files)\n",
+				green, reset, stack, act.VersionNumber, *act.PriorVersionNumber, len(files))
 		} else {
-			fmt.Fprintf(stdout, "%s v%d activated (%d files)\n",
-				stack, act.VersionNumber, len(files))
+			fmt.Fprintf(stdout, "%s✓%s %s v%d activated (%d files)\n",
+				green, reset, stack, act.VersionNumber, len(files))
 		}
 		if act.StructuredURL != "" {
 			fmt.Fprintf(stdout, "  → %s\n", act.StructuredURL)
@@ -739,16 +736,47 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 	}
+	// One-line recap so the hidden (unchanged) stacks are still accounted for at a
+	// glance: what deployed, how many were already in sync, and any failures.
+	// apply-all only — a single-stack `push` already prints its one ✓ line.
+	if !opts.jsonOut && onlyStack == "" {
+		var nAct, nUnch int
+		for _, r := range results {
+			switch {
+			case r.Activated:
+				nAct++
+			case r.Unchanged:
+				nUnch++
+			}
+		}
+		recap := fmt.Sprintf("%s✓ %d deployed%s · %s%d unchanged%s", green, nAct, reset, dim, nUnch, reset)
+		if len(failures) > 0 {
+			recap += fmt.Sprintf(" · %s✗ %d failed%s", red, len(failures), reset)
+		}
+		fmt.Fprintf(stdout, "%s: %s\n", cmd, recap)
+	}
+
 	// Stacks that exhausted their retries don't abort the run, but they do make
 	// it a non-zero exit and a re-runnable resume point. The "applied stacks are
 	// skipped" promise holds because apply short-circuits unchanged stacks.
 	if len(failures) > 0 {
-		fmt.Fprintf(stderr, "\n%s: %d of %d stack%s failed after retries: %s\n",
-			cmd, len(failures), len(stacks), pluralS(len(stacks)), strings.Join(failures, ", "))
+		fmt.Fprintf(stderr, "\n%s✗%s %s: %d of %d stack%s failed after retries: %s\n",
+			red, reset, cmd, len(failures), len(stacks), pluralS(len(stacks)), strings.Join(failures, ", "))
 		fmt.Fprintf(stderr, "%s: re-run to resume — already-applied stacks are skipped as unchanged.\n", cmd)
 		return 1
 	}
 	return 0
+}
+
+// statusColors returns ANSI codes for the deploy recap (green ✓ / red ✗ / dim),
+// honoring an interactive terminal and NO_COLOR. Empty strings on a pipe/log/CI
+// writer so machine-consumed output stays clean.
+func statusColors(w io.Writer) (green, red, dim, reset string) {
+	f, ok := w.(*os.File)
+	if ok && term.IsTerminal(int(f.Fd())) && os.Getenv("NO_COLOR") == "" {
+		return "\x1b[32m", "\x1b[31m", "\x1b[2m", "\x1b[0m"
+	}
+	return "", "", "", ""
 }
 
 // groupOpsByStack collects parsed bundle entries per top-level stack
