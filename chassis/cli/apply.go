@@ -42,6 +42,16 @@ type applyOpts struct {
 	// skip holds --skip substrings: a stack whose full name contains any of
 	// them is left untouched (not drafted/uploaded/activated). Repeatable.
 	skip []string
+	// changed makes the run trust the digest recorded after the last successful
+	// apply from this workspace (.txco/<stack>.state.json) and skip unchanged
+	// stacks with ZERO server round-trips (not even the bulk list) — the fastest,
+	// offline-friendly mode. It reflects "changed since I last applied from here",
+	// not the server's live version, so it can miss out-of-band drift.
+	changed bool
+	// force re-versions EVERY stack even when unchanged, bypassing all skip
+	// short-circuits (the default bulk-list skip, the per-stack GetStack no-op,
+	// and --changed). Use to force a redeploy / fleet reload.
+	force bool
 }
 
 // spin animates a braille spinner on a TTY while fn runs, then clears the line.
@@ -156,6 +166,8 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
 	fs.IntVar(&opts.retries, "retries", 10, "retry each transient per-stack failure this many times with backoff before recording it and moving on; a failed run is resumable (re-run skips applied stacks)")
 	fs.StringArrayVar(&opts.skip, "skip", nil, "skip any stack whose name contains this substring (repeatable); e.g. --skip publications")
+	fs.BoolVar(&opts.changed, "changed", false, "zero-network fast mode: trust the local .txco/<stack>.state.json digest and skip stacks unchanged since the last apply from this workspace (no bulk list, no per-stack probe). Reflects local record, not server drift; a stack never applied here counts as changed.")
+	fs.BoolVar(&opts.force, "force", false, "re-version every stack even if unchanged (bypass all skip short-circuits); forces a redeploy / fleet reload")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response (method, URL, status, error body) to stderr. Equivalent to TXCO_VERBOSE=1, which works for ANY txco command.")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -170,6 +182,11 @@ every stack in the tree — use `+"`txco push <stack>`"+` for one stack.
 Deploys CODE only — operations and FILES/. A stack's VECTORS/+KV/ store-seed
 packs are carried forward untouched; deploy them with `+"`txco data apply`"+` (data
 is opt-in, so a checkout without the data packs still deploys fine).
+
+Incremental by default: a single bulk stack list lets apply skip stacks whose
+code already matches the server, so an iterative redeploy only touches what
+changed — no per-stack probe. `+"`--force`"+` re-versions every stack anyway;
+`+"`--changed`"+` goes fully offline (trusts the local .txco record, zero network).
 
 <dir> defaults to "."; a bare <target> (e.g. "staging", or a profile name)
 selects the chassis. A path-like arg or an existing directory is the <dir>.
@@ -474,6 +491,28 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	// set at the end. apply is idempotent (unchanged stacks short-circuit), so
 	// simply re-running resumes where this run left off.
 	var failures []string
+
+	// Default fast-skip: one bulk GET /stacks up front instead of a GetStack probe
+	// per stack. We match each stack's local code digest against the SERVER's active
+	// manifest, so an unchanged stack is skipped without any per-stack round-trip —
+	// server-authoritative (always converges if the server drifted), unlike --changed
+	// which trusts the local record. The listed hash is the all-files manifest, which
+	// equals the code hash for every stack WITHOUT store-seed packs (the common case);
+	// a pack-bearing stack won't match and simply falls through to the accurate
+	// per-stack GetStack no-op below. Skipped entirely under --changed (local-trust)
+	// and --force (re-version all), and for single-stack `push` (one probe is cheap).
+	// Best-effort: a list failure just falls back to per-stack checks.
+	serverByName := map[string]client.StackRecord{}
+	if onlyStack == "" && !opts.changed && !opts.force {
+		if recs, lerr := c.ListStacks(ctx); lerr == nil {
+			for _, r := range recs {
+				serverByName[r.Name] = r
+			}
+		} else {
+			fmt.Fprintf(stderr, "%s: bulk stack list failed (%v); falling back to per-stack checks\n", cmd, lerr)
+		}
+	}
+
 	for _, stack := range sortedKeys(stacks) {
 		files := opsToFiles(stacks[stack])
 		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
@@ -482,6 +521,34 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, assets...)
+		localHash := localManifestHash(files)
+
+		// Fast-skip an unchanged stack with no per-stack round-trip. --force skips
+		// nothing (re-version all). --changed trusts the local last-applied digest
+		// (zero network). Default matches against the SERVER hash from the one bulk
+		// list above. A miss (or a mode with no baseline) falls through to the
+		// accurate per-stack GetStack no-op below.
+		if !opts.force {
+			var skipVersion int64
+			skip := false
+			if opts.changed {
+				if saved, _ := state.Load(dir, stack); saved != nil && saved.ManifestHash == localHash {
+					skip, skipVersion = true, saved.VersionNumber
+				}
+			} else if rec, ok := serverByName[stack]; ok && rec.ActiveVersion != nil && rec.ManifestHash == localHash {
+				skip, skipVersion = true, *rec.ActiveVersion
+			}
+			if skip {
+				results = append(results, deployResult{
+					Stack: stack, Version: skipVersion,
+					Files: len(files), Activated: false, Unchanged: true,
+				})
+				if !opts.jsonOut {
+					fmt.Fprintf(stdout, "%s v%d unchanged — skipped\n", stack, skipVersion)
+				}
+				continue
+			}
+		}
 
 		// TEMP timing (set TXCO_TIMING=1): per-phase client-side durations, to
 		// localize slowness vs the server reload. Remove with the server timers.
@@ -504,18 +571,24 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		// the hashes only match on identical code, so this never skips a real
 		// change (and a changed-but-undeployed local pack is correctly ignored —
 		// it deploys via `txco data apply`).
-		if rec, rerr := c.GetStack(ctx, stack); rerr == nil && rec != nil &&
-			rec.ActiveVersion != nil && rec.CodeManifestHash != "" &&
-			rec.CodeManifestHash == localManifestHash(files) {
-			results = append(results, deployResult{
-				Stack: stack, Version: *rec.ActiveVersion,
-				Files: len(files), Activated: false, Unchanged: true,
-			})
-			if !opts.jsonOut {
-				fmt.Fprintf(stdout, "%s v%d unchanged — no changes, not re-versioned\n",
-					stack, *rec.ActiveVersion)
+		// Runs as the accurate backstop in DEFAULT mode only — it uses the CODE-only
+		// manifest, so it also skips an unchanged pack-bearing stack the bulk list's
+		// all-files hash couldn't. --changed (zero network) and --force (re-version)
+		// both bypass it.
+		if !opts.force && !opts.changed {
+			if rec, rerr := c.GetStack(ctx, stack); rerr == nil && rec != nil &&
+				rec.ActiveVersion != nil && rec.CodeManifestHash != "" &&
+				rec.CodeManifestHash == localHash {
+				results = append(results, deployResult{
+					Stack: stack, Version: *rec.ActiveVersion,
+					Files: len(files), Activated: false, Unchanged: true,
+				})
+				if !opts.jsonOut {
+					fmt.Fprintf(stdout, "%s v%d unchanged — no changes, not re-versioned\n",
+						stack, *rec.ActiveVersion)
+				}
+				continue
 			}
-			continue
 		}
 
 		tPhase := time.Now()
@@ -631,7 +704,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		if serr := state.Save(dir, stack, state.State{
 			VersionNumber:       act.VersionNumber,
 			ParentVersionNumber: act.VersionNumber,
-			ManifestHash:        localManifestHash(files),
+			ManifestHash:        localHash,
 		}); serr != nil {
 			fmt.Fprintf(stderr, "%s: %s: warning: could not record local state: %v\n", cmd, stack, serr)
 		}
