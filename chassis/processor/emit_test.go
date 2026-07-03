@@ -355,6 +355,43 @@ func TestOverlayResponse_PathRefResolvesAgainstEnv(t *testing.T) {
 	}
 }
 
+// TestE2E_TelemetryMetricsViaObjectArray pins the idiomatic authoring
+// form for tenant metric intents (the one docs/telemetry.md shows):
+// &array(&object(...)) composed on an EMIT RHS, spanning lines. Arrays
+// of objects have no literal syntax in txcl by design — composition
+// goes through the function registry — so this is the form that must
+// keep working.
+func TestE2E_TelemetryMetricsViaObjectArray(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	src := `EMIT @telemetry.metrics = &array(
+  &object("name", "book.queued",
+          "kind", "counter",
+          "value", 1,
+          "attrs", &object("source", "search")))`
+	res := parser.New(lexer.New(src)).ParseEvent()
+	if res == nil || res.Emit == nil {
+		t.Fatalf("parse produced no EMIT; got %#v", res)
+	}
+
+	got, err := pu.OverlayResponse(`{}`, `{}`, res.Emit.Overrides)
+	if err != nil {
+		t.Fatalf("OverlayResponse: %v", err)
+	}
+	if g := gjson.Get(got, "_txc.telemetry.metrics.0.name").String(); g != "book.queued" {
+		t.Errorf("metrics.0.name = %q (raw=%s)", g, got)
+	}
+	if g := gjson.Get(got, "_txc.telemetry.metrics.0.value").Int(); g != 1 {
+		t.Errorf("metrics.0.value = %d (raw=%s)", g, got)
+	}
+	if g := gjson.Get(got, "_txc.telemetry.metrics.0.attrs.source").String(); g != "search" {
+		t.Errorf("metrics.0.attrs.source = %q (raw=%s)", g, got)
+	}
+	if !gjson.Get(got, "_txc.telemetry.metrics").IsArray() {
+		t.Errorf("metrics is not an array (raw=%s)", got)
+	}
+}
+
 // TestE2E_NowFunctionWithFormat exercises a one-arg call end-to-end:
 // `SET .ts = &now("rfc3339")` should produce a parseable RFC 3339
 // timestamp in the envelope.

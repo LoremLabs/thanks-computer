@@ -41,15 +41,17 @@ Read in order, or jump to what you need:
    operations, and deploying a catalog declaratively with `txco data`.
 9. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
    fact.
-10. **[Schemas](./schemas.md)** — optionally write down the shape a
+10. **[Telemetry](./telemetry.md)** — emit your application's metrics from
+    a stack; the chassis ships them to the backend you configure.
+11. **[Schemas](./schemas.md)** — optionally write down the shape a
     stack reads and writes, for humans and machines.
-11. **[Packages](./packages.md)** — share a working department; install
+12. **[Packages](./packages.md)** — share a working department; install
     someone else's.
-12. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
+13. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
     runs its DNS: mail records, reputation keys, TLS, handled.
-13. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
+14. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
     stacks, domains, secrets, people, and usage, walled per tenant.
-14. **[Running a chassis](./running.md)** — `txco serve` and the
+15. **[Running a chassis](./running.md)** — `txco serve` and the
     author–apply loop, on your own machine.
 
 Building stacks day to day? The **[authoring guides](./authoring/README.md)**

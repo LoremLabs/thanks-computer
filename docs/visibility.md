@@ -59,15 +59,8 @@ WITH redact = "_txc.web.req.headers.authorization"   # value → "[REDACTED]"
 WITH omit   = "_txc.lmtp.msg.attachments"            # field vanishes
 ```
 
-## Open Telemetry Support
+## Metrics
 
-If you run your own chassis you can inspect each event via standard [Open Telemetry](https://opentelemetry.io/) signals. 
-Just configure your environment and point the chassis there:
-
-```
-// Configuration is via standard OTel environment variables:
-//   - OTEL_EXPORTER_OTLP_ENDPOINT   (e.g. http://localhost:4318)
-//   - OTEL_EXPORTER_OTLP_PROTOCOL   (http/protobuf | grpc)
-//   - OTEL_SERVICE_NAME             (default: txco-chassis)
-//   - OTEL_RESOURCE_ATTRIBUTES      (extra resource attributes)
-```
+Traces answer "what did this request do?". For *counting* things —
+your application's metrics, and the chassis's own OpenTelemetry
+signals — see **[Telemetry](./telemetry.md)**.
