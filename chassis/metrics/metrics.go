@@ -37,10 +37,11 @@ const instrumentationName = "github.com/loremlabs/thanks-computer/chassis"
 // style (lower-snake-case, dotted namespace) so they roll up cleanly in any
 // OTLP backend.
 const (
-	AttrEventsSource = "txco.events.source"
-	AttrOpName       = "txco.op.name"
-	AttrTenantSlug   = "txco.tenant.slug"
-	AttrSecretName   = "txco.secret.name"
+	AttrEventsSource        = "txco.events.source"
+	AttrOpName              = "txco.op.name"
+	AttrTenantSlug          = "txco.tenant.slug"
+	AttrSecretName          = "txco.secret.name"
+	AttrTelemetryDropReason = "txco.telemetry.drop_reason"
 )
 
 // Metrics holds the chassis tracer, meter, and pre-built instruments.
@@ -61,6 +62,13 @@ type Metrics struct {
 	// quota purposes. NEVER record the cleartext or the cleartext
 	// length here — only the names.
 	SecretMaterialized metric.Int64Counter
+
+	// TelemetryDropped counts tenant metric intents the request-end
+	// telemetry processor dropped, tagged tenant slug + drop reason
+	// (validation failure, no exporter config, export error, …). This
+	// is the chassis-side diagnostic for "my metrics aren't arriving".
+	// NEVER record metric names or values here — only counts + reason.
+	TelemetryDropped metric.Int64Counter
 
 	shutdown []func(context.Context) error
 }
@@ -155,6 +163,15 @@ func New(ctx context.Context, conf config.Config, logger *zap.Logger) *Metrics {
 		logger.Fatal("create secret.materialize counter", zap.Error(err))
 	}
 
+	telemetryDropped, err := meter.Int64Counter(
+		"chassis.telemetry.dropped",
+		metric.WithDescription("Count of tenant metric intents dropped by the request-end telemetry processor"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		logger.Fatal("create telemetry.dropped counter", zap.Error(err))
+	}
+
 	return &Metrics{
 		Tracer:               tracer,
 		Meter:                meter,
@@ -163,6 +180,7 @@ func New(ctx context.Context, conf config.Config, logger *zap.Logger) *Metrics {
 		OpTotal:              opTotal,
 		OpDurationMs:         opDurationMs,
 		SecretMaterialized:   secretMaterialized,
+		TelemetryDropped:     telemetryDropped,
 		shutdown:             shutdownFns,
 	}
 }
@@ -207,6 +225,22 @@ func (m *Metrics) RecordSecretMaterialize(ctx context.Context, tenantSlug, secre
 	m.SecretMaterialized.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(AttrTenantSlug, tenantSlug),
 		attribute.String(AttrSecretName, secretName),
+	))
+}
+
+// RecordTelemetryDrop adds n to the telemetry.dropped counter tagged
+// with tenant slug + drop reason. Nil-safe like RecordSecretMaterialize
+// (no-op when the chassis was built without metrics). Reasons are a
+// small fixed vocabulary (unpinned, disabled, invalid_*, over_limit,
+// bad_endpoint, secret_error, export_error) — never metric names,
+// values, or attribute content.
+func (m *Metrics) RecordTelemetryDrop(ctx context.Context, tenantSlug, reason string, n int64) {
+	if m == nil || m.TelemetryDropped == nil || n <= 0 {
+		return
+	}
+	m.TelemetryDropped.Add(ctx, n, metric.WithAttributes(
+		attribute.String(AttrTenantSlug, tenantSlug),
+		attribute.String(AttrTelemetryDropReason, reason),
 	))
 }
 

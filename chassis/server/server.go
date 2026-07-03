@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -70,6 +73,9 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/kvseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/vecseed"
+	"github.com/loremlabs/thanks-computer/chassis/telemetry"
+	_ "github.com/loremlabs/thanks-computer/chassis/telemetry/log"  // registers the "log" telemetry exporter
+	_ "github.com/loremlabs/thanks-computer/chassis/telemetry/otlp" // registers the "otlp" telemetry exporter
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
@@ -680,11 +686,13 @@ func runPipeline(
 
 // runWithTrace dispatches the processor through runPipeline and, when
 // tracing is enabled, records the request to the trace sink. The tee
-// now lives in runPipeline rather than here: usage logging needs the
-// final payload in production where the trace sink is NoopSink, so the
-// capture decision is `tracing OR usage`, not `tracing` alone. The
-// captured final payload is returned so the bus loop can size the
-// response and read the resolved tenant for the usage event.
+// now lives in runPipeline rather than here: usage logging and tenant
+// telemetry need the final payload in production where the trace sink
+// is NoopSink, so the capture decision is `tracing OR usage OR
+// telemetry`, not `tracing` alone. The captured final payload is
+// returned so the bus loop can size the response, read the resolved
+// tenant for the usage event, and hand metric intents to the telemetry
+// processor.
 func runWithTrace(
 	ctx context.Context,
 	pu *processor.Unit,
@@ -692,9 +700,10 @@ func runWithTrace(
 	envelope *event.Envelope,
 	raw, stage string,
 	usageEnabled bool,
+	telemetryEnabled bool,
 ) (finalPayload []byte, fuelUsed int64, err error) {
 	_, isNoop := sink.(trace.NoopSink)
-	capture := !isNoop || usageEnabled
+	capture := !isNoop || usageEnabled || telemetryEnabled
 
 	if isNoop {
 		return runPipeline(ctx, pu, envelope, raw, stage, capture)
@@ -1023,6 +1032,41 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	}
 	logger.Info("egress policy loaded",
 		zap.String("policy", guard.Name()))
+
+	// Tenant telemetry: the request-end processor that turns
+	// _txc.telemetry.metrics intents into exports. A tenant goes live by
+	// setting its TELEMETRY_ENDPOINT secret; the node just provides the
+	// machinery. The exporter gets its OWN egress-guarded client (same
+	// DialControl as op dials, no otelhttp wrap — the chassis shouldn't
+	// trace its own telemetry egress) because the destination is
+	// tenant-supplied.
+	var telemetryProc *telemetry.Processor
+	if conf.TelemetryEnabled {
+		tTransport := http.DefaultTransport.(*http.Transport).Clone()
+		tTransport.DialContext = (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control:   egress.DialControl(guard),
+		}).DialContext
+		dropped := func(tenant, reason string, n int64) {
+			mc.RecordTelemetryDrop(context.Background(), tenant, reason, n)
+		}
+		texp, terr := telemetry.Open(conf.TelemetryExporter, telemetry.ExporterConfig{
+			NodeID:      resolveUsageNodeID(conf.Fqdn),
+			Environment: conf.Environment,
+			Logger:      logger,
+			HTTPClient:  &http.Client{Transport: tTransport, Timeout: 30 * time.Second},
+			Secrets:     telemetrySecretSource(secretsResolver),
+			Dropped:     dropped,
+		})
+		if terr != nil {
+			cancel()
+			return ctx, nil, terr
+		}
+		telemetryProc = telemetry.NewProcessor(texp, logger, dropped)
+		logger.Info("telemetry exporter loaded",
+			zap.String("exporter", texp.Name()))
+	}
 
 	// create communications channel
 	bus := make(chan *event.Envelope)
@@ -1542,7 +1586,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						// tracer when tracing is enabled (mode != off); when
 						// off, it's a direct call into pu.Run.
 						reqStart := time.Now()
-						finalPayload, fuelUsed, runErr := runWithTrace(reqCtx, pu, traceSink, envelope, raw, stage, usageSink != nil)
+						finalPayload, fuelUsed, runErr := runWithTrace(reqCtx, pu, traceSink, envelope, raw, stage, usageSink != nil, telemetryProc != nil)
 						if runErr != nil {
 							logger.Warn("error adding event", zap.String("err", runErr.Error()))
 						}
@@ -1602,6 +1646,28 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 								AdmissionReason: gjson.GetBytes(finalPayload, "_txc.admission.reason").String(),
 								Billable:        !denied,
 							})
+						}
+						// Tenant telemetry: hand _txc.telemetry.metrics
+						// intents to the exporter. Same trust rule as
+						// usage — the tenant comes from the immutable
+						// observer — but STRICTER: no envelope fallback,
+						// because export runs against the tenant's own
+						// configured endpoint, so an unpinned request has
+						// no identity to attribute that egress to (the
+						// processor drops those, counted). Runs after the
+						// response was written; context.WithoutCancel so
+						// an already-canceled request ctx can't fail the
+						// exporter's cold-start secret read.
+						if telemetryProc != nil {
+							tTenant, tPinned := tenantObs.Tenant()
+							if !tPinned {
+								tTenant = ""
+							}
+							tStack := gjson.GetBytes(finalPayload, "_txc.stack").String()
+							if tStack == "" {
+								tStack = stage
+							}
+							telemetryProc.Process(context.WithoutCancel(reqCtx), finalPayload, tTenant, tStack, envelope.Src)
 						}
 						if conf.LogOps != "" {
 							go func() {
@@ -1675,6 +1741,16 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			}
 			cancelUsageFlush()
 		}
+		// Drain tenant telemetry: flush every tenant's pending metric
+		// aggregations. Runs after the inflight wait above, so every
+		// bus-loop Process call has already handed its events over.
+		if telemetryProc != nil {
+			tFlushCtx, cancelTFlush := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := telemetryProc.Close(tFlushCtx); err != nil {
+				logger.Warn("telemetry exporter shutdown error", zap.Error(err))
+			}
+			cancelTFlush()
+		}
 		// flush any pending OTel telemetry before exit
 		flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelFlush()
@@ -1684,6 +1760,24 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		logger.Info("--thanks computer chassis shutdown--", zap.String("reason", reason))
 	}, nil
 
+}
+
+// telemetrySecretSource adapts the chassis secret resolver to the
+// telemetry seam: tenant-wide scope only (stack ""), with the store's
+// not-found error mapped to the seam's sentinel so telemetry backends
+// never import chassis/secrets. A nil resolver (some embedders/tests)
+// reads as "no tenant has telemetry configured".
+func telemetrySecretSource(r *secrets.Resolver) telemetry.SecretSource {
+	return func(ctx context.Context, tenantSlug, name string) ([]byte, error) {
+		if r == nil {
+			return nil, telemetry.ErrSecretNotFound
+		}
+		cleartext, _, err := r.MaterializeForOpSlug(ctx, tenantSlug, "", name)
+		if errors.Is(err, secrets.ErrSecretNotFound) {
+			return nil, telemetry.ErrSecretNotFound
+		}
+		return cleartext, err
+	}
 }
 
 // resolveUsageNodeID picks a stable identity for THIS chassis to stamp on

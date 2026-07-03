@@ -236,6 +236,8 @@ type Config struct {
 	WebMockHeader                bool     `id:"web-mock-header" default:"false" desc:"Honor the X-Txco-Mocks request header and map it into _txc.mocks (caller-driven mock interception). Dev convenience; leave off in production."`
 	UsageEnabled                 bool     `id:"usage-enabled" default:"true" desc:"Emit one structured 'usage' log line per completed request (rid, tenant, sizes, timing, status) for downstream accounting. On by default; set --usage-enabled=false to disable."`
 	UsageSink                    string   `id:"usage-sink" default:"zap" desc:"Usage sink backend: {zap}. zap folds each event into the structured 'usage' log line. usage-enabled=false disables usage entirely regardless of this. (zap)"`
+	TelemetryEnabled             bool     `id:"telemetry-enabled" default:"true" desc:"Tenant telemetry: process _txc.telemetry.metrics intents at request end and export them. A tenant is only live once it sets its TELEMETRY_ENDPOINT secret; without it intents are dropped. (true)"`
+	TelemetryExporter            string   `id:"telemetry-exporter" default:"otlp" desc:"Telemetry exporter backend: {otlp, log}. otlp ships OTLP/HTTP to the tenant-configured endpoint; log writes each metric as a chassis log line (dev). (otlp)"`
 	BackgroundServices           string   `id:"background-services" default:"" desc:"Comma-list of long-running background services to run (chassis-owned loops, started/stopped with the controllers). Empty by default. ()"`
 }
 

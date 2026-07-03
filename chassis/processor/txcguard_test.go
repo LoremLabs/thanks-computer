@@ -27,6 +27,8 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.goto", true},
 		{"_txc.halt", true},
 		{"_txc.delete", true},
+		{"_txc.telemetry", true},
+		{"_txc.telemetry.metrics", true},
 		// Reserved control fields — never author-writable.
 		{"_txc", false},
 		{"_txc.tenant", false},
@@ -43,6 +45,7 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		// A reserved prefix must not be defeated by a lookalike sibling.
 		{"_txc.web.response", false}, // not "web.res"
 		{"_txc.gotoxyz", false},      // not "goto"
+		{"_txc.telemetryX", false},   // not "telemetry"
 	}
 	for _, c := range cases {
 		if got := authorMayWriteTxc(c.path); got != c.want {
@@ -196,6 +199,68 @@ func TestEmitCannotSetReservedTxc(t *testing.T) {
 	}
 	if g := gjson.Get(got, "_txc.web.res.body").String(); g != "victim" {
 		t.Errorf("allowlisted _txc.web.res.body not written: %s", got)
+	}
+}
+
+// TestEmitTelemetryMetricsWritable is the allowlist-growth proof for
+// "telemetry": a stack emits metric intents at _txc.telemetry.metrics
+// (EMIT overlay), while reserved siblings stay blocked in the same call.
+func TestEmitTelemetryMetricsWritable(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	overrides := []resonator.BranchValue{
+		{Path: "._txc.telemetry.metrics", Value: ast.Literal{V: []interface{}{
+			map[string]interface{}{"name": "book.queued", "kind": "counter", "value": int64(1)},
+		}}},
+		{Path: "._txc.tenant", Value: ast.Literal{V: "victim"}},
+	}
+	got, err := pu.OverlayResponse(`{}`, `{}`, overrides)
+	if err != nil {
+		t.Fatalf("OverlayResponse: %v", err)
+	}
+	if g := gjson.Get(got, "_txc.telemetry.metrics.0.name").String(); g != "book.queued" {
+		t.Errorf("EMIT _txc.telemetry.metrics not written: %s", got)
+	}
+	if gjson.Get(got, "_txc.tenant").Exists() {
+		t.Errorf("EMIT forged _txc.tenant alongside telemetry: %s", got)
+	}
+}
+
+// TestSanitizeKeepsTelemetry: an untrusted producer (http/compute/mock
+// transport) contributing metric intents keeps them through the output
+// sanitizer's projection, while forged control fields are dropped.
+func TestSanitizeKeepsTelemetry(t *testing.T) {
+	in := `{"data":1,"_txc":{"tenant":"victim",` +
+		`"telemetry":{"metrics":[{"name":"book.queued","kind":"counter","value":1}]}}}`
+	out := sanitizeAuthorOutput(in)
+
+	if gjson.Get(out, "_txc.tenant").Exists() {
+		t.Errorf("forged _txc.tenant survived: %s", out)
+	}
+	if g := gjson.Get(out, "_txc.telemetry.metrics.0.name").String(); g != "book.queued" {
+		t.Errorf("_txc.telemetry dropped by sanitizer: %s", out)
+	}
+}
+
+// TestTelemetryMetricsAccumulateAcrossMerges pins the accumulator
+// semantic the telemetry feature depends on: two ops each contributing
+// one element to _txc.telemetry.metrics merge to an array of two
+// (MergeJSON appends arrays), in emission order.
+func TestTelemetryMetricsAccumulateAcrossMerges(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	resp := `{"_txc":{"telemetry":{"metrics":[{"name":"a","kind":"counter","value":1}]}}}`
+	out := `{"_txc":{"telemetry":{"metrics":[{"name":"b","kind":"counter","value":2}]}}}`
+	merged, err := pu.MergeJSON(resp, out)
+	if err != nil {
+		t.Fatalf("MergeJSON: %v", err)
+	}
+	arr := gjson.Get(merged, "_txc.telemetry.metrics").Array()
+	if len(arr) != 2 {
+		t.Fatalf("metrics array length = %d, want 2 (raw=%s)", len(arr), merged)
+	}
+	if arr[0].Get("name").String() != "a" || arr[1].Get("name").String() != "b" {
+		t.Errorf("accumulator order wrong: %s", merged)
 	}
 }
 

@@ -26,11 +26,12 @@ import (
 // bypass — so the allowlist is deliberately small and grows only with a test
 // that proves a shipped resonator needs the path.
 var authorWritableTxcPaths = []string{
-	"web.res",  // the rendered HTTP response (status/body/headers)
-	"lmtp.res", // the SMTP verdict
-	"goto",     // flow control: jump to another stage
-	"halt",     // flow control: stop the pipeline
-	"delete",   // prune envelope paths (targets are separately guarded)
+	"web.res",   // the rendered HTTP response (status/body/headers)
+	"lmtp.res",  // the SMTP verdict
+	"goto",      // flow control: jump to another stage
+	"halt",      // flow control: stop the pipeline
+	"delete",    // prune envelope paths (targets are separately guarded)
+	"telemetry", // tenant metric intents (_txc.telemetry.metrics), consumed post-request
 }
 
 // authorMayWriteTxc reports whether an author-controlled producer (a Tier-2
