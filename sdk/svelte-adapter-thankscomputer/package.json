@@ -1,6 +1,6 @@
 {
   "name": "@txco/svelte-adapter-thankscomputer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "SvelteKit adapter that deploys a static build to thanks.computer (txco): writes your app into a stack's FILES/ and generates the SPA-fallback op, served by txco://static.",
   "license": "MIT",
   "type": "module",
@@ -22,7 +22,11 @@
   },
   "homepage": "https://github.com/LoremLabs/thanks-computer/tree/master/sdk/svelte-adapter-thankscomputer#readme",
   "bugs": "https://github.com/LoremLabs/thanks-computer/issues",
-  "files": ["dist", "src", "README.md"],
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -44,5 +48,6 @@
     "@sveltejs/kit": "^2.0.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0"
-  }
+  },
+  "packageManager": "pnpm@10.6.3+sha512.bb45e34d50a9a76e858a95837301bfb6bd6d35aea2c5d52094fa497a467c43f5c440103ce2511e9e0a2f89c3d6071baac3358fc68ac6fb75e2ceb3d2736065e6"
 }

@@ -141,45 +141,125 @@ function writeFallbackOp(
 ): void {
   const b64 = readFileSync(fallbackPath).toString("base64");
 
-  // Remove any stale spa-fallback op from a previous build at a different
-  // scope, so exactly one exists. Otherwise a leftover at a lower scope would
-  // fire first and halt — silently defeating the current fallbackScope.
+  // Remove any stale generated fallback ops from previous builds (any scope), so
+  // exactly the intended files remain. A leftover at a lower scope would fire
+  // first and halt, silently defeating the current scope / route-aware behavior.
+  const generated = ["spa-fallback.txcl", "spa-404.txcl"];
   if (existsSync(out)) {
     for (const entry of readdirSync(out, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const stale = join(out, entry.name, "spa-fallback.txcl");
-      if (existsSync(stale)) rmSync(stale);
+      for (const name of generated) {
+        const stale = join(out, entry.name, name);
+        if (existsSync(stale)) rmSync(stale);
+      }
     }
   }
 
   const opDir = join(out, String(scope));
   builder.mkdirp(opDir);
-  const opPath = join(opDir, "spa-fallback.txcl");
 
-  // The WHEN fires only for navigations with no file extension. This op lives
-  // at a high (last-resort) scope so it runs AFTER txco://route and any other
-  // ops in this stack — and halts — so it never swallows an extension-less
-  // request that an earlier-scope handler (e.g. an API) should answer.
-  const txcl = `# ${NAME} — SPA fallback (generated; do not edit by hand).
+  // The WHENs fire only for navigations with no file extension. These ops live at
+  // a high (last-resort) scope so they run AFTER txco://route and any other ops in
+  // this stack — and halt — so they never swallow an extension-less request that
+  // an earlier-scope handler (e.g. an API) should answer.
+  const extGuard = "@web.req.url.path !~ /\\.[a-z0-9]+$/";
+  const known = knownRoutesRegex(builder.routes);
+
+  if (!known) {
+    // Fail open: no representable page routes (or a route uses a regex feature Go's
+    // RE2 lacks) → the legacy blanket-200 catch-all. Never worse than before, and
+    // never 404s a real route.
+    builder.log.warn(
+      `${NAME}: couldn't derive a route matcher from builder.routes — emitting the ` +
+        `legacy blanket-200 SPA fallback (unknown paths return 200, not 404).`,
+    );
+    const opPath = join(opDir, "spa-fallback.txcl");
+    writeFileSync(
+      opPath,
+      `# ${NAME} — SPA fallback (generated; do not edit by hand).
 #
-# txco://static serves real files (assets, ${fallbackName}) at boot/50 and falls
-# through for extension-less paths (client routes and "/"). This op — a catch-all
-# at the stack's last scope — serves the SvelteKit shell for those so a hard
-# reload or deep link renders the app. Being last + halting means it only fires
-# for requests nothing else (static, your own ops) handled.
-#
+# Serves the SvelteKit shell for any extension-less path nothing else handled.
 # @web.res.body is base64-encoded ${fallbackName} (the web inlet decodes it).
 # Regenerated on every \`vite build\` — it embeds content-hashed asset URLs.
-WHEN @web.req.url.path !~ /\\.[a-z0-9]+$/
-  EMIT @web.res.status = 200,
+WHEN ${extGuard}
+${emitShell(200, b64)}`,
+    );
+    builder.log.minor(`Wrote SPA fallback op ${opPath} (blanket 200)`);
+    return;
+  }
+
+  // Route-aware: 200 for paths matching a known page route (the shell, so the
+  // client renders), 404 for extension-less paths that match no route at all.
+  // <known> is derived from SvelteKit's own route table, so it tracks route
+  // changes automatically. Two mutually-exclusive ops (one WHEN each, per the txcl
+  // convention) — the concrete + dynamic page routes share this same matcher.
+  const pageRoutes = builder.routes.filter(
+    (r) => r.page && r.page.methods.length > 0,
+  ).length;
+
+  writeFileSync(
+    join(opDir, "spa-fallback.txcl"),
+    `# ${NAME} — SPA fallback: known routes (generated; do not edit by hand).
+#
+# txco://static serves real files (assets, ${fallbackName}) at boot/50 and halts.
+# This op serves the SvelteKit shell (200) for client-rendered PAGE routes that no
+# static file or earlier op handled. The route set is derived from SvelteKit's own
+# route table (builder.routes[].pattern). Paired with spa-404.txcl, which 404s
+# extension-less paths matching no route.
+# @web.res.body is base64-encoded ${fallbackName}. Regenerated on every build.
+WHEN ${extGuard} && @web.req.url.path =~ /${known}/
+${emitShell(200, b64)}`,
+  );
+
+  writeFileSync(
+    join(opDir, "spa-404.txcl"),
+    `# ${NAME} — SPA 404 (generated; do not edit by hand).
+#
+# An extension-less path matching NO known page route (and handled by no static
+# file or earlier op) is a genuine miss → HTTP 404. The shell is still served as
+# the body so the client renders its branded error page; only the status differs
+# from spa-fallback.txcl.
+WHEN ${extGuard} && @web.req.url.path !~ /${known}/
+${emitShell(404, b64)}`,
+  );
+
+  builder.log.minor(
+    `Wrote route-aware SPA fallback in ${opDir}/ (200 for ${pageRoutes} page routes, 404 otherwise)`,
+  );
+}
+
+/**
+ * Build an anchored regex STRING matching exactly the SvelteKit PAGE routes,
+ * derived from the framework's own route table (`builder.routes[].pattern`).
+ * Returns null when there are no page routes, or when a route's pattern uses a
+ * regex feature Go's RE2 engine (which txcl compiles with) can't represent — the
+ * caller then falls back to the legacy blanket-200 op rather than risk 404-ing a
+ * real route. Literal slashes are emitted escaped (`\\/`) for the txcl `/.../`
+ * delimiter; the txcl lexer unescapes them to `/` before RE2 sees the pattern.
+ */
+function knownRoutesRegex(routes: Builder["routes"]): string | null {
+  const parts: string[] = [];
+  for (const r of routes) {
+    // Renderable pages only (page.methods non-empty); skip +server.ts / api-only.
+    if (!r.page || r.page.methods.length === 0) continue;
+    let src = r.pattern.source; // e.g. "^\\/me\\/drips\\/([^/]+?)\\/?$"
+    // RE2 has no lookaround or backreferences; if a route needs them, bail.
+    if (/\(\?[=!<]/.test(src) || /\\[1-9]/.test(src)) return null;
+    src = src.replace(/^\^/, "").replace(/\$$/, ""); // strip anchors
+    src = src.replace(/\\?\//g, "\\/"); // normalize every literal slash for /.../
+    parts.push(`(?:${src})`);
+  }
+  return parts.length ? `^(?:${parts.join("|")})$` : null;
+}
+
+/** Shared EMIT tail for the fallback ops: headers, the base64 shell, and halt. */
+function emitShell(status: number, b64: string): string {
+  return `  EMIT @web.res.status = ${status},
        @web.res.headers.content-type.0 = "text/html; charset=utf-8",
        @web.res.headers.cache-control.0 = "no-cache",
        @web.res.body = "${b64}",
        @halt = true
 `;
-
-  writeFileSync(opPath, txcl);
-  builder.log.minor(`Wrote SPA fallback op ${opPath}`);
 }
 
 /** Deploy by shelling out to `txco apply` in the current working directory. */
