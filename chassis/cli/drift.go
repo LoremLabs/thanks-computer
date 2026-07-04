@@ -78,7 +78,14 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 			files := opsToFiles(opsForStack(localOps, name))
 			if assets, aerr := collectFileAssets(stackDir); aerr == nil {
 				files = append(files, assets...)
-				if saved.ManifestHash != "" {
+				// Datasets are part of the code manifest apply records, so the
+				// cleanliness hash must include them (fingerprint rows only —
+				// artifacts are hashed streaming, not read).
+				dsFiles, _, derr := collectDatasetFiles(stackDir)
+				if derr == nil {
+					files = append(files, dsFiles...)
+				}
+				if saved.ManifestHash != "" && derr == nil {
 					if localManifestHash(files) == saved.ManifestHash {
 						d.Local += " (clean)"
 					} else {

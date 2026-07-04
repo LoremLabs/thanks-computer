@@ -1,0 +1,9 @@
+# A dataset error (unknown query, missing artifact) answers 500 with the
+# structured code so the probe — and a human — can see what broke.
+WHEN .dataset.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error", .dataset.error.code,
+         "message", .dataset.error.message))),
+       @web.res.status = 500,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

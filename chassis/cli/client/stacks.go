@@ -49,6 +49,12 @@ type StackFile struct {
 	// Encoding is "base64" when Content is base64-encoded — used for non-UTF-8
 	// binary assets (images, fonts) that JSON would otherwise mangle. Empty =
 	// raw UTF-8 text. The server decodes base64 before hashing/storing.
+	//
+	// Encoding "cas" marks a fingerprint-only row: Content is omitted and the
+	// bytes MUST already be in the chassis content-addressed store under
+	// ContentHash (streamed there via PutBlob). Used for DATASETS/ artifacts,
+	// which can run to gigabytes and never ride the JSON body. The server
+	// verifies presence and refuses the row when the hash is absent.
 	Encoding string `json:"encoding,omitempty"`
 }
 

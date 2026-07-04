@@ -67,6 +67,15 @@ type VerifyOptions struct {
 	// It receives the (keyID, nonce) pair. Returning a non-nil error
 	// rejects the request as a replay.
 	NonceCheck func(keyID, nonce string) error
+
+	// SkipBodyDigest skips the final body-vs-Content-Digest validation,
+	// which buffers the ENTIRE body (the library helper reads it all to
+	// hash it). Set it only for streaming routes whose handler performs
+	// its own byte-level verification — e.g. the blob endpoint, which
+	// hashes the stream and refuses a body whose sha256 differs from the
+	// {hash} in the (signature-covered) request path. The Content-Digest
+	// HEADER itself remains covered by the signature either way.
+	SkipBodyDigest bool
 }
 
 // requestExtractor is a tiny indirection so tests can stub the underlying

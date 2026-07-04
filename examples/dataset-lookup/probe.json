@@ -1,0 +1,27 @@
+{
+  "note": "Bundled read-only SQLite dataset queried through txco://dataset. The apply streams DATASETS/books.sqlite over the blob plane, activation prepares every declared query, and /books?q= runs the FTS5 search. Binds localhost → dataset-demo (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "bind": [{ "host": "localhost", "stack": "dataset-demo" }],
+  "checks": [
+    {
+      "name": "full-text lookup finds a book",
+      "method": "GET",
+      "path": "/books?q=angels",
+      "status": 200,
+      "contains": "Angels with Dirty Faces"
+    },
+    {
+      "name": "author search matches too",
+      "method": "GET",
+      "path": "/books?q=hemingway",
+      "status": 200,
+      "contains": "A Farewell to Arms"
+    },
+    {
+      "name": "no query → usage hint",
+      "method": "GET",
+      "path": "/books",
+      "status": 400,
+      "contains": "usage"
+    }
+  ]
+}

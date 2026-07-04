@@ -1,0 +1,14 @@
+# dataset-demo scope 100 — run the named full-text query against the
+# bundled dataset.
+#
+# `txco://dataset` executes ONLY queries declared in
+# DATASETS/books.yaml, parameters always bound — there is no way to send
+# SQL from a request. The result lands at `into` (default `_dataset`):
+# {dataset, query, rows: [{col: val}...], count, truncated}.
+#
+# Query params arrive as arrays (?q=angels → @web.req.url.query.q.0).
+WHEN @src == "http" && @web.req.url.query.q.0 != ""
+  EXEC "txco://dataset"
+    WITH dataset = "books",
+         query = "search",
+         args = &array(@web.req.url.query.q.0)

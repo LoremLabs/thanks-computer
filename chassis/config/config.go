@@ -171,6 +171,10 @@ type Config struct {
 	FileCASStoreS3Prefix         string   `id:"filecas-store-s3-prefix" default:"" desc:"Reserved: S3-compatible filecas key prefix (fleet overlay; unused in open core)"`
 	FileCASCacheBytes            int      `id:"filecas-cache-bytes" default:"67108864" desc:"In-memory LRU budget (bytes) fronting filecas Get (64MiB). 0 disables the cache."`
 	FileCASMaxFileBytes          int      `id:"filecas-max-file-bytes" default:"10485760" desc:"Max size of a single FILES/ asset served from the CAS (10MiB); larger is indexed but 404s on serve. Also the per-entry LRU guard."`
+	DatasetCacheDir              string   `id:"dataset-cache-dir" default:"./chassis/data/datasets" desc:"Node-local materialise cache for DATASETS/ artifacts (one <hash>.sqlite per content hash) fronting the filecas backend. Fleet nodes point this at persistent disk (e.g. /data/datasets)."`
+	DatasetCacheBytes            int      `id:"dataset-cache-bytes" default:"4294967296" desc:"Disk budget (bytes) for the dataset materialise cache; LRU eviction closes the read handle and removes the cached file (4GiB). 0 = unbounded."`
+	DatasetMaxFileBytes          int      `id:"dataset-max-file-bytes" default:"4294967296" desc:"Max size of a single DATASETS/ artifact accepted by the blob upload endpoint and enforced again at activation (4GiB)."`
+	DatasetMaxRows               int      `id:"dataset-max-rows" default:"200" desc:"Hard cap on rows a txco://dataset query returns; a query's manifest max_rows and the rule's WITH limit clamp under it (200)."`
 	SnapshotBootstrapRef         string   `id:"snapshot-bootstrap-ref" default:"" desc:"If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap."`
 	FeedSource                   string   `id:"feed-source" default:"nop" desc:"Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged."`
 	FeedSourceFileDir            string   `id:"feed-source-file-dir" default:"./chassis/data/feed" desc:"Root directory for the file feed source (./chassis/data/feed)"`

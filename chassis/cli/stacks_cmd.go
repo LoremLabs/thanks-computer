@@ -209,6 +209,16 @@ Flags:
 			fmt.Fprintf(stderr, "pull: mkdir %s: %v\n", filepath.Dir(full), err)
 			return 1
 		}
+		// Dataset artifacts arrive as fingerprint rows (encoding "cas") —
+		// their bytes never inline into the JSON version detail. Stream them
+		// down the blob plane, hash-verified, straight to disk.
+		if f.Encoding == "cas" {
+			if err := downloadBlobToFile(ctx, c, f.ContentHash, full); err != nil {
+				fmt.Fprintf(stderr, "pull: fetch %s: %v\n", f.Path, err)
+				return 1
+			}
+			continue
+		}
 		// Binary assets arrive base64-encoded (paired with the server's encode on the
 		// version-detail wire); decode to the real bytes before writing.
 		data := []byte(f.Content)
@@ -323,7 +333,14 @@ func loadLocalStackFiles(dir, name string) ([]client.StackFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(files, assets...), nil
+	files = append(files, assets...)
+	// Datasets join the code manifest the same way apply records them:
+	// manifests inline, artifacts as fingerprint-only rows (hashed streaming).
+	dsFiles, _, err := collectDatasetFiles(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
+	if err != nil {
+		return nil, err
+	}
+	return append(files, dsFiles...), nil
 }
 
 // opsForStack narrows a full bundle.Walk result to a single stack's ops.

@@ -78,6 +78,14 @@ type Config struct {
 	Sessions       SessionStore
 	AllowedOrigins []string
 
+	// StreamingBody marks routes whose request bodies must NOT be
+	// buffered by verification (multi-GB blob uploads): the verifier
+	// skips its body-vs-Content-Digest check and the HANDLER owns
+	// byte-level verification (hash-while-streaming against the
+	// signature-covered URL hash). Only set on dedicated subrouters
+	// whose handlers uphold that contract.
+	StreamingBody bool
+
 	// Logger is optional; when nil the middleware stays quiet.
 	Logger func(msg string, fields map[string]any)
 }
@@ -282,6 +290,7 @@ func (cfg *Config) verifySigned(r *http.Request) (*Context, error) {
 		NonceCheck: func(keyID, nonce string) error {
 			return cfg.Nonces.Use(r.Context(), keyID, nonce)
 		},
+		SkipBodyDigest: cfg.StreamingBody,
 	}
 
 	verified, err := cfg.Verifier.Verify(r, resolve, opts)

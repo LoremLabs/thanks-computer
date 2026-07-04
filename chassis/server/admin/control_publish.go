@@ -33,6 +33,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
+	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
@@ -98,17 +99,23 @@ func (c *Controller) readStackFilesForArtifact(
 			return nil, err
 		}
 		// CAS-backed bytes travel as a fingerprint, not inline: FILES/** static
-		// assets AND store-seed packs (VECTORS/, KV/ — potentially large
-		// pre-computed vectors). Ensure the bytes are in the shared CAS, then
-		// ship only ContentHash so data-plane nodes resolve them lazily (and
-		// never inline them into the in-memory runtime DB). Rule/fixture files
-		// stay inline. Single-node deployments never call this (gated on
-		// FeedSink != nop), so the file/disk CAS is fine there.
-		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) {
+		// assets, store-seed packs (VECTORS/, KV/ — potentially large
+		// pre-computed vectors), AND dataset members (DATASETS/ — SQLite
+		// artifacts that can run to gigabytes). Ensure the bytes are in the
+		// shared CAS, then ship only ContentHash so data-plane nodes resolve
+		// them lazily (and never inline them into the in-memory runtime DB).
+		// Rule/fixture files stay inline. Single-node deployments never call
+		// this (gated on FeedSink != nop), so the file/disk CAS is fine there.
+		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) {
 			if hash == "" {
 				hash = sha256Hex(content)
 			}
-			if c.fcas != nil {
+			// A fingerprint-only row (content already stripped — e.g. a dataset
+			// artifact that streamed through the blob endpoint, or a row a fleet
+			// applier upserted) has nothing to put: its bytes are in the shared
+			// CAS by contract (enforced at draft-PUT and again at activation).
+			// Enqueueing it would fail the store's sha256==hash verification.
+			if c.fcas != nil && content != "" {
 				puts = append(puts, casPut{path: path, hash: hash, content: content})
 			}
 			out = append(out, controlevent.StackArtifactFile{Path: path, ContentHash: hash})
@@ -170,8 +177,8 @@ func (c *Controller) readStackFilesForArtifact(
 
 // priorActiveFileHashes returns the set of CAS-backed content hashes that the
 // stack's CURRENT active version already materialised into the shared CAS —
-// FILES/* static assets and VECTORS//KV/ store-seed packs alike (all three ride
-// the shared CAS). readStackFilesForArtifact runs BEFORE the activation tx flips
+// FILES/* static assets, VECTORS//KV/ store-seed packs, and DATASETS/ dataset
+// members alike (all riding the shared CAS). readStackFilesForArtifact runs BEFORE the activation tx flips
 // active_version, so this is the prior version's set — and a new version's file
 // whose hash is in it is provably already in the CAS, so it needs no CAS
 // round-trip at all. Best-effort: an empty/nil set just routes everything
@@ -185,7 +192,7 @@ func (c *Controller) priorActiveFileHashes(
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
 		   AND sf.content_hash <> ''
-		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%')`,
+		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'DATASETS/%')`,
 		tenantID, stackName)
 	if err != nil {
 		return nil

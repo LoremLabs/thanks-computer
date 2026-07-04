@@ -1,0 +1,15 @@
+# Named queries for the books dataset — the ONLY SQL the runtime will run
+# against books.sqlite. Validated at `txco apply`: each query must prepare
+# read-only against the shipped schema or activation refuses.
+queries:
+  search:
+    sql: |
+      SELECT b.isbn13, b.title, b.author, b.year
+        FROM books_fts f
+        JOIN books b ON b.rowid = f.rowid
+       WHERE books_fts MATCH ?
+       ORDER BY rank
+    max_rows: 10
+  by_isbn:
+    sql: SELECT isbn13, title, author, year FROM books WHERE isbn13 = ?
+    max_rows: 1

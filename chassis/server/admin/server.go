@@ -24,6 +24,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
+	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/room"
@@ -81,6 +82,13 @@ type Controller struct {
 	// Set by SetStoreReconciler from chassis/server/server.go. Nil-safe: when
 	// unset (no seedable store configured), packs ride as inert stack_files.
 	storeReconciler *storeseed.Reconciler
+
+	// dsCache materialises + opens DATASETS/ artifacts (chassis/dataset):
+	// the deep activation gate validates through it and the fleet applier
+	// warms it post-commit. Set by SetDatasetCache from
+	// chassis/server/server.go. Nil-safe: when unset, dataset-bearing
+	// versions refuse to validate/activate (loud, not silent).
+	dsCache *dataset.Cache
 
 	// vstore backs the vector inspect/teardown admin endpoints (`txco vector
 	// ls/show/diff/rm`). Set by SetVectorStore from chassis/server/server.go.
@@ -301,6 +309,23 @@ func (c *Controller) Start() {
 	for _, m := range serverext.PublicMounters() {
 		m(r)
 	}
+
+	// The blob plane (streamed CAS uploads for DATASETS/ artifacts) runs the
+	// SAME auth as everything else but with StreamingBody: the middleware
+	// must not buffer a multi-GB body to validate Content-Digest, so the
+	// handler owns byte verification (hash-while-streaming against the
+	// signature-covered URL hash — see blobs.go). Mounted before the "/"
+	// catch-all so this subrouter's middleware wins for these paths.
+	streamCfg := authCfg
+	streamCfg.StreamingBody = true
+	blobR := r.PathPrefix("/v1/tenants/{tenant}/blobs").Subrouter()
+	blobR.Use(func(next http.Handler) http.Handler {
+		return auth.Middleware(streamCfg, next)
+	})
+	blobR.Use(c.resolveTenantMiddleware)
+	blobR.HandleFunc("/sha256/{hash}", c.handleHeadBlob).Methods(http.MethodHead)
+	blobR.HandleFunc("/sha256/{hash}", c.handleGetBlob).Methods(http.MethodGet)
+	blobR.HandleFunc("/sha256/{hash}", c.handlePutBlob).Methods(http.MethodPut)
 
 	// Everything else goes through the auth middleware.
 	protected := r.PathPrefix("/").Subrouter()

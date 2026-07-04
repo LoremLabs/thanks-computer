@@ -33,6 +33,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
+	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 )
 
@@ -409,13 +410,14 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 	for _, f := range art.Files {
 		content := f.Content
 		hash := f.ContentHash
-		if (strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path)) && hash != "" {
-			// Fingerprint-only CAS-backed asset (FILES/ static asset or a
-			// VECTORS//KV/ store-seed pack): the bytes live in the shared
-			// content-addressed store, so don't inline them here — keeps the
-			// node's in-memory runtime DB free of tenant file/pack bytes. The
-			// static serve path (FILES/) and the store-seed reconciler (packs)
-			// resolve them lazily by content_hash.
+		if (strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path)) && hash != "" {
+			// Fingerprint-only CAS-backed asset (FILES/ static asset, a
+			// VECTORS//KV/ store-seed pack, or a DATASETS/ member): the bytes
+			// live in the shared content-addressed store, so don't inline them
+			// here — keeps the node's in-memory runtime DB free of tenant
+			// file/pack bytes. The static serve path (FILES/), the store-seed
+			// reconciler (packs), and the dataset cache (DATASETS/) resolve
+			// them lazily by content_hash.
 			content = ""
 		} else if hash == "" {
 			hash = sha256Hex([]byte(content))
@@ -456,6 +458,12 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 	// once. ev.BaseVersion is the prior active version → change-driven reconcile
 	// skips unchanged packs. Best-effort: ReconcileStorePacks logs, never fails.
 	c.admin.ReconcileStorePacks(ctx, art.TenantID, art.Stack, art.Version, ev.BaseVersion, false)
+
+	// Warm this node's dataset cache (DATASETS/ artifacts) so the first
+	// query doesn't eat a cold multi-GB CAS fetch inside a request. Same
+	// post-commit, best-effort posture as the pack reconcile above; the
+	// origin already deep-validated the version before publishing it.
+	c.admin.WarmDatasets(ctx, art.TenantID, art.Stack, art.Version)
 
 	c.pu.Logger.Info("control-event applied: stack.activated",
 		zap.String("event_id", ev.EventID),

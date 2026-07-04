@@ -69,7 +69,7 @@ BUILT_TXCO=
 if [[ -z "${TXCO}" ]]; then
     BUILT_TXCO="$(mktemp -t txco-examples-smoke-XXXXXX)"
     echo "==> building txco binary at ${BUILT_TXCO}..."
-    ( cd "${REPO_ROOT}" && go build -o "${BUILT_TXCO}" ./cmd/txco ) || {
+    ( cd "${REPO_ROOT}" && go build -tags sqlite_fts5 -o "${BUILT_TXCO}" ./cmd/txco ) || {
         echo "FAIL: go build failed" >&2
         rm -f "${BUILT_TXCO}"
         exit 1

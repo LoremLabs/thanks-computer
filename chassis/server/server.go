@@ -36,6 +36,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
 	cronq "github.com/loremlabs/thanks-computer/chassis/cron"
 	_ "github.com/loremlabs/thanks-computer/chassis/cron/local" // registers the "local" cron queue backend
+	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
 	"github.com/loremlabs/thanks-computer/chassis/egress"
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/open"    // registers the "open" policy
@@ -986,6 +987,25 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			zap.String("dir", conf.FileCASStoreFileDir))
 	}
 
+	// Dataset cache: node-local materialise + read-only handle cache for
+	// DATASETS/ artifacts (chassis/dataset), resolving misses from filecas.
+	// Powers the txco://dataset op, the deep activation gate, and the fleet
+	// applier's post-commit warm. Requires a filecas store; without one the
+	// op stays unregistered and dataset-bearing versions refuse activation.
+	var dsCache *dataset.Cache
+	if fcas != nil {
+		var dcErr error
+		dsCache, dcErr = dataset.NewCache(conf.DatasetCacheDir, fcas, int64(conf.DatasetCacheBytes))
+		if dcErr != nil {
+			logger.Error("dataset cache init failed; txco://dataset disabled",
+				zap.String("dir", conf.DatasetCacheDir), zap.Error(dcErr))
+		} else {
+			logger.Info("dataset cache ready",
+				zap.String("dir", conf.DatasetCacheDir),
+				zap.Int("budget_bytes", conf.DatasetCacheBytes))
+		}
+	}
+
 	// Control-event feed source. Default "nop" yields nothing, so the
 	// applier controller is inert and single-node behaviour is unchanged.
 	fsrc, ferr := feed.Open(conf.FeedSource, feed.SourceConfig{
@@ -1292,6 +1312,18 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		storeSeedMaterializers = append(storeSeedMaterializers, vecseed.New(vstore, vstore.Shared()))
 	}
 
+	// txco://dataset — named-query lookups against the routed stack's
+	// DATASETS/ SQLite artifacts (chassis/dataset). Tenant-scoped via
+	// processor.TenantScope like kv/vector; per-stack like read-file.
+	// Registered only when the dataset cache initialised (needs filecas);
+	// otherwise the op reports "op not found" rather than half-working.
+	if dsCache != nil {
+		pu.Handle([]byte("txco://dataset"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return datasetQuery(ctx, pu.Dbc, dsCache, fcas, in, conf.DatasetMaxRows)
+			}))
+	}
+
 	// KV store-seed materializer (KV/<namespace>.jsonl packs). kvHandle is
 	// always constructed above, so this is unconditional. redis = fleet-shared
 	// (reconcile once on the origin); boltdb (default) = per-node.
@@ -1368,6 +1400,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Wire the filecas store so activation can persist FILES/ asset bytes
 	// content-addressed. Nil-safe (gated on a configured store).
 	adminCtrl.SetFileCAS(fcas)
+	adminCtrl.SetDatasetCache(dsCache)
 	// Wire the declarative store-seed reconciler so activation materialises
 	// VECTORS/ (+ later KV/) packs into the runtime stores. Built from whatever
 	// seedable stores opened above; nil-safe when none did.

@@ -28,6 +28,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
+	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/opname"
@@ -406,6 +407,21 @@ func validateStackFilePath(p string) error {
 		if storeseed.PackName(p) == "" {
 			return fmt.Errorf("store-seed packs must be a single %q file directly under %s/ or %s/ (got %q)",
 				storeseed.PackExt, storeseed.DirVectors, storeseed.DirKV, p)
+		}
+		return nil
+	}
+
+	// DATASETS/** are txco://dataset artifact/manifest pairs (see
+	// chassis/dataset): "DATASETS/<name>.sqlite" + "DATASETS/<name>.yaml".
+	// Artifacts are content-addressed like FILES/ (and, unlike FILES/, are
+	// expected to arrive as fingerprint-only rows via the blob endpoint);
+	// they are queried through txco://dataset, never served. Single name
+	// segment, member extensions only — pair completeness is enforced at
+	// activation, not here (files arrive one PUT at a time).
+	if dataset.IsDatasetPath(p) {
+		if dataset.Name(p) == "" {
+			return fmt.Errorf("dataset members must be a single %q or %q file directly under %s/ (got %q)",
+				dataset.ArtifactExt, dataset.ManifestExt, dataset.Dir, p)
 		}
 		return nil
 	}
@@ -1255,6 +1271,15 @@ func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, mode
 			f.ContentHash = sha256Hex(content)
 		}
 		if mode.wantsBytes(f.Path) {
+			// Dataset ARTIFACTS are never inlined into a JSON response — they
+			// can run to gigabytes. They travel as fingerprint rows (Encoding
+			// "cas"); `txco pull` streams their bytes through the blob GET
+			// endpoint instead. Manifests (small yaml) resolve normally below.
+			if dataset.IsArtifactPath(f.Path) && content == "" && f.ContentHash != "" && f.ContentHash != emptyHash {
+				f.Encoding = "cas"
+				out = append(out, f)
+				continue
+			}
 			// A materialised version strips the content column — the bytes live in the
 			// filecas (a 0-byte stub here is why `txco pull` wrote empty files). Resolve
 			// them from the CAS, like handleCatFile. An empty hash is a genuinely-empty
@@ -1464,6 +1489,41 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		seen[f.Path] = true
+		// A fingerprint-only row (Encoding "cas"): the bytes were streamed to
+		// the CAS via the blob endpoint and only the hash rides the draft.
+		// The integrity guard is non-negotiable — a row must never reference
+		// bytes the server can't produce, so absence refuses the whole PUT.
+		if f.Encoding == "cas" {
+			if f.Content != "" {
+				writeJSONError(w, http.StatusBadRequest, "cas_row_has_content",
+					map[string]any{"index": i, "path": f.Path, "hint": "encoding \"cas\" rows carry content_hash only"})
+				return
+			}
+			if _, ok := filecas.ShardKey(f.ContentHash); !ok {
+				writeJSONError(w, http.StatusBadRequest, "malformed_hash",
+					map[string]any{"index": i, "path": f.Path, "hash": f.ContentHash})
+				return
+			}
+			if c.fcas == nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "no_filecas",
+					map[string]any{"path": f.Path})
+				return
+			}
+			ok, cerr := c.fcas.Exists(r.Context(), f.ContentHash)
+			if cerr != nil {
+				writeJSONError(w, http.StatusInternalServerError, "blob_check",
+					map[string]any{"path": f.Path, "err": cerr.Error()})
+				return
+			}
+			if !ok {
+				writeJSONError(w, http.StatusUnprocessableEntity, "missing_blob",
+					map[string]any{"path": f.Path, "hash": f.ContentHash,
+						"hint": "stream the bytes to PUT /blobs/sha256/{hash} before referencing them"})
+				return
+			}
+			f.Encoding = "" // stored shape matches fleet fingerprint rows: content='', hash set
+			continue
+		}
 		// Binary assets arrive base64-encoded (the wire is JSON/UTF-8); decode to raw
 		// bytes BEFORE hashing + storing, so the stored content and its hash (the
 		// content-addressed store key) are the real file bytes.
@@ -1754,6 +1814,20 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	}
 	_ = frows.Close()
 
+	// Dataset pair completeness — path-level, no bytes, so it runs on every
+	// activation path (origin, single-node, fleet applier). The deep gate
+	// (open + prepare queries) runs on the HTTP validate/activate paths
+	// only; see admin/datasets.go.
+	if len(rawFiles) > 0 {
+		paths := make([]string, len(rawFiles))
+		for i, rf := range rawFiles {
+			paths[i] = rf.path
+		}
+		if me := datasetPairError(paths); me != nil {
+			return currentActiveID, targetVersionID, me
+		}
+	}
+
 	// Persist FILES/* asset bytes into the content-addressed store so the
 	// static serve path resolves them lazily by hash; .txcl / mock-* stay
 	// inline in ops. The store verifies sha256==hash and is create-if-absent
@@ -1774,7 +1848,12 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	if c.fcas != nil && !c.fleetEnabled() {
 		assets := make(map[string]string)
 		for _, rf := range rawFiles {
-			if strings.HasPrefix(rf.path, "FILES/") && rf.content != "" {
+			// DATASETS/ artifacts normally arrive fingerprint-only (bytes went
+			// through the blob endpoint straight to the CAS, content == ""), so
+			// this materialises nothing for them; an inline-pushed member (a
+			// small artifact via the raw API, or the .yaml manifest) gets the
+			// same CAS treatment as FILES/.
+			if (strings.HasPrefix(rf.path, "FILES/") || dataset.IsDatasetPath(rf.path)) && rf.content != "" {
 				assets[rf.path] = rf.content
 			}
 		}
@@ -1805,6 +1884,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 		if storeseed.IsPackPath(rf.path) {
 			continue // store-seed pack → reconciled post-commit, not an ops row
+		}
+		if dataset.IsDatasetPath(rf.path) {
+			continue // dataset artifact/manifest → filecas + txco://dataset, not an ops row
 		}
 		pf, ok := parseStackPath(rf.path)
 		if !ok {
@@ -2014,6 +2096,21 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 	}
 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+
+	// Deep dataset gate — BEFORE the tx (materialising a cold multi-GB
+	// artifact must never pin the runtime DB connection) and before the
+	// fleet artifact upload (don't publish a version that can't activate).
+	// Cheap no-op for versions without DATASETS/ rows.
+	if stackID, _, serr := c.lookupStack(r.Context(), c.pu.RuntimeDB, ac.TenantID, name); serr == nil {
+		if versionID, _, verr := c.lookupVersion(r.Context(), c.pu.RuntimeDB, stackID, req.VersionNumber); verr == nil {
+			if issues := c.deepValidateDatasets(r.Context(), versionID); len(issues) > 0 {
+				writeJSONError(w, http.StatusUnprocessableEntity, "dataset_invalid", datasetIssuesDetail(issues))
+				return
+			}
+		}
+	}
+	// Lookup failures fall through: materialiseStackVersion re-runs both
+	// lookups inside the tx and reports them with its established codes.
 
 	// Fleet-sync producer: read the target version's files BEFORE
 	// opening the tx so the artifact upload runs out of the lock.
@@ -2291,6 +2388,14 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 			resp.OK = false
 			resp.Errors = append(resp.Errors, validateError{Path: f.Path, Err: msg})
 		}
+	}
+	// Dataset deep gate — same checks activation enforces (artifact in CAS,
+	// manifest parses, every query prepares read-only), surfaced here so
+	// `txco apply`'s validate phase reports them before any pointer flips.
+	for _, issue := range c.deepValidateDatasets(r.Context(), versionID) {
+		resp.OK = false
+		resp.Checked++
+		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

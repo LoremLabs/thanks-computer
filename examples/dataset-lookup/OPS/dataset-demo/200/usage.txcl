@@ -1,0 +1,9 @@
+# No ?q= given → usage hint. Gated on the query being ABSENT: rules in one
+# scope evaluate concurrently against the same snapshot, so responders must
+# be mutually exclusive by WHEN, not by file order.
+WHEN @src == "http" && @web.req.url.query.q.0 == ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "usage", "GET /books?q=<full-text query>"))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

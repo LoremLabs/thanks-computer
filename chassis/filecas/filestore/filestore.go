@@ -11,8 +11,11 @@ package filestore
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -120,5 +123,89 @@ func (fs *FileStore) Exists(ctx context.Context, hash string) (bool, error) {
 	return false, err
 }
 
-// Compile-time interface check.
-var _ filecas.Store = (*FileStore)(nil)
+// PutReader implements filecas.ReaderPutter: stream to a temp file in the
+// destination directory while hashing, verify, then os.Link into place —
+// the same never-observe-a-partial-object discipline as Put, without ever
+// holding the blob in memory. size is advisory here; when non-negative it
+// is cross-checked like the hash.
+func (fs *FileStore) PutReader(ctx context.Context, hash string, r io.Reader, size int64) error {
+	dest := fs.hashPath(hash)
+	if dest == "" {
+		return fmt.Errorf("filecas: malformed hash %q", hash)
+	}
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	h := sha256.New()
+	n, werr := io.Copy(io.MultiWriter(tmp, h), r)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return werr
+	}
+	if size >= 0 && n != size {
+		return fmt.Errorf("%w: wrote %d bytes, expected %d", filecas.ErrHashMismatch, n, size)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != hash {
+		return fmt.Errorf("%w: have %s want %s", filecas.ErrHashMismatch, got, hash)
+	}
+	if lerr := os.Link(tmpName, dest); lerr != nil {
+		if errors.Is(lerr, os.ErrExist) {
+			return nil // dedup: identical content already present
+		}
+		return lerr
+	}
+	return nil
+}
+
+// GetReader implements filecas.ReaderGetter: an open read handle on the
+// content-addressed file itself.
+func (fs *FileStore) GetReader(ctx context.Context, hash string) (io.ReadCloser, int64, error) {
+	p := fs.hashPath(hash)
+	if p == "" {
+		return nil, 0, filecas.ErrNotFound
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, 0, filecas.ErrNotFound
+		}
+		return nil, 0, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, err
+	}
+	return f, info.Size(), nil
+}
+
+// BlobPath implements filecas.PathProvider: the blob IS a local file, so
+// zero-copy consumers can open it in place (read-only — the path is
+// content-addressed and immutable).
+func (fs *FileStore) BlobPath(hash string) (string, bool) {
+	p := fs.hashPath(hash)
+	if p == "" {
+		return "", false
+	}
+	if _, err := os.Stat(p); err != nil {
+		return "", false
+	}
+	return p, true
+}
+
+// Compile-time interface checks.
+var (
+	_ filecas.Store        = (*FileStore)(nil)
+	_ filecas.ReaderPutter = (*FileStore)(nil)
+	_ filecas.ReaderGetter = (*FileStore)(nil)
+	_ filecas.PathProvider = (*FileStore)(nil)
+)

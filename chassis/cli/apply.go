@@ -522,6 +522,17 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, assets...)
+		// Datasets are CODE (the manifest names queries the rules call; a query
+		// and schema change deploy atomically), so they join the code manifest
+		// here — unlike store-seed packs, which are data (`txco data apply`).
+		// Artifacts enter as fingerprint-only rows; dsUploads streams any bytes
+		// the chassis CAS is missing right before the draft is created.
+		dsFiles, dsUploads, derr := collectDatasetFiles(filepath.Join(dir, "OPS", stack))
+		if derr != nil {
+			fmt.Fprintf(stderr, "%s: %s: collect DATASETS/: %v\n", cmd, stack, derr)
+			return 1
+		}
+		files = append(files, dsFiles...)
 		localHash := localManifestHash(files)
 
 		// Fast-skip an unchanged stack with no per-stack round-trip. --force skips
@@ -584,6 +595,18 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 					Stack: stack, Version: *rec.ActiveVersion,
 					Files: len(files), Activated: false, Unchanged: true,
 				})
+				continue
+			}
+		}
+
+		// Make dataset artifact bytes resident in the chassis CAS before any
+		// draft references them (HEAD per hash, streamed PUT for misses) — the
+		// same before-the-reference discipline as uploadComputes above. Runs
+		// after the unchanged-skip so an in-sync stack costs zero blob probes.
+		if len(dsUploads) > 0 {
+			if err := ensureDatasetBlobs(ctx, c, dsUploads, progress, stderr); err != nil {
+				fmt.Fprintf(stderr, "%s: %s: %v\n", cmd, stack, err)
+				failures = append(failures, stack)
 				continue
 			}
 		}

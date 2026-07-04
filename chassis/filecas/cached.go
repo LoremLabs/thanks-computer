@@ -42,6 +42,12 @@ func newCachedStore(backend Store, maxBytes, maxEntry int64) *cachedStore {
 
 func (c *cachedStore) Name() string { return c.backend.Name() }
 
+// unwrap exposes the wrapped backend so the package-level streaming helpers
+// (PutReader/GetReader/BlobPath) can discover its capabilities through this
+// decorator. Streaming deliberately bypasses the byte LRU: blobs big enough
+// to stream are exactly the ones the per-entry guard would refuse anyway.
+func (c *cachedStore) unwrap() Store { return c.backend }
+
 func (c *cachedStore) Exists(ctx context.Context, hash string) (bool, error) {
 	c.mu.Lock()
 	_, ok := c.items[hash]

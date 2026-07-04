@@ -92,8 +92,9 @@ func (v *defaultVerifier) Verify(req *http.Request, resolve PublicKeyResolver, o
 
 	// Validate Content-Digest. The library's helper reads the body to
 	// hash it; afterwards we put it back so the handler can still
-	// consume it.
-	if cd := req.Header.Values("Content-Digest"); len(cd) > 0 {
+	// consume it. Streaming routes (multi-GB blob uploads) opt out via
+	// SkipBodyDigest and do their own hash-while-streaming verification.
+	if cd := req.Header.Values("Content-Digest"); len(cd) > 0 && !opts.SkipBodyDigest {
 		body := req.Body
 		if err := httpsign.ValidateContentDigestHeader(cd, &body, []string{httpsign.DigestSha256}); err != nil {
 			return nil, &AuthError{Code: ErrInvalidContentDigest, Cause: err}

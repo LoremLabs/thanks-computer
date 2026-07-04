@@ -28,6 +28,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	devpkg "github.com/loremlabs/thanks-computer/chassis/cli/dev"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
+	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
@@ -512,6 +513,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
 		files = append(files, packs...)
+		dsFiles, dsUploads, derr := collectDatasetFiles(filepath.Join(dir, "OPS", stack))
+		if derr != nil {
+			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
+		}
+		files = append(files, dsFiles...)
 		localHash := localManifestHash(files)
 
 		// Fast paths against the chassis's current active version:
@@ -558,6 +564,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		// Push path. "active" tells the server to clone from the
 		// current active version when one exists, otherwise start an
 		// empty draft. Mirrors runApply (apply.go:134).
+		if len(dsUploads) > 0 {
+			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: %w", stack, err)
+			}
+		}
 		versionNumber, err := c.CreateDraft(ctx, stack, "active")
 		if err != nil {
 			return fmt.Errorf("%s: create draft: %w", stack, err)
@@ -728,6 +739,16 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
 		files = append(files, packs...)
+		dsFiles, dsUploads, derr := collectDatasetFiles(stackDir)
+		if derr != nil {
+			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
+		}
+		files = append(files, dsFiles...)
+		if len(dsUploads) > 0 {
+			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: %w", stack, err)
+			}
+		}
 		if n, ok := state.drafts[stack]; ok {
 			if _, err := c.PutDraftFiles(ctx, stack, n, files); err == nil {
 				state.fps[stack] = fp
@@ -769,7 +790,7 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
 	}
 	// Asset half: stat-only walk of the same trees the collectors read.
-	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV} {
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, dataset.Dir} {
 		treeDir := filepath.Join(stackDir, top)
 		info, err := os.Stat(treeDir)
 		if err != nil || !info.IsDir() {

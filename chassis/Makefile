@@ -6,12 +6,16 @@ BUILD_TIMESTAMP = $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 GIT_HASH ?= $(shell git rev-parse HEAD)
 LDFLAGS = -ldflags "-X main.BuildTimestamp=$(BUILD_TIMESTAMP) -X main.CommitId=$(GIT_HASH) -X main.Version=$(VERSION) -X main.InstallMethod=source"
 
+# mattn/go-sqlite3 compile-gates FTS5 behind this tag; txco://dataset
+# artifacts rely on FTS5 MATCH queries, so every build and test run needs it.
+GOTAGS = -tags sqlite_fts5
+
 # Path to the txco command package, relative to the module root.
 TXCO_CMD = ../cmd/txco
 
 all: lint test build
 benchmark:
-	go test ./... -bench=.
+	go test $(GOTAGS) ./... -bench=.
 clean:
 	rm -rf ${WORKSPACE}/bin
 fetch-tools:
@@ -20,20 +24,20 @@ fetch-tools:
 lint:
 	golangci-lint run
 test:
-	go test -v -race -cover ./...
+	go test $(GOTAGS) -v -race -cover ./...
 qtest:
-	go test -race -cover ./...
+	go test $(GOTAGS) -race -cover ./...
 cover:
-	go test -race -coverprofile="/tmp/go-cover.$$.tmp" ./... && go tool cover -html="/tmp/go-cover.$$.tmp"
+	go test $(GOTAGS) -race -coverprofile="/tmp/go-cover.$$.tmp" ./... && go tool cover -html="/tmp/go-cover.$$.tmp"
 
 # Builds the txco binary locally into chassis/bin/txco. start.sh uses this
 # for the in-repo dev loop. For a system-wide install (txco on PATH), use
 # `make install` from the repo root.
 build:
 	mkdir -p ${WORKSPACE}/bin
-	go build -o ${WORKSPACE}/bin/txco $(LDFLAGS) ${TXCO_CMD}
+	go build $(GOTAGS) -o ${WORKSPACE}/bin/txco $(LDFLAGS) ${TXCO_CMD}
 
 # Installs `txco` to $GOBIN (default ~/go/bin). Add that dir to your PATH
 # so the binary is callable from anywhere.
 install:
-	go install $(LDFLAGS) ${TXCO_CMD}
+	go install $(GOTAGS) $(LDFLAGS) ${TXCO_CMD}

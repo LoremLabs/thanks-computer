@@ -1,0 +1,18 @@
+# _sys/boot scope 75 — path-gated auto-route hook.
+#
+# Only HTTP requests under `/books` route to the dataset-demo stack;
+# everything else falls through to scope 1000's 404. Single-stack
+# local-dev workspace, so detect-tenant@0 has no hostname binding —
+# scope 100's txco://route promotes this proposal.
+#
+# Production note: delete this file once you have real hostname
+# bindings; path-prefix gating belongs in per-tenant routing, not the
+# system bootstrap.
+WHEN @route.to == ""
+  && @src == "http"
+  && @web.req.url.path =~ /^\/books(\/.*)?$/
+  EMIT @route.tenant = "default",
+       @route.stack = "dataset-demo",
+       @route.to = "dataset-demo/0",
+       @route.ingress = "auto-route",
+       @route.hostname_verified = true

@@ -78,7 +78,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -trimpath \
+          go build -tags sqlite_fts5 -trimpath \
             -ldflags "-X main.Version=${GITHUB_REF_NAME#v} -X main.CommitId=${GITHUB_SHA} -X main.BuildTimestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.InstallMethod=release" \
             -o dist/txco ./cmd/txco
 

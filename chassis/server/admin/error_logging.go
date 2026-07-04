@@ -126,3 +126,11 @@ func (w *errorLoggingWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap lets http.ResponseController reach the underlying writer, so
+// per-request deadline extensions (the blob plane's multi-GB uploads and
+// downloads escape the small-JSON Read/WriteTimeout this way) work through
+// this middleware instead of failing with ErrNotSupported.
+func (w *errorLoggingWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}

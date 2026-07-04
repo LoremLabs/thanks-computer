@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — the lookup is a chassis built-in
+# (txco://dataset); the workspace ships only rules + the dataset pair.

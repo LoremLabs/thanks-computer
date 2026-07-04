@@ -1,0 +1,12 @@
+# dataset-demo scope 200 — serialize the lookup result to exact JSON bytes
+# (explicit body instead of envelope projection, so the wire shape is
+# stable regardless of the chassis debug flags — see the mcp-server
+# example's respond.txcl for the long version of why).
+WHEN ._dataset.count != null
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "query", @web.req.url.query.q.0,
+         "count", ._dataset.count,
+         "books", ._dataset.rows))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

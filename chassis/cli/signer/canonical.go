@@ -38,6 +38,15 @@ type signParams struct {
 // requires (`sha-256=:<base64>:`). Returns the value it set so the
 // caller can also inject it into the canonical base.
 func computeContentDigest(req *http.Request, body []byte) string {
+	// A caller that STREAMS its body (dataset blob PUT — gigabytes, never
+	// in memory) pre-sets Content-Digest from its own streamed sha256 and
+	// passes body=nil; sign over the declared value. This is not a
+	// trust hole: the digest is a covered component, and the server
+	// verifies the actual bytes against it (or against the URL hash the
+	// signature also covers) on receipt.
+	if v := req.Header.Get("Content-Digest"); v != "" {
+		return v
+	}
 	if len(body) == 0 {
 		req.Header.Set("Content-Digest", emptyBodyDigest)
 		return emptyBodyDigest
