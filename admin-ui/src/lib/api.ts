@@ -295,6 +295,55 @@ export interface CreateDraftResponse {
     version_number: number
 }
 
+// ---- Inspect (POST /v1/tenants/{t}/inspect) --------------------------------
+//
+// Ask the tenant's own _inspect ops to explain their current state. The
+// request becomes a @src=="inspect" event; the matching inspector answers
+// with a structured card the UI renders (sections of [label, value] rows).
+
+export interface InspectCardSection {
+    title?: string
+    rows?: [string, unknown][]
+}
+
+export interface InspectCard {
+    title?: string
+    sections?: InspectCardSection[]
+    // Optional underlying domain JSON for raw viewing.
+    raw?: unknown
+}
+
+export interface InspectRequestBody {
+    stack: string
+    noun?: string
+    id?: string
+    args?: Record<string, string>
+}
+
+// inspectTenant runs one inspect request. Returns null when no inspector
+// answered (404 no_inspector — e.g. the tenant has no _inspect stack or no
+// op matched the stack/noun), so the view can render a distinct empty state.
+export async function inspectTenant(
+    tenant: string,
+    body: InspectRequestBody
+): Promise<InspectCard | null> {
+    const resp = await fetch(`/v1/tenants/${encodeURIComponent(tenant)}/inspect`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    })
+    if (check401(resp)) {
+        throw new Error(`inspect ${body.stack}/${body.noun ?? ''}: 401 unauthorized`)
+    }
+    if (resp.status === 404) return null
+    if (!resp.ok) {
+        throw new Error(`inspect ${body.stack}/${body.noun ?? ''}: ${resp.status} ${resp.statusText}`)
+    }
+    const data = (await resp.json()) as { card: InspectCard }
+    return data.card
+}
+
 // PATCH / DELETE on a draft's individual files. Both require a
 // base_hash for optimistic concurrency — server side at
 // chassis/server/admin/stacks.go:121-142 (patchFileRequest,

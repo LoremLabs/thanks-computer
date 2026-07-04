@@ -1,0 +1,28 @@
+# OPS/_inspect/100 — answer an inspect request with a structured card.
+#
+# The inspect inlet (`txco inspect <stack> <noun> <id>`) routes every
+# @src=="inspect" event for this tenant into _inspect/0, so this stack runs for
+# each request. An inspector op gates on the stack/noun it knows how to explain
+# and answers by writing `._inspect.card`; the inlet returns the card and the
+# CLI (or admin UI) renders it.
+#
+# @ is sugar for ._txc, so @inspect.stack/@inspect.noun/@inspect.id are the
+# chassis-stamped request context (read-only — ops cannot forge them), while
+# `._inspect.card` (no @) is the top-level reply the inlet looks for.
+#
+# Card shape: { "title", "sections": [ { "title", "rows": [[label, value]] } ],
+# "raw"? } — rows are [label, value] pairs; value may be any JSON.
+WHEN @src == "inspect" && @inspect.stack == "demo"
+  EMIT ._inspect.card = &object(
+         "title", "Demo Inspector",
+         "sections", &array(
+           &object("title", "Request",
+                   "rows", &array(
+                     &array("Stack", @inspect.stack),
+                     &array("Noun", @inspect.noun),
+                     &array("Id", @inspect.id))),
+           &object("title", "About",
+                   "rows", &array(
+                     &array("Answered by", "OPS/_inspect/100/card.txcl"),
+                     &array("Replace with", "kv/get + read-file + a nano-op"))))),
+       @halt = true

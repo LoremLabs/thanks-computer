@@ -191,6 +191,35 @@ func TestDetectTenantBodyRoomNoTenantUnchanged(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyInspect: an inspect request (src=inspect with a trusted
+// _txc.inspect.tenant stamped by the authenticated admin inlet) proposes a
+// route into that tenant's _inspect/0, even though the resolver would miss.
+func TestDetectTenantBodyInspect(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"inspect","inspect":{"tenant":"acme","stack":"marketing","noun":"user","id":"matt@example.com"}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_inspect/0" {
+		t.Errorf("_txc.route.to = %q, want _inspect/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.stack").String(); got != "_inspect" {
+		t.Errorf("_txc.route.stack = %q, want _inspect", got)
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+}
+
+// An inspect event with no _txc.inspect.tenant must NOT take the inspect
+// branch — it falls through to the resolver (here a miss → "{}").
+func TestDetectTenantBodyInspectNoTenantUnchanged(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"inspect","inspect":{"stack":"marketing","noun":"user"}}}`)); body != "{}" {
+		t.Errorf("inspect body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyScheduled: a fired scheduled event (src=scheduled with a
 // trusted _txc.scheduled.tenant stamped by the scheduled personality from the
 // stored row) proposes a route into that tenant's _scheduled/0, even though the

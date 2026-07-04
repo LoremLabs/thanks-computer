@@ -179,6 +179,23 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			return raw
 		}
 	}
+	// Inspect request. The inspect inlet (admin POST /v1/tenants/{t}/inspect)
+	// stamps the target slug in `_txc.inspect.tenant` (trusted: the
+	// authenticated URL tenant, never client input). Propose a route into that
+	// tenant's `_inspect/0` — the same sanctioned _sys→tenant pin as room. A
+	// tenant with no `_inspect` stack falls through to the 404 like any
+	// unrouted request; the inlet reports that as "no inspector answered".
+	if gjson.GetBytes(in, "_txc.src").String() == "inspect" {
+		if it := gjson.GetBytes(in, "_txc.inspect.tenant").String(); it != "" {
+			raw := "{}"
+			raw, _ = sjson.Set(raw, "_txc.route.tenant", it)
+			raw, _ = sjson.Set(raw, "_txc.route.stack", "_inspect")
+			raw, _ = sjson.Set(raw, "_txc.route.ingress", "inspect")
+			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
+			raw, _ = sjson.Set(raw, "_txc.route.to", "_inspect/0")
+			return raw
+		}
+	}
 	// Scheduled event. The scheduled personality fires a claimed due event,
 	// stamping the target slug in `_txc.scheduled.tenant` (trusted: from the
 	// stored row's tenant, pinned at enqueue from processor.TenantScope, never

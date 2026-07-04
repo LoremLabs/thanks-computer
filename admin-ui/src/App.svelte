@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte'
     import { ValidationFailedError } from './lib/api'
-    import { isAuthed, requiresLogin, store } from './lib/store.svelte'
+    import { hasCapability, isAuthed, requiresLogin, store } from './lib/store.svelte'
     import { opId, type Op } from './lib/types'
     import { groupOps } from './lib/tree'
     import Ago from './components/Ago.svelte'
@@ -12,6 +12,7 @@
     import SecretDetail from './components/SecretDetail.svelte'
     import SecretsList from './components/SecretsList.svelte'
     import SessionIndicator from './components/SessionIndicator.svelte'
+    import InspectView from './components/InspectView.svelte'
     import SidebarNav from './components/SidebarNav.svelte'
     import StackView from './components/StackView.svelte'
     import TraceDetail from './components/TraceDetail.svelte'
@@ -217,18 +218,23 @@
 
     // Sidebar nav: top-level "ops" vs "traces". Clicking ops returns
     // to the default (no traces); clicking traces opens the list page.
-    const currentNav = $derived<'ops' | 'traces' | 'secrets'>(
+    const currentNav = $derived<'ops' | 'traces' | 'secrets' | 'inspect'>(
         store.state.showSecrets
             ? 'secrets'
-            : store.state.showTraces
-              ? 'traces'
-              : 'ops'
+            : store.state.showInspect
+              ? 'inspect'
+              : store.state.showTraces
+                ? 'traces'
+                : 'ops'
     )
-    function selectNav(view: 'ops' | 'traces' | 'secrets') {
+    const canInspect = $derived(hasCapability(store.state.session, 'inspect:*:read'))
+    function selectNav(view: 'ops' | 'traces' | 'secrets' | 'inspect') {
         if (view === 'traces') {
             store.showTraces()
         } else if (view === 'secrets') {
             store.showSecrets()
+        } else if (view === 'inspect') {
+            store.showInspect()
         } else {
             // Returning to Ops: land on the first stack if there is
             // one (StackView, tree highlights it) so the panel is
@@ -369,7 +375,7 @@
     <main class="relative flex flex-1 overflow-hidden">
         <!-- Desktop sidebar: in-flow at md+ only. -->
         <aside class="hidden w-72 shrink-0 overflow-y-auto border-r border-neutral-200 bg-white md:block">
-            <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} />
+            <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} canInspect={canInspect} />
             <StackNav
                 ops={store.state.ops}
                 selectedId={store.state.selectedId}
@@ -395,7 +401,7 @@
                 : '-translate-x-full'}"
             aria-hidden={!sidebarOpen}
         >
-            <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} />
+            <SidebarNav current={currentNav} onSelect={selectNav} showDemo={store.state.demoMode} canInspect={canInspect} />
             <StackNav
                 ops={store.state.ops}
                 selectedId={store.state.selectedId}
@@ -412,6 +418,8 @@
                     name={store.state.showSecrets}
                     onBack={() => store.showSecrets()}
                 />
+            {:else if store.state.showInspect}
+                <InspectView />
             {:else if store.state.showTraces === '__list__'}
                 <TracesList onSelectTrace={(rid) => store.showTraces(rid)} />
             {:else if store.state.showTraces}

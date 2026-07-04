@@ -182,6 +182,11 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// chassis/app.roomAlias). A room message becomes a normal
 		// @src=="room" event — see chassis/cli/room.go.
 		return runRoom(rest, stdout, stderr), true
+	case "inspect":
+		// Ask a tenant's own _inspect ops for a structured state card
+		// (@src=="inspect") — see chassis/cli/inspect_cmd.go. Package
+		// manifests stay under `txco package inspect`.
+		return runInspectRuntime(rest, stdout, stderr), true
 	case "admin":
 		return runAdmin(rest, stdout, stderr), true
 	case "update":
@@ -341,6 +346,7 @@ func printUsage(w io.Writer) {
 			{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
 			{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},
 			{"room [--room N] <msg>", muted("Send a message into a room (also installed as ") + hint("thanks") + muted(")")},
+			{"inspect <stack> [noun] [id]", muted("Ask a stack to explain its current state (structured card)")},
 		}},
 		{"CLI", []row{
 			{"version", muted("Print version info")},

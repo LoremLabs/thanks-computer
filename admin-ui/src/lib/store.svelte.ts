@@ -61,7 +61,7 @@ interface Selection {
     // 'demo' = render the txcl walkthrough — only present when the
     // chassis runs in demo mode (see state.demoMode + probeDemoMode).
     // Otherwise '' (op-or-stack view).
-    page: 'versions' | 'login' | 'traces' | 'secrets' | 'demo' | ''
+    page: 'versions' | 'login' | 'traces' | 'secrets' | 'inspect' | 'demo' | ''
     // Captured from `#login?t=<token>` and consumed once by
     // syncFromHash → tryExchange. Not part of the persistent URL.
     loginToken?: string
@@ -275,6 +275,10 @@ function createStore() {
         // Mirrors the showTraces / showSecrets pattern but boolean —
         // the demo route has no inner detail/list distinction.
         showDemo: false as boolean,
+        // True when the URL hash is #inspect — the "ask a stack about
+        // its state" panel. Mirrors showDemo: boolean, no inner
+        // detail routes; the panel owns its form state locally.
+        showInspect: initial.page === 'inspect',
         // Live-trace cache: keyed by rid, holding the full ClosedTrace
         // shape received over /traces/stream. Populated by TracesList
         // as events arrive; consumed by TraceDetail to avoid an
@@ -628,6 +632,9 @@ function createStore() {
                     state.showSecrets === '__list__' ? '' : state.showSecrets,
             }
         }
+        if (state.showInspect) {
+            return { op: '', stack: '', version: null, page: 'inspect' }
+        }
         // Stack name to use for version-pinning: either the explicit
         // selectedStack (stack/versions view) or the op's parent
         // stack (op-detail view). The URL form is decided separately
@@ -667,6 +674,7 @@ function createStore() {
         state.showVersionsList = ''
         state.showTraces = ''
         state.showSecrets = ''
+        state.showInspect = false
         writeHash(currentSelection())
     }
 
@@ -680,6 +688,7 @@ function createStore() {
         state.showVersionsList = ''
         state.showTraces = ''
         state.showSecrets = ''
+        state.showInspect = false
         writeHash(currentSelection())
     }
 
@@ -692,6 +701,7 @@ function createStore() {
         state.showVersionsList = stack
         state.showTraces = ''
         state.showSecrets = ''
+        state.showInspect = false
         // Lazy-fetch history.
         if (!state.versionsByStack[stack]) refreshVersions(stack)
         writeHash(currentSelection())
@@ -706,6 +716,7 @@ function createStore() {
         state.selectedStack = ''
         state.showVersionsList = ''
         state.showSecrets = ''
+        state.showInspect = false
         state.showTraces = rid && rid !== '' ? rid : '__list__'
         writeHash(currentSelection())
     }
@@ -719,8 +730,22 @@ function createStore() {
         state.selectedStack = ''
         state.showVersionsList = ''
         state.showTraces = ''
+        state.showInspect = false
         state.showSecrets = name && name !== '' ? name : '__list__'
         if (!state.secretsLoaded) refreshSecrets()
+        writeHash(currentSelection())
+    }
+
+    // Open the inspect panel — ask a stack to explain its current
+    // state. Mirrors showSecrets/showTraces but boolean: the panel
+    // owns its own form state and there are no inner routes.
+    function showInspect() {
+        state.selectedId = ''
+        state.selectedStack = ''
+        state.showVersionsList = ''
+        state.showTraces = ''
+        state.showSecrets = ''
+        state.showInspect = true
         writeHash(currentSelection())
     }
 
@@ -812,6 +837,7 @@ function createStore() {
             state.showVersionsList = ''
             state.showSecrets = ''
             state.showDemo = false
+            state.showInspect = false
             state.showTraces = h.traceRid && h.traceRid !== '' ? h.traceRid : '__list__'
             return
         }
@@ -822,6 +848,7 @@ function createStore() {
             state.showVersionsList = ''
             state.showTraces = ''
             state.showDemo = false
+            state.showInspect = false
             state.showSecrets =
                 h.secretName && h.secretName !== '' ? h.secretName : '__list__'
             if (!state.secretsLoaded) refreshSecrets()
@@ -829,6 +856,17 @@ function createStore() {
         }
         // Demo route — no stack context, no inner detail. The App
         // ladder swaps in DemoView and hides admin chrome.
+        // Inspect route — boolean, no inner detail (mirrors demo).
+        if (h.page === 'inspect') {
+            state.selectedId = ''
+            state.selectedStack = ''
+            state.showVersionsList = ''
+            state.showTraces = ''
+            state.showSecrets = ''
+            state.showDemo = false
+            state.showInspect = true
+            return
+        }
         if (h.page === 'demo') {
             state.selectedId = ''
             state.selectedStack = ''
@@ -836,6 +874,7 @@ function createStore() {
             state.showTraces = ''
             state.showSecrets = ''
             state.showDemo = true
+            state.showInspect = false
             return
         }
         state.selectedId = h.op
@@ -844,6 +883,7 @@ function createStore() {
         state.showTraces = ''
         state.showSecrets = ''
         state.showDemo = false
+        state.showInspect = false
         if (h.stack && typeof h.version === 'number') {
             // The hash carries an explicit version pin; honor it.
             // Fire-and-forget: setStackVersion fetches + rebuilds ops
@@ -1356,6 +1396,7 @@ function createStore() {
         setStackVersion,
         setTenant,
         showSecrets,
+        showInspect,
         showTraces,
         showVersions,
         signOut,
@@ -1560,6 +1601,12 @@ function readHash(): Selection {
         return { op: '', stack: '', version: null, page: 'secrets', secretName: sm[1] }
     }
 
+    // Inspect route — the "ask a stack about its state" panel. No inner
+    // detail routes; #inspect is the whole surface.
+    if (h === '#inspect' || h === '#inspect/') {
+        return { op: '', stack: '', version: null, page: 'inspect' }
+    }
+
     // Demo route — only renders when state.demoMode is true (probed from
     // /v1/demo/info at boot). Outside demo mode this still parses fine
     // but the App ladder's `page === 'demo'` branch shows an empty state.
@@ -1605,6 +1652,8 @@ function writeHash(sel: Selection) {
         next = sel.traceRid ? `#traces/${sel.traceRid}` : '#traces'
     } else if (sel.page === 'secrets') {
         next = sel.secretName ? `#secrets/${sel.secretName}` : '#secrets'
+    } else if (sel.page === 'inspect') {
+        next = '#inspect'
     } else if (sel.page === 'demo') {
         next = '#demo'
     } else if (sel.page === 'versions' && sel.stack) {

@@ -4,8 +4,8 @@
         // the active row. We pass it down rather than reading the
         // store here so the parent can hold the routing decisions
         // (clicking Ops also unsets traces and vice versa).
-        current: 'ops' | 'traces' | 'secrets'
-        onSelect: (view: 'ops' | 'traces' | 'secrets') => void
+        current: 'ops' | 'traces' | 'secrets' | 'inspect'
+        onSelect: (view: 'ops' | 'traces' | 'secrets' | 'inspect') => void
         // When the chassis is running under `txco demo` the store's
         // probeDemoMode flips this true (see store.svelte.ts). We
         // surface a #demo link in the sidebar so the operator can
@@ -14,10 +14,13 @@
         // sidebar. Hidden in non-demo deployments so production
         // admins don't see a dead link.
         showDemo?: boolean
+        // Whether the signed-in member holds inspect:*:read. The row is
+        // hidden (not disabled) without it — same posture as showDemo.
+        canInspect?: boolean
     }
-    let { current, onSelect, showDemo = false }: Props = $props()
+    let { current, onSelect, showDemo = false, canInspect = false }: Props = $props()
 
-    function rowClass(view: 'ops' | 'traces' | 'secrets'): string {
+    function rowClass(view: 'ops' | 'traces' | 'secrets' | 'inspect'): string {
         const base =
             'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-neutral-100'
         if (current === view) {
@@ -40,6 +43,12 @@
         <span class="inline-block w-4 shrink-0 text-center font-semibold tracking-tight text-brand-yellow" aria-hidden="true">o</span>
         secrets
     </button>
+    {#if canInspect}
+        <button type="button" class={rowClass('inspect')} onclick={() => onSelect('inspect')}>
+            <span class="inline-block w-4 shrink-0 text-center font-semibold tracking-tight text-brand-red" aria-hidden="true">o</span>
+            inspect
+        </button>
+    {/if}
     {#if showDemo}
         <!-- Plain <a href="#demo"> rather than a button + onSelect
              callback: navigating the hash is the canonical way to

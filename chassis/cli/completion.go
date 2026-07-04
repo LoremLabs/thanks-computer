@@ -300,6 +300,7 @@ var cliCommandTree = []node{
 	{Name: "data", Desc: "Deploy + inspect declarative store-seed packs (VECTORS/, KV/)", Children: dataChildren},
 	{Name: "cron", Desc: "Cron subcommands (timezone config)", Children: cronChildren},
 	{Name: "room", Desc: "Enter a room — send a message to a shared context (also: thanks)", Flags: []string{"room", "tenant", "profile", "addr", "target", "user", "pass"}},
+	{Name: "inspect", Desc: "Ask a stack to explain its current state (structured card)", Flags: []string{"arg", "json", "tenant", "profile", "addr", "target", "user", "pass"}},
 	{Name: "admin", Desc: "Operator-facing chassis maintenance", Children: adminChildren},
 	{Name: "completion", Desc: "Emit shell completion script (bash|zsh|fish)"},
 	{Name: "help", Desc: "Show top-level help"},

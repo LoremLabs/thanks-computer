@@ -18,10 +18,11 @@ const RoleTenantOwner = "tenant_owner"
 // metadata + create/generate/rotate/revoke — all tenant-scoped by the resolver,
 // so an owner only ever touches their own tenant's secrets), and read access to
 // the op-writable KV store (kv:*:read — list a namespace's keys via the admin
-// API). It deliberately EXCLUDES chassis-wide authority that an unverified
-// tenant must not self-grant: notably dns:*:* (delegated DNS zones confer
-// DKIM/verified-sender/routing without ownership proof — super-admin gated) and
-// *:*:* (super-admin).
+// API), and the inspect inlet (inspect:*:* — ask the tenant's own _inspect
+// ops for structured state cards). It deliberately EXCLUDES chassis-wide
+// authority that an unverified tenant must not self-grant: notably dns:*:*
+// (delegated DNS zones confer DKIM/verified-sender/routing without ownership
+// proof — super-admin gated) and *:*:* (super-admin).
 func TenantOwnerCaps() []string {
-	return []string{"opstack:*:*", "stack:*:*", "hostname:*:*", "secret:*:*", "kv:*:*"}
+	return []string{"opstack:*:*", "stack:*:*", "hostname:*:*", "secret:*:*", "kv:*:*", "inspect:*:*"}
 }

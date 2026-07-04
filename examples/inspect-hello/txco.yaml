@@ -1,0 +1,23 @@
+# examples/inspect-hello — the smallest possible inspector.
+#
+# An `_inspect` stack that answers `txco inspect` with a structured card. The
+# inspect inlet routes every `@src == "inspect"` event for this tenant into
+# `_inspect/0`; the op below answers by writing `._inspect.card`, which the
+# inlet returns and the CLI renders as aligned sections.
+#
+# Try it (against a running chassis — e.g. `txco dev` in this directory):
+#
+#   txco apply
+#   txco inspect demo user matt@example.com
+#   txco inspect demo user matt@example.com --json
+#
+# Replace the echo with real lookups — kv/get a snapshot, read-file a manifest,
+# shape it with a nano-op. trace answers "what just happened?"; inspect answers
+# "what is the current state, and why?".
+
+target: dev
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow

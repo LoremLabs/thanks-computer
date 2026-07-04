@@ -18,8 +18,8 @@ import (
 
 // runInspect shows a package's identity and exports without installing it.
 //
-//	txco inspect dir:./examples/packages/support-basic
-//	txco inspect github:loremlabs/txco-packages/support-basic [--json]
+//	txco package inspect dir:./examples/packages/support-basic
+//	txco package inspect github:loremlabs/txco-packages/support-basic [--json]
 func runInspect(args []string, stdout, stderr io.Writer) int {
 	fs := pflag.NewFlagSet("inspect", pflag.ContinueOnError)
 	fs.SetOutput(stderr)

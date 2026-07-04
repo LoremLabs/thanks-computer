@@ -396,6 +396,10 @@ func (c *Controller) Start() {
 	// a normal @src=="room" event routed to the tenant's _room stack.
 	tenantR.HandleFunc("/rooms/{room}/messages", c.handlePostRoomMessage).Methods(http.MethodPost)
 	tenantR.HandleFunc("/rooms/{room}/stream", c.handleRoomStream).Methods(http.MethodGet)
+	// Inspect inlet (txco inspect): ask the tenant's own ops to explain their
+	// current state — a normal @src=="inspect" event routed to the tenant's
+	// _inspect stack, answered with a structured card.
+	tenantR.HandleFunc("/inspect", c.handleInspect).Methods(http.MethodPost)
 	tenantR.HandleFunc("/auth/actors", c.handleListActors).Methods(http.MethodGet)
 	tenantR.HandleFunc("/auth/actors/{actorID}/revoke", c.handleRevokeActor).Methods(http.MethodPost)
 	tenantR.HandleFunc("/auth/members", c.handleListTenantMembers).Methods(http.MethodGet)
