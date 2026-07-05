@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	radix "github.com/hashicorp/go-immutable-radix"
@@ -79,6 +80,12 @@ type Unit struct {
 	Reg        registry.Registry
 	Mux        *radix.Tree
 	HTTPClient *http.Client
+
+	// opsIdx caches the current snapshot's parsed, scope-sorted ops so
+	// the per-scope hot path skips SQL and txcl re-parsing. Lazily
+	// built; invalidated by snapshot-handle identity + Dbc generation.
+	// See opsindex.go.
+	opsIdx atomic.Pointer[opsIndex]
 
 	// Runs is the continuation store wrapper. Used only on the barrier
 	// (async) path; nil-safe — the sync fast path never touches it.
@@ -3303,6 +3310,18 @@ func (pu *Unit) OpsForStage(ctx context.Context, stage string) ([]operation.Oper
 
 	tenant := tenantScope(ctx)
 	wildcard := strings.ContainsAny(stack, "%_")
+
+	// Hot path: resolve from the in-memory ops index — no SQL, no txcl
+	// re-parse (see opsindex.go). Only for non-wildcard patterns on the
+	// CURRENT snapshot; wildcard lookups, superseded-snapshot requests,
+	// and continuation resumes (frozen opstack DBs) fall through to the
+	// SQL loop below, which is byte-identical to the pre-index behavior.
+	if !wildcard {
+		if idx := pu.currentOpsIndex(pu.opstackDB(ctx)); idx != nil {
+			return idx.opsForStage(ctx, pu, tenant, stack, scope)
+		}
+	}
+
 	prefix := stack
 	for {
 		rows, err := pu.lookupOpsExact(ctx, prefix, scope, tenant)

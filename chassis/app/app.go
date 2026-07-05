@@ -349,7 +349,13 @@ func Run(bi BuildInfo) int {
 			sysMu.Unlock()
 			dbc.Mu.Lock()
 			defer dbc.Mu.Unlock()
-			return nl.Apply(dbc.Db)
+			err := nl.Apply(dbc.Db)
+			// In-place write to the LIVE snapshot: bump the generation
+			// so pointer-identical derived caches (processor ops index)
+			// rebuild. Bump even on a partial-apply error — some rows
+			// may have landed.
+			dbc.BumpGen()
+			return err
 		})
 		logger.Info("system opstacks hot-reload enabled", zap.String("dir", conf.SystemOpstacksDir))
 	}

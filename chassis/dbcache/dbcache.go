@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bep/debounce"
@@ -73,6 +74,28 @@ type DbCache struct {
 	// would otherwise drop them). A hook error is logged, not fatal:
 	// the previous snapshot stays live rather than going dark.
 	OnReload func(*sql.DB) error
+
+	// gen counts IN-PLACE mutations of the live snapshot. Reload never
+	// touches it — a reload swaps Db to a fresh handle, and derived
+	// caches (the processor's ops index) already invalidate on pointer
+	// identity. The only in-place writer is the dev-only system-
+	// opstacks hot-reload (app.go, --system-opstacks-watch), which must
+	// call BumpGen() after applying so pointer-identical caches rebuild.
+	gen atomic.Uint64
+}
+
+// Gen returns the in-place mutation generation of the live snapshot.
+// Pair with the Db pointer: a derived cache is fresh only while BOTH
+// the handle and the generation it captured are unchanged.
+func (dbc *DbCache) Gen() uint64 {
+	return dbc.gen.Load()
+}
+
+// BumpGen invalidates derived caches after mutating the LIVE snapshot
+// in place (dev-only system-opstacks hot-reload). Not needed around
+// Reload — the handle swap is the invalidation there.
+func (dbc *DbCache) BumpGen() {
+	dbc.gen.Add(1)
 }
 
 // New Create a new in-memory DB cache.
