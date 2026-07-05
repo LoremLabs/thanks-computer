@@ -554,6 +554,34 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		return err
 	}
 
+	// Scope fast-forward (fastforward.go): nothing resonated at this
+	// stage, so instead of recursing one full Run frame per populated
+	// scope until something fires, hop the ladder in-place and land at
+	// the first live scope (or the end of the stack). Budget accounting
+	// is replayed per hop, so the envelope stays byte-identical to the
+	// recursive path. Gated off for deferred runs (their join-floor
+	// check runs per frame), breakpoints (break=N may halt at an empty
+	// intermediate scope), and non-index lookups (wildcards, superseded
+	// snapshots, continuation resumes) — those keep the frame-per-scope
+	// path unchanged.
+	if len(ops) == 0 {
+		if _, deferredActive := deferredRunFrom(ctx); !deferredActive &&
+			!gjson.Get(raw, "_txc.flag_breakpoint").Bool() &&
+			pu.currentOpsIndex(pu.opstackDB(ctx)) != nil {
+			var ffStopped bool
+			ops, stage, raw, ffStopped, err = pu.fastForward(ctx, raw, stage, resCh)
+			if err != nil {
+				pu.Logger.Warn("fast-forward error", zap.String("err", err.Error()))
+				return err
+			}
+			if ffStopped {
+				// Budget exhausted mid-walk; the terminal response was
+				// already emitted (same contract as the entry checks).
+				return nil
+			}
+		}
+	}
+
 	// Deferred-join dispatch (internal docs/todo-deferred-join.md). Peel off async ops
 	// whose join floor is a LATER scope: dispatch them now WITHOUT suspending
 	// and continue. The remaining ops (sync + same-scope async) fall through

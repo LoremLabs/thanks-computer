@@ -25,7 +25,7 @@ import (
 // Pinning that second handle in ctx makes currentOpsIndex miss
 // (pointer != Dbc.Snapshot()) and drives the original SQL path — the
 // parity oracle. The DB schema mirrors newTestUnit's.
-func newFileBackedUnit(t *testing.T) (*Unit, *sql.DB) {
+func newFileBackedUnit(t testing.TB) (*Unit, *sql.DB) {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "opstack.db")
@@ -56,7 +56,7 @@ func newFileBackedUnit(t *testing.T) (*Unit, *sql.DB) {
 
 // seedOp inserts one rule row. tenantID is `any` so tests can seed the
 // untenanted bucket with a typed nil (`(*string)(nil)`).
-func seedIdxOp(t *testing.T, db *sql.DB, tenantID any, stack string, scope int, name, txcl string) {
+func seedIdxOp(t testing.TB, db *sql.DB, tenantID any, stack string, scope int, name, txcl string) {
 	t.Helper()
 	if _, err := db.Exec(`INSERT INTO ops (tenant_id, stack, scope, name, txcl, mock_req, mock_res) VALUES (?, ?, ?, ?, ?, '', '')`,
 		tenantID, stack, scope, name, txcl); err != nil {
@@ -64,7 +64,7 @@ func seedIdxOp(t *testing.T, db *sql.DB, tenantID any, stack string, scope int, 
 	}
 }
 
-func seedIdxTenant(t *testing.T, db *sql.DB, id, slug string) {
+func seedIdxTenant(t testing.TB, db *sql.DB, id, slug string) {
 	t.Helper()
 	if _, err := db.Exec(`INSERT INTO tenants (tenant_id, slug, name, created_at) VALUES (?, ?, ?, '')`, id, slug, slug); err != nil {
 		t.Fatalf("seed tenant %s: %v", slug, err)
@@ -285,7 +285,7 @@ func TestOpsIndexInvalidation(t *testing.T) {
 }
 
 // dbFile recovers the temp DB path for the swap simulation.
-func dbFile(t *testing.T, pu *Unit) string {
+func dbFile(t testing.TB, pu *Unit) string {
 	t.Helper()
 	var name string
 	if err := pu.Dbc.Db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&name); err != nil {
