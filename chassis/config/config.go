@@ -276,9 +276,14 @@ func Load() (Config, error) {
 			// convert to absolute path
 
 			config.KVStoreAddrs[i] = path.Join(dir, kvaddr)
-			err = os.MkdirAll(config.KVStoreAddrs[i], os.ModePerm)
+			// The addr is the boltdb DB FILE path (valkeyrie opens it as a
+			// file) — create its PARENT, not the addr itself: MkdirAll on the
+			// addr left a directory where bolt expects a file, so every
+			// txco://kv/* op on a fresh default-flag chassis failed with
+			// "is a directory".
+			err = os.MkdirAll(filepath.Dir(config.KVStoreAddrs[i]), os.ModePerm)
 			if err != nil {
-				log.Fatalf("unable to make directory %s %q", config.KVStoreAddrs[i], err)
+				log.Fatalf("unable to make directory %s %q", filepath.Dir(config.KVStoreAddrs[i]), err)
 			}
 		}
 	}
