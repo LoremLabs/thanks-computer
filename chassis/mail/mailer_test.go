@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jhillyerd/enmime"
+	"github.com/jhillyerd/enmime/v2"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -641,6 +641,47 @@ func TestSendInvalidShell(t *testing.T) {
 	}
 	if len(sub.calls) != 0 {
 		t.Fatalf("a broken shell must not submit; calls=%d", len(sub.calls))
+	}
+}
+
+func TestSendQuotedPrintableLongLines(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+
+	// One unbreakable >1,000-char pure-ASCII token: a giant style attribute.
+	// enmime's default picks 7bit for ASCII regardless of line length, the MTA
+	// then folds at ~998 chars, and a fold landing inside an attribute
+	// corrupts it (and breaks the DKIM body hash). composeMIME forces
+	// quoted-printable on the body parts so no line ever reaches the fold
+	// threshold and the content decodes byte-exact.
+	style := strings.Repeat("margin-left:0;", 100) + "height:auto"
+	body := `<p>before</p><img src="https://example.com/x.png" style="` + style + `" alt="pic" /><p>after</p>`
+	in := env(t, map[string]any{
+		"to": "x@example.com", "subject": "Long", "from": "noreply@acme.com",
+		"body": body,
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(sub.calls) != 1 {
+		t.Fatalf("submit calls=%d want 1", len(sub.calls))
+	}
+	raw := string(sub.calls[0].msg)
+	if n := strings.Count(raw, "Content-Transfer-Encoding: quoted-printable"); n != 2 {
+		t.Fatalf("quoted-printable parts=%d want 2 (text + html):\n%s", n, raw)
+	}
+	for _, line := range strings.Split(raw, "\r\n") {
+		if len(line) > 998 {
+			t.Fatalf("%d-byte line would be folded by the MTA:\n%.120s...", len(line), line)
+		}
+	}
+	msg, err := enmime.ReadEnvelope(bytes.NewReader(sub.calls[0].msg))
+	if err != nil {
+		t.Fatalf("parse mime: %v", err)
+	}
+	if !strings.Contains(msg.HTML, `style="`+style+`"`) {
+		t.Fatalf("giant attribute did not survive the round-trip:\n%.300s...", msg.HTML)
 	}
 }
 

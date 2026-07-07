@@ -9,7 +9,7 @@ import (
 	"sync"
 	texttemplate "text/template"
 
-	"github.com/jaytaylor/html2text"
+	"github.com/inbucket/html2text"
 )
 
 // defaultShellSrc is the bundled default email template — a responsive,
@@ -135,7 +135,9 @@ var (
 )
 
 // htmlToText derives a plaintext alternative from rendered HTML using a real
-// HTML parser (jaytaylor/html2text): it decodes entities (&amp;, &#8212;),
+// HTML parser (inbucket/html2text — the maintained jaytaylor fork, and the one
+// enmime v2 already pulls in, so one html2text in the tree): it decodes
+// entities (&amp;, &#8212;),
 // keeps links as "text <url>", and formats lists / headings / tables — far more
 // faithful than tag-stripping. On a parse error or empty output it falls back
 // to regexHTMLToText so the text/plain MIME part is never empty.

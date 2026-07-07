@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"net/mail"
 
-	"github.com/jhillyerd/enmime"
+	"github.com/jhillyerd/enmime/v2"
 
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
@@ -37,6 +37,19 @@ func composeMIME(from, to mail.Address, cc []mail.Address, replyTo string, extra
 	part, berr := b.Build()
 	if berr != nil {
 		return nil, "", berr
+	}
+	// Force quoted-printable on the body parts. enmime's default picks 7bit
+	// for pure-ASCII content regardless of line length, and drip HTML is one
+	// long line — the MTA folds it at ~998 chars, which corrupts any attribute
+	// the fold lands in and breaks the DKIM body hash. QP wraps at 76 chars
+	// and decodes byte-exact. The root part gets no encoder so top-level
+	// headers keep their default encoding.
+	enc := enmime.NewEncoder(enmime.ForceQuotedPrintableCte(true))
+	for c := part.FirstChild; c != nil; c = c.NextSibling {
+		c.WithEncoder(enc)
+	}
+	if part.FirstChild == nil { // single-part message: the root is the body
+		part.WithEncoder(enc)
 	}
 	var buf bytes.Buffer
 	if eerr := part.Encode(&buf); eerr != nil {

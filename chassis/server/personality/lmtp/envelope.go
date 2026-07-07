@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jhillyerd/enmime"
+	"github.com/jhillyerd/enmime/v2"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
