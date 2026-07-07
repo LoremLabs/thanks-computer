@@ -295,20 +295,33 @@ func effectiveProfile(targetName, profile string) string {
 // "none" (logout sentinel), nil is returned and the request is
 // sent unsigned.
 //
-// Errors are swallowed (returning nil) on this path so basic-auth
-// and open-mode chassis remain usable when no key is configured.
-// The first signed request against a chassis that REQUIRES signing
-// will fail with a clear chassis-side 401.
+// "Nothing configured" (no meta for the profile) stays silent-nil so
+// basic-auth and open-mode chassis remain usable. But "configured and
+// UNUSABLE" — a meta exists yet its backend fails (key file gone, or
+// an ssh-agent key that vanished on reboot) — warns loudly before
+// falling through unsigned: without the warning the only symptom is a
+// chassis-side 401 missing_signature_headers that reads like a server
+// problem. The request is still sent unsigned (open/dev chassis keep
+// working); a signing chassis rejects it as before.
 func loadSigner(profileFlag string) signer.Signer {
+	warn := func(err error) {
+		fmt.Fprintf(os.Stderr,
+			"txco: warning: signing key is configured but unusable — sending requests UNSIGNED (a signing chassis will 401).\n"+
+				"  cause: %v\n"+
+				"  fix: re-add the key to ssh-agent (ssh-add), or re-enroll (txco auth accept / bootstrap-local).\n",
+			err)
+	}
 	if explicit := os.Getenv("TXCO_PRIVATE_KEY_PATH"); explicit != "" {
 		s, err := auth.LoadSignerForMetaPath(explicit + ".meta.json")
 		if err != nil {
+			warn(err)
 			return nil
 		}
 		return s
 	}
 	s, err := auth.LoadSignerForActiveProfile(profileFlag)
 	if err != nil {
+		warn(err)
 		return nil
 	}
 	return s

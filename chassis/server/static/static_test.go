@@ -82,6 +82,17 @@ func TestIndexDirectoryOwnership(t *testing.T) {
 	if r := ix.Lookup("", "","/"); r.Found || r.Owned {
 		t.Fatalf("root must pass through; %+v", r)
 	}
+	// Ownership is FILE-LIKE misses only: an extension-less path under an
+	// owned dir is a PAGE route (the adapter's route-aware fallbacks and
+	// data-404 ops handle it) and must pass through — the
+	// /publications/<ns>/<slug> case, which shares its prefix with the
+	// prerendered /publications/<slug>.html catalog pages.
+	if r := ix.Lookup("", "", "/assets/some-page"); r.Found || r.Owned {
+		t.Fatalf("extension-less miss under owned dir must pass through; %+v", r)
+	}
+	if r := ix.Lookup("", "", "/assets/deep/nested-page"); r.Found || r.Owned {
+		t.Fatalf("deep extension-less miss must pass through; %+v", r)
+	}
 }
 
 // try_files: prerendered routes serve their own HTML for the

@@ -187,8 +187,17 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 
 	// No file resolved. Static owns the path only if it's under a directory
 	// that exists in an applicable layer (the root / a bare top-level name is
-	// never prefix-owned). Checked on the original rel, not a candidate.
-	if seg, _, nested := strings.Cut(rel, "/"); nested {
+	// never prefix-owned) AND the last segment is file-like (has an
+	// extension). An extension-less path is a PAGE route: the SvelteKit
+	// adapter's route-aware fallbacks (spa-fallback/spa-404, plus dedicated
+	// data-404 ops like www's pub404) partition exactly those, so they must
+	// keep flowing to the app even when they share a prefix with prerendered
+	// files — /publications/<ns>/<slug> lives under the same dir as the
+	// prerendered /publications/<slug>.html catalog pages. A missing ASSET
+	// (/app/immutable/chunks/gone.js) stays a hard 404: booting the SPA shell
+	// in place of a chunk would only cascade the failure. Checked on the
+	// original rel, not a candidate.
+	if seg, _, nested := strings.Cut(rel, "/"); nested && filepath.Ext(rel) != "" {
 		for _, l := range opLayers {
 			if _, ok := l.dirs[seg]; ok {
 				return Result{Owned: true}
