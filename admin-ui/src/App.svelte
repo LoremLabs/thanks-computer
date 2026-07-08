@@ -101,14 +101,15 @@
     // The Ops view must never render blank: with no stack/op/versions
     // selected the main panel falls back to an empty OpDetail, which
     // reads as "the service is broken". Whenever we're on Ops (not
-    // traces) with nothing in focus and at least one stack exists,
-    // pre-select the first stack so StackView renders and the tree
-    // highlights it. Setting selectedStack makes the guard's own
-    // condition false, so this can't loop.
+    // traces/secrets/inspect) with nothing in focus and at least one
+    // stack exists, pre-select the first stack so StackView renders
+    // and the tree highlights it. Setting selectedStack makes the
+    // guard's own condition false, so this can't loop.
     $effect(() => {
         if (
             !store.state.showTraces &&
             !store.state.showSecrets &&
+            !store.state.showInspect &&
             !store.state.showVersionsList &&
             !store.state.selectedStack &&
             !store.state.selectedId &&
