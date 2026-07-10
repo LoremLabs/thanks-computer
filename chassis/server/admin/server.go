@@ -130,18 +130,21 @@ func NewController(ctx context.Context, pu *processor.Unit) *Controller {
 	return &Controller{ctx: ctx, pu: pu, hub: room.NewHub(roomRingSize)}
 }
 
-// rb rebinds `?` placeholders for the runtime DB's dialect (identity on
-// SQLite). Admin direct-tx writers all run on c.pu.RuntimeDB (or a tx from
-// it), so they use its dialect. nil-safe: some tests construct a Unit
-// without a dialect set. Never use this for dbcache-snapshot reads — the
-// mirror is always SQLite regardless of the runtime dialect.
-func (c *Controller) rb(q string) string {
-	d := c.pu.RuntimeDialect
-	if d == nil {
-		d = registry.SQLite
+// dia returns the runtime DB's dialect, nil-safe (some tests construct a Unit
+// without one → SQLite). Use it for any direct dialect-method call
+// (BeginWrite, LockClause, IsUniqueViolationGeneric) so a nil dialect can't
+// panic. Never use it for dbcache-snapshot reads — the mirror is always SQLite.
+func (c *Controller) dia() registry.Dialect {
+	if c.pu.RuntimeDialect == nil {
+		return registry.SQLite
 	}
-	return d.Rebind(q)
+	return c.pu.RuntimeDialect
 }
+
+// rb rebinds `?` placeholders for the runtime DB's dialect (identity on
+// SQLite). Admin direct-tx writers all run on c.pu.RuntimeDB (or a tx from it),
+// so they use its dialect.
+func (c *Controller) rb(q string) string { return c.dia().Rebind(q) }
 
 // SetArtifactStore wires the artifact store the admin handlers use
 // to publish event payloads when fleet-sync producer is enabled. The

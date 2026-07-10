@@ -1341,7 +1341,7 @@ func (c *Controller) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 	user := authedUser(r)
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 
-	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	tx, err := c.dia().BeginWrite(r.Context(), c.pu.RuntimeDB)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
 		return
@@ -1353,20 +1353,47 @@ func (c *Controller) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Look up or auto-vivify the stack.
+	// Look up or auto-vivify the stack, LOCKING its row so concurrent drafts on
+	// the same stack serialize on the MAX(version_number)+1 below. LockClause()
+	// is " FOR UPDATE" on Postgres and "" on SQLite (whose whole-DB RESERVED
+	// write lock from BeginWrite already serializes). It has no placeholders, so
+	// appending it inside c.rb() is safe.
+	lockStackSQL := c.rb(`SELECT stack_id, active_version FROM stacks
+		 WHERE tenant_id = ? AND name = ?` + c.dia().LockClause())
 	var stackID string
 	var activeVersionID sql.NullInt64
-	row := tx.QueryRowContext(r.Context(),
-		c.rb(`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`),
-		ac.TenantID, name)
-	err = row.Scan(&stackID, &activeVersionID)
+	err = tx.QueryRowContext(r.Context(), lockStackSQL, ac.TenantID, name).Scan(&stackID, &activeVersionID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		// First draft for this (tenant, name): create the stack row. Wrap it in a
+		// SAVEPOINT so a concurrent first-draft race recovers cleanly — on Postgres
+		// the loser's INSERT raises a unique_violation that would otherwise poison
+		// the whole tx; we roll back to the savepoint and re-select (locking) the
+		// row the sibling just created. Inert on SQLite, where the RESERVED lock
+		// means this race can't occur.
 		stackID = "stk_" + hxid.NewTimeSort().String()
-		if _, err := tx.ExecContext(r.Context(),
+		if _, err := tx.ExecContext(r.Context(), "SAVEPOINT sp_vivify"); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "savepoint", map[string]any{"err": err.Error()})
+			return
+		}
+		_, ierr := tx.ExecContext(r.Context(),
 			c.rb(`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`),
-			stackID, ac.TenantID, name, now); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": err.Error()})
+			stackID, ac.TenantID, name, now)
+		switch {
+		case ierr == nil:
+			_, _ = tx.ExecContext(r.Context(), "RELEASE SAVEPOINT sp_vivify")
+		case c.dia().IsUniqueViolationGeneric(ierr):
+			// Sibling won the create race — adopt its row (locked).
+			if _, rberr := tx.ExecContext(r.Context(), "ROLLBACK TO SAVEPOINT sp_vivify"); rberr != nil {
+				writeJSONError(w, http.StatusInternalServerError, "savepoint_rollback", map[string]any{"err": rberr.Error()})
+				return
+			}
+			if err := tx.QueryRowContext(r.Context(), lockStackSQL, ac.TenantID, name).Scan(&stackID, &activeVersionID); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "lookup_stack", map[string]any{"err": err.Error()})
+				return
+			}
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": ierr.Error()})
 			return
 		}
 	case err != nil:
@@ -1762,7 +1789,19 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	tenantID, stackName string, versionNumber int64, now string, mintHosts bool,
 ) (sql.NullInt64, int64, error) {
 
-	stackID, currentActiveID, err := c.lookupStack(ctx, tx, tenantID, stackName)
+	// Lock the stacks row for the duration of the activation so concurrent
+	// activations of the SAME stack serialize — this closes the version
+	// status-flip / active-pointer race and makes the per-stack hostname mints
+	// below (EnsureZoneHostnameTx / EnsureSystemHostnameTx) see a stable view.
+	// LockClause() is " FOR UPDATE" on Postgres, "" on SQLite (whose whole-DB
+	// write lock already serializes). Inlined here rather than in lookupStack so
+	// the read-only lookupStack callers stay lock-free.
+	var stackID string
+	var currentActiveID sql.NullInt64
+	err := tx.QueryRowContext(ctx,
+		c.rb(`SELECT stack_id, active_version FROM stacks
+		 WHERE tenant_id = ? AND name = ?`+c.dia().LockClause()),
+		tenantID, stackName).Scan(&stackID, &currentActiveID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return currentActiveID, 0, &materialiseError{http.StatusNotFound, "stack_not_found", map[string]any{"name": stackName}}
 	}
@@ -2157,12 +2196,13 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		fleetChecksum = sum
 	}
 
-	// The runtime DB is opened with _txlock=immediate, so this BeginTx takes
-	// SQLite's RESERVED write lock up front; concurrent activations on the same
-	// chassis serialise (waiting on _busy_timeout) rather than racing into a
-	// half-applied state or failing a read→write upgrade with "database is
-	// locked". See openSQLiteOrDie in chassis/app.
-	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	// BeginWrite: on SQLite the runtime DB's _txlock=immediate takes the RESERVED
+	// write lock up front (concurrent activations on the same chassis serialise on
+	// _busy_timeout rather than racing into a half-applied state); on Postgres it
+	// is an explicit READ COMMITTED tx, and materialiseStackVersion locks the
+	// stacks row (FOR UPDATE) so same-stack activations serialize there. Both
+	// avoid the version status-flip / active-pointer race.
+	tx, err := c.dia().BeginWrite(r.Context(), c.pu.RuntimeDB)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
 		return

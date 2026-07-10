@@ -17,7 +17,8 @@ import "embed"
 //
 // schema/postgres/auth mirrors schema/sqlite/auth for when the auth DSN
 // is a postgres:// URL (the in-tree default stays SQLite — the runtime DB
-// is always SQLite). See chassis/auth/registry dialect seam.
+// is always SQLite in open-core; the cloud overlay owns the Postgres
+// runtime schema). See chassis/auth/registry dialect seam.
 //
 //go:embed schema/sqlite/auth schema/sqlite/runtime schema/postgres/auth
 var FS embed.FS

@@ -131,19 +131,29 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 		suffix = "." + suffix
 	}
 
-	// Idempotency: reuse the existing active managed row if present.
-	var existing string
-	err := tx.QueryRowContext(ctx,
-		d.Rebind(`SELECT hostname FROM tenant_hostnames
-		  WHERE tenant_id = ? AND stack = ? AND created_by = ?
-		    AND revoked_at IS NULL
-		  LIMIT 1`),
-		tenantID, stack, SystemStructuredHostCreatedBy).Scan(&existing)
-	switch {
-	case err == nil:
-		return existing, nil
-	case !errors.Is(err, sql.ErrNoRows):
+	// Idempotency: reuse the existing active managed row for this (tenant, stack)
+	// if present. Reused on the initial check AND after a mint conflict below.
+	lookupExisting := func() (string, bool, error) {
+		var h string
+		err := tx.QueryRowContext(ctx,
+			d.Rebind(`SELECT hostname FROM tenant_hostnames
+			  WHERE tenant_id = ? AND stack = ? AND created_by = ?
+			    AND revoked_at IS NULL
+			  LIMIT 1`),
+			tenantID, stack, SystemStructuredHostCreatedBy).Scan(&h)
+		switch {
+		case err == nil:
+			return h, true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			return "", false, nil
+		default:
+			return "", false, err
+		}
+	}
+	if h, found, err := lookupExisting(); err != nil {
 		return "", err
+	} else if found {
+		return h, nil
 	}
 
 	// Per-host DKIM keypair: each structured host signs `d=<host>` with its OWN
@@ -163,6 +173,13 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 			return "", errors.New("tenants: structured-host suffix yields an invalid hostname: " + suffix)
 		}
 		id := "thn_" + hxid.New().String()
+		// Wrap the INSERT in a SAVEPOINT so a unique-violation can be recovered
+		// without poisoning the enclosing activation tx. On Postgres a 23505
+		// aborts the whole tx until ROLLBACK TO SAVEPOINT; on SQLite the wrapper
+		// is inert (a constraint error is already localized). Portable syntax.
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT ehs"); err != nil {
+			return "", err
+		}
 		_, ierr := tx.ExecContext(ctx,
 			d.Rebind(`INSERT INTO tenant_hostnames
 			     (id, hostname, tenant_id, stack, created_at, created_by, verified_at,
@@ -171,12 +188,25 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 			id, canon, tenantID, stack, now, SystemStructuredHostCreatedBy, now,
 			DKIMSelector, priv, pub)
 		if ierr == nil {
+			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ehs")
 			return canon, nil
 		}
-		if d.IsUniqueViolationGeneric(ierr) {
-			continue // freak collision on the random part — regenerate
+		if _, rberr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT ehs"); rberr != nil {
+			return "", rberr
 		}
-		return "", ierr
+		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ehs")
+		if !d.IsUniqueViolationGeneric(ierr) {
+			return "", ierr
+		}
+		// A conflict here is normally a freak random-label collision. But a
+		// concurrent activation may have just minted THIS (tenant, stack) managed
+		// host — re-check and adopt it rather than spinning or masking the error.
+		if h, found, lerr := lookupExisting(); lerr != nil {
+			return "", lerr
+		} else if found {
+			return h, nil
+		}
+		// No managed row yet → genuine label collision → regenerate.
 	}
 	return "", errors.New("tenants: could not mint a unique structured hostname after retries")
 }

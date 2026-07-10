@@ -259,3 +259,32 @@ func TestAppendOutboxRejectsEmpty(t *testing.T) {
 		t.Errorf("empty payload_json should be rejected")
 	}
 }
+
+// TestPumpEnabledGatesOnAdminPersonality proves the C-4 single-producer gate:
+// only a chassis with the "admin" personality drains the outbox, so once the
+// runtime DB is shared Postgres, non-admin nodes don't double-publish it.
+func TestPumpEnabledGatesOnAdminPersonality(t *testing.T) {
+	sink := &stubSink{}
+	ctrl := func(pers, feedSink string) *Controller {
+		pu := &processor.Unit{
+			Conf:   config.Config{FeedSink: feedSink, Personalities: pers},
+			Logger: zap.NewNop(),
+		}
+		return NewController(context.Background(), pu, sink)
+	}
+	cases := []struct {
+		pers, feedSink string
+		want           bool
+	}{
+		{"web,admin,dns", "stub", true}, // admin present ⇒ drains
+		{"admin", "stub", true},         // admin only ⇒ drains
+		{"web,dns", "stub", false},      // no admin ⇒ never drains (shared-PG safety)
+		{"web,admin", "nop", false},     // nop feed-sink always disables
+		{"web,admin", "", false},        // empty feed-sink disables
+	}
+	for _, c := range cases {
+		if got := ctrl(c.pers, c.feedSink).enabled(); got != c.want {
+			t.Errorf("enabled(personalities=%q, feed-sink=%q) = %v, want %v", c.pers, c.feedSink, got, c.want)
+		}
+	}
+}

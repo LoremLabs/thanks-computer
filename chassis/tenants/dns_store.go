@@ -123,26 +123,60 @@ func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, orig
 	if !ok || !IsValidHostname(canon) {
 		return "", errors.New("tenants: zone hostname invalid: " + label + "." + origin)
 	}
-	var existing string
-	err := tx.QueryRowContext(ctx,
-		d.Rebind(`SELECT hostname FROM tenant_hostnames
-		  WHERE tenant_id = ? AND stack = ? AND created_by = ? AND revoked_at IS NULL
-		  LIMIT 1`), tenantID, stack, SystemZoneHostCreatedBy).Scan(&existing)
-	switch {
-	case err == nil:
-		return existing, nil
-	case !errors.Is(err, sql.ErrNoRows):
+	// Idempotency lookup for this (tenant, stack) managed zone-host; reused after
+	// a mint conflict below.
+	lookupExisting := func() (string, bool, error) {
+		var h string
+		err := tx.QueryRowContext(ctx,
+			d.Rebind(`SELECT hostname FROM tenant_hostnames
+			  WHERE tenant_id = ? AND stack = ? AND created_by = ? AND revoked_at IS NULL
+			  LIMIT 1`), tenantID, stack, SystemZoneHostCreatedBy).Scan(&h)
+		switch {
+		case err == nil:
+			return h, true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			return "", false, nil
+		default:
+			return "", false, err
+		}
+	}
+	if h, found, err := lookupExisting(); err != nil {
 		return "", err
+	} else if found {
+		return h, nil
 	}
 	id := "thn_" + hxid.New().String()
-	if _, ierr := tx.ExecContext(ctx,
+	// SAVEPOINT-wrap the INSERT so a unique-violation doesn't poison the enclosing
+	// activation tx on Postgres (inert on SQLite). The label is deterministic, so
+	// a conflict means the identical host already exists.
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT ezh"); err != nil {
+		return "", err
+	}
+	_, ierr := tx.ExecContext(ctx,
 		d.Rebind(`INSERT INTO tenant_hostnames
 		     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		id, canon, tenantID, stack, now, SystemZoneHostCreatedBy, now); ierr != nil {
-		return "", ierr
+		id, canon, tenantID, stack, now, SystemZoneHostCreatedBy, now)
+	if ierr == nil {
+		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ezh")
+		return canon, nil
 	}
-	return canon, nil
+	if _, rberr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT ezh"); rberr != nil {
+		return "", rberr
+	}
+	_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ezh")
+	if d.IsUniqueViolationGeneric(ierr) {
+		// A concurrent activation of THIS (tenant, stack) may have just minted the
+		// identical deterministic host — adopt it idempotently. If the hostname is
+		// instead owned by a different tenant/stack, the lookup finds nothing and
+		// we surface the conflict (the caller treats a mint failure as non-fatal).
+		if h, found, lerr := lookupExisting(); lerr != nil {
+			return "", lerr
+		} else if found {
+			return h, nil
+		}
+	}
+	return "", ierr
 }
 
 // DNSZone is a delegated zone. Timestamps are RFC3339 UTC text (empty

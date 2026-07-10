@@ -30,6 +30,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,7 +67,13 @@ func NewController(ctx context.Context, pu *processor.Unit, sink feed.Sink) *Con
 }
 
 func (c *Controller) enabled() bool {
-	return c.sink != nil && c.pu.Conf.FeedSink != "" && c.pu.Conf.FeedSink != "nop"
+	// Only the admin personality drains the outbox. The outbox is produced only
+	// by admin handlers, and gating to a single producer is what keeps the pump
+	// safe once the runtime DB is shared Postgres: without it every node with a
+	// non-nop feed-sink would drain (and double-publish) the same shared outbox.
+	// On per-node SQLite today this is harmless (the admin node still runs it).
+	return c.sink != nil && c.pu.Conf.FeedSink != "" && c.pu.Conf.FeedSink != "nop" &&
+		strings.Contains(c.pu.Conf.Personalities, "admin")
 }
 
 // rb rebinds `?` placeholders for the runtime DB's dialect (identity on

@@ -459,23 +459,41 @@ func (s *Store) RotateSecret(ctx context.Context,
 		return nil, fmt.Errorf("secrets: empty value")
 	}
 
-	// Load the full current row + the global max version BEFORE the write tx
-	// so the fleet artifact uploads pre-tx. The secret store is the only
-	// producer with a version counter; rotations are rare, serialized
-	// operator actions, so reading max(version_no) here (vs inside the tx) is
-	// safe. The parent REPLACE artifact needs every column, so we load full
-	// metadata rather than the old (secret_id, key_version) projection.
+	// Load the full current row (validates existence; the fleet REPLACE artifact
+	// needs every column).
 	meta0, err := s.lookupMetadataExact(ctx, tenantID, stack, name)
 	if err != nil {
 		return nil, err // ErrSecretNotFound bubbles
 	}
 	secretID := meta0.SecretID
 
-	// New version number = max(version_no) + 1 (over ALL versions, incl.
-	// revoked, so a number is never reused).
+	// Open the write tx and LOCK the parent secret row up front, so concurrent
+	// rotations serialize on the version_no allocation below. LockClause() is
+	// " FOR UPDATE" on Postgres and "" on SQLite (whose whole-DB RESERVED lock
+	// from BeginWrite already serializes). The version_no is then read UNDER the
+	// lock — so no two rotations can mint the same number — and the
+	// tenant_secret_versions_secret_ver_uidx unique index is the final backstop.
+	// Consequence: the fleet artifact upload (publishUpsert) now runs inside the
+	// locked window rather than strictly pre-tx. Rotations are rare, single-node
+	// operator actions, so holding the row lock across the upload is acceptable.
+	tx, err := s.dia().BeginWrite(ctx, s.DB)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var lockedID string
+	if err := tx.QueryRowContext(ctx,
+		s.rb(`SELECT secret_id FROM tenant_secrets WHERE secret_id = ?`+s.dia().LockClause()),
+		secretID).Scan(&lockedID); err != nil {
+		return nil, fmt.Errorf("secrets: lock secret: %w", err)
+	}
+
+	// New version number = max(version_no) + 1 (over ALL versions, incl. revoked,
+	// so a number is never reused), read under the parent-row lock.
 	var maxVer sql.NullInt64
-	if err := s.queryRow(ctx,
-		`SELECT MAX(version_no) FROM tenant_secret_versions WHERE secret_id = ?`,
+	if err := tx.QueryRowContext(ctx,
+		s.rb(`SELECT MAX(version_no) FROM tenant_secret_versions WHERE secret_id = ?`),
 		secretID).Scan(&maxVer); err != nil {
 		return nil, fmt.Errorf("secrets: max version: %w", err)
 	}
@@ -494,7 +512,8 @@ func (s *Store) RotateSecret(ctx context.Context,
 	}
 	versionID := "sec_v_" + hxid.NewTimeSort().String()
 
-	// Post-rotate parent row (full row for the consumer's INSERT OR REPLACE).
+	// Post-rotate parent row (full row for the consumer's INSERT OR REPLACE) +
+	// fleet artifact upload, now inside the locked window.
 	newMeta := *meta0
 	newMeta.VersionNo = versionNo
 	newMeta.KeyVersion = newKeyVer
@@ -505,12 +524,6 @@ func (s *Store) RotateSecret(ctx context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("secrets: fleet publish: %w", err)
 	}
-
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("secrets: begin tx: %w", err)
-	}
-	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, s.rb(`
 		INSERT INTO tenant_secret_versions

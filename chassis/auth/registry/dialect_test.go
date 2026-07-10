@@ -1,9 +1,39 @@
 package registry
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"testing"
+	// go-sqlite3 is registered by oidc_test.go in this same test binary.
 )
+
+func TestLockClause(t *testing.T) {
+	if got := SQLite.LockClause(); got != "" {
+		t.Errorf("SQLite.LockClause() = %q, want empty (no row lock on SQLite)", got)
+	}
+	if got := Postgres.LockClause(); got != " FOR UPDATE" {
+		t.Errorf("Postgres.LockClause() = %q, want %q", got, " FOR UPDATE")
+	}
+}
+
+func TestSQLiteBeginWrite(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	tx, err := SQLite.BeginWrite(context.Background(), db)
+	if err != nil {
+		t.Fatalf("BeginWrite: %v", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `CREATE TABLE t (x INTEGER)`); err != nil {
+		t.Fatalf("exec in write tx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
 
 func TestDialectForDSN(t *testing.T) {
 	cases := map[string]Dialect{

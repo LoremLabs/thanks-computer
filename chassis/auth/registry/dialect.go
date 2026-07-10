@@ -51,6 +51,23 @@ type Dialect interface {
 	// paths (invitation / bootstrap redemption) with an upfront write
 	// lock appropriate to the engine.
 	BeginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, error)
+
+	// BeginWrite opens the transaction used by the runtime control-plane
+	// write path. SQLite returns a plain tx (its connection-level
+	// _txlock=immediate already takes the whole-DB RESERVED write lock, so
+	// the whole path serializes). Postgres returns an explicit READ COMMITTED
+	// tx so that a LockClause() `FOR UPDATE` BLOCKS on contention rather than
+	// aborting — under an accidental SERIALIZABLE session a lock wait would
+	// surface as a 40001 serialization failure instead. Distinct from
+	// BeginImmediate (which is SERIALIZABLE on Postgres, for the auth registry).
+	BeginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error)
+
+	// LockClause returns the row-lock suffix appended to a SELECT to take a
+	// pessimistic lock on the matched rows. Postgres returns " FOR UPDATE";
+	// SQLite returns "" (empty — the whole-DB RESERVED lock from BeginWrite
+	// already serializes, so no per-row lock exists or is needed). Empty on
+	// SQLite means the query text is unchanged.
+	LockClause() string
 }
 
 // SQLite is the default dialect — identity placeholders, error-string
@@ -113,6 +130,17 @@ func (sqliteDialect) BeginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, e
 	}
 	return tx, nil
 }
+
+// BeginWrite: plain tx. The runtime DB is opened with _txlock=immediate, so
+// this already takes SQLite's whole-DB RESERVED write lock up front — the
+// historical behaviour every runtime write path relied on before this seam.
+func (sqliteDialect) BeginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	return db.BeginTx(ctx, nil)
+}
+
+// LockClause: empty — SQLite has no row lock (nor `FOR UPDATE`); the whole-DB
+// RESERVED lock serializes writers, so appending "" leaves the SQL unchanged.
+func (sqliteDialect) LockClause() string { return "" }
 
 // --- Postgres ---------------------------------------------------------
 
@@ -233,6 +261,21 @@ func pgIsUniqueViolation(err error) bool {
 func (postgresDialect) BeginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	return db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 }
+
+// BeginWrite: explicit READ COMMITTED. The runtime write path takes pessimistic
+// row locks (LockClause → `FOR UPDATE`) at its few contended sites; under READ
+// COMMITTED those lock waits BLOCK and resolve, and a unique-violation can be
+// recovered with ROLLBACK TO SAVEPOINT. Under SERIALIZABLE the same contention
+// would raise an unrecoverable 40001 the handlers can't safely retry (they do
+// irreversible side effects — fleet artifact uploads — before COMMIT). Being
+// explicit guards against an accidental SERIALIZABLE session default.
+func (postgresDialect) BeginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	return db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+}
+
+// LockClause: `FOR UPDATE` — a pessimistic row lock that blocks concurrent
+// writers under READ COMMITTED instead of aborting them.
+func (postgresDialect) LockClause() string { return " FOR UPDATE" }
 
 // itoa is a tiny strconv.Itoa to avoid the import churn for a 1-2 digit
 // placeholder index (queries never have hundreds of params).
