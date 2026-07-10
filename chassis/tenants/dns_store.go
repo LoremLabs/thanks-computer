@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
 
@@ -33,13 +34,13 @@ const SystemZoneHostCreatedBy = "system:dns-zone-host"
 // zone origin (lexically first when several exist), or ok=false. Read
 // inside the activation tx so the minted routing host is consistent
 // with the same transaction's view of the zone set.
-func ActivePatternZoneOriginTx(ctx context.Context, tx *sql.Tx, tenantID string) (string, bool, error) {
+func ActivePatternZoneOriginTx(ctx context.Context, tx *sql.Tx, tenantID string, d registry.Dialect) (string, bool, error) {
 	var origin string
 	err := tx.QueryRowContext(ctx,
-		`SELECT origin FROM dns_zones
+		orSQLite(d).Rebind(`SELECT origin FROM dns_zones
 		  WHERE tenant_id = ? AND mode = 'pattern'
 		    AND revoked_at IS NULL AND verified_at IS NOT NULL
-		  ORDER BY origin LIMIT 1`, tenantID).Scan(&origin)
+		  ORDER BY origin LIMIT 1`), tenantID).Scan(&origin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -55,19 +56,19 @@ func ActivePatternZoneOriginTx(ctx context.Context, tx *sql.Tx, tenantID string)
 // verified — no separate challenge needed. Package-level (takes *sql.DB) so
 // the mail op and the ingress resolver can both call it. Reads, never the
 // hot-path snapshot.
-func DomainCoveredByZone(ctx context.Context, db *sql.DB, slug, domain string) (bool, error) {
+func DomainCoveredByZone(ctx context.Context, db *sql.DB, slug, domain string, d registry.Dialect) (bool, error) {
 	canon, ok := CanonicalizeHost(domain)
 	if !ok || slug == "" {
 		return false, nil
 	}
 	var one int
 	err := db.QueryRowContext(ctx,
-		`SELECT 1 FROM dns_zones z
+		orSQLite(d).Rebind(`SELECT 1 FROM dns_zones z
 		   JOIN tenants t ON t.tenant_id = z.tenant_id
 		  WHERE t.slug = ? AND t.revoked_at IS NULL
 		    AND z.revoked_at IS NULL AND z.verified_at IS NOT NULL
 		    AND (z.origin = ? OR ? LIKE '%.' || z.origin)
-		  LIMIT 1`, slug, canon, canon).Scan(&one)
+		  LIMIT 1`), slug, canon, canon).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -82,18 +83,18 @@ func DomainCoveredByZone(ctx context.Context, db *sql.DB, slug, domain string) (
 // match (longest origin wins, so sub.example.com beats example.com). Used by
 // the ingress resolver as a fallback when no tenant_hostnames row exists:
 // "we serve DNS for it" ⟹ route mail to <slug>/_mail.
-func TenantForMailZone(ctx context.Context, db *sql.DB, domain string) (slug string, ok bool, err error) {
+func TenantForMailZone(ctx context.Context, db *sql.DB, domain string, d registry.Dialect) (slug string, ok bool, err error) {
 	canon, cok := CanonicalizeHost(domain)
 	if !cok {
 		return "", false, nil
 	}
 	err = db.QueryRowContext(ctx,
-		`SELECT t.slug FROM dns_zones z
+		orSQLite(d).Rebind(`SELECT t.slug FROM dns_zones z
 		   JOIN tenants t ON t.tenant_id = z.tenant_id
 		  WHERE z.revoked_at IS NULL AND t.revoked_at IS NULL
 		    AND z.verified_at IS NOT NULL
 		    AND (z.origin = ? OR ? LIKE '%.' || z.origin)
-		  ORDER BY length(z.origin) DESC LIMIT 1`, canon, canon).Scan(&slug)
+		  ORDER BY length(z.origin) DESC LIMIT 1`), canon, canon).Scan(&slug)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -109,10 +110,11 @@ func TenantForMailZone(ctx context.Context, db *sql.DB, domain string) (slug str
 // route match. Deterministic (no random suffix; the zone is
 // tenant-scoped) and pre-verified (we are authoritative for the zone).
 // Idempotent per (tenant, stack). Runs in the activation tx.
-func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, origin, now string) (string, error) {
+func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, origin, now string, d registry.Dialect) (string, error) {
 	if tenantID == "" || stack == "" || origin == "" {
 		return "", nil
 	}
+	d = orSQLite(d)
 	label := StackLabel(stack)
 	if label == "" {
 		return "", nil
@@ -123,9 +125,9 @@ func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, orig
 	}
 	var existing string
 	err := tx.QueryRowContext(ctx,
-		`SELECT hostname FROM tenant_hostnames
+		d.Rebind(`SELECT hostname FROM tenant_hostnames
 		  WHERE tenant_id = ? AND stack = ? AND created_by = ? AND revoked_at IS NULL
-		  LIMIT 1`, tenantID, stack, SystemZoneHostCreatedBy).Scan(&existing)
+		  LIMIT 1`), tenantID, stack, SystemZoneHostCreatedBy).Scan(&existing)
 	switch {
 	case err == nil:
 		return existing, nil
@@ -134,9 +136,9 @@ func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, orig
 	}
 	id := "thn_" + hxid.New().String()
 	if _, ierr := tx.ExecContext(ctx,
-		`INSERT INTO tenant_hostnames
+		d.Rebind(`INSERT INTO tenant_hostnames
 		     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`),
 		id, canon, tenantID, stack, now, SystemZoneHostCreatedBy, now); ierr != nil {
 		return "", ierr
 	}
@@ -215,13 +217,13 @@ type rowQueryer interface {
 // LoadDNSSettings reads the singleton dns_settings row. found=false when
 // no row exists yet (first run) — callers then fall back to the boot
 // `--dns-*` flag defaults.
-func LoadDNSSettings(ctx context.Context, q rowQueryer) (DNSSettings, bool, error) {
+func LoadDNSSettings(ctx context.Context, q rowQueryer, d registry.Dialect) (DNSSettings, bool, error) {
 	var s DNSSettings
 	var ns, edge string
 	err := q.QueryRowContext(ctx,
-		`SELECT nameservers, edge_ips, mx_host, mx_priority, synth_ttl,
+		orSQLite(d).Rebind(`SELECT nameservers, edge_ips, mx_host, mx_priority, synth_ttl,
 		        updated_at, COALESCE(updated_by, '')
-		   FROM dns_settings WHERE singleton = 1`).
+		   FROM dns_settings WHERE singleton = 1`)).
 		Scan(&ns, &edge, &s.MXHost, &s.MXPriority, &s.SynthTTL, &s.UpdatedAt, &s.UpdatedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DNSSettings{}, false, nil
@@ -235,7 +237,7 @@ func LoadDNSSettings(ctx context.Context, q rowQueryer) (DNSSettings, bool, erro
 }
 
 // PutDNSSettingsTx upserts the singleton dns_settings row.
-func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings) error {
+func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings, d registry.Dialect) error {
 	now := s.UpdatedAt
 	if now == "" {
 		now = time.Now().UTC().Format(time.RFC3339)
@@ -253,7 +255,7 @@ func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings) error {
 		pri = 10
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO dns_settings
+		orSQLite(d).Rebind(`INSERT INTO dns_settings
 		     (singleton, nameservers, edge_ips, mx_host, mx_priority, synth_ttl, updated_at, updated_by)
 		 VALUES (1, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(singleton) DO UPDATE SET
@@ -263,7 +265,7 @@ func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings) error {
 		     mx_priority = excluded.mx_priority,
 		     synth_ttl   = excluded.synth_ttl,
 		     updated_at  = excluded.updated_at,
-		     updated_by  = excluded.updated_by`,
+		     updated_by  = excluded.updated_by`),
 		joinCSV(s.Nameservers), joinCSV(s.EdgeIPs), strings.TrimSpace(s.MXHost),
 		pri, ttl, now, updatedByArg)
 	return err
@@ -371,16 +373,16 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 		verifiedAtArg = z.VerifiedAt
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO dns_zones
+		s.rb(`INSERT INTO dns_zones
 		     (id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		      minimum, default_ttl, mode, created_at, created_by, updated_at,
 		      dkim_selector, dkim_private_pem, dkim_public_b64, verified_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		z.ID, z.TenantID, canon, z.MName, z.RName, z.Refresh, z.Retry, z.Expire,
 		z.Minimum, z.DefaultTTL, z.Mode, now, createdByArg, now,
 		z.DKIMSelector, z.DKIMPrivatePEM, z.DKIMPublicB64, verifiedAtArg)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.dia().IsUniqueViolationGeneric(err) {
 			return ErrZoneExists
 		}
 		return err
@@ -399,7 +401,7 @@ func (s *Store) ListZones(ctx context.Context, tenantID string, includeRevoked b
 		q += ` AND revoked_at IS NULL`
 	}
 	q += ` ORDER BY origin`
-	rows, err := s.DB.QueryContext(ctx, q, tenantID)
+	rows, err := s.query(ctx, q, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -421,15 +423,15 @@ func (s *Store) ListZones(ctx context.Context, tenantID string, includeRevoked b
 // producer can read the fully-defaulted persisted row — SOA timers + timestamps
 // filled by CreateZoneTx/RevokeZoneTx — to fleet-publish it. Returns ErrNotFound
 // if absent.
-func GetZoneByIDTx(ctx context.Context, tx *sql.Tx, id string) (DNSZone, error) {
+func GetZoneByIDTx(ctx context.Context, tx *sql.Tx, id string, d registry.Dialect) (DNSZone, error) {
 	var z DNSZone
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
+		orSQLite(d).Rebind(`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		        minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
 		        updated_at, COALESCE(revoked_at, ''), COALESCE(verified_at, ''),
 		        dkim_selector, dkim_private_pem, dkim_public_b64
 		   FROM dns_zones
-		  WHERE id = ?`, id).Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
+		  WHERE id = ?`), id).Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
 		&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
 		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt, &z.VerifiedAt,
 		&z.DKIMSelector, &z.DKIMPrivatePEM, &z.DKIMPublicB64)
@@ -450,7 +452,7 @@ func (s *Store) LookupActiveZone(ctx context.Context, tenantID, origin string) (
 		return DNSZone{}, ErrNotFound
 	}
 	var z DNSZone
-	err := s.DB.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		        minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
 		        updated_at, COALESCE(revoked_at, '')
@@ -472,14 +474,14 @@ func (s *Store) LookupActiveZone(ctx context.Context, tenantID, origin string) (
 // SOA serial advances) on a tenant's active zone — flipping a PENDING zone live
 // once its NS delegation is confirmed. Idempotent (re-verify refreshes it).
 // ErrNotFound if no active zone for (tenantID, origin).
-func SetZoneVerifiedTx(ctx context.Context, tx *sql.Tx, tenantID, origin, now string) error {
+func SetZoneVerifiedTx(ctx context.Context, tx *sql.Tx, tenantID, origin, now string, d registry.Dialect) error {
 	canon, ok := CanonicalizeHost(origin)
 	if !ok {
 		return ErrNotFound
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE dns_zones SET verified_at = ?, updated_at = ?
-		  WHERE tenant_id = ? AND origin = ? AND revoked_at IS NULL`,
+		orSQLite(d).Rebind(`UPDATE dns_zones SET verified_at = ?, updated_at = ?
+		  WHERE tenant_id = ? AND origin = ? AND revoked_at IS NULL`),
 		now, now, tenantID, canon)
 	if err != nil {
 		return err
@@ -501,8 +503,8 @@ func (s *Store) RevokeZoneTx(ctx context.Context, tx *sql.Tx, tenantID, origin s
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE dns_zones SET revoked_at = ?
-		  WHERE tenant_id = ? AND origin = ? AND revoked_at IS NULL`,
+		s.rb(`UPDATE dns_zones SET revoked_at = ?
+		  WHERE tenant_id = ? AND origin = ? AND revoked_at IS NULL`),
 		now, tenantID, canon)
 	if err != nil {
 		return canon, err
@@ -538,9 +540,9 @@ func (s *Store) CreateRecordTx(ctx context.Context, tx *sql.Tx, r DNSRecord) err
 		createdByArg = r.CreatedBy
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO dns_records
+		s.rb(`INSERT INTO dns_records
 		     (id, zone_id, name, type, ttl, rdata, created_at, created_by, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		r.ID, r.ZoneID, name, strings.ToUpper(r.Type), r.TTL, r.Rdata,
 		now, createdByArg, now)
 	return err
@@ -548,7 +550,7 @@ func (s *Store) CreateRecordTx(ctx context.Context, tx *sql.Tx, r DNSRecord) err
 
 // ListRecords returns the active records for a zone.
 func (s *Store) ListRecords(ctx context.Context, zoneID string) ([]DNSRecord, error) {
-	rows, err := s.DB.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, zone_id, name, type, ttl, rdata, created_at,
 		        COALESCE(created_by, ''), updated_at, COALESCE(revoked_at, '')
 		   FROM dns_records
@@ -578,8 +580,8 @@ func (s *Store) RevokeRecordTx(ctx context.Context, tx *sql.Tx, zoneID, name, rt
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE dns_records SET revoked_at = ?
-		  WHERE zone_id = ? AND name = ? AND type = ? AND revoked_at IS NULL`,
+		s.rb(`UPDATE dns_records SET revoked_at = ?
+		  WHERE zone_id = ? AND name = ? AND type = ? AND revoked_at IS NULL`),
 		now, zoneID, name, strings.ToUpper(rtype))
 	if err != nil {
 		return err

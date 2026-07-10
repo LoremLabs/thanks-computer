@@ -221,7 +221,7 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 		// cron.settings.upserted — the tenant's cron timezone, so a resynced
 		// node localizes @cron.* consistently. Re-published verbatim (incl. its
 		// updated_at) so the row matches what the admin node holds.
-		if cs, ok, cerr := tenants.LoadCronSettings(ctx, c.pu.RuntimeDB, t.TenantID); cerr != nil {
+		if cs, ok, cerr := tenants.LoadCronSettings(ctx, c.pu.RuntimeDB, t.TenantID, c.pu.RuntimeDialect); cerr != nil {
 			return nil, counts, fmt.Errorf("tenant %s cron settings: %w", t.TenantID, cerr)
 		} else if ok {
 			cRef, cSum, cuerr := c.fleetUploadCronSettingsUpsert(ctx, t.TenantID, cs.Timezone, cs.UpdatedAt, cs.UpdatedBy)

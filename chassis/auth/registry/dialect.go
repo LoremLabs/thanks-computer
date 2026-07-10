@@ -34,8 +34,18 @@ type Dialect interface {
 
 	// IsUniqueViolation reports whether err is the actor_keys public-key
 	// uniqueness conflict (the only UNIQUE the registry distinguishes —
-	// it surfaces as ErrKeyAlreadyEnrolled).
+	// it surfaces as ErrKeyAlreadyEnrolled). Deliberately column-specific
+	// on SQLite so an unrelated UNIQUE can't masquerade as that error.
 	IsUniqueViolation(err error) bool
+
+	// IsUniqueViolationGeneric reports whether err is *any* unique-constraint
+	// violation, regardless of table/column. This is the general check the
+	// runtime stores need on Postgres — a duplicate hostname, secret, or DNS
+	// zone must map to its typed error on either engine. On Postgres the
+	// SQLSTATE (23505) already carries no column identity, so the narrow and
+	// generic checks coincide there; the distinction only matters for SQLite's
+	// string-based detection.
+	IsUniqueViolationGeneric(err error) bool
 
 	// BeginImmediate starts the transaction used by the atomic consume
 	// paths (invitation / bootstrap redemption) with an upfront write
@@ -81,6 +91,13 @@ func (sqliteDialect) IsUniqueViolation(err error) bool {
 		strings.Contains(msg, "actor_keys.public_key")
 }
 
+// IsUniqueViolationGeneric matches any SQLite unique-constraint failure,
+// whatever table/column — the canonical message prefix covers plain UNIQUE
+// columns and partial unique indexes alike.
+func (sqliteDialect) IsUniqueViolationGeneric(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
 func (sqliteDialect) BeginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -101,24 +118,78 @@ func (sqliteDialect) BeginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, e
 
 type postgresDialect struct{}
 
+// Rebind rewrites `?` placeholders to `$1, $2, …`, skipping `?` that appear in
+// contexts where they are not placeholders: single-quoted string literals (a
+// doubled single-quote escapes), double-quoted identifiers (a doubled
+// double-quote escapes), -- line comments, and block comments. Two-character JSON
+// operators `?|` and `?&` are also left intact.
+//
+// Known limitation: the *bare* single-char JSON operator `?` (jsonb key-exists)
+// is textually indistinguishable from a placeholder and WILL be rebound. Don't
+// use it in runtime queries — use the function form `jsonb_exists(col, 'key')`
+// (or parameterize) instead. Documented + covered in dialect_test.go.
 func (postgresDialect) Rebind(q string) string {
 	var b strings.Builder
 	b.Grow(len(q) + 8)
 	n := 0
-	inStr := false // inside a '...' string literal — don't rebind ? there
+	var inStr, inIdent, inLine, inBlock bool
 	for i := 0; i < len(q); i++ {
 		c := q[i]
 		switch {
-		case c == '\'':
-			// Handle the '' escape inside a string literal.
+		case inLine:
 			b.WriteByte(c)
-			if inStr && i+1 < len(q) && q[i+1] == '\'' {
-				b.WriteByte(q[i+1])
-				i++
-				continue
+			if c == '\n' {
+				inLine = false
 			}
-			inStr = !inStr
-		case c == '?' && !inStr:
+		case inBlock:
+			b.WriteByte(c)
+			if c == '*' && i+1 < len(q) && q[i+1] == '/' {
+				b.WriteByte('/')
+				i++
+				inBlock = false
+			}
+		case inStr:
+			b.WriteByte(c)
+			if c == '\'' {
+				if i+1 < len(q) && q[i+1] == '\'' { // '' escape
+					b.WriteByte('\'')
+					i++
+				} else {
+					inStr = false
+				}
+			}
+		case inIdent:
+			b.WriteByte(c)
+			if c == '"' {
+				if i+1 < len(q) && q[i+1] == '"' { // "" escape
+					b.WriteByte('"')
+					i++
+				} else {
+					inIdent = false
+				}
+			}
+		case c == '\'':
+			b.WriteByte(c)
+			inStr = true
+		case c == '"':
+			b.WriteByte(c)
+			inIdent = true
+		case c == '-' && i+1 < len(q) && q[i+1] == '-':
+			b.WriteByte('-')
+			b.WriteByte('-')
+			i++
+			inLine = true
+		case c == '/' && i+1 < len(q) && q[i+1] == '*':
+			b.WriteByte('/')
+			b.WriteByte('*')
+			i++
+			inBlock = true
+		case c == '?' && i+1 < len(q) && (q[i+1] == '|' || q[i+1] == '&'):
+			// Postgres JSON existence operators ?| and ?& — not placeholders.
+			b.WriteByte(c)
+			b.WriteByte(q[i+1])
+			i++
+		case c == '?':
 			n++
 			b.WriteByte('$')
 			b.WriteString(itoa(n))
@@ -134,6 +205,19 @@ func (postgresDialect) Rebind(q string) string {
 type sqlStater interface{ SQLState() string }
 
 func (postgresDialect) IsUniqueViolation(err error) bool {
+	return pgIsUniqueViolation(err)
+}
+
+// IsUniqueViolationGeneric is identical to IsUniqueViolation on Postgres:
+// SQLSTATE 23505 is already table-agnostic, so there is no narrower form to
+// distinguish (the narrowing only exists for SQLite's string-based detection).
+func (postgresDialect) IsUniqueViolationGeneric(err error) bool {
+	return pgIsUniqueViolation(err)
+}
+
+// pgIsUniqueViolation reports a Postgres unique_violation (SQLSTATE 23505),
+// duck-typing the driver error so core never imports pq/pgx.
+func pgIsUniqueViolation(err error) bool {
 	if err == nil {
 		return false
 	}

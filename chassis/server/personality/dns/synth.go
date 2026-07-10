@@ -134,7 +134,8 @@ func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
 	if db == nil {
 		return flagDefaults
 	}
-	s, found, err := tenants.LoadDNSSettings(context.Background(), db)
+	// nil dialect ⇒ SQLite: db is the dbcache snapshot mirror (always SQLite).
+	s, found, err := tenants.LoadDNSSettings(context.Background(), db, nil)
 	if err != nil || !found {
 		return flagDefaults
 	}

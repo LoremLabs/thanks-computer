@@ -38,7 +38,7 @@ func TestDomainCoveredByZone(t *testing.T) {
 		{"acme", "", false},                 // empty
 	}
 	for _, c := range cases {
-		got, err := DomainCoveredByZone(ctx, s.DB, c.slug, c.domain)
+		got, err := DomainCoveredByZone(ctx, s.DB, c.slug, c.domain, nil)
 		if err != nil || got != c.want {
 			t.Errorf("DomainCoveredByZone(%q,%q)=%v,%v want %v", c.slug, c.domain, got, err, c.want)
 		}
@@ -59,7 +59,7 @@ func TestTenantForMailZoneLongestMatch(t *testing.T) {
 		{"nope.org", "", false},             // no zone
 	}
 	for _, c := range cases {
-		slug, ok, err := TenantForMailZone(ctx, s.DB, c.domain)
+		slug, ok, err := TenantForMailZone(ctx, s.DB, c.domain, nil)
 		if err != nil || ok != c.wantOK || slug != c.wantSlug {
 			t.Errorf("TenantForMailZone(%q)=%q,%v,%v want %q,%v", c.domain, slug, ok, err, c.wantSlug, c.wantOK)
 		}
@@ -72,11 +72,11 @@ func TestTenantForMailZoneSkipsRevoked(t *testing.T) {
 	if _, err := s.DB.Exec(`UPDATE dns_zones SET revoked_at='t' WHERE origin='sub.example.com'`); err != nil {
 		t.Fatal(err)
 	}
-	slug, ok, err := TenantForMailZone(ctx, s.DB, "x.sub.example.com")
+	slug, ok, err := TenantForMailZone(ctx, s.DB, "x.sub.example.com", nil)
 	if err != nil || !ok || slug != "acme" {
 		t.Fatalf("after revoke want acme; got %q,%v,%v", slug, ok, err)
 	}
-	if cov, _ := DomainCoveredByZone(ctx, s.DB, "beta", "sub.example.com"); cov {
+	if cov, _ := DomainCoveredByZone(ctx, s.DB, "beta", "sub.example.com", nil); cov {
 		t.Fatal("revoked zone must not count as covered")
 	}
 }

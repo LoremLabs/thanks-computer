@@ -240,7 +240,7 @@ func Run(bi BuildInfo) int {
 				zap.String("source", mkSource),
 				zap.String("err", mkErr.Error()))
 		} else {
-			store := secrets.NewStore(runtimeDB, mk)
+			store := secrets.NewStoreWithDialect(runtimeDB, mk, registry.DialectForDSN(conf.DbRuntimeDsn))
 			// Slug→id lookup against the same runtime DB. Used by the
 			// processor splice (PR 3), which has the tenant SLUG pinned
 			// on context but needs the tenant_id (hxid) to query the

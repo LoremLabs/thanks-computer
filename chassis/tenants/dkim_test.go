@@ -14,7 +14,7 @@ func TestEnsureSystemHostnameStoresDKIM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := EnsureSystemHostnameTx(ctx, tx, "tnt_a", "web", ".stacks.example.com", "2026-01-01T00:00:00Z")
+	host, err := EnsureSystemHostnameTx(ctx, tx, "tnt_a", "web", ".stacks.example.com", "2026-01-01T00:00:00Z", nil)
 	if err != nil {
 		t.Fatalf("EnsureSystemHostnameTx: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestEnsureSystemHostnameStoresDKIM(t *testing.T) {
 
 	// Idempotent re-mint returns the same host (no second key).
 	tx2, _ := db.BeginTx(ctx, nil)
-	host2, err := EnsureSystemHostnameTx(ctx, tx2, "tnt_a", "web", ".stacks.example.com", "2026-01-02T00:00:00Z")
+	host2, err := EnsureSystemHostnameTx(ctx, tx2, "tnt_a", "web", ".stacks.example.com", "2026-01-02T00:00:00Z", nil)
 	_ = tx2.Commit()
 	if err != nil || host2 != host {
 		t.Fatalf("re-mint not idempotent: %q vs %q (%v)", host2, host, err)
@@ -56,19 +56,19 @@ func TestDKIMSignerForDomain(t *testing.T) {
 		MName: "ns1.txco.io", RName: "h.acme.com"})
 
 	t.Run("exact structured host → d=host, per-host key", func(t *testing.T) {
-		sdid, sel, priv, ok, err := DKIMSignerForDomain(ctx, db, "web-x.stacks.example.com")
+		sdid, sel, priv, ok, err := DKIMSignerForDomain(ctx, db, "web-x.stacks.example.com", nil)
 		if err != nil || !ok || sdid != "web-x.stacks.example.com" || sel != "txco" || priv != "PRIVHOST" {
 			t.Fatalf("got %q/%q/%q ok=%v err=%v", sdid, sel, priv, ok, err)
 		}
 	})
 	t.Run("delegated zone (subdomain) → d=zone", func(t *testing.T) {
-		sdid, _, priv, ok, err := DKIMSignerForDomain(ctx, db, "mail.acme.com")
+		sdid, _, priv, ok, err := DKIMSignerForDomain(ctx, db, "mail.acme.com", nil)
 		if err != nil || !ok || sdid != "acme.com" || priv == "" {
 			t.Fatalf("got %q priv?%v ok=%v err=%v", sdid, priv != "", ok, err)
 		}
 	})
 	t.Run("no signer", func(t *testing.T) {
-		if _, _, _, ok, err := DKIMSignerForDomain(ctx, db, "nope.org"); ok || err != nil {
+		if _, _, _, ok, err := DKIMSignerForDomain(ctx, db, "nope.org", nil); ok || err != nil {
 			t.Fatalf("want no signer; ok=%v err=%v", ok, err)
 		}
 	})

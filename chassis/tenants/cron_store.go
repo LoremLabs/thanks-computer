@@ -10,15 +10,17 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 )
 
 // LoadCronTimezone returns the tenant's configured cron timezone (an IANA
 // name like "Asia/Tokyo"). ok=false when no row exists or the timezone is
 // empty — callers then treat the tenant as UTC. Works on the live runtime
 // DB or the dbcache snapshot.
-func LoadCronTimezone(ctx context.Context, q rowQueryer, tenantID string) (tz string, ok bool, err error) {
+func LoadCronTimezone(ctx context.Context, q rowQueryer, tenantID string, d registry.Dialect) (tz string, ok bool, err error) {
 	err = q.QueryRowContext(ctx,
-		`SELECT timezone FROM cron_settings WHERE tenant_id = ?`, tenantID).Scan(&tz)
+		orSQLite(d).Rebind(`SELECT timezone FROM cron_settings WHERE tenant_id = ?`), tenantID).Scan(&tz)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -40,11 +42,11 @@ type CronSettingsRow struct {
 // when no row exists (the tenant never configured a timezone). Unlike
 // LoadCronTimezone, a present-but-empty timezone still returns ok=true — an
 // explicitly-cleared row is real state worth re-asserting on resync.
-func LoadCronSettings(ctx context.Context, q rowQueryer, tenantID string) (CronSettingsRow, bool, error) {
+func LoadCronSettings(ctx context.Context, q rowQueryer, tenantID string, d registry.Dialect) (CronSettingsRow, bool, error) {
 	var r CronSettingsRow
 	err := q.QueryRowContext(ctx,
-		`SELECT timezone, updated_at, COALESCE(updated_by, '')
-		   FROM cron_settings WHERE tenant_id = ?`, tenantID).
+		orSQLite(d).Rebind(`SELECT timezone, updated_at, COALESCE(updated_by, '')
+		   FROM cron_settings WHERE tenant_id = ?`), tenantID).
 		Scan(&r.Timezone, &r.UpdatedAt, &r.UpdatedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CronSettingsRow{}, false, nil
@@ -60,7 +62,7 @@ func LoadCronSettings(ctx context.Context, q rowQueryer, tenantID string) (CronS
 // the row matches the fleet-sync artifact uploaded before the tx, and validates
 // the zone name (the admin endpoint does, via time.LoadLocation) so a bad zone
 // fails the set rather than every tick.
-func PutCronTimezoneTx(ctx context.Context, tx *sql.Tx, tenantID, tz, updatedAt, updatedBy string) error {
+func PutCronTimezoneTx(ctx context.Context, tx *sql.Tx, tenantID, tz, updatedAt, updatedBy string, d registry.Dialect) error {
 	if tenantID == "" {
 		return errors.New("tenants: PutCronTimezoneTx requires tenant_id")
 	}
@@ -69,12 +71,12 @@ func PutCronTimezoneTx(ctx context.Context, tx *sql.Tx, tenantID, tz, updatedAt,
 		byArg = updatedBy
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO cron_settings (tenant_id, timezone, updated_at, updated_by)
+		orSQLite(d).Rebind(`INSERT INTO cron_settings (tenant_id, timezone, updated_at, updated_by)
 		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT(tenant_id) DO UPDATE SET
 		     timezone   = excluded.timezone,
 		     updated_at = excluded.updated_at,
-		     updated_by = excluded.updated_by`,
+		     updated_by = excluded.updated_by`),
 		tenantID, tz, updatedAt, byArg)
 	return err
 }

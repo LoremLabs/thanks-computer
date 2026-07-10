@@ -82,7 +82,7 @@ func (c *Controller) EnsureStructuredSuffixZone(ctx context.Context) error {
 		return err
 	}
 	if c.fleetEnabled() {
-		persisted, gerr := tenants.GetZoneByIDTx(ctx, tx, z.ID)
+		persisted, gerr := tenants.GetZoneByIDTx(ctx, tx, z.ID, c.pu.RuntimeDialect)
 		if gerr != nil {
 			return gerr
 		}
@@ -248,7 +248,7 @@ func (c *Controller) reconcileZoneHostnames(ctx context.Context, tx *sql.Tx, ten
 		return fmt.Errorf("load active stacks: %w", err)
 	}
 	for _, s := range stacks {
-		if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, s, origin, now); merr != nil {
+		if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, s, origin, now, c.pu.RuntimeDialect); merr != nil {
 			c.pu.Logger.Warn("zone-create reconcile: hostname mint skipped (zone create unaffected)",
 				zap.String("tenant", tenantID), zap.String("stack", s),
 				zap.String("origin", origin), zap.String("err", merr.Error()))

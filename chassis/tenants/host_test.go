@@ -10,10 +10,10 @@ import "testing"
 // inline.
 func TestCanonicalizeHost(t *testing.T) {
 	cases := []struct {
-		name   string
-		in     string
-		out    string
-		ok     bool
+		name string
+		in   string
+		out  string
+		ok   bool
 	}{
 		{"plain hostname", "example.com", "example.com", true},
 		{"uppercase", "Example.COM", "example.com", true},

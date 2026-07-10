@@ -172,7 +172,7 @@ func (c *Controller) handleCreateHostname(w http.ResponseWriter, r *http.Request
 	// routing-record reminder. Not flag-gated: it's a soundness fact, not a dev
 	// convenience.
 	if h.VerifiedAt == nil {
-		if covered, cerr := tenants.DomainCoveredByZone(r.Context(), c.pu.RuntimeDB, ac.TenantSlug, canon); cerr == nil && covered {
+		if covered, cerr := tenants.DomainCoveredByZone(r.Context(), c.pu.RuntimeDB, ac.TenantSlug, canon, c.pu.RuntimeDialect); cerr == nil && covered {
 			now := h.CreatedAt
 			h.VerifiedAt = &now
 		}
@@ -320,16 +320,16 @@ func (c *Controller) handleMintHostname(w http.ResponseWriter, r *http.Request) 
 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	var host string
-	origin, hasZone, zerr := tenants.ActivePatternZoneOriginTx(r.Context(), tx, ac.TenantID)
+	origin, hasZone, zerr := tenants.ActivePatternZoneOriginTx(r.Context(), tx, ac.TenantID, c.pu.RuntimeDialect)
 	if zerr != nil {
 		writeJSONError(w, http.StatusInternalServerError, "zone_lookup", map[string]any{"err": zerr.Error()})
 		return
 	}
 	switch {
 	case hasZone:
-		host, err = tenants.EnsureZoneHostnameTx(r.Context(), tx, ac.TenantID, stack, origin, now)
+		host, err = tenants.EnsureZoneHostnameTx(r.Context(), tx, ac.TenantID, stack, origin, now, c.pu.RuntimeDialect)
 	case c.pu.Conf.StructuredHostSuffix != "":
-		host, err = tenants.EnsureSystemHostnameTx(r.Context(), tx, ac.TenantID, stack, c.pu.Conf.StructuredHostSuffix, now)
+		host, err = tenants.EnsureSystemHostnameTx(r.Context(), tx, ac.TenantID, stack, c.pu.Conf.StructuredHostSuffix, now, c.pu.RuntimeDialect)
 	default:
 		writeJSONError(w, http.StatusBadRequest, "no_host_scheme",
 			map[string]any{"hint": "no delegated DNS zone and no --structured-host-suffix configured"})

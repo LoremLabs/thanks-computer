@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
 
@@ -121,10 +122,11 @@ func randLabel() string {
 // the configured apex, e.g. ".stacks.example.com" or ".localhost" — a
 // missing leading dot is tolerated. An empty suffix means the feature
 // is off → ("", nil), a no-op (the caller also guards this).
-func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, suffix, now string) (string, error) {
+func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, suffix, now string, d registry.Dialect) (string, error) {
 	if suffix == "" || tenantID == "" || stack == "" {
 		return "", nil
 	}
+	d = orSQLite(d)
 	if !strings.HasPrefix(suffix, ".") {
 		suffix = "." + suffix
 	}
@@ -132,10 +134,10 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 	// Idempotency: reuse the existing active managed row if present.
 	var existing string
 	err := tx.QueryRowContext(ctx,
-		`SELECT hostname FROM tenant_hostnames
+		d.Rebind(`SELECT hostname FROM tenant_hostnames
 		  WHERE tenant_id = ? AND stack = ? AND created_by = ?
 		    AND revoked_at IS NULL
-		  LIMIT 1`,
+		  LIMIT 1`),
 		tenantID, stack, SystemStructuredHostCreatedBy).Scan(&existing)
 	switch {
 	case err == nil:
@@ -162,16 +164,16 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 		}
 		id := "thn_" + hxid.New().String()
 		_, ierr := tx.ExecContext(ctx,
-			`INSERT INTO tenant_hostnames
+			d.Rebind(`INSERT INTO tenant_hostnames
 			     (id, hostname, tenant_id, stack, created_at, created_by, verified_at,
 			      dkim_selector, dkim_private_pem, dkim_public_b64)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 			id, canon, tenantID, stack, now, SystemStructuredHostCreatedBy, now,
 			DKIMSelector, priv, pub)
 		if ierr == nil {
 			return canon, nil
 		}
-		if isUniqueViolation(ierr) {
+		if d.IsUniqueViolationGeneric(ierr) {
 			continue // freak collision on the random part — regenerate
 		}
 		return "", ierr

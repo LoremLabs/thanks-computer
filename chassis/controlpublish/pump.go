@@ -35,6 +35,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/feed"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
@@ -66,6 +67,17 @@ func NewController(ctx context.Context, pu *processor.Unit, sink feed.Sink) *Con
 
 func (c *Controller) enabled() bool {
 	return c.sink != nil && c.pu.Conf.FeedSink != "" && c.pu.Conf.FeedSink != "nop"
+}
+
+// rb rebinds `?` placeholders for the runtime DB's dialect (identity on
+// SQLite). The pump's outbox statements run on c.pu.RuntimeDB, so they use
+// its dialect. nil-safe: tests may construct a Unit without a dialect set.
+func (c *Controller) rb(q string) string {
+	d := c.pu.RuntimeDialect
+	if d == nil {
+		d = registry.SQLite
+	}
+	return d.Rebind(q)
 }
 
 // Start launches the pump goroutine. No-op when disabled.
@@ -133,11 +145,11 @@ func (c *Controller) batchSize() int {
 // --feed-sink-backoff-max for that addition if needed).
 func (c *Controller) drainOnce(ctx context.Context) {
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
-		`SELECT id, event_id, payload_json
+		c.rb(`SELECT id, event_id, payload_json
 		   FROM control_events_outbox
 		  WHERE published_control_version IS NULL
 		  ORDER BY id
-		  LIMIT ?`, c.batchSize())
+		  LIMIT ?`), c.batchSize())
 	if err != nil {
 		c.pu.Logger.Error("control-event publisher: select pending",
 			zap.String("err", err.Error()))
@@ -199,9 +211,9 @@ func (c *Controller) publishOne(ctx context.Context, rowID int64, eventID string
 	}
 	now := time.Now().UTC().Format(tsLayout)
 	_, uerr := c.pu.RuntimeDB.ExecContext(ctx,
-		`UPDATE control_events_outbox
+		c.rb(`UPDATE control_events_outbox
 		    SET published_control_version = ?, published_at = ?
-		  WHERE id = ?`,
+		  WHERE id = ?`),
 		out.ControlVersion, now, rowID)
 	if uerr != nil {
 		// Published to the broker but failed to record it locally.
@@ -233,11 +245,11 @@ func (c *Controller) recordFailure(ctx context.Context, rowID int64, err error) 
 		short = short[:200]
 	}
 	_, uerr := c.pu.RuntimeDB.ExecContext(ctx,
-		`UPDATE control_events_outbox
+		c.rb(`UPDATE control_events_outbox
 		    SET attempt_count = attempt_count + 1,
 		        last_error = ?,
 		        last_attempt_at = ?
-		  WHERE id = ?`,
+		  WHERE id = ?`),
 		short, now, rowID)
 	if uerr != nil {
 		c.pu.Logger.Error("control-event publisher: failure-bookkeeping update failed",
@@ -267,6 +279,7 @@ func AppendOutbox(
 	version, baseVersion int64,
 	artifactRef, checksum string,
 	payloadJSON []byte,
+	d registry.Dialect,
 ) error {
 	if eventID == "" {
 		return fmt.Errorf("controlpublish: AppendOutbox requires non-empty event_id")
@@ -277,11 +290,14 @@ func AppendOutbox(
 	if len(payloadJSON) == 0 {
 		return fmt.Errorf("controlpublish: AppendOutbox requires non-empty payload_json")
 	}
+	if d == nil {
+		d = registry.SQLite
+	}
 	now := time.Now().UTC().Format(tsLayout)
-	_, err := tx.ExecContext(ctx, `INSERT INTO control_events_outbox
+	_, err := tx.ExecContext(ctx, d.Rebind(`INSERT INTO control_events_outbox
 		(event_id, event_type, tenant_id, stack_id, version, base_version,
 		 artifact_ref, checksum, payload_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		eventID, eventType,
 		nullableString(tenantID), nullableString(stackID),
 		nullableInt(version), nullableInt(baseVersion),

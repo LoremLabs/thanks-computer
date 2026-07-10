@@ -48,7 +48,7 @@ func (c *Controller) handleGetCronConfig(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
 		return
 	}
-	tz, configured, err := tenants.LoadCronTimezone(r.Context(), c.pu.RuntimeDB, ac.TenantID)
+	tz, configured, err := tenants.LoadCronTimezone(r.Context(), c.pu.RuntimeDB, ac.TenantID, c.pu.RuntimeDialect)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "load_cron_config", map[string]any{"err": err.Error()})
 		return
@@ -120,7 +120,7 @@ func (c *Controller) handlePutCronConfig(w http.ResponseWriter, r *http.Request)
 			_ = tx.Rollback()
 		}
 	}()
-	if err := tenants.PutCronTimezoneTx(r.Context(), tx, ac.TenantID, tz, updatedAt, updatedBy); err != nil {
+	if err := tenants.PutCronTimezoneTx(r.Context(), tx, ac.TenantID, tz, updatedAt, updatedBy, c.pu.RuntimeDialect); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "put_cron_config", map[string]any{"err": err.Error()})
 		return
 	}

@@ -254,7 +254,7 @@ func (c *Controller) fleetQueueEvent(
 	}
 	if err := controlpublish.AppendOutbox(ctx, tx,
 		eventID, eventType, tenantID, stackID, version, baseVersion,
-		artifactRef, checksum, payload); err != nil {
+		artifactRef, checksum, payload, c.pu.RuntimeDialect); err != nil {
 		return "", fmt.Errorf("append outbox: %w", err)
 	}
 	return eventID, nil

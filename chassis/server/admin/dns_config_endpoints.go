@@ -45,7 +45,7 @@ type putDNSConfigRequest struct {
 // use (settings row overlaid on flags) plus whether a row exists.
 func (c *Controller) effectiveDNSConfigDTO(ctx context.Context) dnsConfigDTO {
 	eff := dnsp.EffectiveSynthConfig(c.pu.Dbc.Snapshot(), dnsp.SynthConfigFrom(c.pu.Conf))
-	_, configured, _ := tenants.LoadDNSSettings(ctx, c.pu.RuntimeDB)
+	_, configured, _ := tenants.LoadDNSSettings(ctx, c.pu.RuntimeDB, c.pu.RuntimeDialect)
 	return dnsConfigDTO{
 		Nameservers: eff.Nameservers,
 		EdgeIPs:     eff.EdgeIPs,
@@ -93,15 +93,34 @@ func (c *Controller) handlePutDNSConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Start from the current effective config so a partial set preserves
-	// the other fields (and the first set seeds from the boot flags).
-	cur := dnsp.EffectiveSynthConfig(c.pu.Dbc.Snapshot(), dnsp.SynthConfigFrom(c.pu.Conf))
+	// Start from the current PERSISTED config so a partial set preserves the
+	// other fields (first set seeds from the boot flags). Read the settings row
+	// from the authoritative runtime DB, NOT the dbcache mirror: a partial PUT
+	// landing while the mirror is stale would otherwise clobber the unspecified
+	// fields with stale values. PutDNSSettingsTx always writes all columns
+	// (clamped), so a found row is complete and needs no flag overlay.
+	flags := dnsp.SynthConfigFrom(c.pu.Conf)
 	s := tenants.DNSSettings{
-		Nameservers: cur.Nameservers,
-		EdgeIPs:     cur.EdgeIPs,
-		MXHost:      cur.MXHost,
-		MXPriority:  int(cur.MXPriority),
-		SynthTTL:    int(cur.TTL),
+		Nameservers: flags.Nameservers,
+		EdgeIPs:     flags.EdgeIPs,
+		MXHost:      flags.MXHost,
+		MXPriority:  int(flags.MXPriority),
+		SynthTTL:    int(flags.TTL),
+	}
+	// Distinguish "no row yet" (seed from flags) from a read failure: a
+	// transient error must NOT fall through to boot defaults, or a partial
+	// PUT would clobber all unspecified persisted fields. Fail the request.
+	row, found, lerr := tenants.LoadDNSSettings(r.Context(), c.pu.RuntimeDB, c.pu.RuntimeDialect)
+	if lerr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "load_dns_config", map[string]any{"err": lerr.Error()})
+		return
+	}
+	if found {
+		s.Nameservers = row.Nameservers
+		s.EdgeIPs = row.EdgeIPs
+		s.MXHost = row.MXHost
+		s.MXPriority = row.MXPriority
+		s.SynthTTL = row.SynthTTL
 	}
 	if ac != nil {
 		s.UpdatedBy = ac.ActorID
@@ -133,7 +152,7 @@ func (c *Controller) handlePutDNSConfig(w http.ResponseWriter, r *http.Request) 
 			_ = tx.Rollback()
 		}
 	}()
-	if err := tenants.PutDNSSettingsTx(r.Context(), tx, s); err != nil {
+	if err := tenants.PutDNSSettingsTx(r.Context(), tx, s, c.pu.RuntimeDialect); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "put_dns_config", map[string]any{"err": err.Error()})
 		return
 	}

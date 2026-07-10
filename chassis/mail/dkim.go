@@ -22,7 +22,9 @@ import (
 // survives the relay's header re-folding; the relay only adds unsigned
 // headers (Received), leaving the signed set + body intact.
 func (m *Mailer) dkimSign(ctx context.Context, fromDomain string, msg []byte) []byte {
-	origin, selector, privPEM, ok, err := tenants.DKIMSignerForDomain(ctx, m.db, fromDomain)
+	// nil dialect ⇒ SQLite (m.db is SQLite today; Phase-1 revisit if the
+	// mailer's handle becomes a Postgres runtime pool).
+	origin, selector, privPEM, ok, err := tenants.DKIMSignerForDomain(ctx, m.db, fromDomain, nil)
 	if err != nil {
 		if m.log != nil {
 			m.log.Warn("sendmail: DKIM key lookup failed", zap.String("domain", fromDomain), zap.Error(err))

@@ -82,13 +82,13 @@ func newChassis(t *testing.T, label, dbPath, feedDir, artDir string) *chassisEnd
 		t.Fatalf("%s: schema: %v", label, err)
 	}
 	conf := config.Config{
-		DbRuntimeDsn:      "file:" + dbPath,
-		FeedSource:        "file",
-		FeedSink:          "file",
-		FeedSourceFileDir: feedDir,
-		FeedPollPeriod:    1,
-		FeedSinkBatchSize: 32,
-		ArtifactStore:     "file",
+		DbRuntimeDsn:         "file:" + dbPath,
+		FeedSource:           "file",
+		FeedSink:             "file",
+		FeedSourceFileDir:    feedDir,
+		FeedPollPeriod:       1,
+		FeedSinkBatchSize:    32,
+		ArtifactStore:        "file",
 		ArtifactStoreFileDir: artDir,
 	}
 	dbc, err := dbcache.New(conf, zap.NewNop(), context.Background(), db)
@@ -164,7 +164,7 @@ func TestProducerToConsumerEndToEnd(t *testing.T) {
 	}
 	if err := controlpublish.AppendOutbox(context.Background(), tx,
 		eventID, ev.Type, ev.TenantID, "", 0, 0,
-		ev.ArtifactRef, ev.Checksum, payload); err != nil {
+		ev.ArtifactRef, ev.Checksum, payload, nil); err != nil {
 		t.Fatalf("append outbox: %v", err)
 	}
 	if err := tx.Commit(); err != nil {

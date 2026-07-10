@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
 
@@ -32,10 +33,10 @@ type execer interface {
 // CreateTx inserts a tenants row inside the caller's tx. Same
 // validation and SQL as Create. Returns the same errors.
 func (s *Store) CreateTx(ctx context.Context, tx *sql.Tx, t Tenant) error {
-	return createTenant(ctx, tx, t)
+	return createTenant(ctx, tx, t, s.dia())
 }
 
-func createTenant(ctx context.Context, x execer, t Tenant) error {
+func createTenant(ctx context.Context, x execer, t Tenant, d registry.Dialect) error {
 	if t.TenantID == "" {
 		return errors.New("tenants: empty tenant_id")
 	}
@@ -57,8 +58,8 @@ func createTenant(ctx context.Context, x execer, t Tenant) error {
 		nameArg = t.Name
 	}
 	_, err := x.ExecContext(ctx,
-		`INSERT INTO tenants (tenant_id, slug, name, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		orSQLite(d).Rebind(`INSERT INTO tenants (tenant_id, slug, name, created_at)
+		 VALUES (?, ?, ?, ?)`),
 		t.TenantID, slug, nameArg, now.UTC().Format(time.RFC3339))
 	return err
 }
@@ -104,13 +105,13 @@ func (s *Store) CreateHostnameTx(ctx context.Context, tx *sql.Tx, h Hostname) er
 		verifiedAtArg = h.VerifiedAt.UTC().Format(time.RFC3339)
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO tenant_hostnames
+		s.rb(`INSERT INTO tenant_hostnames
 		     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`),
 		h.ID, canon, h.TenantID, h.Stack,
 		now.Format(time.RFC3339), createdByArg, verifiedAtArg)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.dia().IsUniqueViolationGeneric(err) {
 			return ErrHostnameInUse
 		}
 		return err
@@ -137,9 +138,9 @@ func (s *Store) AttachHostnameTx(ctx context.Context, tx *sql.Tx, hostname, stac
 		return errors.New("tenants: empty stack")
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE tenant_hostnames
+		s.rb(`UPDATE tenant_hostnames
 		    SET stack = ?
-		  WHERE hostname = ? AND revoked_at IS NULL`,
+		  WHERE hostname = ? AND revoked_at IS NULL`),
 		stack, canon)
 	if err != nil {
 		return err
@@ -167,9 +168,9 @@ func (s *Store) RevokeHostnameTx(ctx context.Context, tx *sql.Tx, hostname strin
 	}
 	now := time.Now().UTC()
 	_, execErr := tx.ExecContext(ctx,
-		`UPDATE tenant_hostnames
+		s.rb(`UPDATE tenant_hostnames
 		    SET revoked_at = ?
-		  WHERE hostname = ? AND revoked_at IS NULL`,
+		  WHERE hostname = ? AND revoked_at IS NULL`),
 		now.Format(time.RFC3339), canon)
 	if execErr != nil {
 		return canon, now, execErr
@@ -181,7 +182,7 @@ func (s *Store) RevokeHostnameTx(ctx context.Context, tx *sql.Tx, hostname strin
 // MarkHostnameVerified.
 func (s *Store) MarkHostnameVerifiedTx(ctx context.Context, tx *sql.Tx, hostnameID string, when time.Time) error {
 	_, err := tx.ExecContext(ctx,
-		`UPDATE tenant_hostnames SET verified_at = ? WHERE id = ?`,
+		s.rb(`UPDATE tenant_hostnames SET verified_at = ? WHERE id = ?`),
 		when.UTC().Format(time.RFC3339), hostnameID)
 	return err
 }

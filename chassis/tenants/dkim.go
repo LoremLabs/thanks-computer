@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 )
 
 // DKIMSelector is the fixed selector for chassis-issued DKIM keys. The key
@@ -45,16 +47,17 @@ func GenerateDKIM() (privPEM, pubB64 string, err error) {
 //     d=<zone origin>.
 //
 // Used by the sendmail op.
-func DKIMSignerForDomain(ctx context.Context, db *sql.DB, domain string) (sdid, selector, privPEM string, ok bool, err error) {
+func DKIMSignerForDomain(ctx context.Context, db *sql.DB, domain string, d registry.Dialect) (sdid, selector, privPEM string, ok bool, err error) {
 	canon, cok := CanonicalizeHost(domain)
 	if !cok {
 		return "", "", "", false, nil
 	}
+	d = orSQLite(d)
 	// 1. Per-host key on the exact structured host → sign as the host itself.
 	err = db.QueryRowContext(ctx,
-		`SELECT dkim_selector, dkim_private_pem FROM tenant_hostnames
+		d.Rebind(`SELECT dkim_selector, dkim_private_pem FROM tenant_hostnames
 		  WHERE hostname = ? AND revoked_at IS NULL AND dkim_private_pem != ''
-		  LIMIT 1`, canon).Scan(&selector, &privPEM)
+		  LIMIT 1`), canon).Scan(&selector, &privPEM)
 	switch {
 	case err == nil:
 		return canon, selector, privPEM, true, nil
@@ -63,10 +66,10 @@ func DKIMSignerForDomain(ctx context.Context, db *sql.DB, domain string) (sdid, 
 	}
 	// 2. Delegated-zone key (apex or subdomain; most-specific wins).
 	err = db.QueryRowContext(ctx,
-		`SELECT origin, dkim_selector, dkim_private_pem FROM dns_zones
+		d.Rebind(`SELECT origin, dkim_selector, dkim_private_pem FROM dns_zones
 		  WHERE revoked_at IS NULL AND verified_at IS NOT NULL AND dkim_private_pem != ''
 		    AND (origin = ? OR ? LIKE '%.' || origin)
-		  ORDER BY length(origin) DESC LIMIT 1`,
+		  ORDER BY length(origin) DESC LIMIT 1`),
 		canon, canon).Scan(&sdid, &selector, &privPEM)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", false, nil

@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	authregistry "github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
@@ -68,18 +69,28 @@ func normalizeSelectPath(p string) string {
 // sessions) and is nil on data-plane-only chassis where the admin
 // personality isn't active.
 type Unit struct {
-	Conf       config.Config
-	Logger     *zap.Logger
-	Kv         store.Store
-	RuntimeDB  *sql.DB
-	AuthDB     *sql.DB
-	Dbc        *dbcache.DbCache
-	Mc         *metrics.Metrics
-	mu         sync.Mutex
-	Bus        chan<- *event.Envelope
-	Reg        registry.Registry
-	Mux        *radix.Tree
-	HTTPClient *http.Client
+	Conf      config.Config
+	Logger    *zap.Logger
+	Kv        store.Store
+	RuntimeDB *sql.DB
+	// RuntimeDialect is the SQL dialect of RuntimeDB, derived once from the
+	// runtime DSN. Today always SQLite (the runtime DSN is file:); it exists
+	// so the runtime write path is dialect-portable ahead of the cloud
+	// service moving the runtime store to Postgres. Admin direct-tx writers
+	// and the control-publish pump read it via pu.RuntimeDialect; the stores
+	// carry their own copy via their constructors. Note: dbcache snapshot
+	// reads are always SQLite regardless of this value (the mirror is a
+	// :memory: SQLite dump), so mirror/snapshot readers pass registry.SQLite,
+	// not this field. See docs/todo-runtime-postgres.md.
+	RuntimeDialect authregistry.Dialect
+	AuthDB         *sql.DB
+	Dbc            *dbcache.DbCache
+	Mc             *metrics.Metrics
+	mu             sync.Mutex
+	Bus            chan<- *event.Envelope
+	Reg            registry.Registry
+	Mux            *radix.Tree
+	HTTPClient     *http.Client
 
 	// opsIdx caches the current snapshot's parsed, scope-sorted ops so
 	// the per-scope hot path skips SQL and txcl re-parsing. Lazily
@@ -380,6 +391,7 @@ func New(conf config.Config, logger *zap.Logger, reg registry.Registry, mc *metr
 		Logger:          logger,
 		Kv:              kv,
 		RuntimeDB:       runtimeDB,
+		RuntimeDialect:  authregistry.DialectForDSN(conf.DbRuntimeDsn),
 		AuthDB:          authDB,
 		Dbc:             dbc,
 		Mc:              mc,

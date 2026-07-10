@@ -44,11 +44,11 @@ CREATE TABLE control_events_outbox (
 // stubSink records what was Append'd and lets the test control
 // success/failure + assign control_version sequentially.
 type stubSink struct {
-	mu     sync.Mutex
-	count  uint64
-	fail   error // when non-nil, Append returns this error on the next call
-	failN  int   // when > 0, the next failN calls fail
-	got    []controlevent.Event
+	mu    sync.Mutex
+	count uint64
+	fail  error // when non-nil, Append returns this error on the next call
+	failN int   // when > 0, the next failN calls fail
+	got   []controlevent.Event
 }
 
 func (s *stubSink) Name() string { return "stub" }
@@ -219,7 +219,7 @@ func TestAppendOutboxHelper(t *testing.T) {
 		"evt-helper", controlevent.TypeStackActivated,
 		"t_a", "web", 7, 6,
 		"artifacts/t_a/web/7.json", "sha256:abc",
-		payload,
+		payload, nil,
 	); err != nil {
 		t.Fatalf("AppendOutbox: %v", err)
 	}
@@ -249,13 +249,13 @@ func TestAppendOutboxRejectsEmpty(t *testing.T) {
 	_, db, _ := newPumpHarness(t)
 	tx, _ := db.Begin()
 	defer tx.Rollback()
-	if err := AppendOutbox(context.Background(), tx, "", "type", "", "", 0, 0, "", "", []byte(`{}`)); err == nil {
+	if err := AppendOutbox(context.Background(), tx, "", "type", "", "", 0, 0, "", "", []byte(`{}`), nil); err == nil {
 		t.Errorf("empty event_id should be rejected")
 	}
-	if err := AppendOutbox(context.Background(), tx, "evt", "", "", "", 0, 0, "", "", []byte(`{}`)); err == nil {
+	if err := AppendOutbox(context.Background(), tx, "evt", "", "", "", 0, 0, "", "", []byte(`{}`), nil); err == nil {
 		t.Errorf("empty event_type should be rejected")
 	}
-	if err := AppendOutbox(context.Background(), tx, "evt", "type", "", "", 0, 0, "", "", nil); err == nil {
+	if err := AppendOutbox(context.Background(), tx, "evt", "type", "", "", 0, 0, "", "", nil, nil); err == nil {
 		t.Errorf("empty payload_json should be rejected")
 	}
 }

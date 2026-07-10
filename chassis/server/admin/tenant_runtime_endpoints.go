@@ -300,11 +300,23 @@ func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, rr ru
 		}
 	}()
 
+	// Portable upsert. This writer always supplies all 9 columns, so
+	// ON CONFLICT DO UPDATE is row-identical to the old INSERT OR REPLACE
+	// (no column-blanking to preserve) and works on SQLite + Postgres alike.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO tenant_runtime_state
+		c.rb(`INSERT INTO tenant_runtime_state
 		   (tenant_id, enabled, suspended, deny_status, deny_reason,
 		    rate_limit_rps, rate_burst, concurrency_limit, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(tenant_id) DO UPDATE SET
+		     enabled           = excluded.enabled,
+		     suspended         = excluded.suspended,
+		     deny_status       = excluded.deny_status,
+		     deny_reason       = excluded.deny_reason,
+		     rate_limit_rps    = excluded.rate_limit_rps,
+		     rate_burst        = excluded.rate_burst,
+		     concurrency_limit = excluded.concurrency_limit,
+		     updated_at        = excluded.updated_at`),
 		row["tenant_id"], row["enabled"], row["suspended"], row["deny_status"], row["deny_reason"],
 		row["rate_limit_rps"], row["rate_burst"], row["concurrency_limit"], row["updated_at"],
 	); err != nil {

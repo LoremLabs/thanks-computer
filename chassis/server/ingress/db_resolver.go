@@ -209,7 +209,9 @@ func (r *DBResolver) lookupMailDomain(db *sql.DB, canonical string) (RouteTarget
 		// serve authoritative DNS for this domain (apex or subdomain), that
 		// delegation is itself proof of control — route mail to the owning
 		// tenant's <tenant>/_mail, verified. Longest-zone-match inside.
-		if zslug, zok, zerr := tenants.TenantForMailZone(ctx, db, canonical); zerr == nil && zok {
+		// nil dialect ⇒ SQLite: db here is the dbcache snapshot, always a
+		// SQLite :memory: mirror even when the runtime store is Postgres.
+		if zslug, zok, zerr := tenants.TenantForMailZone(ctx, db, canonical, nil); zerr == nil && zok {
 			return RouteTarget{
 				Tenant:   zslug,
 				Stack:    "_mail",

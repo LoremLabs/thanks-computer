@@ -37,7 +37,8 @@ func (m *Mailer) fromDomainVerified(ctx context.Context, slug, domain string) (b
 		}
 	}
 	// We serve DNS for this domain (apex or subdomain) ⟹ verified.
-	return tenants.DomainCoveredByZone(ctx, m.db, slug, domain)
+	// nil dialect ⇒ SQLite (m.db is SQLite today; Phase-1 revisit).
+	return tenants.DomainCoveredByZone(ctx, m.db, slug, domain, nil)
 }
 
 // domainOf extracts the lowercased domain from a bare email address

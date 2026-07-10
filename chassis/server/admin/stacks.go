@@ -207,7 +207,7 @@ func (c *Controller) lookupStack(ctx context.Context, tx interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, tenantID, name string) (stackID string, activeVersionID sql.NullInt64, err error) {
 	row := tx.QueryRowContext(ctx,
-		`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`,
+		c.rb(`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`),
 		tenantID, name)
 	err = row.Scan(&stackID, &activeVersionID)
 	return
@@ -226,7 +226,7 @@ func (c *Controller) stackMintsHost(ctx context.Context, tx interface {
 }, tenantID, name string) bool {
 	var v sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT mint_hostname FROM stacks WHERE tenant_id = ? AND name = ?`,
+		c.rb(`SELECT mint_hostname FROM stacks WHERE tenant_id = ? AND name = ?`),
 		tenantID, name).Scan(&v); err != nil {
 		return true
 	}
@@ -238,7 +238,7 @@ func (c *Controller) lookupVersion(ctx context.Context, tx interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, stackID string, versionNumber int64) (versionID int64, status string, err error) {
 	row := tx.QueryRowContext(ctx,
-		`SELECT version_id, status FROM stack_versions WHERE stack_id = ? AND version_number = ?`,
+		c.rb(`SELECT version_id, status FROM stack_versions WHERE stack_id = ? AND version_number = ?`),
 		stackID, versionNumber)
 	err = row.Scan(&versionID, &status)
 	return
@@ -250,7 +250,7 @@ func (c *Controller) lookupVersion(ctx context.Context, tx interface {
 func (c *Controller) versionNumberFor(ctx context.Context, versionID int64) (int64, error) {
 	var n int64
 	err := c.pu.RuntimeDB.QueryRowContext(ctx,
-		`SELECT version_number FROM stack_versions WHERE version_id = ?`, versionID).Scan(&n)
+		c.rb(`SELECT version_number FROM stack_versions WHERE version_id = ?`), versionID).Scan(&n)
 	return n, err
 }
 
@@ -283,12 +283,12 @@ func sha256Hex(s string) string {
 // local file set, so without this every code re-apply would needlessly re-mint a
 // version. Returns "" (no error) when the stack has no active version.
 func (c *Controller) codeManifestHash(ctx context.Context, tenantID, name string) (string, error) {
-	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, c.rb(`
 		SELECT sf.path, sf.content, sf.content_hash
 		  FROM stack_files sf
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
-		   AND sf.path NOT LIKE 'VECTORS/%' AND sf.path NOT LIKE 'KV/%'`,
+		   AND sf.path NOT LIKE 'VECTORS/%' AND sf.path NOT LIKE 'KV/%'`),
 		tenantID, name)
 	if err != nil {
 		return "", err
@@ -460,7 +460,7 @@ func validateStackFilePath(p string) error {
 // the diff endpoint's manifest-hash short-circuit stays consistent.
 func (c *Controller) recomputeManifestHash(ctx context.Context, tx *sql.Tx, versionID int64) (string, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT path, content, content_hash FROM stack_files WHERE version_id = ? ORDER BY path`,
+		c.rb(`SELECT path, content, content_hash FROM stack_files WHERE version_id = ? ORDER BY path`),
 		versionID)
 	if err != nil {
 		return "", err
@@ -483,7 +483,7 @@ func (c *Controller) recomputeManifestHash(ctx context.Context, tx *sql.Tx, vers
 	}
 	mhash := computeManifestHash(files)
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE stack_versions SET manifest_hash = ? WHERE version_id = ?`,
+		c.rb(`UPDATE stack_versions SET manifest_hash = ? WHERE version_id = ?`),
 		mhash, versionID); err != nil {
 		return "", err
 	}
@@ -508,11 +508,11 @@ func (c *Controller) handleListStacks(w http.ResponseWriter, r *http.Request) {
 	// ordered. The admin UI takes the first N as its "recent" set and keeps
 	// the full list for search.
 	rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
-		`SELECT s.name, sv.version_number, sv.manifest_hash, sv.activated_at, s.created_at, s.mint_hostname
+		c.rb(`SELECT s.name, sv.version_number, sv.manifest_hash, sv.activated_at, s.created_at, s.mint_hostname
 		   FROM stacks s
 		   LEFT JOIN stack_versions sv ON sv.version_id = s.active_version
 		  WHERE s.tenant_id = ?
-		  ORDER BY sv.activated_at IS NULL, sv.activated_at DESC, s.name`, ac.TenantID)
+		  ORDER BY sv.activated_at IS NULL, sv.activated_at DESC, s.name`), ac.TenantID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "query_failed", map[string]any{"err": err.Error()})
 		return
@@ -557,10 +557,10 @@ func (c *Controller) handleGetStack(w http.ResponseWriter, r *http.Request) {
 	var mh sql.NullString
 	var mint int64
 	err := c.pu.RuntimeDB.QueryRowContext(r.Context(),
-		`SELECT sv.version_number, sv.manifest_hash, s.created_at, s.mint_hostname
+		c.rb(`SELECT sv.version_number, sv.manifest_hash, s.created_at, s.mint_hostname
 		   FROM stacks s
 		   LEFT JOIN stack_versions sv ON sv.version_id = s.active_version
-		  WHERE s.tenant_id = ? AND s.name = ?`, ac.TenantID, name).Scan(&av, &mh, &rec.CreatedAt, &mint)
+		  WHERE s.tenant_id = ? AND s.name = ?`), ac.TenantID, name).Scan(&av, &mh, &rec.CreatedAt, &mint)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSONError(w, http.StatusNotFound, "stack_not_found", map[string]any{"name": name})
 		return
@@ -675,12 +675,12 @@ func (c *Controller) handlePatchStackSettings(w http.ResponseWriter, r *http.Req
 	var stackID string
 	var activeVersionID sql.NullInt64
 	switch err = tx.QueryRowContext(r.Context(),
-		`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`,
+		c.rb(`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`),
 		ac.TenantID, name).Scan(&stackID, &activeVersionID); {
 	case errors.Is(err, sql.ErrNoRows):
 		stackID = "stk_" + hxid.NewTimeSort().String()
 		if _, err := tx.ExecContext(r.Context(),
-			`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`,
+			c.rb(`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`),
 			stackID, ac.TenantID, name, now); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": err.Error()})
 			return
@@ -695,7 +695,7 @@ func (c *Controller) handlePatchStackSettings(w http.ResponseWriter, r *http.Req
 		mint = 1
 	}
 	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND name = ?`,
+		c.rb(`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND name = ?`),
 		mint, ac.TenantID, name); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "update_settings", map[string]any{"err": err.Error()})
 		return
@@ -792,7 +792,7 @@ func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Req
 	// semantics (and sidesteps SQL LIKE-escaping of the user's substring).
 	type matchedStack struct{ id, name string }
 	rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
-		`SELECT stack_id, name FROM stacks WHERE tenant_id = ? ORDER BY name`, ac.TenantID)
+		c.rb(`SELECT stack_id, name FROM stacks WHERE tenant_id = ? ORDER BY name`), ac.TenantID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "list_stacks", map[string]any{"err": err.Error()})
 		return
@@ -882,7 +882,7 @@ func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Req
 
 	for _, ms := range matched {
 		if _, err := tx.ExecContext(r.Context(),
-			`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND name = ?`,
+			c.rb(`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND name = ?`),
 			mint, ac.TenantID, ms.name); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "update_settings", map[string]any{"err": err.Error(), "stack": ms.name})
 			return
@@ -940,10 +940,10 @@ func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Req
 // full row incl. DKIM for the fleet artifact) is fine.
 func (c *Controller) listManagedStackHosts(ctx context.Context, tenantID, stack string) ([]tenants.Hostname, error) {
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
-		`SELECT hostname FROM tenant_hostnames
+		c.rb(`SELECT hostname FROM tenant_hostnames
 		  WHERE tenant_id = ? AND stack = ? AND revoked_at IS NULL
 		    AND created_by IN (?, ?)
-		  ORDER BY hostname`,
+		  ORDER BY hostname`),
 		tenantID, stack, tenants.SystemStructuredHostCreatedBy, tenants.SystemZoneHostCreatedBy)
 	if err != nil {
 		return nil, err
@@ -1020,12 +1020,12 @@ func (c *Controller) handleListVersions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
-		`SELECT v.version_id, v.version_number, v.status, v.created_by, v.created_at,
+		c.rb(`SELECT v.version_id, v.version_number, v.status, v.created_by, v.created_at,
 		        v.activated_at, v.manifest_hash, p.version_number AS parent_n
 		   FROM stack_versions v
 		   LEFT JOIN stack_versions p ON p.version_id = v.parent_version_id
 		  WHERE v.stack_id = ?
-		  ORDER BY v.version_number DESC`, stackID)
+		  ORDER BY v.version_number DESC`), stackID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "query_failed", map[string]any{"err": err.Error()})
 		return
@@ -1091,11 +1091,11 @@ func (c *Controller) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 	var activatedAt sql.NullString
 	var parentN sql.NullInt64
 	err = c.pu.RuntimeDB.QueryRowContext(r.Context(),
-		`SELECT v.version_id, v.version_number, v.status, v.created_by, v.created_at,
+		c.rb(`SELECT v.version_id, v.version_number, v.status, v.created_by, v.created_at,
 		        v.activated_at, v.manifest_hash, p.version_number
 		   FROM stack_versions v
 		   LEFT JOIN stack_versions p ON p.version_id = v.parent_version_id
-		  WHERE v.stack_id = ? AND v.version_number = ?`, stackID, n).
+		  WHERE v.stack_id = ? AND v.version_number = ?`), stackID, n).
 		Scan(&vID, &v.VersionNumber, &v.Status, &v.CreatedBy, &v.CreatedAt,
 			&activatedAt, &v.ManifestHash, &parentN)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1177,7 +1177,7 @@ func (c *Controller) handleCatFile(w http.ResponseWriter, r *http.Request) {
 
 	var content, hash string
 	err = c.pu.RuntimeDB.QueryRowContext(r.Context(),
-		`SELECT content, content_hash FROM stack_files WHERE version_id = ? AND path = ?`,
+		c.rb(`SELECT content, content_hash FROM stack_files WHERE version_id = ? AND path = ?`),
 		activeVersionID.Int64, stored).Scan(&content, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		resp["found"] = false
@@ -1252,8 +1252,8 @@ func (m contentMode) wantsBytes(path string) bool {
 
 func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, mode contentMode) ([]stackFile, error) {
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
-		`SELECT path, content, content_hash FROM stack_files
-		  WHERE version_id = ? ORDER BY path`, versionID)
+		c.rb(`SELECT path, content, content_hash FROM stack_files
+		  WHERE version_id = ? ORDER BY path`), versionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1357,14 +1357,14 @@ func (c *Controller) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 	var stackID string
 	var activeVersionID sql.NullInt64
 	row := tx.QueryRowContext(r.Context(),
-		`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`,
+		c.rb(`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`),
 		ac.TenantID, name)
 	err = row.Scan(&stackID, &activeVersionID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		stackID = "stk_" + hxid.NewTimeSort().String()
 		if _, err := tx.ExecContext(r.Context(),
-			`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`,
+			c.rb(`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`),
 			stackID, ac.TenantID, name, now); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": err.Error()})
 			return
@@ -1387,7 +1387,7 @@ func (c *Controller) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 		var vID int64
 		if err := tx.QueryRowContext(r.Context(),
-			`SELECT version_id FROM stack_versions WHERE stack_id = ? AND version_number = ?`,
+			c.rb(`SELECT version_id FROM stack_versions WHERE stack_id = ? AND version_number = ?`),
 			stackID, n).Scan(&vID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeJSONError(w, http.StatusBadRequest, "from_version_not_found", map[string]any{"version_number": n})
@@ -1402,28 +1402,32 @@ func (c *Controller) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 	// Assign next version_number for this stack.
 	var nextN int64
 	if err := tx.QueryRowContext(r.Context(),
-		`SELECT COALESCE(MAX(version_number), 0) + 1 FROM stack_versions WHERE stack_id = ?`,
+		c.rb(`SELECT COALESCE(MAX(version_number), 0) + 1 FROM stack_versions WHERE stack_id = ?`),
 		stackID).Scan(&nextN); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "next_version_number", map[string]any{"err": err.Error()})
 		return
 	}
 
-	res, err := tx.ExecContext(r.Context(),
-		`INSERT INTO stack_versions
+	// Read the generated version_id (INTEGER PRIMARY KEY) back with RETURNING —
+	// one path for both engines. Avoids Result.LastInsertId() (unsupported by
+	// pgx) and its silently-ignored error. RETURNING is supported by the bundled
+	// SQLite (>= 3.35) and Postgres.
+	var draftVersionID int64
+	if err := tx.QueryRowContext(r.Context(),
+		c.rb(`INSERT INTO stack_versions
 		    (stack_id, version_number, parent_version_id, status, created_by, created_at, manifest_hash)
-		 VALUES (?, ?, ?, 'draft', ?, ?, '')`,
-		stackID, nextN, nullableInt(sourceVersionID), user, now)
-	if err != nil {
+		 VALUES (?, ?, ?, 'draft', ?, ?, '')
+		 RETURNING version_id`),
+		stackID, nextN, nullableInt(sourceVersionID), user, now).Scan(&draftVersionID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "create_version", map[string]any{"err": err.Error()})
 		return
 	}
-	draftVersionID, _ := res.LastInsertId()
 
 	// Clone files from source if any.
 	if sourceVersionID.Valid {
 		if _, err := tx.ExecContext(r.Context(),
-			`INSERT INTO stack_files (version_id, path, content, content_hash)
-			 SELECT ?, path, content, content_hash FROM stack_files WHERE version_id = ?`,
+			c.rb(`INSERT INTO stack_files (version_id, path, content, content_hash)
+			 SELECT ?, path, content, content_hash FROM stack_files WHERE version_id = ?`),
 			draftVersionID, sourceVersionID.Int64); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "clone_files", map[string]any{"err": err.Error()})
 			return
@@ -1590,7 +1594,7 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		delQuery = `DELETE FROM stack_files WHERE version_id = ?
 			   AND (path LIKE 'VECTORS/%' OR path LIKE 'KV/%')`
 	}
-	if _, err := tx.ExecContext(r.Context(), delQuery, versionID); err != nil {
+	if _, err := tx.ExecContext(r.Context(), c.rb(delQuery), versionID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "clear_files", map[string]any{"err": err.Error()})
 		return
 	}
@@ -1607,8 +1611,8 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			hash = sha256Hex(f.Content)
 		}
 		if _, err := tx.ExecContext(r.Context(),
-			`INSERT INTO stack_files (version_id, path, content, content_hash)
-			 VALUES (?, ?, ?, ?)`, versionID, f.Path, f.Content, hash); err != nil {
+			c.rb(`INSERT INTO stack_files (version_id, path, content, content_hash)
+			 VALUES (?, ?, ?, ?)`), versionID, f.Path, f.Content, hash); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "insert_file",
 				map[string]any{"path": f.Path, "err": err.Error()})
 			return
@@ -1617,7 +1621,7 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 
 	mhash := computeManifestHash(req.Files)
 	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE stack_versions SET manifest_hash = ? WHERE version_id = ?`,
+		c.rb(`UPDATE stack_versions SET manifest_hash = ? WHERE version_id = ?`),
 		mhash, versionID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "update_manifest_hash", map[string]any{"err": err.Error()})
 		return
@@ -1780,22 +1784,22 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// Flip status to 'superseded' if still draft; record activated_at on
 	// first activation.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE stack_versions
+		c.rb(`UPDATE stack_versions
 		    SET status = 'superseded',
 		        activated_at = COALESCE(activated_at, ?)
-		  WHERE version_id = ?`, now, targetVersionID); err != nil {
+		  WHERE version_id = ?`), now, targetVersionID); err != nil {
 		return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "update_version_status", map[string]any{"err": err.Error()}}
 	}
 
 	// Materialise into ops: clear this (tenant, stack) and re-insert from
 	// stack_files. The runtime keeps reading ops directly.
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM ops WHERE tenant_id = ? AND stack = ?`, tenantID, stackName); err != nil {
+		c.rb(`DELETE FROM ops WHERE tenant_id = ? AND stack = ?`), tenantID, stackName); err != nil {
 		return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "clear_ops", map[string]any{"err": err.Error()}}
 	}
 
 	frows, err := tx.QueryContext(ctx,
-		`SELECT path, content FROM stack_files WHERE version_id = ?`, targetVersionID)
+		c.rb(`SELECT path, content FROM stack_files WHERE version_id = ?`), targetVersionID)
 	if err != nil {
 		return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "load_files", map[string]any{"err": err.Error()}}
 	}
@@ -1945,8 +1949,8 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	for scope, sd := range scopes {
 		for nm, txc := range sd.rules {
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO ops (tenant_id, stack, scope, name, txcl, mock_req, mock_res)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				c.rb(`INSERT INTO ops (tenant_id, stack, scope, name, txcl, mock_req, mock_res)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`),
 				tenantID, stackName, scope, nm, txc, sd.mockReq, sd.mockRes); err != nil {
 				return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "insert_ops", map[string]any{"scope": scope, "name": nm, "err": err.Error()}}
 			}
@@ -1955,7 +1959,7 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 
 	// Flip the pointer.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE stacks SET active_version = ? WHERE stack_id = ?`,
+		c.rb(`UPDATE stacks SET active_version = ? WHERE stack_id = ?`),
 		targetVersionID, stackID); err != nil {
 		return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "update_active_version", map[string]any{"err": err.Error()}}
 	}
@@ -1974,7 +1978,7 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// (then fleet-publishes the row); the data-plane applier passes false
 	// so it never mints a divergent random host (see the func doc).
 	if mintHosts && isMintableStack(stackName) && c.stackMintsHost(ctx, tx, tenantID, stackName) {
-		origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID)
+		origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID, c.pu.RuntimeDialect)
 		if zerr != nil {
 			// A zone-lookup failure must never skip the structured-host
 			// fallback (or fail activation): log and treat it as "no
@@ -1986,13 +1990,13 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 		switch {
 		case ok:
-			if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, stackName, origin, now); merr != nil {
+			if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, stackName, origin, now, c.pu.RuntimeDialect); merr != nil {
 				c.pu.Logger.Warn("zone hostname mint skipped (activation unaffected)",
 					zap.String("tenant", tenantID), zap.String("stack", stackName),
 					zap.String("origin", origin), zap.String("err", merr.Error()))
 			}
 		case c.pu.Conf.StructuredHostSuffix != "":
-			if _, merr := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, c.pu.Conf.StructuredHostSuffix, now); merr != nil {
+			if _, merr := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, c.pu.Conf.StructuredHostSuffix, now, c.pu.RuntimeDialect); merr != nil {
 				c.pu.Logger.Warn("structured hostname mint skipped (activation unaffected)",
 					zap.String("tenant", tenantID), zap.String("stack", stackName),
 					zap.String("err", merr.Error()))
@@ -2192,7 +2196,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		// materialiseStackVersion since that path upserts it.
 		var stackID string
 		if err := tx.QueryRowContext(r.Context(),
-			`SELECT stack_id FROM stacks WHERE tenant_id = ? AND name = ?`,
+			c.rb(`SELECT stack_id FROM stacks WHERE tenant_id = ? AND name = ?`),
 			ac.TenantID, name).Scan(&stackID); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "fleet_stack_lookup",
 				map[string]any{"err": err.Error()})
@@ -2285,9 +2289,9 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 	if c.pu.Conf.StructuredHostSuffix != "" {
 		var sh string
 		if err := c.pu.RuntimeDB.QueryRowContext(r.Context(),
-			`SELECT hostname FROM tenant_hostnames
+			c.rb(`SELECT hostname FROM tenant_hostnames
 			   WHERE tenant_id=? AND stack=? AND created_by=? AND revoked_at IS NULL
-			   LIMIT 1`,
+			   LIMIT 1`),
 			ac.TenantID, name, tenants.SystemStructuredHostCreatedBy).Scan(&sh); err == nil && sh != "" {
 			resp.StructuredURL = structuredURL(r, sh, c.pu.Conf.WebAddr)
 		}
@@ -2444,8 +2448,8 @@ func (c *Controller) handleDiffVersions(w http.ResponseWriter, r *http.Request) 
 	loadMeta := func(versionNumber int64) (versionMeta, error) {
 		var m versionMeta
 		err := c.pu.RuntimeDB.QueryRowContext(r.Context(),
-			`SELECT version_id, manifest_hash FROM stack_versions
-			  WHERE stack_id = ? AND version_number = ?`,
+			c.rb(`SELECT version_id, manifest_hash FROM stack_versions
+			  WHERE stack_id = ? AND version_number = ?`),
 			stackID, versionNumber).Scan(&m.id, &m.manifestHash)
 		return m, err
 	}
@@ -2481,7 +2485,7 @@ func (c *Controller) handleDiffVersions(w http.ResponseWriter, r *http.Request) 
 
 	loadHashes := func(versionID int64) (map[string]string, error) {
 		rows, err := c.pu.RuntimeDB.QueryContext(r.Context(),
-			`SELECT path, content, content_hash FROM stack_files WHERE version_id = ?`, versionID)
+			c.rb(`SELECT path, content, content_hash FROM stack_files WHERE version_id = ?`), versionID)
 		if err != nil {
 			return nil, err
 		}
@@ -2631,7 +2635,7 @@ func (c *Controller) handlePatchDraftFile(w http.ResponseWriter, r *http.Request
 		curHash    string
 	)
 	row := tx.QueryRowContext(r.Context(),
-		`SELECT content, content_hash FROM stack_files WHERE version_id = ? AND path = ?`,
+		c.rb(`SELECT content, content_hash FROM stack_files WHERE version_id = ? AND path = ?`),
 		versionID, req.Path)
 	switch err := row.Scan(&curContent, &curHash); {
 	case errors.Is(err, sql.ErrNoRows):
@@ -2645,7 +2649,7 @@ func (c *Controller) handlePatchDraftFile(w http.ResponseWriter, r *http.Request
 		}
 		newHash := sha256Hex(req.Content)
 		if _, err := tx.ExecContext(r.Context(),
-			`INSERT INTO stack_files (version_id, path, content, content_hash) VALUES (?, ?, ?, ?)`,
+			c.rb(`INSERT INTO stack_files (version_id, path, content, content_hash) VALUES (?, ?, ?, ?)`),
 			versionID, req.Path, req.Content, newHash); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "insert_file", map[string]any{"err": err.Error()})
 			return
@@ -2672,7 +2676,7 @@ func (c *Controller) handlePatchDraftFile(w http.ResponseWriter, r *http.Request
 		}
 		newHash := sha256Hex(req.Content)
 		if _, err := tx.ExecContext(r.Context(),
-			`UPDATE stack_files SET content = ?, content_hash = ? WHERE version_id = ? AND path = ?`,
+			c.rb(`UPDATE stack_files SET content = ?, content_hash = ? WHERE version_id = ? AND path = ?`),
 			req.Content, newHash, versionID, req.Path); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "update_file", map[string]any{"err": err.Error()})
 			return
@@ -2741,7 +2745,7 @@ func (c *Controller) handleDeleteDraftFile(w http.ResponseWriter, r *http.Reques
 		curHash    string
 	)
 	row := tx.QueryRowContext(r.Context(),
-		`SELECT content, content_hash FROM stack_files WHERE version_id = ? AND path = ?`,
+		c.rb(`SELECT content, content_hash FROM stack_files WHERE version_id = ? AND path = ?`),
 		versionID, req.Path)
 	switch err := row.Scan(&curContent, &curHash); {
 	case errors.Is(err, sql.ErrNoRows):
@@ -2761,7 +2765,7 @@ func (c *Controller) handleDeleteDraftFile(w http.ResponseWriter, r *http.Reques
 	}
 
 	if _, err := tx.ExecContext(r.Context(),
-		`DELETE FROM stack_files WHERE version_id = ? AND path = ?`,
+		c.rb(`DELETE FROM stack_files WHERE version_id = ? AND path = ?`),
 		versionID, req.Path); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "delete_file", map[string]any{"err": err.Error()})
 		return

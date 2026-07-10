@@ -49,10 +49,10 @@ func TestZoneVerificationGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cov, err := DomainCoveredByZone(ctx, s.DB, "acme", "pending.example"); err != nil || cov {
+	if cov, err := DomainCoveredByZone(ctx, s.DB, "acme", "pending.example", nil); err != nil || cov {
 		t.Fatalf("pending zone must NOT be a covered sender: cov=%v err=%v", cov, err)
 	}
-	if slug, ok, err := TenantForMailZone(ctx, s.DB, "pending.example"); err != nil || ok {
+	if slug, ok, err := TenantForMailZone(ctx, s.DB, "pending.example", nil); err != nil || ok {
 		t.Fatalf("pending zone must NOT route mail: slug=%q ok=%v err=%v", slug, ok, err)
 	}
 
@@ -61,17 +61,17 @@ func TestZoneVerificationGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SetZoneVerifiedTx(ctx, vtx, "t_a", "pending.example", "2026-06-20T00:00:00Z"); err != nil {
+	if err := SetZoneVerifiedTx(ctx, vtx, "t_a", "pending.example", "2026-06-20T00:00:00Z", nil); err != nil {
 		t.Fatalf("SetZoneVerifiedTx: %v", err)
 	}
 	if err := vtx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 
-	if cov, err := DomainCoveredByZone(ctx, s.DB, "acme", "pending.example"); err != nil || !cov {
+	if cov, err := DomainCoveredByZone(ctx, s.DB, "acme", "pending.example", nil); err != nil || !cov {
 		t.Fatalf("verified zone must be a covered sender: cov=%v err=%v", cov, err)
 	}
-	if _, ok, err := TenantForMailZone(ctx, s.DB, "pending.example"); err != nil || !ok {
+	if _, ok, err := TenantForMailZone(ctx, s.DB, "pending.example", nil); err != nil || !ok {
 		t.Fatalf("verified zone must route mail: ok=%v err=%v", ok, err)
 	}
 }

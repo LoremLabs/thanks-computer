@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
 
@@ -54,13 +54,14 @@ type SecretMetadata struct {
 }
 
 // Store is the thin façade over tenant_secrets + tenant_secret_versions.
-// Plain *sql.DB (no dialect seam) matches chassis/tenants/store.go:
-// runtime tables stay SQLite-only per-machine. If/when the runtime
-// store moves to Postgres for HA, this and tenants.Store adopt the
-// dialect together (so the schema-level decision is uniform).
+// dialect makes the writers portable to Postgres (nil ⇒ SQLite; s.DB is
+// always the authoritative runtime store, never the SQLite dbcache mirror).
+// tenants.Store adopts the dialect the same way — the runtime schema-level
+// decision is uniform. See docs/todo-runtime-postgres.md.
 type Store struct {
-	DB *sql.DB
-	MK MasterKeyProvider
+	DB      *sql.DB
+	MK      MasterKeyProvider
+	dialect registry.Dialect
 
 	// syncer, when non-nil, fleet-publishes every write so other nodes'
 	// local copies converge. Installed via SetSyncer during admin wiring;
@@ -72,11 +73,40 @@ type Store struct {
 }
 
 // NewStore builds a Store against the given runtime *sql.DB and
-// MasterKeyProvider. The MK is required — a nil MK means "feature
-// off"; callers wiring boot logic (PR 2 step in chassis/app/app.go)
-// should construct the Store only when SecretMasterKeyPath is set.
+// MasterKeyProvider, defaulting to the SQLite dialect (open-core / single
+// node). The MK is required — a nil MK means "feature off"; callers wiring
+// boot logic (chassis/app/app.go) should construct the Store only when
+// SecretMasterKeyPath is set.
 func NewStore(db *sql.DB, mk MasterKeyProvider) *Store {
-	return &Store{DB: db, MK: mk, now: func() time.Time { return time.Now().UTC() }}
+	return NewStoreWithDialect(db, mk, nil)
+}
+
+// NewStoreWithDialect builds a Store with an explicit SQL dialect. A nil
+// dialect defaults to SQLite, so existing callers stay byte-identical.
+func NewStoreWithDialect(db *sql.DB, mk MasterKeyProvider, d registry.Dialect) *Store {
+	if d == nil {
+		d = registry.SQLite
+	}
+	return &Store{DB: db, MK: mk, dialect: d, now: func() time.Time { return time.Now().UTC() }}
+}
+
+func (s *Store) dia() registry.Dialect {
+	if s.dialect == nil {
+		return registry.SQLite
+	}
+	return s.dialect
+}
+
+// rb rebinds `?` placeholders for the store's dialect (identity on SQLite).
+// Tx-scoped writes rebind inline via s.rb; DB-direct reads go through
+// query/queryRow below.
+func (s *Store) rb(q string) string { return s.dia().Rebind(q) }
+
+func (s *Store) query(ctx context.Context, q string, a ...any) (*sql.Rows, error) {
+	return s.DB.QueryContext(ctx, s.rb(q), a...)
+}
+func (s *Store) queryRow(ctx context.Context, q string, a ...any) *sql.Row {
+	return s.DB.QueryRowContext(ctx, s.rb(q), a...)
 }
 
 // CreateSecret stores a new value supplied by the caller (operator).
@@ -152,23 +182,23 @@ func (s *Store) CreateSecret(ctx context.Context,
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, s.rb(`
 		INSERT INTO tenant_secrets
 			(secret_id, tenant_id, stack, name, description, created_at, created_by, key_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
 		secretID, tenantID, nilIfEmptyStack(stack), name, description,
 		createdAt.Format(time.RFC3339), createdBy, keyVer)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.dia().IsUniqueViolationGeneric(err) {
 			return nil, ErrSecretExists
 		}
 		return nil, fmt.Errorf("secrets: insert tenant_secrets: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, s.rb(`
 		INSERT INTO tenant_secret_versions
 			(version_id, secret_id, version_no, nonce, ciphertext, wrapped_dek, dek_nonce, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
 		versionID, secretID, versionNo, es.Nonce, es.Ciphertext, es.WrappedDEK, es.DEKNonce,
 		createdAt.Format(time.RFC3339))
 	if err != nil {
@@ -228,7 +258,7 @@ func (s *Store) LookupSecretMetadata(ctx context.Context,
 // both tenant-wide and stack-scoped. Ordered by name then stack
 // (NULL stack first via COALESCE).
 func (s *Store) ListSecrets(ctx context.Context, tenantID string) ([]*SecretMetadata, error) {
-	rows, err := s.DB.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT s.secret_id, s.tenant_id, s.stack, s.name, COALESCE(s.description,''),
 		       s.created_at, COALESCE(s.created_by,''), s.last_rotated_at, s.revoked_at, s.key_version,
 		       COALESCE((SELECT MAX(version_no) FROM tenant_secret_versions v
@@ -265,7 +295,7 @@ func (s *Store) ListForResync(ctx context.Context, tenantID string) ([]ResyncRow
 	for _, m := range metas {
 		var versionID, createdAtStr string
 		var nonce, ciphertext, wrappedDEK, dekNonce []byte
-		err := s.DB.QueryRowContext(ctx, `
+		err := s.queryRow(ctx, `
 			SELECT version_id, nonce, ciphertext, wrapped_dek, dek_nonce, created_at
 			FROM tenant_secret_versions
 			WHERE secret_id = ? AND version_no = ? AND revoked_at IS NULL`,
@@ -388,10 +418,10 @@ func (s *Store) UpdateSecretDescription(ctx context.Context,
 	}
 	defer tx.Rollback()
 
-	res, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, s.rb(`
 		UPDATE tenant_secrets
 		SET description = ?
-		WHERE secret_id = ? AND revoked_at IS NULL`,
+		WHERE secret_id = ? AND revoked_at IS NULL`),
 		newDescription, meta.SecretID)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: update description: %w", err)
@@ -444,7 +474,7 @@ func (s *Store) RotateSecret(ctx context.Context,
 	// New version number = max(version_no) + 1 (over ALL versions, incl.
 	// revoked, so a number is never reused).
 	var maxVer sql.NullInt64
-	if err := s.DB.QueryRowContext(ctx,
+	if err := s.queryRow(ctx,
 		`SELECT MAX(version_no) FROM tenant_secret_versions WHERE secret_id = ?`,
 		secretID).Scan(&maxVer); err != nil {
 		return nil, fmt.Errorf("secrets: max version: %w", err)
@@ -482,20 +512,20 @@ func (s *Store) RotateSecret(ctx context.Context,
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, s.rb(`
 		INSERT INTO tenant_secret_versions
 			(version_id, secret_id, version_no, nonce, ciphertext, wrapped_dek, dek_nonce, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
 		versionID, secretID, versionNo, es.Nonce, es.Ciphertext, es.WrappedDEK, es.DEKNonce,
 		rotatedAt.Format(time.RFC3339))
 	if err != nil {
 		return nil, fmt.Errorf("secrets: insert rotated version: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, s.rb(`
 		UPDATE tenant_secrets
 		SET last_rotated_at = ?, key_version = ?
-		WHERE secret_id = ?`,
+		WHERE secret_id = ?`),
 		rotatedAt.Format(time.RFC3339), newKeyVer, secretID)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: bump rotated_at: %w", err)
@@ -564,10 +594,10 @@ func (s *Store) RevokeSecret(ctx context.Context,
 	}
 	defer tx.Rollback()
 
-	res, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, s.rb(`
 		UPDATE tenant_secrets
 		SET revoked_at = ?
-		WHERE secret_id = ? AND revoked_at IS NULL`,
+		WHERE secret_id = ? AND revoked_at IS NULL`),
 		revokedAt.Format(time.RFC3339), meta.SecretID)
 	if err != nil {
 		return fmt.Errorf("secrets: revoke: %w", err)
@@ -600,7 +630,7 @@ func (s *Store) RevokeSecret(ctx context.Context,
 func (s *Store) lookupMetadataExact(ctx context.Context,
 	tenantID string, stack *string, name string,
 ) (*SecretMetadata, error) {
-	row := s.DB.QueryRowContext(ctx, `
+	row := s.queryRow(ctx, `
 		SELECT s.secret_id, s.tenant_id, s.stack, s.name, COALESCE(s.description,''),
 		       s.created_at, COALESCE(s.created_by,''), s.last_rotated_at, s.revoked_at, s.key_version,
 		       COALESCE((SELECT MAX(version_no) FROM tenant_secret_versions v
@@ -621,7 +651,7 @@ func (s *Store) lookupMetadataExact(ctx context.Context,
 // decryptActive loads the active version row for meta and decrypts.
 func (s *Store) decryptActive(ctx context.Context, meta *SecretMetadata) ([]byte, error) {
 	var nonce, ciphertext, wrappedDEK, dekNonce []byte
-	err := s.DB.QueryRowContext(ctx, `
+	err := s.queryRow(ctx, `
 		SELECT nonce, ciphertext, wrapped_dek, dek_nonce
 		FROM tenant_secret_versions
 		WHERE secret_id = ? AND version_no = ? AND revoked_at IS NULL`,
@@ -689,18 +719,6 @@ func copyStringPtr(p *string) *string {
 	}
 	s := *p
 	return &s
-}
-
-// isUniqueViolation matches SQLite's UNIQUE-constraint error text.
-// Mirrors the dialect-seam pattern used by chassis/auth/registry —
-// kept inline here because runtime tables are SQLite-only (see
-// the Store doc comment).
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "UNIQUE constraint failed") || strings.Contains(s, "constraint failed: UNIQUE")
 }
 
 // rowScanner abstracts *sql.Row and *sql.Rows so scanMetadata works

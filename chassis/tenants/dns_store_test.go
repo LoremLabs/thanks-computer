@@ -173,7 +173,7 @@ func TestDNSSettingsRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	// No row yet → found=false (callers fall back to flag defaults).
-	if _, found, err := LoadDNSSettings(ctx, db); err != nil || found {
+	if _, found, err := LoadDNSSettings(ctx, db, nil); err != nil || found {
 		t.Fatalf("want not-found, got found=%v err=%v", found, err)
 	}
 
@@ -182,12 +182,12 @@ func TestDNSSettingsRoundTrip(t *testing.T) {
 		Nameservers: []string{"ns1.txco.io", "ns2.txco.io"},
 		EdgeIPs:     []string{"203.0.113.10"},
 		MXHost:      "mx.txco.io", MXPriority: 10, SynthTTL: 300, UpdatedBy: "op",
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("PutDNSSettingsTx: %v", err)
 	}
 	_ = tx.Commit()
 
-	got, found, err := LoadDNSSettings(ctx, db)
+	got, found, err := LoadDNSSettings(ctx, db, nil)
 	if err != nil || !found {
 		t.Fatalf("load after put: found=%v err=%v", found, err)
 	}
@@ -200,11 +200,11 @@ func TestDNSSettingsRoundTrip(t *testing.T) {
 	if err := PutDNSSettingsTx(ctx, tx2, DNSSettings{
 		Nameservers: got.Nameservers, EdgeIPs: got.EdgeIPs,
 		MXHost: "mx2.txco.io", MXPriority: 20, SynthTTL: 600,
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	_ = tx2.Commit()
-	got2, _, _ := LoadDNSSettings(ctx, db)
+	got2, _, _ := LoadDNSSettings(ctx, db, nil)
 	if got2.MXHost != "mx2.txco.io" || got2.MXPriority != 20 || got2.SynthTTL != 600 {
 		t.Fatalf("upsert not applied: %+v", got2)
 	}
@@ -225,22 +225,22 @@ func TestActivationHelpers(t *testing.T) {
 	tx, _ := db.BeginTx(ctx, nil)
 	defer func() { _ = tx.Commit() }()
 
-	origin, ok, err := ActivePatternZoneOriginTx(ctx, tx, "t1")
+	origin, ok, err := ActivePatternZoneOriginTx(ctx, tx, "t1", nil)
 	if err != nil || !ok || origin != "ops.example.com" {
 		t.Fatalf("ActivePatternZoneOriginTx: %q ok=%v err=%v", origin, ok, err)
 	}
 	// A tenant with no zone → ok=false.
-	if _, ok, _ := ActivePatternZoneOriginTx(ctx, tx, "nobody"); ok {
+	if _, ok, _ := ActivePatternZoneOriginTx(ctx, tx, "nobody", nil); ok {
 		t.Fatal("expected no zone for unknown tenant")
 	}
 
 	// Deterministic label, matches StackLabel — and pre-verified.
-	host, err := EnsureZoneHostnameTx(ctx, tx, "t1", "web-api", origin, "2026-05-29T14:32:07Z")
+	host, err := EnsureZoneHostnameTx(ctx, tx, "t1", "web-api", origin, "2026-05-29T14:32:07Z", nil)
 	if err != nil || host != "web-api.ops.example.com" {
 		t.Fatalf("EnsureZoneHostnameTx: %q err=%v", host, err)
 	}
 	// Idempotent.
-	host2, _ := EnsureZoneHostnameTx(ctx, tx, "t1", "web-api", origin, "2026-05-29T14:32:07Z")
+	host2, _ := EnsureZoneHostnameTx(ctx, tx, "t1", "web-api", origin, "2026-05-29T14:32:07Z", nil)
 	if host2 != host {
 		t.Fatalf("not idempotent: %q vs %q", host2, host)
 	}

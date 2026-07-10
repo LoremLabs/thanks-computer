@@ -192,7 +192,7 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	// head). Read the persisted row so CreateZoneTx's SOA + timestamp defaults
 	// ride along.
 	if z.VerifiedAt != "" && c.fleetEnabled() {
-		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, z.ID)
+		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, z.ID, c.pu.RuntimeDialect)
 		if gerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
 			return
@@ -291,7 +291,7 @@ func (c *Controller) handleVerifyZone(w http.ResponseWriter, r *http.Request) {
 			_ = tx.Rollback()
 		}
 	}()
-	if err := tenants.SetZoneVerifiedTx(r.Context(), tx, ac.TenantID, origin, now); err != nil {
+	if err := tenants.SetZoneVerifiedTx(r.Context(), tx, ac.TenantID, origin, now, c.pu.RuntimeDialect); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "set_verified", map[string]any{"err": err.Error()})
 		return
 	}
@@ -304,7 +304,7 @@ func (c *Controller) handleVerifyZone(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if c.fleetEnabled() {
-		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zone.ID)
+		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zone.ID, c.pu.RuntimeDialect)
 		if gerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
 			return
@@ -390,7 +390,7 @@ func (c *Controller) handleRevokeZone(w http.ResponseWriter, r *http.Request) {
 	// Propagate the now-revoked row (revoked_at set) so data-plane nodes drop
 	// the zone from their state too.
 	if c.fleetEnabled() && zoneID != "" {
-		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zoneID)
+		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zoneID, c.pu.RuntimeDialect)
 		if gerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
 			return

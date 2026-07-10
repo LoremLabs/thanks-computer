@@ -30,7 +30,7 @@ func TestEnsureSystemHostnameTx_MintAndReuse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		h, err := EnsureSystemHostnameTx(ctx, tx, tenant, stack, suffix, tNow)
+		h, err := EnsureSystemHostnameTx(ctx, tx, tenant, stack, suffix, tNow, nil)
 		if err != nil {
 			_ = tx.Rollback()
 			t.Fatalf("EnsureSystemHostnameTx: %v", err)
@@ -87,7 +87,7 @@ func TestEnsureSystemHostnameTx_EmptySuffixIsNoop(t *testing.T) {
 	ctx := context.Background()
 	tx, _ := db.BeginTx(ctx, nil)
 	defer func() { _ = tx.Rollback() }()
-	h, err := EnsureSystemHostnameTx(ctx, tx, "tnt_x", "web", "", tNow)
+	h, err := EnsureSystemHostnameTx(ctx, tx, "tnt_x", "web", "", tNow, nil)
 	if err != nil || h != "" {
 		t.Fatalf("empty suffix: got (%q,%v), want (\"\",nil)", h, err)
 	}

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
 
@@ -78,10 +79,50 @@ var ErrChallengeExpired = errors.New("challenge expired")
 // Store is the thin façade over the tenants table. Backed by runtime.db.
 type Store struct {
 	DB *sql.DB
+	// dialect makes the runtime writers portable to Postgres. nil ⇒ SQLite
+	// (see dia()). Always the runtime DB's dialect, since s.DB is the
+	// authoritative runtime store — never the SQLite dbcache mirror.
+	dialect registry.Dialect
 }
 
-// New builds a Store against the given runtime *sql.DB.
-func New(db *sql.DB) *Store { return &Store{DB: db} }
+// New builds a Store against the given runtime *sql.DB, defaulting to the
+// SQLite dialect (the open-core / single-node build). Cloud callers that
+// run the runtime store on Postgres use NewWithDialect.
+func New(db *sql.DB) *Store { return NewWithDialect(db, nil) }
+
+// NewWithDialect builds a Store with an explicit SQL dialect. A nil dialect
+// defaults to SQLite, so existing callers stay byte-identical.
+func NewWithDialect(db *sql.DB, d registry.Dialect) *Store {
+	return &Store{DB: db, dialect: orSQLite(d)}
+}
+
+// orSQLite normalizes a nil dialect to SQLite. Package-level read/write
+// funcs that source from the dbcache mirror (always a SQLite :memory: dump)
+// pass nil; authoritative-RuntimeDB callers pass the runtime dialect.
+func orSQLite(d registry.Dialect) registry.Dialect {
+	if d == nil {
+		return registry.SQLite
+	}
+	return d
+}
+
+func (s *Store) dia() registry.Dialect { return orSQLite(s.dialect) }
+
+// rb rebinds `?` placeholders for the store's dialect (identity on SQLite).
+func (s *Store) rb(q string) string { return s.dia().Rebind(q) }
+
+// exec/query/queryRow run a statement on s.DB with placeholders rebound to
+// the store's dialect. Tx-scoped methods (…Tx) rebind inline via s.rb since
+// they run over a caller-supplied *sql.Tx rather than s.DB.
+func (s *Store) exec(ctx context.Context, q string, a ...any) (sql.Result, error) {
+	return s.DB.ExecContext(ctx, s.rb(q), a...)
+}
+func (s *Store) query(ctx context.Context, q string, a ...any) (*sql.Rows, error) {
+	return s.DB.QueryContext(ctx, s.rb(q), a...)
+}
+func (s *Store) queryRow(ctx context.Context, q string, a ...any) *sql.Row {
+	return s.DB.QueryRowContext(ctx, s.rb(q), a...)
+}
 
 // ErrNotFound mirrors the same sentinel the auth registry uses; callers
 // in admin handlers translate it to HTTP 404.
@@ -151,7 +192,7 @@ func (s *Store) Create(ctx context.Context, t Tenant) error {
 	} else {
 		nameArg = t.Name
 	}
-	_, err := s.DB.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO tenants (tenant_id, slug, name, created_at)
 		 VALUES (?, ?, ?, ?)`,
 		t.TenantID, slug, nameArg, now.UTC().Format(time.RFC3339))
@@ -162,7 +203,7 @@ func (s *Store) Create(ctx context.Context, t Tenant) error {
 // no row exists; satisfies the registry.TenantLookup interface so the
 // auth registry can resolve slugs without importing this package.
 func (s *Store) Lookup(ctx context.Context, tenantID string) (*Tenant, error) {
-	row := s.DB.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT tenant_id, slug, COALESCE(name, ''), created_at, revoked_at
 		   FROM tenants WHERE tenant_id = ?`, tenantID)
 	return scan(row)
@@ -171,7 +212,7 @@ func (s *Store) Lookup(ctx context.Context, tenantID string) (*Tenant, error) {
 // LookupBySlug resolves a slug to a tenant. Used by the admin mux when
 // it sees `/v1/tenants/{slug}/…`.
 func (s *Store) LookupBySlug(ctx context.Context, slug string) (*Tenant, error) {
-	row := s.DB.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT tenant_id, slug, COALESCE(name, ''), created_at, revoked_at
 		   FROM tenants WHERE slug = ?`,
 		strings.ToLower(strings.TrimSpace(slug)))
@@ -180,7 +221,7 @@ func (s *Store) LookupBySlug(ctx context.Context, slug string) (*Tenant, error) 
 
 // List returns every non-revoked tenant, newest first.
 func (s *Store) List(ctx context.Context) ([]Tenant, error) {
-	rows, err := s.DB.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT tenant_id, slug, COALESCE(name, ''), created_at, revoked_at
 		   FROM tenants
 		  WHERE revoked_at IS NULL
@@ -239,13 +280,13 @@ func (s *Store) CreateHostname(ctx context.Context, h Hostname) (Hostname, error
 		createdByArg = h.CreatedBy
 	}
 
-	_, err := s.DB.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO tenant_hostnames
 		     (id, hostname, tenant_id, stack, created_at, created_by)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		id, canon, h.TenantID, h.Stack, now.Format(time.RFC3339), createdByArg)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if s.dia().IsUniqueViolationGeneric(err) {
 			// Surface the existing owner so the caller can render the
 			// 409 body — the index only constrains active rows, so
 			// the active row is unambiguous.
@@ -288,7 +329,7 @@ func (s *Store) ListHostnames(ctx context.Context, tenantID string, includeRevok
 		          WHERE tenant_id = ? AND revoked_at IS NULL
 		          ORDER BY hostname`
 	}
-	rows, err := s.DB.QueryContext(ctx, query, tenantID)
+	rows, err := s.query(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +360,7 @@ func (s *Store) AttachHostname(ctx context.Context, hostname, stack string) erro
 	if stack == "" {
 		return errors.New("tenants: empty stack")
 	}
-	res, err := s.DB.ExecContext(ctx,
+	res, err := s.exec(ctx,
 		`UPDATE tenant_hostnames
 		    SET stack = ?
 		  WHERE hostname = ? AND revoked_at IS NULL`,
@@ -345,7 +386,7 @@ func (s *Store) RevokeHostname(ctx context.Context, hostname string) error {
 	if !ok {
 		return nil // lenient: nothing to revoke if it can't even canonicalize
 	}
-	_, err := s.DB.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE tenant_hostnames
 		    SET revoked_at = ?
 		  WHERE hostname = ? AND revoked_at IS NULL`,
@@ -363,7 +404,7 @@ func (s *Store) LookupActiveHostname(ctx context.Context, hostname string) (Host
 	if !ok {
 		return Hostname{}, ErrNotFound
 	}
-	row := s.DB.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT id, hostname, tenant_id, stack, created_at,
 		        COALESCE(created_by, ''), revoked_at, verified_at, dkim_selector, dkim_private_pem, dkim_public_b64
 		   FROM tenant_hostnames
@@ -446,10 +487,10 @@ func (s *Store) CreateChallenge(ctx context.Context, hostnameID, method, created
 
 	// Soft-revoke any prior active challenge for this pair.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE tenant_hostname_challenges
+		s.rb(`UPDATE tenant_hostname_challenges
 		    SET revoked_at = ?
 		  WHERE hostname_id = ? AND method = ?
-		    AND verified_at IS NULL AND revoked_at IS NULL`,
+		    AND verified_at IS NULL AND revoked_at IS NULL`),
 		now.Format(time.RFC3339), hostnameID, method); err != nil {
 		return Challenge{}, fmt.Errorf("revoke prior: %w", err)
 	}
@@ -461,9 +502,9 @@ func (s *Store) CreateChallenge(ctx context.Context, hostnameID, method, created
 		createdByArg = createdBy
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tenant_hostname_challenges
+		s.rb(`INSERT INTO tenant_hostname_challenges
 		     (id, hostname_id, method, token, created_at, created_by, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`),
 		id, hostnameID, method, token,
 		now.Format(time.RFC3339), createdByArg, expiresAt.Format(time.RFC3339),
 	); err != nil {
@@ -488,7 +529,7 @@ func (s *Store) CreateChallenge(ctx context.Context, hostnameID, method, created
 // exists, ErrChallengeExpired when the row exists but its expires_at
 // has passed.
 func (s *Store) ActiveChallenge(ctx context.Context, hostnameID, method string) (*Challenge, error) {
-	row := s.DB.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT id, hostname_id, method, token, created_at,
 		        COALESCE(created_by, ''), expires_at, attempted_at,
 		        COALESCE(last_error, ''), verified_at, revoked_at
@@ -512,7 +553,7 @@ func (s *Store) ActiveChallenge(ctx context.Context, hostnameID, method string) 
 // ErrChallengeExpired if the matching row exists but is past its
 // expires_at.
 func (s *Store) LookupChallengeByToken(ctx context.Context, token string) (*Challenge, error) {
-	row := s.DB.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT id, hostname_id, method, token, created_at,
 		        COALESCE(created_by, ''), expires_at, attempted_at,
 		        COALESCE(last_error, ''), verified_at, revoked_at
@@ -536,7 +577,7 @@ func (s *Store) LookupChallengeByToken(ctx context.Context, token string) (*Chal
 func (s *Store) RecordChallengeAttempt(ctx context.Context, id, lastError string, verified bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if verified {
-		_, err := s.DB.ExecContext(ctx,
+		_, err := s.exec(ctx,
 			`UPDATE tenant_hostname_challenges
 			    SET attempted_at = ?, last_error = NULL, verified_at = ?
 			  WHERE id = ?`,
@@ -548,7 +589,7 @@ func (s *Store) RecordChallengeAttempt(ctx context.Context, id, lastError string
 	if len(lastError) > 512 {
 		lastError = lastError[:512]
 	}
-	_, err := s.DB.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE tenant_hostname_challenges
 		    SET attempted_at = ?, last_error = ?
 		  WHERE id = ?`,
@@ -561,7 +602,7 @@ func (s *Store) RecordChallengeAttempt(ctx context.Context, id, lastError string
 // resolver can see the hostname as verified on its next dbcache
 // reload.
 func (s *Store) MarkHostnameVerified(ctx context.Context, hostnameID string, when time.Time) error {
-	_, err := s.DB.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE tenant_hostnames SET verified_at = ? WHERE id = ?`,
 		when.UTC().Format(time.RFC3339), hostnameID)
 	return err
@@ -600,20 +641,6 @@ func scanChallenge(row *sql.Row) (*Challenge, error) {
 // hxidNew is a small wrapper around the hxid package so tests can
 // stub. Production uses the time-sortable hxid.
 var hxidNew = defaultHxidNew
-
-// isUniqueViolation reports whether err is a SQLite unique-constraint
-// failure. Matches on the error string because go-sqlite3 doesn't
-// export a stable error code; the message is "UNIQUE constraint failed".
-// Mirrors the helper in chassis/auth (kept package-local to avoid an
-// import cycle).
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "constraint failed: tenant_hostnames")
-}
 
 func scan(row *sql.Row) (*Tenant, error) {
 	var t Tenant
