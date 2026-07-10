@@ -173,28 +173,24 @@ func EnsureSystemHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, su
 			return "", errors.New("tenants: structured-host suffix yields an invalid hostname: " + suffix)
 		}
 		id := "thn_" + hxid.New().String()
-		// Wrap the INSERT in a SAVEPOINT so a unique-violation can be recovered
-		// without poisoning the enclosing activation tx. On Postgres a 23505
-		// aborts the whole tx until ROLLBACK TO SAVEPOINT; on SQLite the wrapper
-		// is inert (a constraint error is already localized). Portable syntax.
-		if _, err := tx.ExecContext(ctx, "SAVEPOINT ehs"); err != nil {
-			return "", err
-		}
-		_, ierr := tx.ExecContext(ctx,
-			d.Rebind(`INSERT INTO tenant_hostnames
-			     (id, hostname, tenant_id, stack, created_at, created_by, verified_at,
-			      dkim_selector, dkim_private_pem, dkim_public_b64)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			id, canon, tenantID, stack, now, SystemStructuredHostCreatedBy, now,
-			DKIMSelector, priv, pub)
+		// Wrap the INSERT in a SAVEPOINT so a unique-violation is recoverable
+		// without poisoning the enclosing activation tx: on Postgres a 23505
+		// aborts the whole tx until ROLLBACK TO SAVEPOINT; on SQLite the savepoint
+		// is real but the recover path never fires (a constraint error there is
+		// localized). RunInSavepoint returns the INSERT error for us to classify.
+		ierr := registry.RunInSavepoint(ctx, tx, "ehs", func() error {
+			_, e := tx.ExecContext(ctx,
+				d.Rebind(`INSERT INTO tenant_hostnames
+				     (id, hostname, tenant_id, stack, created_at, created_by, verified_at,
+				      dkim_selector, dkim_private_pem, dkim_public_b64)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+				id, canon, tenantID, stack, now, SystemStructuredHostCreatedBy, now,
+				DKIMSelector, priv, pub)
+			return e
+		})
 		if ierr == nil {
-			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ehs")
 			return canon, nil
 		}
-		if _, rberr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT ehs"); rberr != nil {
-			return "", rberr
-		}
-		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ehs")
 		if !d.IsUniqueViolationGeneric(ierr) {
 			return "", ierr
 		}

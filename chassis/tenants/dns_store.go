@@ -147,24 +147,20 @@ func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, orig
 	}
 	id := "thn_" + hxid.New().String()
 	// SAVEPOINT-wrap the INSERT so a unique-violation doesn't poison the enclosing
-	// activation tx on Postgres (inert on SQLite). The label is deterministic, so
-	// a conflict means the identical host already exists.
-	if _, err := tx.ExecContext(ctx, "SAVEPOINT ezh"); err != nil {
-		return "", err
-	}
-	_, ierr := tx.ExecContext(ctx,
-		d.Rebind(`INSERT INTO tenant_hostnames
-		     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		id, canon, tenantID, stack, now, SystemZoneHostCreatedBy, now)
+	// activation tx on Postgres (on SQLite the savepoint is real but the recover
+	// path never fires). The label is deterministic, so a conflict means the
+	// identical host already exists.
+	ierr := registry.RunInSavepoint(ctx, tx, "ezh", func() error {
+		_, e := tx.ExecContext(ctx,
+			d.Rebind(`INSERT INTO tenant_hostnames
+			     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`),
+			id, canon, tenantID, stack, now, SystemZoneHostCreatedBy, now)
+		return e
+	})
 	if ierr == nil {
-		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ezh")
 		return canon, nil
 	}
-	if _, rberr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT ezh"); rberr != nil {
-		return "", rberr
-	}
-	_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ezh")
 	if d.IsUniqueViolationGeneric(ierr) {
 		// A concurrent activation of THIS (tenant, stack) may have just minted the
 		// identical deterministic host — adopt it idempotently. If the hostname is

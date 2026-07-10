@@ -470,12 +470,7 @@ func (s *Store) RotateSecret(ctx context.Context,
 	// Open the write tx and LOCK the parent secret row up front, so concurrent
 	// rotations serialize on the version_no allocation below. LockClause() is
 	// " FOR UPDATE" on Postgres and "" on SQLite (whose whole-DB RESERVED lock
-	// from BeginWrite already serializes). The version_no is then read UNDER the
-	// lock — so no two rotations can mint the same number — and the
-	// tenant_secret_versions_secret_ver_uidx unique index is the final backstop.
-	// Consequence: the fleet artifact upload (publishUpsert) now runs inside the
-	// locked window rather than strictly pre-tx. Rotations are rare, single-node
-	// operator actions, so holding the row lock across the upload is acceptable.
+	// from BeginWrite already serializes).
 	tx, err := s.dia().BeginWrite(ctx, s.DB)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: begin tx: %w", err)
@@ -486,11 +481,33 @@ func (s *Store) RotateSecret(ctx context.Context,
 	if err := tx.QueryRowContext(ctx,
 		s.rb(`SELECT secret_id FROM tenant_secrets WHERE secret_id = ?`+s.dia().LockClause()),
 		secretID).Scan(&lockedID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrSecretNotFound // vanished/revoked between the lookup and the lock
+		}
 		return nil, fmt.Errorf("secrets: lock secret: %w", err)
+	}
+
+	// Re-read the metadata UNDER the lock: newMeta must be built from the CURRENT
+	// row, not the pre-lock meta0 (a concurrent UpdateSecretDescription / rotate
+	// could have changed description/key_version between that read and the lock —
+	// publishing stale metadata would revert it). Also re-validates existence.
+	meta0, err = s.lookupMetadataExactVia(ctx, tx, tenantID, stack, name)
+	if err != nil {
+		return nil, err // ErrSecretNotFound if it vanished under us
 	}
 
 	// New version number = max(version_no) + 1 (over ALL versions, incl. revoked,
 	// so a number is never reused), read under the parent-row lock.
+	//
+	// TRANSITIONAL COMPROMISE: publishUpsert (the fleet artifact upload) below runs
+	// inside this locked window rather than strictly pre-tx, because the artifact
+	// is keyed on version_no which is only known after the lock. publishUpsert only
+	// uploads to the external artifact store (it does NOT touch the runtime DB — no
+	// self-deadlock) and no-ops when single-node, so holding the row lock across it
+	// is just network latency on a rare operator action. It is NOT atomic with the
+	// commit (an upload can outlive a failed tx → orphaned, GC-able CAS object) —
+	// same non-atomicity as before. The clean design is lock→persist a publish job
+	// →commit→publish async+idempotently; deferred.
 	var maxVer sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
 		s.rb(`SELECT MAX(version_no) FROM tenant_secret_versions WHERE secret_id = ?`),
@@ -643,7 +660,23 @@ func (s *Store) RevokeSecret(ctx context.Context,
 func (s *Store) lookupMetadataExact(ctx context.Context,
 	tenantID string, stack *string, name string,
 ) (*SecretMetadata, error) {
-	row := s.queryRow(ctx, `
+	return s.lookupMetadataExactVia(ctx, s.DB, tenantID, stack, name)
+}
+
+// rowQueryer is satisfied by both *sql.DB and *sql.Tx, so a lookup can run on
+// the live DB or inside a write tx (e.g. to re-read fresh under a FOR UPDATE lock).
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// lookupMetadataExactVia is lookupMetadataExact against a caller-supplied queryer.
+// RotateSecret passes the write tx so it reads the row it holds the lock on —
+// building the fleet artifact from CURRENT metadata, not a value read before the
+// lock (which a concurrent description/key_version update could have changed).
+func (s *Store) lookupMetadataExactVia(ctx context.Context, q rowQueryer,
+	tenantID string, stack *string, name string,
+) (*SecretMetadata, error) {
+	row := q.QueryRowContext(ctx, s.rb(`
 		SELECT s.secret_id, s.tenant_id, s.stack, s.name, COALESCE(s.description,''),
 		       s.created_at, COALESCE(s.created_by,''), s.last_rotated_at, s.revoked_at, s.key_version,
 		       COALESCE((SELECT MAX(version_no) FROM tenant_secret_versions v
@@ -652,7 +685,7 @@ func (s *Store) lookupMetadataExact(ctx context.Context,
 		WHERE s.tenant_id = ? AND COALESCE(s.stack,'') = COALESCE(?,'')
 		      AND s.name = ? AND s.revoked_at IS NULL
 		ORDER BY s.created_at DESC, s.secret_id DESC
-		LIMIT 1`,
+		LIMIT 1`),
 		tenantID, nilIfEmptyStack(stack), name)
 	m, err := scanMetadata(row)
 	if errors.Is(err, sql.ErrNoRows) {

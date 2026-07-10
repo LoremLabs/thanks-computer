@@ -24,6 +24,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
@@ -1369,30 +1370,26 @@ func (c *Controller) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		// SAVEPOINT so a concurrent first-draft race recovers cleanly — on Postgres
 		// the loser's INSERT raises a unique_violation that would otherwise poison
 		// the whole tx; we roll back to the savepoint and re-select (locking) the
-		// row the sibling just created. Inert on SQLite, where the RESERVED lock
-		// means this race can't occur.
+		// row the sibling just created. On SQLite the RESERVED write lock means
+		// this create race can't occur, so the recover branch never fires there.
 		stackID = "stk_" + hxid.NewTimeSort().String()
-		if _, err := tx.ExecContext(r.Context(), "SAVEPOINT sp_vivify"); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "savepoint", map[string]any{"err": err.Error()})
-			return
-		}
-		_, ierr := tx.ExecContext(r.Context(),
-			c.rb(`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`),
-			stackID, ac.TenantID, name, now)
+		ierr := registry.RunInSavepoint(r.Context(), tx, "sp_vivify", func() error {
+			_, e := tx.ExecContext(r.Context(),
+				c.rb(`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`),
+				stackID, ac.TenantID, name, now)
+			return e
+		})
 		switch {
 		case ierr == nil:
-			_, _ = tx.ExecContext(r.Context(), "RELEASE SAVEPOINT sp_vivify")
+			// created
 		case c.dia().IsUniqueViolationGeneric(ierr):
-			// Sibling won the create race — adopt its row (locked).
-			if _, rberr := tx.ExecContext(r.Context(), "ROLLBACK TO SAVEPOINT sp_vivify"); rberr != nil {
-				writeJSONError(w, http.StatusInternalServerError, "savepoint_rollback", map[string]any{"err": rberr.Error()})
-				return
-			}
+			// Sibling won the create race — adopt its row (re-select, locked).
 			if err := tx.QueryRowContext(r.Context(), lockStackSQL, ac.TenantID, name).Scan(&stackID, &activeVersionID); err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "lookup_stack", map[string]any{"err": err.Error()})
 				return
 			}
 		default:
+			// The INSERT error, or a savepoint control error (surfaced, not swallowed).
 			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": ierr.Error()})
 			return
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	// go-sqlite3 is registered by oidc_test.go in this same test binary.
 )
@@ -33,6 +34,64 @@ func TestSQLiteBeginWrite(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+}
+
+// TestSQLiteBeginWriteImmediateLockIsJoint proves the actual (joint) contract:
+// BeginWrite takes the whole-DB RESERVED write lock UP FRONT only when the DB was
+// opened with _txlock=immediate — and does NOT when it wasn't. Two independent
+// pools on one file DB stand in for two writers.
+func TestSQLiteBeginWriteImmediateLockIsJoint(t *testing.T) {
+	ctx := context.Background()
+
+	openPool := func(file, opts string) *sql.DB {
+		db, err := sql.Open("sqlite3", "file:"+file+"?_busy_timeout=150"+opts)
+		if err != nil {
+			t.Fatalf("open %s: %v", file, err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+
+	// --- WITH _txlock=immediate: B cannot begin its write tx while A holds it. ---
+	imm := filepath.Join(t.TempDir(), "imm.db")
+	aImm, bImm := openPool(imm, "&_txlock=immediate"), openPool(imm, "&_txlock=immediate")
+	if _, err := aImm.ExecContext(ctx, `CREATE TABLE t (x INTEGER)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// A begins a write tx (BEGIN IMMEDIATE → RESERVED) without issuing a write.
+	txAImm, err := SQLite.BeginWrite(ctx, aImm)
+	if err != nil {
+		t.Fatalf("A BeginWrite (immediate): %v", err)
+	}
+	if _, errB := SQLite.BeginWrite(ctx, bImm); errB == nil {
+		t.Fatal("with _txlock=immediate, B BeginWrite should block/fail while A holds the lock, but it succeeded")
+	}
+	if err := txAImm.Rollback(); err != nil {
+		t.Fatalf("A rollback: %v", err)
+	}
+	if txB, err := SQLite.BeginWrite(ctx, bImm); err != nil {
+		t.Fatalf("B BeginWrite after A released: %v", err)
+	} else {
+		_ = txB.Rollback()
+	}
+
+	// --- WITHOUT _txlock=immediate: BeginWrite is deferred — no up-front lock, so
+	//     both writers can begin. Proves the lock is NOT provided by BeginWrite alone.
+	def := filepath.Join(t.TempDir(), "def.db")
+	aDef, bDef := openPool(def, ""), openPool(def, "")
+	if _, err := aDef.ExecContext(ctx, `CREATE TABLE t (x INTEGER)`); err != nil {
+		t.Fatalf("create def: %v", err)
+	}
+	txC, err := SQLite.BeginWrite(ctx, aDef)
+	if err != nil {
+		t.Fatalf("C BeginWrite: %v", err)
+	}
+	txD, errD := SQLite.BeginWrite(ctx, bDef)
+	if errD != nil {
+		t.Fatalf("without _txlock=immediate, BeginWrite must NOT lock up front, but B failed: %v", errD)
+	}
+	_ = txC.Rollback()
+	_ = txD.Rollback()
 }
 
 func TestDialectForDSN(t *testing.T) {

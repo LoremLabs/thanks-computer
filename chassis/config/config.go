@@ -245,6 +245,21 @@ type Config struct {
 	BackgroundServices           string   `id:"background-services" default:"" desc:"Comma-list of long-running background services to run (chassis-owned loops, started/stopped with the controllers). Empty by default. ()"`
 }
 
+// HasPersonality reports whether the given head/personality is enabled. It
+// splits Personalities on commas and matches the whole token — unlike a bare
+// strings.Contains, so "admin" does not match "notadmin" or a future
+// "admin-readonly". Prefer this over strings.Contains(Personalities, …) for new
+// checks. (Many existing call sites still use strings.Contains; those match only
+// because none of the current personality names is a substring of another.)
+func (c Config) HasPersonality(name string) bool {
+	for _, p := range strings.Split(c.Personalities, ",") {
+		if strings.TrimSpace(p) == name {
+			return true
+		}
+	}
+	return false
+}
+
 func Load() (Config, error) {
 	config := Config{}
 

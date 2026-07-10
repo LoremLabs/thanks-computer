@@ -30,7 +30,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -67,13 +66,20 @@ func NewController(ctx context.Context, pu *processor.Unit, sink feed.Sink) *Con
 }
 
 func (c *Controller) enabled() bool {
-	// Only the admin personality drains the outbox. The outbox is produced only
-	// by admin handlers, and gating to a single producer is what keeps the pump
-	// safe once the runtime DB is shared Postgres: without it every node with a
-	// non-nop feed-sink would drain (and double-publish) the same shared outbox.
-	// On per-node SQLite today this is harmless (the admin node still runs it).
+	// Narrow the drainer to the admin personality. The outbox is produced only by
+	// admin handlers, so no other node has business draining it. This is an
+	// OPERATIONAL NARROWING, not a shared-Postgres concurrency guarantee: the
+	// admin *personality* is not a singleton, so two admin instances against one
+	// shared runtime Postgres would both drain the same outbox and double-publish.
+	// A real shared-PG drainer needs atomic row claiming (SELECT … FOR UPDATE SKIP
+	// LOCKED, or an UPDATE … RETURNING claim) plus sink-level idempotency to
+	// tolerate "published then crashed before marking done" replay — deferred,
+	// and likely moot because pure-PG retires the runtime outbox entirely (Phase
+	// 3). Until then, exactly-one-admin is a deployment invariant, not a
+	// mechanism. (The pump is the outbox DRAINER; the producers are the admin
+	// handlers that AppendOutbox.)
 	return c.sink != nil && c.pu.Conf.FeedSink != "" && c.pu.Conf.FeedSink != "nop" &&
-		strings.Contains(c.pu.Conf.Personalities, "admin")
+		c.pu.Conf.HasPersonality("admin")
 }
 
 // rb rebinds `?` placeholders for the runtime DB's dialect (identity on

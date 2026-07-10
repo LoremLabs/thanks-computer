@@ -52,20 +52,25 @@ type Dialect interface {
 	// lock appropriate to the engine.
 	BeginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, error)
 
-	// BeginWrite opens the transaction used by the runtime control-plane
-	// write path. SQLite returns a plain tx (its connection-level
-	// _txlock=immediate already takes the whole-DB RESERVED write lock, so
-	// the whole path serializes). Postgres returns an explicit READ COMMITTED
-	// tx so that a LockClause() `FOR UPDATE` BLOCKS on contention rather than
-	// aborting — under an accidental SERIALIZABLE session a lock wait would
-	// surface as a 40001 serialization failure instead. Distinct from
-	// BeginImmediate (which is SERIALIZABLE on Postgres, for the auth registry).
+	// BeginWrite opens the transaction used by the runtime control-plane write
+	// path. On SQLite it is a plain BeginTx; whether that takes the whole-DB
+	// RESERVED write lock UP FRONT is NOT provided by BeginWrite itself — it is a
+	// JOINT guarantee with how the runtime DB was opened: only a connection
+	// opened with `_txlock=immediate` issues BEGIN IMMEDIATE and takes the lock
+	// eagerly (see openSQLiteOrDie for kind=="runtime"). On any other SQLite DSN
+	// this is a deferred tx that acquires the write lock lazily on first write.
+	// Postgres returns an explicit READ COMMITTED tx so that a LockClause()
+	// `FOR UPDATE` BLOCKS on contention rather than aborting — under an accidental
+	// SERIALIZABLE session a lock wait would surface as a 40001 serialization
+	// failure instead. Distinct from BeginImmediate (SERIALIZABLE on Postgres,
+	// for the auth registry).
 	BeginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error)
 
 	// LockClause returns the row-lock suffix appended to a SELECT to take a
 	// pessimistic lock on the matched rows. Postgres returns " FOR UPDATE";
-	// SQLite returns "" (empty — the whole-DB RESERVED lock from BeginWrite
-	// already serializes, so no per-row lock exists or is needed). Empty on
+	// SQLite returns "" (empty — SQLite has no per-row lock; serialization comes
+	// from the whole-DB write lock, held eagerly only under _txlock=immediate).
+	// Empty on
 	// SQLite means the query text is unchanged.
 	LockClause() string
 }
@@ -131,9 +136,11 @@ func (sqliteDialect) BeginImmediate(ctx context.Context, db *sql.DB) (*sql.Tx, e
 	return tx, nil
 }
 
-// BeginWrite: plain tx. The runtime DB is opened with _txlock=immediate, so
-// this already takes SQLite's whole-DB RESERVED write lock up front — the
-// historical behaviour every runtime write path relied on before this seam.
+// BeginWrite: plain BeginTx. Eager whole-DB write locking is NOT provided here —
+// it comes from the connection: the runtime DB is opened with _txlock=immediate
+// (openSQLiteOrDie, kind=="runtime"), which makes BeginTx issue BEGIN IMMEDIATE
+// and take the RESERVED lock up front — the historical behaviour the runtime
+// write path relies on. On a DSN without that flag this is a deferred tx.
 func (sqliteDialect) BeginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	return db.BeginTx(ctx, nil)
 }

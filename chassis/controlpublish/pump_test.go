@@ -276,11 +276,13 @@ func TestPumpEnabledGatesOnAdminPersonality(t *testing.T) {
 		pers, feedSink string
 		want           bool
 	}{
-		{"web,admin,dns", "stub", true}, // admin present ⇒ drains
-		{"admin", "stub", true},         // admin only ⇒ drains
-		{"web,dns", "stub", false},      // no admin ⇒ never drains (shared-PG safety)
-		{"web,admin", "nop", false},     // nop feed-sink always disables
-		{"web,admin", "", false},        // empty feed-sink disables
+		{"web,admin,dns", "stub", true},   // admin present ⇒ drains
+		{"admin", "stub", true},           // admin only ⇒ drains
+		{"web,dns", "stub", false},        // no admin ⇒ never drains
+		{"notadmin", "stub", false},       // exact-token match: "admin" ∉ {"notadmin"}
+		{"admin-readonly", "stub", false}, // …and not matched as a prefix either
+		{"web,admin", "nop", false},       // nop feed-sink always disables
+		{"web,admin", "", false},          // empty feed-sink disables
 	}
 	for _, c := range cases {
 		if got := ctrl(c.pers, c.feedSink).enabled(); got != c.want {
