@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/radovskyb/watcher"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 )
 
@@ -40,6 +42,94 @@ mutex lock
 // bounds how many superseded mirrors can be alive at once under bursty
 // (debounced) reloads.
 const supersededDBCloseGrace = 30 * time.Second
+
+// MirrorLoader (re)builds the in-memory read mirror: given a freshly-opened,
+// empty :memory: SQLite handle `dst` and the chassis's authoritative runtime
+// store `src`, it populates `dst` with the rows the hot read path serves.
+//
+// The mirror is ALWAYS SQLite (every reader assumes a :memory: SQLite
+// snapshot — see chassis/processor and chassis/server/ingress); only the
+// SOURCE varies. For a file: SQLite runtime the built-in "sqlite" loader does
+// a page-level online backup. For a postgres:// runtime the cloud overlay
+// registers a "postgres" loader that applies the SQLite runtime schema to
+// `dst` and copies the hot tables out of Postgres — keeping every Postgres
+// line out of open-core (open-core compiles no Postgres driver).
+type MirrorLoader func(ctx context.Context, dst, src *sql.DB) error
+
+var (
+	loaderMu sync.Mutex
+	loaders  = map[string]MirrorLoader{}
+)
+
+// RegisterLoader records a mirror loader under name (e.g. "postgres").
+// Mirrors the feed/scheduled/artifact factory-registry pattern: the cloud
+// overlay calls this from its init(), blank-imported by the cloud main, so
+// open-core never references the overlay symbol. The built-in "sqlite"
+// loader self-registers below.
+func RegisterLoader(name string, l MirrorLoader) {
+	loaderMu.Lock()
+	defer loaderMu.Unlock()
+	loaders[name] = l
+}
+
+func lookupLoader(name string) (MirrorLoader, bool) {
+	loaderMu.Lock()
+	defer loaderMu.Unlock()
+	l, ok := loaders[name]
+	return l, ok
+}
+
+func init() { RegisterLoader("sqlite", sqliteBackupLoad) }
+
+// sqliteBackupLoad is the built-in mirror loader for a SQLite runtime: a
+// binary, page-level online backup of `src` into the fresh :memory: `dst`
+// over a single borrowed source connection (NOT a SQL-text dump+replay,
+// which was O(n²) in go-sqlite3's no-args Exec — ~35s for a 1MB DB; the
+// backup is O(db size), ~ms). Running over the existing Source *connection*
+// keeps the WAL .db-shm race the old dump avoided still avoided.
+func sqliteBackupLoad(ctx context.Context, dst, src *sql.DB) error {
+	srcConn, err := src.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer srcConn.Close()
+	destConn, err := dst.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	// Closing returns the pinned connection to dst's 1-conn pool (it does
+	// NOT destroy the :memory: db, which lives on that connection), so every
+	// subsequent mirror read reuses exactly this copy.
+	defer destConn.Close()
+	return destConn.Raw(func(dc any) error {
+		return srcConn.Raw(func(sc any) error {
+			bk, err := dc.(*sqlite3.SQLiteConn).Backup("main", sc.(*sqlite3.SQLiteConn), "main")
+			if err != nil {
+				return err
+			}
+			// Step(-1) copies all remaining pages in one shot; it restarts
+			// internally if the source is written mid-copy, returning
+			// done=false until it settles. Bounded retry guards a
+			// pathological sustained-write source.
+			for tries := 0; ; tries++ {
+				done, serr := bk.Step(-1)
+				if serr != nil {
+					_ = bk.Finish()
+					return serr
+				}
+				if done {
+					break
+				}
+				if tries >= 500 {
+					_ = bk.Finish()
+					return errors.New("dbcache backup did not converge (source under sustained write)")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			return bk.Finish()
+		})
+	})
+}
 
 // DbCache structure
 type DbCache struct {
@@ -82,6 +172,12 @@ type DbCache struct {
 	// opstacks hot-reload (app.go, --system-opstacks-watch), which must
 	// call BumpGen() after applying so pointer-identical caches rebuild.
 	gen atomic.Uint64
+
+	// loaderName selects the registered MirrorLoader Reload() uses to
+	// (re)build the :memory: mirror from Source — "sqlite" (built-in
+	// online backup) for a file: runtime, "postgres" (overlay-registered)
+	// for a postgres:// runtime. Resolved once in New from the runtime DSN.
+	loaderName string
 }
 
 // Gen returns the in-place mutation generation of the live snapshot.
@@ -124,11 +220,25 @@ func New(conf config.Config, logger *zap.Logger, ctx context.Context, source *sq
 	}
 	db.SetMaxOpenConns(1)
 
+	// Pick the mirror loader from the runtime DSN. A file: runtime uses the
+	// built-in "sqlite" online-backup loader; a postgres:// runtime needs
+	// the cloud overlay's "postgres" loader (blank-imported into the cloud
+	// binary). Fail closed here — an open-core binary pointed at a Postgres
+	// runtime has no loader and must not boot into a panic at first Reload.
+	loaderName := "sqlite"
+	if registry.DialectForDSN(conf.DbRuntimeDsn) == registry.Postgres {
+		loaderName = "postgres"
+	}
+	if _, ok := lookupLoader(loaderName); !ok {
+		return nil, fmt.Errorf("dbcache: no %q mirror loader registered (a postgres:// runtime needs the cloud overlay's pgmirror; open-core serves only file: runtimes)", loaderName)
+	}
+
 	dbc.Conf = conf
 	dbc.Db = db
 	dbc.Source = source
 	dbc.Logger = logger
 	dbc.Ctx = ctx
+	dbc.loaderName = loaderName
 
 	return dbc, nil
 }
@@ -175,15 +285,13 @@ func (dbc *DbCache) Reload() error {
 	dbc.reloadMu.Lock()
 	defer dbc.reloadMu.Unlock()
 
-	// Build the fresh mirror by COPYING Source → a new :memory: DB via SQLite's
-	// online backup API — a binary, page-level copy — NOT a SQL-text
-	// dump+replay. The old path serialized the whole DB to ~8MB of INSERT text
-	// and fed it to one dbNew.Exec; go-sqlite3's no-args exec re-CStrings the
-	// ENTIRE remaining string once per statement (sqlite3.go), making replay
-	// O(statements × bytes) ≈ O(n²) — ~35s for a 1MB DB. The backup copies pages
-	// directly: O(db size), ~ms. It runs over the existing Source *connection*
-	// (no second handle to the file), so the WAL .db-shm race the old dump
-	// avoided stays avoided.
+	// Build the fresh mirror by handing an empty :memory: SQLite handle to the
+	// configured MirrorLoader (built-in "sqlite" online backup for a file:
+	// runtime; the overlay's "postgres" logical copy for a shared-Postgres
+	// runtime). The loader runs entirely under reloadMu — off the Snapshot()
+	// path — so a slow build never blocks readers. On loader failure the old
+	// mirror stays live (below), which is also the Postgres availability
+	// buffer: a Neon blip fails the reload but keeps serving the last snapshot.
 	dbNew, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		dbc.Logger.Warn("reload cachedb open err", zap.String("err", err.Error()))
@@ -197,52 +305,16 @@ func (dbc *DbCache) Reload() error {
 	if bctx == nil {
 		bctx = context.Background()
 	}
-	srcConn, err := dbc.Source.Conn(bctx)
-	if err != nil {
-		dbc.Logger.Warn("reload cachedb source-conn err", zap.String("err", err.Error()))
+	loader, ok := lookupLoader(dbc.loaderName)
+	if !ok {
+		// Guarded at New(); defensive here so a mis-set loaderName surfaces
+		// loudly instead of a nil-call panic.
 		_ = dbNew.Close()
-		return err
+		return fmt.Errorf("dbcache: mirror loader %q not registered", dbc.loaderName)
 	}
-	defer srcConn.Close()
-	destConn, err := dbNew.Conn(bctx)
-	if err != nil {
-		dbc.Logger.Warn("reload cachedb mirror-conn err", zap.String("err", err.Error()))
-		_ = dbNew.Close()
-		return err
-	}
-	berr := destConn.Raw(func(dc any) error {
-		return srcConn.Raw(func(sc any) error {
-			bk, err := dc.(*sqlite3.SQLiteConn).Backup("main", sc.(*sqlite3.SQLiteConn), "main")
-			if err != nil {
-				return err
-			}
-			// Step(-1) copies all remaining pages in one shot; it restarts
-			// internally if the source is written mid-copy, returning
-			// done=false until it settles. Bounded retry guards a pathological
-			// sustained-write source.
-			for tries := 0; ; tries++ {
-				done, serr := bk.Step(-1)
-				if serr != nil {
-					_ = bk.Finish()
-					return serr
-				}
-				if done {
-					break
-				}
-				if tries >= 500 {
-					_ = bk.Finish()
-					return errors.New("dbcache backup did not converge (source under sustained write)")
-				}
-				time.Sleep(5 * time.Millisecond)
-			}
-			return bk.Finish()
-		})
-	})
-	// Return the populated connection to dbNew's 1-conn pool; the :memory: db
-	// lives on it, so every subsequent mirror read reuses exactly this copy.
-	_ = destConn.Close()
-	if berr != nil {
-		dbc.Logger.Warn("reload cachedb backup err", zap.String("err", berr.Error()))
+	if berr := loader(bctx, dbNew, dbc.Source); berr != nil {
+		dbc.Logger.Warn("reload cachedb load err",
+			zap.String("loader", dbc.loaderName), zap.String("err", berr.Error()))
 		_ = dbNew.Close()
 		return berr
 	}

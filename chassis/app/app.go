@@ -151,8 +151,17 @@ func Run(bi BuildInfo) int {
 	// DB → sanity-check → atomic rename into place. A non-fresh DB is left
 	// untouched (no silent downgrade — use `txco snapshot import --force`).
 	// Empty ref ⇒ this whole block is skipped and boot is byte-for-byte
-	// unchanged from single-node.
-	if conf.SnapshotBootstrapRef != "" {
+	// unchanged from single-node. A postgres:// runtime DSN also skips it:
+	// snapshot restore is a SQLite-file operation (temp-file restore →
+	// sanity-check → atomic rename) with no Postgres analogue — a shared
+	// Postgres runtime bootstraps simply by opening the pool and migrating.
+	bootstrapWanted := conf.SnapshotBootstrapRef != ""
+	if bootstrapWanted && registry.DialectForDSN(conf.DbRuntimeDsn) != registry.SQLite {
+		logger.Info("snapshot bootstrap skipped — runtime DSN is Postgres (restore is a SQLite-file op; a shared Postgres runtime bootstraps by migrating the store)",
+			zap.String("ref", conf.SnapshotBootstrapRef))
+		bootstrapWanted = false
+	}
+	if bootstrapWanted {
 		runtimeDBPath := strings.TrimPrefix(conf.DbRuntimeDsn, "file:")
 		if !snapshot.IsFresh(runtimeDBPath) {
 			logger.Info("snapshot bootstrap skipped — runtime DB not fresh (use `txco snapshot import --force` to replace)",
@@ -194,14 +203,18 @@ func Run(bi BuildInfo) int {
 
 	// runtime.db is opened on every chassis. It carries the content the
 	// runtime reads from (via dbcache) plus the tenants table for
-	// future hostname routing on the data plane.
-	runtimeDB := openSQLiteOrDie(logger, conf.DbRuntimeDsn, "runtime")
+	// hostname routing on the data plane. A file: DSN is the historical
+	// local SQLite (byte-for-byte unchanged); a postgres:// DSN selects the
+	// shared runtime store for the cloud service, riding the same dialect
+	// seam as auth/scheduled. The Postgres runtime schema is supplied by the
+	// cloud overlay (runtimeSchemaSource) — open-core embeds only the SQLite
+	// tree, and the dbcache read mirror is re-sourced from the store by the
+	// overlay's registered loader (see dbcache.RegisterLoader).
+	runtimeDB, runtimeDialect := openSharedDBOrDie(logger, conf.DbRuntimeDsn, "runtime")
 	defer runtimeDB.Close()
-	// runtime.db is always SQLite (scope: only auth moves to Postgres
-	// for an HA control plane; runtime-DB HA is the architecture's
-	// separately-deferred decision).
-	applyMigrationsOrDie(ctx, logger, runtimeDB, registry.SQLite, schemaFS,
-		path.Join(schemaBase, "runtime"), "txco-db-changeset-runtime", "runtime")
+	runtimeSchemaFS, runtimeSchemaRoot := runtimeSchemaSource(schemaFS, schemaBase, runtimeDialect, logger)
+	applyMigrationsOrDie(ctx, logger, runtimeDB, runtimeDialect, runtimeSchemaFS,
+		runtimeSchemaRoot, "txco-db-changeset-runtime", "runtime")
 
 	// Per-tenant secret store. Auto-minted on first boot at the
 	// configured path (default: ./chassis/data/secrets/txco-master.key,
@@ -499,6 +512,26 @@ func authSchemaRoot(schemaBase string, d registry.Dialect) string {
 		return path.Join(schemaBase, "postgres", "auth")
 	}
 	return path.Join(schemaBase, "auth")
+}
+
+// runtimeSchemaSource resolves the (fs.FS, root) for the runtime migration
+// set for the chosen dialect. SQLite (the default, and the only open-core
+// case) uses the embedded/on-disk sqlite tree at <base>/runtime. A
+// postgres:// runtime DSN uses the schema the cloud overlay registered via
+// dbschemas.RegisterRuntimePostgresSchema — open-core embeds NO Postgres
+// runtime schema, so if none is registered we fail closed rather than
+// migrate an empty/mismatched tree over a real store. (Auth swaps trees
+// inside one embed via authSchemaRoot; runtime swaps the fs.FS itself,
+// because its Postgres tree lives in a different module.)
+func runtimeSchemaSource(sqliteFS fs.FS, schemaBase string, d registry.Dialect, logger *zap.Logger) (fs.FS, string) {
+	if d == registry.Postgres {
+		pgFS, pgRoot, ok := dbschemas.RuntimePostgresSchema()
+		if !ok {
+			logger.Fatal("runtime DSN is postgres:// but no Postgres runtime schema is registered — this binary has no Postgres runtime support (use a file: runtime DSN, or run the cloud binary that blank-imports overlay/pgruntime)")
+		}
+		return pgFS, pgRoot
+	}
+	return sqliteFS, path.Join(schemaBase, "runtime")
 }
 
 // openSQLiteOrDie opens a SQLite file with the chassis's standard
