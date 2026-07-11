@@ -375,6 +375,13 @@ func validateStackFilePath(p string) error {
 	if p == "" {
 		return fmt.Errorf("empty path")
 	}
+	// The path is a component of the stack_files PRIMARY KEY. On the Postgres
+	// runtime a btree index tuple caps at 2704 bytes, so an unbounded path
+	// would fail the INSERT with SQLSTATE 54000 (the ops_uniq incident class).
+	// 1024 is far above any legitimate tree and comfortably under the cap.
+	if len(p) > 1024 {
+		return fmt.Errorf("path exceeds 1024 bytes (%d)", len(p))
+	}
 	if strings.HasPrefix(p, "/") {
 		return fmt.Errorf("path must be relative, not absolute")
 	}
@@ -1975,7 +1982,12 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 			// must already be in the artifact store, else the rule would
 			// materialise and fail at runtime with "artifact not found".
 			// Fail loudly here; the deferred rollback aborts activation.
-			if refs := compute.ScanRefs(rf.content); len(refs) > 0 {
+			// On a FLEET node this ran PRE-tx in handleActivateStack — the
+			// astore is R2 there and, like the CAS materialise above, its
+			// round trips must not run while the activation tx pins locks
+			// (the applier consumes producer-verified artifacts). Single-
+			// node checks here, against its local, fast store.
+			if refs := compute.ScanRefs(rf.content); len(refs) > 0 && !c.fleetEnabled() {
 				if c.astore == nil {
 					return currentActiveID, targetVersionID, &materialiseError{http.StatusServiceUnavailable, "compute_store_unavailable", map[string]any{
 						"stack": stackName, "scope": pf.scope, "name": pf.name,
@@ -2210,6 +2222,50 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				map[string]any{"err": ferr.Error()})
 			return
 		}
+		// Compute-ref guardrail, hoisted PRE-tx on fleet nodes: the in-tx
+		// check in materialiseStackVersion is skipped there because the
+		// astore is R2 and its round trips must not run while the
+		// activation tx pins locks (same reasoning as its CAS materialise
+		// gate). Runs before the artifact upload so a version that can't
+		// activate is never published. Mirrors the in-tx loop's coverage
+		// exactly: rule bodies only — not FILES/, packs, datasets, mocks.
+		for _, f := range files {
+			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) {
+				continue
+			}
+			pf, ok := parseStackPath(f.Path)
+			if !ok || pf.isMockReq || pf.isMockRes {
+				continue
+			}
+			refs := compute.ScanRefs(f.Content)
+			if len(refs) == 0 {
+				continue
+			}
+			if c.astore == nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "compute_store_unavailable", map[string]any{
+					"stack": name, "scope": pf.scope, "name": pf.name,
+					"hint": "this chassis has no artifact store; compute:// rules cannot be activated here",
+				})
+				return
+			}
+			for _, ref := range refs {
+				ok, cerr := c.astore.Exists(r.Context(), ref.StoreRef())
+				if cerr != nil {
+					writeJSONError(w, http.StatusInternalServerError, "compute_store_check",
+						map[string]any{"ref": ref.String(), "err": cerr.Error()})
+					return
+				}
+				if !ok {
+					writeJSONError(w, http.StatusUnprocessableEntity, "missing_compute_artifact", map[string]any{
+						"stack": name, "scope": pf.scope, "name": pf.name,
+						"ref":  ref.String(),
+						"hint": "upload the compute artifact (txco compute build + apply) before activating",
+					})
+					return
+				}
+			}
+		}
+
 		// Producer's view of the prior active_version, recorded as
 		// base_version for future CAS-style concurrency checks. Best-
 		// effort: if active_version is unset (first activation) we
@@ -2250,6 +2306,8 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		}
 	}()
 
+	var pendingHosts []pendingHostEvent
+
 	currentActiveID, targetVersionID, merr := c.materialiseStackVersion(
 		r.Context(), tx, ac.TenantID, name, req.VersionNumber, now, true)
 	if merr != nil {
@@ -2288,26 +2346,29 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				map[string]any{"err": qerr.Error()})
 			return
 		}
-		// Propagate the auto-minted delegated-zone routing host (if this tenant
-		// has a delegated zone, materialiseStackVersion just minted
-		// <label>.<origin>). The dns_zones row isn't fleet-synced, so a
-		// data-plane node can't re-derive it from this stack.activated replay —
-		// ship the row so it can route + cert the host. See dns_fleet.go.
-		if qerr := c.queueZoneHostnameUpserts(r.Context(), tx, ac.TenantID, name); qerr != nil {
+		// Propagate the auto-minted routing hosts: the delegated-zone host
+		// (<label>.<origin>) and the structured-suffix host
+		// (<stack>-<rand>.<suffix>). The dns_zones row isn't fleet-synced and
+		// data-plane nodes no longer re-mint, so without shipping the rows
+		// they 404 the URLs. COLLECT in-tx (the mint above is only visible
+		// here) but defer the R2 uploads + hostname.bound events to after
+		// commit — no R2 round trip may run inside the activation tx (it
+		// holds the stacks FOR UPDATE row; on shared Postgres that blocks
+		// every same-stack operation and pins a pooler connection). See
+		// pendingHostEvent / publishHostEvents in dns_fleet.go.
+		zoneHosts, qerr := c.collectZoneHostUpserts(r.Context(), tx, ac.TenantID, name)
+		if qerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "fleet_zone_hostname",
 				map[string]any{"err": qerr.Error()})
 			return
 		}
-		// Same for the auto-minted structured-host-suffix routing host
-		// (<stack>-<rand>.<suffix>). materialiseStackVersion minted it in this
-		// tx; without shipping the row, only the control-plane node could route
-		// the structured URL — every data-plane node 404s it (they no longer
-		// re-mint, post mintHosts gate). See queueStructuredHostnameUpserts.
-		if qerr := c.queueStructuredHostnameUpserts(r.Context(), tx, ac.TenantID, name); qerr != nil {
+		structHosts, qerr := c.collectStructuredHostUpserts(r.Context(), tx, ac.TenantID, name)
+		if qerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "fleet_structured_hostname",
 				map[string]any{"err": qerr.Error()})
 			return
 		}
+		pendingHosts = append(zoneHosts, structHosts...)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -2315,6 +2376,19 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	committed = true
+
+	// Publish the collected routing-host artifacts + events now that the
+	// activation is durable (upload first, then one short outbox tx). A
+	// failure here never un-does the activation: shared-Postgres nodes
+	// converge via the stack.activated reload regardless; SQLite fleets
+	// heal with `txco fleet resync`. Detached from the request context so
+	// a client disconnect can't strand a half-published pair.
+	if perr := c.publishHostEvents(context.WithoutCancel(r.Context()), pendingHosts); perr != nil {
+		c.pu.Logger.Error("activate: post-commit hostname publish failed — run `txco fleet resync` to heal fleet routing hosts",
+			zap.String("tenant", ac.TenantID),
+			zap.String("stack", name),
+			zap.String("err", perr.Error()))
+	}
 
 	// Refresh the in-memory dbcache so this node serves the new active
 	// version. Do it ASYNC: the activation is already durably committed and

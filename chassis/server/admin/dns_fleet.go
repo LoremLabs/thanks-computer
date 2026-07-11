@@ -266,8 +266,35 @@ func (c *Controller) reconcileZoneHostnames(ctx context.Context, tx *sql.Tx, ten
 // append, so an accepted DB mutation never lacks its artifact (a Put whose tx
 // later rolls back just orphans the artifact, which the sweeper GCs).
 func (c *Controller) queueZoneHostnameUpserts(ctx context.Context, tx *sql.Tx, tenantID, stack string) error {
+	pending, err := c.collectZoneHostUpserts(ctx, tx, tenantID, stack)
+	if err != nil {
+		return err
+	}
+	return c.publishHostEventsInTx(ctx, tx, pending)
+}
+
+// pendingHostEvent is one hostname RowsArtifact collected inside a tx whose
+// R2 upload + outbox append can be deferred past commit. The activation tx
+// holds the stacks FOR UPDATE row (and, on shared Postgres, a pooled
+// connection) — an R2 round trip inside that window blocks every concurrent
+// same-stack operation for the full R2 timeout, so the activation path
+// collects in-tx (the freshly-minted row is only visible there) and
+// publishes AFTER commit via publishHostEvents. The small direct callers
+// (zone create/verify, hostname mint) still publish in-tx via
+// publishHostEventsInTx pending their own batch rework.
+type pendingHostEvent struct {
+	tenantID string
+	key      string // artifact key: rows/tenant_hostnames/<id>
+	art      controlevent.RowsArtifact
+}
+
+// collectZoneHostUpserts reads the delegated-zone routing-host rows
+// (created_by = system:zone-host) from tx — all of the tenant's, or just one
+// stack's — and returns them as pending one-row upsert artifacts. SQL only;
+// no uploads. Empty when fleet sync is off.
+func (c *Controller) collectZoneHostUpserts(ctx context.Context, tx *sql.Tx, tenantID, stack string) ([]pendingHostEvent, error) {
 	if !c.fleetEnabled() {
-		return nil
+		return nil, nil
 	}
 	q := `SELECT id, hostname, tenant_id, stack, created_at, created_by, verified_at
 	        FROM tenant_hostnames
@@ -279,56 +306,97 @@ func (c *Controller) queueZoneHostnameUpserts(ctx context.Context, tx *sql.Tx, t
 	}
 	rows, err := tx.QueryContext(ctx, c.rb(q), args...)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	type hostRow struct {
-		id, hostname, tenantID, stack, createdAt, createdBy string
-		verifiedAt                                          sql.NullString
-	}
-	var collected []hostRow
+	defer rows.Close()
+	var pending []pendingHostEvent
 	for rows.Next() {
-		var h hostRow
-		if err := rows.Scan(&h.id, &h.hostname, &h.tenantID, &h.stack,
-			&h.createdAt, &h.createdBy, &h.verifiedAt); err != nil {
-			rows.Close()
-			return err
+		var (
+			id, hostname, tid, stk, createdAt, createdBy string
+			verifiedAt                                   sql.NullString
+		)
+		if err := rows.Scan(&id, &hostname, &tid, &stk, &createdAt, &createdBy, &verifiedAt); err != nil {
+			return nil, err
 		}
-		collected = append(collected, h)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, h := range collected {
 		row := map[string]any{
-			"id":         h.id,
-			"hostname":   h.hostname,
-			"tenant_id":  h.tenantID,
-			"stack":      h.stack,
-			"created_at": h.createdAt,
-			"created_by": h.createdBy,
+			"id":         id,
+			"hostname":   hostname,
+			"tenant_id":  tid,
+			"stack":      stk,
+			"created_at": createdAt,
+			"created_by": createdBy,
 		}
-		if h.verifiedAt.Valid && h.verifiedAt.String != "" {
-			row["verified_at"] = h.verifiedAt.String
+		if verifiedAt.Valid && verifiedAt.String != "" {
+			row["verified_at"] = verifiedAt.String
 		}
-		art := controlevent.RowsArtifact{
-			DB:    "runtime",
-			Table: "tenant_hostnames",
-			Op:    "upsert",
-			Rows:  []map[string]any{row},
-		}
-		ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/tenant_hostnames/%s", h.id), art)
+		pending = append(pending, pendingHostEvent{
+			tenantID: tid,
+			key:      fmt.Sprintf("rows/tenant_hostnames/%s", id),
+			art: controlevent.RowsArtifact{
+				DB:    "runtime",
+				Table: "tenant_hostnames",
+				Op:    "upsert",
+				Rows:  []map[string]any{row},
+			},
+		})
+	}
+	return pending, rows.Err()
+}
+
+// publishHostEventsInTx uploads each pending artifact and appends its
+// hostname.bound event to the SAME tx — the pre-refactor behavior, kept for
+// the low-volume direct callers. NOTE: this spans R2 round trips inside the
+// caller's tx; do not add new callers — collect + publishHostEvents instead.
+func (c *Controller) publishHostEventsInTx(ctx context.Context, tx *sql.Tx, pending []pendingHostEvent) error {
+	for _, p := range pending {
+		ref, sum, _, err := c.fleetUploadArtifact(ctx, p.key, p.art)
 		if err != nil {
-			return fmt.Errorf("upload zone hostname %s: %w", h.id, err)
+			return fmt.Errorf("upload %s: %w", p.key, err)
 		}
 		if _, err := c.fleetQueueEvent(ctx, tx,
-			controlevent.TypeHostnameBound, h.tenantID, "", 0, 0, ref, sum); err != nil {
-			return fmt.Errorf("queue zone hostname %s: %w", h.id, err)
+			controlevent.TypeHostnameBound, p.tenantID, "", 0, 0, ref, sum); err != nil {
+			return fmt.Errorf("queue %s: %w", p.key, err)
 		}
 	}
 	return nil
+}
+
+// publishHostEvents is the post-commit half of the collect/publish split:
+// upload every pending artifact, THEN append all the hostname.bound events
+// in one short fresh tx — upload-before-append holds per event, so a
+// committed event never lacks its artifact. A crash between the caller's
+// commit and this publish leaves the mutation without its fleet event —
+// SQLite-fleet drift only (shared-Postgres nodes read the rows directly and
+// reload on the accompanying stack.activated event), healed by
+// `txco fleet resync`.
+func (c *Controller) publishHostEvents(ctx context.Context, pending []pendingHostEvent) error {
+	if len(pending) == 0 || !c.fleetEnabled() {
+		return nil
+	}
+	type uploaded struct {
+		p        pendingHostEvent
+		ref, sum string
+	}
+	ups := make([]uploaded, 0, len(pending))
+	for _, p := range pending {
+		ref, sum, _, err := c.fleetUploadArtifact(ctx, p.key, p.art)
+		if err != nil {
+			return fmt.Errorf("upload %s: %w", p.key, err)
+		}
+		ups = append(ups, uploaded{p: p, ref: ref, sum: sum})
+	}
+	tx, err := c.pu.RuntimeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin host-event tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	for _, u := range ups {
+		if _, err := c.fleetQueueEvent(ctx, tx,
+			controlevent.TypeHostnameBound, u.p.tenantID, "", 0, 0, u.ref, u.sum); err != nil {
+			return fmt.Errorf("queue %s: %w", u.p.key, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // queueStructuredHostnameUpserts ships the auto-minted structured-host-suffix
@@ -345,8 +413,20 @@ func (c *Controller) queueZoneHostnameUpserts(ctx context.Context, tx *sql.Tx, t
 // NOT-NULL-DEFAULT-” column. Mirrors hostnameToRow's column set so the key
 // survives on data-plane nodes.
 func (c *Controller) queueStructuredHostnameUpserts(ctx context.Context, tx *sql.Tx, tenantID, stack string) error {
+	pending, err := c.collectStructuredHostUpserts(ctx, tx, tenantID, stack)
+	if err != nil {
+		return err
+	}
+	return c.publishHostEventsInTx(ctx, tx, pending)
+}
+
+// collectStructuredHostUpserts is collectZoneHostUpserts for the
+// structured-suffix hosts (created_by = system:structured-host), carrying
+// the per-host DKIM columns the consumer's INSERT OR REPLACE must not blank.
+// SQL only; no uploads. Empty when fleet sync is off.
+func (c *Controller) collectStructuredHostUpserts(ctx context.Context, tx *sql.Tx, tenantID, stack string) ([]pendingHostEvent, error) {
 	if !c.fleetEnabled() {
-		return nil
+		return nil, nil
 	}
 	q := `SELECT id, hostname, tenant_id, stack, created_at, created_by, verified_at,
 	             dkim_selector, dkim_private_pem, dkim_public_b64
@@ -359,61 +439,47 @@ func (c *Controller) queueStructuredHostnameUpserts(ctx context.Context, tx *sql
 	}
 	rows, err := tx.QueryContext(ctx, c.rb(q), args...)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	type hostRow struct {
-		id, hostname, tenantID, stack, createdAt, createdBy string
-		dkimSelector, dkimPrivatePEM, dkimPublicB64         string
-		verifiedAt                                          sql.NullString
-	}
-	var collected []hostRow
+	defer rows.Close()
+	var pending []pendingHostEvent
 	for rows.Next() {
-		var h hostRow
-		if err := rows.Scan(&h.id, &h.hostname, &h.tenantID, &h.stack,
-			&h.createdAt, &h.createdBy, &h.verifiedAt,
-			&h.dkimSelector, &h.dkimPrivatePEM, &h.dkimPublicB64); err != nil {
-			rows.Close()
-			return err
+		var (
+			id, hostname, tid, stk, createdAt, createdBy string
+			dkimSelector, dkimPrivatePEM, dkimPublicB64  string
+			verifiedAt                                   sql.NullString
+		)
+		if err := rows.Scan(&id, &hostname, &tid, &stk,
+			&createdAt, &createdBy, &verifiedAt,
+			&dkimSelector, &dkimPrivatePEM, &dkimPublicB64); err != nil {
+			return nil, err
 		}
-		collected = append(collected, h)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, h := range collected {
 		row := map[string]any{
-			"id":               h.id,
-			"hostname":         h.hostname,
-			"tenant_id":        h.tenantID,
-			"stack":            h.stack,
-			"created_at":       h.createdAt,
-			"created_by":       h.createdBy,
-			"dkim_selector":    h.dkimSelector,
-			"dkim_private_pem": h.dkimPrivatePEM,
-			"dkim_public_b64":  h.dkimPublicB64,
+			"id":               id,
+			"hostname":         hostname,
+			"tenant_id":        tid,
+			"stack":            stk,
+			"created_at":       createdAt,
+			"created_by":       createdBy,
+			"dkim_selector":    dkimSelector,
+			"dkim_private_pem": dkimPrivatePEM,
+			"dkim_public_b64":  dkimPublicB64,
 		}
-		if h.verifiedAt.Valid && h.verifiedAt.String != "" {
-			row["verified_at"] = h.verifiedAt.String
+		if verifiedAt.Valid && verifiedAt.String != "" {
+			row["verified_at"] = verifiedAt.String
 		}
-		art := controlevent.RowsArtifact{
-			DB:    "runtime",
-			Table: "tenant_hostnames",
-			Op:    "upsert",
-			Rows:  []map[string]any{row},
-		}
-		ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/tenant_hostnames/%s", h.id), art)
-		if err != nil {
-			return fmt.Errorf("upload structured hostname %s: %w", h.id, err)
-		}
-		if _, err := c.fleetQueueEvent(ctx, tx,
-			controlevent.TypeHostnameBound, h.tenantID, "", 0, 0, ref, sum); err != nil {
-			return fmt.Errorf("queue structured hostname %s: %w", h.id, err)
-		}
+		pending = append(pending, pendingHostEvent{
+			tenantID: tid,
+			key:      fmt.Sprintf("rows/tenant_hostnames/%s", id),
+			art: controlevent.RowsArtifact{
+				DB:    "runtime",
+				Table: "tenant_hostnames",
+				Op:    "upsert",
+				Rows:  []map[string]any{row},
+			},
+		})
 	}
-	return nil
+	return pending, rows.Err()
 }
 
 // zoneToRow projects a DNSZone onto the JSON-row shape the consumer's

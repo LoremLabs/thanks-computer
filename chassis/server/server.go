@@ -1351,11 +1351,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 
 	// `txco://sendmail`: render + submit an outbound email from the
 	// `_sendmail` envelope contract a rule assembled. Struct-based op (needs
-	// the real runtime DB for the campaign guard + From-domain check, the
-	// usage sink, and the relay config). The closure passes the PINNED tenant
-	// (processor.TenantScope) — the From-domain anti-spoof check must not
-	// trust the mutable `_txc.tenant` envelope field.
-	mailer := mail.NewMailer(pu.RuntimeDB, pu.RuntimeDialect, pu.Usage, logger, mail.Config{
+	// the real runtime DB for the campaign guard, the mirror snapshot for the
+	// per-send From-domain/DKIM reads, the usage sink, and the relay config).
+	// The closure passes the PINNED tenant (processor.TenantScope) — the
+	// From-domain anti-spoof check must not trust the mutable `_txc.tenant`
+	// envelope field.
+	mailer := mail.NewMailer(pu.RuntimeDB, pu.RuntimeDialect, pu.Dbc.Snapshot, pu.Usage, logger, mail.Config{
 		RelayAddr:     conf.MailRelayAddr,
 		RelayTLS:      conf.MailRelayTLS,
 		DialTimeout:   time.Duration(conf.MailDialTimeoutMS) * time.Millisecond,

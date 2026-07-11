@@ -44,6 +44,7 @@ type Config struct {
 type Mailer struct {
 	db            *sql.DB
 	dialect       registry.Dialect // runtime DB dialect; nil ⇒ SQLite (see dia)
+	snap          func() *sql.DB   // dbcache mirror snapshot getter; nil ⇒ read m.db
 	usage         usage.Sink
 	log           *zap.Logger
 	maxRecipients int
@@ -55,8 +56,11 @@ type Mailer struct {
 
 // NewMailer builds a Mailer. db must be the real runtime DB (e.g.
 // pu.RuntimeDB) and dialect its DB dialect (pu.RuntimeDialect) so the runtime
-// queries rebind for Postgres; usage/log may be nil.
-func NewMailer(db *sql.DB, dialect registry.Dialect, u usage.Sink, log *zap.Logger, cfg Config) *Mailer {
+// queries rebind for Postgres. snap is the dbcache mirror snapshot getter
+// (pu.Dbc.Snapshot) used for the per-send verification READS — pass the
+// method value, never a captured *sql.DB (Reload swaps the handle); nil falls
+// back to db. usage/log may be nil.
+func NewMailer(db *sql.DB, dialect registry.Dialect, snap func() *sql.DB, u usage.Sink, log *zap.Logger, cfg Config) *Mailer {
 	max := cfg.MaxRecipients
 	if max <= 0 {
 		max = 50
@@ -64,6 +68,7 @@ func NewMailer(db *sql.DB, dialect registry.Dialect, u usage.Sink, log *zap.Logg
 	return &Mailer{
 		db:            db,
 		dialect:       dialect,
+		snap:          snap,
 		usage:         u,
 		log:           log,
 		maxRecipients: max,
@@ -85,6 +90,25 @@ func (m *Mailer) dia() registry.Dialect {
 }
 
 func (m *Mailer) rb(q string) string { return m.dia().Rebind(q) }
+
+// readDB returns the handle + dialect for the per-send verification READS
+// (From-domain ownership, DKIM keys): the dbcache mirror snapshot when wired.
+// tenant_hostnames / dns_zones / tenants are fully mirrored, and on a
+// Postgres runtime these reads ran per-recipient over the network — the
+// dominant per-email DB cost. The mirror is ALWAYS SQLite, so mirror reads
+// use the SQLite dialect regardless of m.dialect; the campaign claim/mark
+// WRITES stay on m.db. Freshness: a hostname verify or DKIM key reaches the
+// mirror via the reload the mutating admin endpoint (or its control event)
+// already triggers — same propagation the fleet had on SQLite. Falls back to
+// the runtime DB when no snapshot getter is wired (tests, zero-value Mailer).
+func (m *Mailer) readDB() (*sql.DB, registry.Dialect) {
+	if m.snap != nil {
+		if db := m.snap(); db != nil {
+			return db, registry.SQLite
+		}
+	}
+	return m.db, m.dia()
+}
 
 type recipient struct {
 	addr    mail.Address

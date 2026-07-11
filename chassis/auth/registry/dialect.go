@@ -73,6 +73,14 @@ type Dialect interface {
 	// Empty on
 	// SQLite means the query text is unchanged.
 	LockClause() string
+
+	// SkipLockedClause returns the competing-consumer claim suffix for the
+	// subselect feeding a claim UPDATE. Postgres returns
+	// " FOR UPDATE SKIP LOCKED" — rows another claimer holds are skipped,
+	// not waited on, so concurrent pollers partition the due set. SQLite
+	// returns "" (single writer; a status guard on the UPDATE is the race
+	// protection, and the whole statement is atomic anyway).
+	SkipLockedClause() string
 }
 
 // SQLite is the default dialect — identity placeholders, error-string
@@ -148,6 +156,9 @@ func (sqliteDialect) BeginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error
 // LockClause: empty — SQLite has no row lock (nor `FOR UPDATE`); the whole-DB
 // RESERVED lock serializes writers, so appending "" leaves the SQL unchanged.
 func (sqliteDialect) LockClause() string { return "" }
+
+// SkipLockedClause: empty — same reasoning as LockClause.
+func (sqliteDialect) SkipLockedClause() string { return "" }
 
 // --- Postgres ---------------------------------------------------------
 
@@ -283,6 +294,11 @@ func (postgresDialect) BeginWrite(ctx context.Context, db *sql.DB) (*sql.Tx, err
 // LockClause: `FOR UPDATE` — a pessimistic row lock that blocks concurrent
 // writers under READ COMMITTED instead of aborting them.
 func (postgresDialect) LockClause() string { return " FOR UPDATE" }
+
+// SkipLockedClause: the canonical Postgres work-queue claim — matched rows
+// are locked for the statement; rows already locked by a competing claimer
+// are skipped instead of waited on.
+func (postgresDialect) SkipLockedClause() string { return " FOR UPDATE SKIP LOCKED" }
 
 // itoa is a tiny strconv.Itoa to avoid the import churn for a 1-2 digit
 // placeholder index (queries never have hundreds of params).

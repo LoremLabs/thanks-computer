@@ -135,58 +135,50 @@ func (s *Store) Cancel(ctx context.Context, tenant, idempotencyKey string) (bool
 	return n > 0, nil
 }
 
-// ClaimDue selects due pending rows (schedule_at <= now) and claims each with
-// an atomic conditional UPDATE; it returns only the rows this call won
-// (rows-affected==1). Two pollers racing the same candidate is safe: the
-// loser's UPDATE matches 0 rows. attempts is bumped on each claim.
+// ClaimDue claims up to limit due pending rows (schedule_at <= now) in ONE
+// statement and returns the rows this call won. The subselect picks the due
+// set, the UPDATE flips it, RETURNING hands back the claimed rows.
 //
-// Correctness here comes purely from the conditional UPDATE, which is
-// dialect-neutral and holds whether one or many pollers run. A SELECT …
-// FOR UPDATE SKIP LOCKED could cut contention but would need the SELECT +
-// UPDATE in one tx; deferred as an optimisation (correct-but-simple first).
+// The previous shape — SELECT candidates, then one conditional UPDATE per
+// row — was correct but paid one network round trip per candidate on a
+// shared Postgres store (~5s at 200 due rows, all before the first event
+// fired), and competing pollers each burned the full round-trip count
+// racing for the same rows. Now: on Postgres the subselect takes FOR UPDATE
+// SKIP LOCKED, so concurrent pollers partition the due set without waiting;
+// on SQLite the clause is empty and the single statement is atomic under
+// the single writer. The redundant status guard on the outer UPDATE is a
+// belt for any plan shape — a row can never be claimed twice.
 func (s *Store) ClaimDue(ctx context.Context, node string, limit int) ([]Claimed, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	nowStr := s.now().Format(time.RFC3339)
 	rows, err := s.db.QueryContext(ctx, s.rb(
-		`SELECT id, tenant, idempotency_key, payload
-		   FROM scheduled_events
-		  WHERE status = 'pending' AND schedule_at <= ?
-		  ORDER BY schedule_at
-		  LIMIT ?`), nowStr, limit)
+		`UPDATE scheduled_events
+		    SET status = 'claimed', claimed_by = ?, claimed_at = ?, attempts = attempts + 1
+		  WHERE status = 'pending'
+		    AND id IN (SELECT id FROM scheduled_events
+		                WHERE status = 'pending' AND schedule_at <= ?
+		                ORDER BY schedule_at
+		                LIMIT ?`+s.dialect.SkipLockedClause()+`)
+		  RETURNING id, tenant, idempotency_key, payload`),
+		node, nowStr, nowStr, limit)
 	if err != nil {
-		return nil, fmt.Errorf("scheduled: select due: %w", err)
+		return nil, fmt.Errorf("scheduled: claim due: %w", err)
 	}
-	var cands []Claimed
+	defer rows.Close()
+	var won []Claimed
 	for rows.Next() {
 		var c Claimed
 		var pl string
 		if err := rows.Scan(&c.ID, &c.Tenant, &c.IdempotencyKey, &pl); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scheduled: scan due: %w", err)
+			return won, fmt.Errorf("scheduled: scan claimed: %w", err)
 		}
 		c.Payload = json.RawMessage(pl)
-		cands = append(cands, c)
+		won = append(won, c)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("scheduled: due rows: %w", err)
-	}
-
-	var won []Claimed
-	for _, c := range cands {
-		res, err := s.db.ExecContext(ctx, s.rb(
-			`UPDATE scheduled_events
-			    SET status = 'claimed', claimed_by = ?, claimed_at = ?, attempts = attempts + 1
-			  WHERE id = ? AND status = 'pending'`),
-			node, nowStr, c.ID)
-		if err != nil {
-			return won, fmt.Errorf("scheduled: claim %s: %w", c.ID, err)
-		}
-		if n, _ := res.RowsAffected(); n == 1 {
-			won = append(won, c)
-		}
+		return won, fmt.Errorf("scheduled: claimed rows: %w", err)
 	}
 	return won, nil
 }

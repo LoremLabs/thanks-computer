@@ -245,6 +245,8 @@ func Run(bi BuildInfo) int {
 	//
 	// See internal docs/todo-secret-store.md §3 + docs/runbook-secret-store.md.
 	var secretsResolver *secrets.Resolver
+	var secretsStore *secrets.Store
+	var mirrorSnap func() *sql.DB // dbcache mirror getter; assigned after dbc is built
 	if conf.SecretMasterKeyPath != "" || conf.SecretMasterKeyB64 != "" {
 		// A fleet-shared inline key (TXCO_SECRET_MASTER_KEY_B64) takes
 		// precedence over the per-node auto-minted file: it's what makes
@@ -268,14 +270,26 @@ func Run(bi BuildInfo) int {
 				zap.String("err", mkErr.Error()))
 		} else {
 			store := secrets.NewStoreWithDialect(runtimeDB, mk, registry.DialectForDSN(conf.DbRuntimeDsn))
-			// Slug→id lookup against the same runtime DB. Used by the
-			// processor splice (PR 3), which has the tenant SLUG pinned
-			// on context but needs the tenant_id (hxid) to query the
-			// secret store.
+			secretsStore = store
+			// Slug→id lookup for the processor splice (PR 3), which has
+			// the tenant SLUG pinned on context but needs the tenant_id
+			// (hxid) to query the secret store. A covered point read —
+			// served from the in-memory mirror (mirrorSnap is assigned
+			// once the dbcache exists below; boot is single-threaded
+			// until Serve, and this closure only runs per request). On a
+			// Postgres runtime the authoritative read was a WAN round
+			// trip on every secret-using op. The runtime-DB fallback
+			// covers a nil/not-yet-built mirror.
 			slugToID := func(ctx context.Context, slug string) (string, error) {
+				db, dia := runtimeDB, runtimeDialect
+				if mirrorSnap != nil {
+					if s := mirrorSnap(); s != nil {
+						db, dia = s, registry.SQLite // the mirror is always SQLite
+					}
+				}
 				var id string
-				err := runtimeDB.QueryRowContext(ctx,
-					runtimeDialect.Rebind(`SELECT tenant_id FROM tenants WHERE slug = ? AND revoked_at IS NULL`),
+				err := db.QueryRowContext(ctx,
+					dia.Rebind(`SELECT tenant_id FROM tenants WHERE slug = ? AND revoked_at IS NULL`),
 					slug).Scan(&id)
 				if err != nil {
 					return "", fmt.Errorf("tenant slug %q not found: %w", slug, err)
@@ -366,6 +380,23 @@ func Run(bi BuildInfo) int {
 		logger.Fatal("db cache load error", zap.String("err", err.Error()))
 	}
 	go dbc.Watch()
+
+	// Late-bind the mirror to the secrets wiring above (the dbcache didn't
+	// exist when the resolver was built; boot stays single-threaded until
+	// Serve). The reload hook flushes the store's encrypted-materialize
+	// cache so secret writes from OTHER nodes — which always arrive via the
+	// control feed and trigger a reload — invalidate within a poll cycle.
+	mirrorSnap = dbc.Snapshot
+	if secretsStore != nil {
+		prevOnReload := dbc.OnReload
+		dbc.OnReload = func(db *sql.DB) error {
+			secretsStore.FlushMaterializeCache()
+			if prevOnReload != nil {
+				return prevOnReload(db)
+			}
+			return nil
+		}
+	}
 
 	// Hot-reload of system opstacks is dev-only (txco serve stays
 	// static after boot). txco dev sets --system-opstacks-watch.

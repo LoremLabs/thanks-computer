@@ -70,6 +70,11 @@ type Store struct {
 
 	// now is a clock seam for tests. Defaults to time.Now.UTC.
 	now func() time.Time
+
+	// mat is the encrypted-materialize cache (see matcache.go). Zero
+	// value is usable; FlushMaterializeCache is the external hook
+	// (wired to the dbcache reload in app.go).
+	mat materializeCache
 }
 
 // NewStore builds a Store against the given runtime *sql.DB and
@@ -214,6 +219,9 @@ func (s *Store) CreateSecret(ctx context.Context,
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("secrets: commit: %w", err)
 	}
+	// A create can shadow a tenant-wide entry cached under a stack key
+	// (scope fallback) — drop everything, writes are rare.
+	s.mat.flush()
 
 	return meta, nil
 }
@@ -341,30 +349,66 @@ func (s *Store) MaterializeSecretForOp(ctx context.Context,
 		return nil, nil, fmt.Errorf("secrets: no master key configured")
 	}
 
+	// 0. Cache hit: decrypt the cached ciphertext locally — zero round
+	// trips. A decrypt failure (e.g. the master key changed under us)
+	// drops the entry and falls through to a fresh authoritative read.
+	key := matKey(tenantID, stack, name)
+	if e, ok := s.mat.get(key, s.clock()); ok {
+		if pt, derr := s.decryptEncrypted(&e.meta, &e.es); derr == nil {
+			m := e.meta
+			return pt, &m, nil
+		}
+		s.mat.drop(key)
+	}
+
 	// 1. Try stack-scoped first if a stack is provided.
 	if stack != "" {
 		if meta, err := s.lookupMetadataExact(ctx, tenantID, &stack, name); err == nil {
-			pt, derr := s.decryptActive(ctx, meta)
-			if derr != nil {
-				return nil, nil, derr
-			}
-			return pt, meta, nil
+			return s.materializeAndCache(ctx, key, meta)
 		} else if !errors.Is(err, ErrSecretNotFound) {
 			return nil, nil, err
 		}
 		// fall through to tenant-wide
 	}
 
-	// 2. Tenant-wide fallback.
+	// 2. Tenant-wide fallback. The cache key is the REQUESTED scope, so
+	// a fallback result memoizes under the (tenant, stack, name) the op
+	// asked for — a later stack-scoped create is a write and flushes.
 	meta, err := s.lookupMetadataExact(ctx, tenantID, nil, name)
 	if err != nil {
 		return nil, nil, err
 	}
-	pt, err := s.decryptActive(ctx, meta)
+	return s.materializeAndCache(ctx, key, meta)
+}
+
+// materializeAndCache loads + decrypts the active version for meta and, on
+// success, caches the ENCRYPTED material under key for later hits.
+func (s *Store) materializeAndCache(ctx context.Context, key string, meta *SecretMetadata) ([]byte, *SecretMetadata, error) {
+	es, err := s.fetchActiveEncrypted(ctx, meta)
 	if err != nil {
 		return nil, nil, err
 	}
+	pt, err := s.decryptEncrypted(meta, es)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.mat.set(key, matEntry{meta: *meta, es: *es, at: s.clock()})
 	return pt, meta, nil
+}
+
+// FlushMaterializeCache drops every cached encrypted-materialize entry.
+// Wired to the dbcache reload hook so secret writes from OTHER nodes
+// (which always ride the control feed → reload) invalidate promptly;
+// this Store's own write methods call it directly after commit.
+func (s *Store) FlushMaterializeCache() { s.mat.flush() }
+
+// clock returns the store's time source, tolerating a zero-value Store
+// (tests construct these) whose now seam was never set.
+func (s *Store) clock() time.Time {
+	if s.now == nil {
+		return time.Now().UTC()
+	}
+	return s.now()
 }
 
 // RevealSecretValue is the break-glass Go hook for high-trust paths.
@@ -440,6 +484,7 @@ func (s *Store) UpdateSecretDescription(ctx context.Context,
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("secrets: commit: %w", err)
 	}
+	s.mat.flush()
 	return s.lookupMetadataExact(ctx, tenantID, stack, name)
 }
 
@@ -570,6 +615,7 @@ func (s *Store) RotateSecret(ctx context.Context,
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("secrets: commit rotate: %w", err)
 	}
+	s.mat.flush()
 
 	return s.lookupMetadataExact(ctx, tenantID, stack, name)
 }
@@ -643,7 +689,11 @@ func (s *Store) RevokeSecret(ctx context.Context,
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.mat.flush()
+	return nil
 }
 
 // --- helpers ---
@@ -696,6 +746,16 @@ func (s *Store) lookupMetadataExactVia(ctx context.Context, q rowQueryer,
 
 // decryptActive loads the active version row for meta and decrypts.
 func (s *Store) decryptActive(ctx context.Context, meta *SecretMetadata) ([]byte, error) {
+	es, err := s.fetchActiveEncrypted(ctx, meta)
+	if err != nil {
+		return nil, err
+	}
+	return s.decryptEncrypted(meta, es)
+}
+
+// fetchActiveEncrypted loads the active version row for meta — the
+// cacheable, round-trip half of decryptActive.
+func (s *Store) fetchActiveEncrypted(ctx context.Context, meta *SecretMetadata) (*EncryptedSecret, error) {
 	var nonce, ciphertext, wrappedDEK, dekNonce []byte
 	err := s.queryRow(ctx, `
 		SELECT nonce, ciphertext, wrapped_dek, dek_nonce
@@ -708,13 +768,18 @@ func (s *Store) decryptActive(ctx context.Context, meta *SecretMetadata) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("secrets: load version: %w", err)
 	}
-	es := &EncryptedSecret{
+	return &EncryptedSecret{
 		Nonce:      nonce,
 		Ciphertext: ciphertext,
 		WrappedDEK: wrappedDEK,
 		DEKNonce:   dekNonce,
 		KeyVersion: meta.KeyVersion,
-	}
+	}, nil
+}
+
+// decryptEncrypted is the pure-local half: AAD-bound decrypt of es under
+// meta's row identity. No DB access — safe to run on cached material.
+func (s *Store) decryptEncrypted(meta *SecretMetadata, es *EncryptedSecret) ([]byte, error) {
 	return Decrypt(s.MK, es,
 		outerAAD(meta.TenantID, meta.SecretID, meta.VersionNo, meta.Name, meta.KeyVersion),
 		innerAAD(meta.TenantID, meta.SecretID, meta.VersionNo, meta.KeyVersion))

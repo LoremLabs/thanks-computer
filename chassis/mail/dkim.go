@@ -22,7 +22,8 @@ import (
 // survives the relay's header re-folding; the relay only adds unsigned
 // headers (Received), leaving the signed set + body intact.
 func (m *Mailer) dkimSign(ctx context.Context, fromDomain string, msg []byte) []byte {
-	origin, selector, privPEM, ok, err := tenants.DKIMSignerForDomain(ctx, m.db, fromDomain, m.dia())
+	db, dia := m.readDB() // mirror read — runs per recipient, keys are mirrored
+	origin, selector, privPEM, ok, err := tenants.DKIMSignerForDomain(ctx, db, fromDomain, dia)
 	if err != nil {
 		if m.log != nil {
 			m.log.Warn("sendmail: DKIM key lookup failed", zap.String("domain", fromDomain), zap.Error(err))

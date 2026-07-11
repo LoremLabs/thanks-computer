@@ -13,14 +13,16 @@ import (
 // tenant `slug`: either a non-revoked hostname with verified_at set, OR a
 // domain we serve authoritative DNS for (an active dns_zones row — delegation
 // is itself proof of control, so no separate verify step). Anti-spoof guard:
-// a tenant may only send as a domain it owns. Reads the real runtime DB.
+// a tenant may only send as a domain it owns. Reads the mirror snapshot (see
+// readDB) — these tables are fully mirrored and this runs on every send.
 func (m *Mailer) fromDomainVerified(ctx context.Context, slug, domain string) (bool, error) {
 	if slug == "" || domain == "" {
 		return false, nil
 	}
+	db, dia := m.readDB()
 	var verifiedAt sql.NullString
-	err := m.db.QueryRowContext(ctx,
-		m.rb(`SELECT h.verified_at
+	err := db.QueryRowContext(ctx,
+		dia.Rebind(`SELECT h.verified_at
 		   FROM tenant_hostnames h
 		   JOIN tenants t ON t.tenant_id = h.tenant_id
 		  WHERE h.hostname = ? AND t.slug = ?
@@ -37,7 +39,7 @@ func (m *Mailer) fromDomainVerified(ctx context.Context, slug, domain string) (b
 		}
 	}
 	// We serve DNS for this domain (apex or subdomain) ⟹ verified.
-	return tenants.DomainCoveredByZone(ctx, m.db, slug, domain, m.dia())
+	return tenants.DomainCoveredByZone(ctx, db, slug, domain, dia)
 }
 
 // domainOf extracts the lowercased domain from a bare email address
