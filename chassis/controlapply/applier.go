@@ -489,7 +489,7 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO stack_files (version_id, path, content, content_hash) VALUES (?, ?, ?, ?)`,
-			versionID, f.Path, content, hash); err != nil {
+			versionID, f.Path, []byte(content), hash); err != nil {
 			return fmt.Errorf("insert file %s: %w", f.Path, err)
 		}
 	}

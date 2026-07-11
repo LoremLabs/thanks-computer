@@ -1634,9 +1634,12 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		if hash == "" && f.Content != "" {
 			hash = sha256Hex(f.Content)
 		}
+		// content binds as []byte: on the Postgres runtime the column is BYTEA
+		// (raw binary; PG has no implicit text→bytea cast), on SQLite it lands
+		// as BLOB — reads, length() and hashing are byte-identical either way.
 		if _, err := tx.ExecContext(r.Context(),
 			c.rb(`INSERT INTO stack_files (version_id, path, content, content_hash)
-			 VALUES (?, ?, ?, ?)`), versionID, f.Path, f.Content, hash); err != nil {
+			 VALUES (?, ?, ?, ?)`), versionID, f.Path, []byte(f.Content), hash); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "insert_file",
 				map[string]any{"path": f.Path, "err": err.Error()})
 			return
@@ -2687,7 +2690,7 @@ func (c *Controller) handlePatchDraftFile(w http.ResponseWriter, r *http.Request
 		newHash := sha256Hex(req.Content)
 		if _, err := tx.ExecContext(r.Context(),
 			c.rb(`INSERT INTO stack_files (version_id, path, content, content_hash) VALUES (?, ?, ?, ?)`),
-			versionID, req.Path, req.Content, newHash); err != nil {
+			versionID, req.Path, []byte(req.Content), newHash); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "insert_file", map[string]any{"err": err.Error()})
 			return
 		}
@@ -2714,7 +2717,7 @@ func (c *Controller) handlePatchDraftFile(w http.ResponseWriter, r *http.Request
 		newHash := sha256Hex(req.Content)
 		if _, err := tx.ExecContext(r.Context(),
 			c.rb(`UPDATE stack_files SET content = ?, content_hash = ? WHERE version_id = ? AND path = ?`),
-			req.Content, newHash, versionID, req.Path); err != nil {
+			[]byte(req.Content), newHash, versionID, req.Path); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "update_file", map[string]any{"err": err.Error()})
 			return
 		}
