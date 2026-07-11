@@ -160,15 +160,29 @@
             L.LABEL_W + widestRow + 32
         )
         const cssH = canvasHeight(L)
+        // Clamp the backing bitmap to what the browser can actually allocate.
+        // WebKit caps a canvas at ~8k–16k px per side AND a total area (~16 MP
+        // on Safari); exceed either and the canvas silently renders blank. A
+        // tall stack (www ≈ 5584×17328 CSS px) at 2× dpr = 11168×34656 ≈ 387 MP,
+        // far over the limit. Scale the resolution down (below dpr, even below 1
+        // for very tall stacks) so it always renders — trading sharpness on huge
+        // diagrams for a non-blank canvas. The SAME scale drives setTransform, so
+        // every draw + the hit rects below stay in CSS-pixel coordinates.
+        const MAX_SIDE = 8192
+        const MAX_AREA = 16_777_216 // 16 MP; conservative for Safari
         const dpr = window.devicePixelRatio || 1
-        canvasEl.width = Math.floor(cssW * dpr)
-        canvasEl.height = Math.floor(cssH * dpr)
+        const scale = Math.max(
+            0.01,
+            Math.min(dpr, MAX_SIDE / cssW, MAX_SIDE / cssH, Math.sqrt(MAX_AREA / (cssW * cssH)))
+        )
+        canvasEl.width = Math.max(1, Math.floor(cssW * scale))
+        canvasEl.height = Math.max(1, Math.floor(cssH * scale))
         canvasEl.style.width = cssW + 'px'
         canvasEl.style.height = cssH + 'px'
 
         const ctx = canvasEl.getContext('2d')
         if (!ctx) return
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.setTransform(scale, 0, 0, scale, 0, 0)
         ctx.clearRect(0, 0, cssW, cssH)
 
         const spineX = (L.LABEL_X + L.LABEL_W + cssW) / 2
