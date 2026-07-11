@@ -52,9 +52,9 @@ func (c *Controller) handleListOps(w http.ResponseWriter, r *http.Request) {
 			`SELECT stack, scope, name, txcl, mock_req, mock_res FROM ops ORDER BY stack, scope, name, txcl`)
 	} else {
 		rows, err = c.pu.RuntimeDB.QueryContext(r.Context(),
-			`SELECT stack, scope, name, txcl, mock_req, mock_res FROM ops
+			c.rb(`SELECT stack, scope, name, txcl, mock_req, mock_res FROM ops
 			 WHERE stack = ? OR stack LIKE ?
-			 ORDER BY stack, scope, name, txcl`,
+			 ORDER BY stack, scope, name, txcl`),
 			prefix, prefix+"/%")
 	}
 	if err != nil {

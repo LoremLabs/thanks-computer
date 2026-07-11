@@ -139,7 +139,7 @@ func (c *Controller) missingVectorPacks(ctx context.Context, tenantID, storeKey,
 func (c *Controller) loadStorePacks(
 	ctx context.Context, tenantID, stack string, versionNumber int64, onlyPaths map[string]struct{},
 ) ([]storeseed.RawPack, error) {
-	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, c.rb(`
 		SELECT sf.path, sf.content, sf.content_hash
 		  FROM stack_files sf
 		  JOIN stack_versions sv ON sf.version_id = sv.version_id
@@ -147,7 +147,7 @@ func (c *Controller) loadStorePacks(
 		 WHERE s.tenant_id = ?
 		   AND s.name = ?
 		   AND sv.version_number = ?
-		 ORDER BY sf.path`,
+		 ORDER BY sf.path`),
 		tenantID, stack, versionNumber)
 	if err != nil {
 		return nil, err
@@ -235,13 +235,13 @@ func (c *Controller) changedPackPaths(
 func (c *Controller) packHashes(
 	ctx context.Context, tenantID, stack string, version int64,
 ) (map[string]string, error) {
-	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, c.rb(`
 		SELECT sf.path, sf.content, sf.content_hash
 		  FROM stack_files sf
 		  JOIN stack_versions sv ON sf.version_id = sv.version_id
 		  JOIN stacks s          ON sv.stack_id = s.stack_id
 		 WHERE s.tenant_id = ? AND s.name = ? AND sv.version_number = ?
-		   AND (sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%')`,
+		   AND (sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%')`),
 		tenantID, stack, version)
 	if err != nil {
 		return nil, err

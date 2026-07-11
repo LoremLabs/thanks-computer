@@ -198,8 +198,8 @@ func (c *Controller) validateDatasetMembers(ctx context.Context, members []datas
 // the gate wants to report per-path.
 func (c *Controller) deepValidateDatasets(ctx context.Context, versionID int64) []datasetIssue {
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
-		`SELECT path, content, content_hash FROM stack_files
-		  WHERE version_id = ? AND path LIKE ? ORDER BY path`,
+		c.rb(`SELECT path, content, content_hash FROM stack_files
+		  WHERE version_id = ? AND path LIKE ? ORDER BY path`),
 		versionID, dataset.Dir+"/%")
 	if err != nil {
 		return []datasetIssue{{Path: dataset.Dir + "/", Err: fmt.Sprintf("load dataset rows: %v", err)}}
@@ -228,13 +228,13 @@ func (c *Controller) WarmDatasets(ctx context.Context, tenantID, stackName strin
 	if c.dsCache == nil || c.fcas == nil {
 		return
 	}
-	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, c.rb(`
 		SELECT sf.path, sf.content_hash
 		  FROM stack_files sf
 		  JOIN stack_versions sv ON sf.version_id = sv.version_id
 		  JOIN stacks s          ON sv.stack_id = s.stack_id
 		 WHERE s.tenant_id = ? AND s.name = ? AND sv.version_number = ?
-		   AND sf.path LIKE ?`,
+		   AND sf.path LIKE ?`),
 		tenantID, stackName, versionNumber, dataset.Dir+"/%")
 	if err != nil {
 		c.pu.Logger.Warn("dataset warm: list members", zap.String("stack", stackName), zap.Error(err))

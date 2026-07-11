@@ -305,12 +305,19 @@ func (dbc *DbCache) Reload() error {
 	if bctx == nil {
 		bctx = context.Background()
 	}
-	loader, ok := lookupLoader(dbc.loaderName)
+	// A DbCache built via New() always has a loaderName; a zero-value or
+	// directly-constructed one (tests) has "" — default it to the built-in
+	// SQLite loader (open-core's only source), so Reload() works without New().
+	name := dbc.loaderName
+	if name == "" {
+		name = "sqlite"
+	}
+	loader, ok := lookupLoader(name)
 	if !ok {
 		// Guarded at New(); defensive here so a mis-set loaderName surfaces
 		// loudly instead of a nil-call panic.
 		_ = dbNew.Close()
-		return fmt.Errorf("dbcache: mirror loader %q not registered", dbc.loaderName)
+		return fmt.Errorf("dbcache: mirror loader %q not registered", name)
 	}
 	if berr := loader(bctx, dbNew, dbc.Source); berr != nil {
 		dbc.Logger.Warn("reload cachedb load err",

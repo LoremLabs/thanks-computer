@@ -109,8 +109,8 @@ func (c *Controller) BackfillStructuredHostDKIM(ctx context.Context) (int, error
 		return 0, errors.New("dkim backfill: store not initialized (call after Start)")
 	}
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
-		`SELECT hostname FROM tenant_hostnames
-		  WHERE created_by = ? AND revoked_at IS NULL AND dkim_private_pem = ''`,
+		c.rb(`SELECT hostname FROM tenant_hostnames
+		  WHERE created_by = ? AND revoked_at IS NULL AND dkim_private_pem = ''`),
 		tenants.SystemStructuredHostCreatedBy)
 	if err != nil {
 		return 0, err
@@ -159,8 +159,8 @@ func (c *Controller) BackfillStructuredHostDKIM(ctx context.Context) (int, error
 			return keyed, terr
 		}
 		if _, uerr := tx.ExecContext(ctx,
-			`UPDATE tenant_hostnames SET dkim_selector = ?, dkim_private_pem = ?, dkim_public_b64 = ?
-			  WHERE id = ?`,
+			c.rb(`UPDATE tenant_hostnames SET dkim_selector = ?, dkim_private_pem = ?, dkim_public_b64 = ?
+			  WHERE id = ?`),
 			h.DKIMSelector, h.DKIMPrivatePEM, h.DKIMPublicB64, h.ID); uerr != nil {
 			_ = tx.Rollback()
 			return keyed, uerr
@@ -217,7 +217,7 @@ const zoneHostTSLayout = "2006-01-02T15:04:05Z"
 // head's synthesis filter (isSynthesizableStack) via isMintableStack.
 func (c *Controller) activeMintableStacks(ctx context.Context, tx *sql.Tx, tenantID string) ([]string, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT name FROM stacks WHERE tenant_id = ? AND active_version IS NOT NULL`, tenantID)
+		c.rb(`SELECT name FROM stacks WHERE tenant_id = ? AND active_version IS NOT NULL`), tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +277,7 @@ func (c *Controller) queueZoneHostnameUpserts(ctx context.Context, tx *sql.Tx, t
 		q += ` AND stack = ?`
 		args = append(args, stack)
 	}
-	rows, err := tx.QueryContext(ctx, q, args...)
+	rows, err := tx.QueryContext(ctx, c.rb(q), args...)
 	if err != nil {
 		return err
 	}
@@ -357,7 +357,7 @@ func (c *Controller) queueStructuredHostnameUpserts(ctx context.Context, tx *sql
 		q += ` AND stack = ?`
 		args = append(args, stack)
 	}
-	rows, err := tx.QueryContext(ctx, q, args...)
+	rows, err := tx.QueryContext(ctx, c.rb(q), args...)
 	if err != nil {
 		return err
 	}

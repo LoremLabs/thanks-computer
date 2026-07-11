@@ -74,7 +74,7 @@ func (c *Controller) fleetUploadArtifact(ctx context.Context, key string, payloa
 func (c *Controller) readStackFilesForArtifact(
 	ctx context.Context, tenantID, stackName string, versionNumber int64,
 ) ([]controlevent.StackArtifactFile, error) {
-	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, c.rb(`
 		SELECT sf.path, sf.content, sf.content_hash
 		  FROM stack_files sf
 		  JOIN stack_versions sv ON sf.version_id = sv.version_id
@@ -82,7 +82,7 @@ func (c *Controller) readStackFilesForArtifact(
 		 WHERE s.tenant_id = ?
 		   AND s.name = ?
 		   AND sv.version_number = ?
-		 ORDER BY sf.path`,
+		 ORDER BY sf.path`),
 		tenantID, stackName, versionNumber)
 	if err != nil {
 		return nil, err
@@ -186,13 +186,13 @@ func (c *Controller) readStackFilesForArtifact(
 func (c *Controller) priorActiveFileHashes(
 	ctx context.Context, tenantID, stackName string,
 ) map[string]struct{} {
-	rows, err := c.pu.RuntimeDB.QueryContext(ctx, `
+	rows, err := c.pu.RuntimeDB.QueryContext(ctx, c.rb(`
 		SELECT sf.content_hash
 		  FROM stack_files sf
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
 		   AND sf.content_hash <> ''
-		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'DATASETS/%')`,
+		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'DATASETS/%')`),
 		tenantID, stackName)
 	if err != nil {
 		return nil
@@ -216,7 +216,7 @@ func (c *Controller) currentActiveVersionNumber(
 ) int64 {
 	var av sql.NullInt64
 	_ = c.pu.RuntimeDB.QueryRowContext(ctx,
-		`SELECT active_version FROM stacks WHERE tenant_id = ? AND name = ?`,
+		c.rb(`SELECT active_version FROM stacks WHERE tenant_id = ? AND name = ?`),
 		tenantID, stackName).Scan(&av)
 	if av.Valid {
 		return av.Int64

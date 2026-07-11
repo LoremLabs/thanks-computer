@@ -16,7 +16,7 @@ import (
 func (c *Controller) SetGate(ctx context.Context, slug string, suspended bool, denyStatus int, denyReason string) error {
 	var tenantID string
 	err := c.pu.RuntimeDB.QueryRowContext(ctx,
-		`SELECT tenant_id FROM tenants WHERE slug = ? AND revoked_at IS NULL`, slug).Scan(&tenantID)
+		c.rb(`SELECT tenant_id FROM tenants WHERE slug = ? AND revoked_at IS NULL`), slug).Scan(&tenantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // unknown/revoked tenant: nothing to gate
 	}

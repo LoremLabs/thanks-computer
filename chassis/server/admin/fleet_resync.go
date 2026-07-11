@@ -273,10 +273,10 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 		// holds a version_id, so JOIN to recover its version_number (the value
 		// the artifact + event carry), mirroring handleListStacks.
 		rows, err := c.pu.RuntimeDB.QueryContext(ctx,
-			`SELECT s.stack_id, s.name, sv.version_number
+			c.rb(`SELECT s.stack_id, s.name, sv.version_number
 			   FROM stacks s
 			   JOIN stack_versions sv ON sv.version_id = s.active_version
-			  WHERE s.tenant_id = ?`, t.TenantID)
+			  WHERE s.tenant_id = ?`), t.TenantID)
 		if err != nil {
 			return nil, counts, fmt.Errorf("tenant %s stacks: %w", t.TenantID, err)
 		}

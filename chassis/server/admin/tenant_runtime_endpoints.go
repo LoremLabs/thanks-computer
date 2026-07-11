@@ -113,8 +113,8 @@ func (rr *runtimeRow) clearDenyIfOpen() {
 func (c *Controller) loadRuntimeRow(ctx context.Context, tenantID string) (runtimeRow, error) {
 	rr := defaultRuntimeRow()
 	err := c.pu.RuntimeDB.QueryRowContext(ctx,
-		`SELECT enabled, suspended, deny_status, deny_reason, rate_limit_rps, rate_burst, concurrency_limit
-		   FROM tenant_runtime_state WHERE tenant_id = ?`, tenantID).Scan(
+		c.rb(`SELECT enabled, suspended, deny_status, deny_reason, rate_limit_rps, rate_burst, concurrency_limit
+		   FROM tenant_runtime_state WHERE tenant_id = ?`), tenantID).Scan(
 		&rr.Enabled, &rr.Suspended, &rr.DenyStatus, &rr.DenyReason,
 		&rr.RateLimitRPS, &rr.RateBurst, &rr.ConcurrencyLimit)
 	if errors.Is(err, sql.ErrNoRows) {
