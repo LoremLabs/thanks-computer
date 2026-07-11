@@ -29,11 +29,11 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
+	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/feed"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
-	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 )
 
@@ -87,7 +87,8 @@ func (c *Controller) Start() {
 	go func() {
 		c.pu.Logger.Info("control-event applier started",
 			zap.String("source", c.src.Name()),
-			zap.Duration("period", period))
+			zap.Duration("period", period),
+			zap.Bool("invalidate_only", c.invalidateOnly()))
 		c.wg.Add(1)
 		for {
 			select {
@@ -153,9 +154,73 @@ func writeCursor(ctx context.Context, x execer, cv uint64) error {
 // relying on the ticker. Not part of the public API.
 func (c *Controller) PollOnceForTest(ctx context.Context) { c.pollOnce(ctx) }
 
+// invalidateOnly reports whether this node runs a shared-Postgres runtime, in
+// which case the applier degenerates to a mirror-invalidation consumer (see
+// pollOnceInvalidate) instead of materializing rows locally.
+func (c *Controller) invalidateOnly() bool {
+	return registry.DialectForDSN(c.pu.Conf.DbRuntimeDsn) == registry.Postgres
+}
+
+// pollOnceInvalidate is the shared-Postgres apply path. Under a postgres://
+// runtime the admin node writes the authoritative rows straight to the shared
+// store, so a data-plane node has NOTHING to materialize — it only needs to
+// refresh its :memory: read mirror from Postgres. So: poll, do ONE coalesced
+// Dbc.Reload() for the whole batch (Reload re-sources the full current PG
+// state, subsuming every event), then Ack.
+//
+// Deliberately skips, versus the SQLite path:
+//   - the cursor + applied_events — both would live in the SHARED runtime DB, so
+//     a per-node consumption cursor there is meaningless; the feed's own per-node
+//     durable consumer (JetStream) tracks delivery, and Ack advances it;
+//   - the artifact fetch + row materialization — its INSERT OR REPLACE /
+//     LastInsertId / sqlite_master are SQLite-only and would error on PG, and the
+//     rows are already authoritative in shared PG anyway;
+//   - the per-node CAS side-effects (store-seed reconcile, dataset warm) — the
+//     cloud's vector/KV stores are SHARED (pgvector/redis) so a data-plane
+//     reconcile is a no-op, and the dataset cache lazy-fills on first query
+//     exactly as it does after a node boot (which never warms it either).
+//
+// On a reload failure the batch is left UNACKED so the durable consumer
+// redelivers and we retry; the previous mirror keeps serving in the meantime
+// (the dbcache availability buffer).
+func (c *Controller) pollOnceInvalidate(ctx context.Context) {
+	// cursor arg unused for the durable NATS consumer (it tracks its own
+	// position); pass 0 rather than reading the shared runtime DB.
+	events, err := c.src.Poll(ctx, 0)
+	if err != nil {
+		c.pu.Logger.Error("control-event applier: poll", zap.String("err", err.Error()))
+		return
+	}
+	if len(events) == 0 {
+		return
+	}
+	if err := c.pu.Dbc.Reload(); err != nil {
+		c.pu.Logger.Warn("control-event: mirror reload failed; leaving batch unacked for redelivery",
+			zap.Int("events", len(events)), zap.String("err", err.Error()))
+		return
+	}
+	if acker, ackable := c.src.(feed.Acker); ackable {
+		for _, ev := range events {
+			if err := acker.Ack(ctx, ev.EventID); err != nil {
+				c.pu.Logger.Warn("control-event ack failed (will replay)",
+					zap.String("event_id", ev.EventID),
+					zap.Uint64("control_version", ev.ControlVersion),
+					zap.String("err", err.Error()))
+			}
+		}
+	}
+	c.pu.Logger.Info("control-event: mirror refreshed from Postgres",
+		zap.Int("events", len(events)),
+		zap.Uint64("high_control_version", events[len(events)-1].ControlVersion))
+}
+
 // pollOnce runs one feed poll + apply pass. Any apply failure halts the
 // pass (cursor not advanced past the failure); the next tick retries.
 func (c *Controller) pollOnce(ctx context.Context) {
+	if c.invalidateOnly() {
+		c.pollOnceInvalidate(ctx)
+		return
+	}
 	cursor, err := c.readCursor(ctx)
 	if err != nil {
 		c.pu.Logger.Error("control-event applier: read cursor", zap.String("err", err.Error()))
