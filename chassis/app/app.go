@@ -145,6 +145,20 @@ func Run(bi BuildInfo) int {
 	schemaFS, schemaBase, schemaSrc := selectSchemaSource(conf.DbSchemaDir)
 	logger.Info("db schema source", zap.String("source", schemaSrc))
 
+	// Fleet split-brain guard (data-platform 2.7 / migration B4): a node that
+	// bootstraps from a shared snapshot is a fleet member and MUST use the
+	// shared redis KV — falling back to node-local boltdb silently diverges
+	// (driplit's primary mutable store lives in the shared KV). Fail loudly
+	// here, BEFORE the expensive snapshot download. Keyed off the raw
+	// SnapshotBootstrapRef (not bootstrapWanted, which is zeroed below for
+	// Postgres-runtime nodes that are still fleet members). Scoped to
+	// bootstrapped nodes, so single-node/dev (boltdb default) are unchanged.
+	if conf.SnapshotBootstrapRef != "" && conf.KVStore != redis.StoreName {
+		logger.Fatal("snapshot-bootstrapped node requires a shared KV backend",
+			zap.String("kvstore", conf.KVStore),
+			zap.String("hint", "set TXCO_KVSTORE=redis — this node bootstraps from a shared snapshot; node-local boltdb would diverge from the fleet"))
+	}
+
 	// Fleet bootstrap (off by default). If a snapshot ref is configured
 	// AND the runtime DB is fresh, restore it BEFORE open/migrate using
 	// the safe path: verify → restore into a temp DB → migrate that temp
@@ -380,7 +394,19 @@ func Run(bi BuildInfo) int {
 	var kvCfg valkeyrie.Config
 	switch conf.KVStore {
 	case redis.StoreName:
-		kvCfg = &redis.Config{Password: conf.KVStorePassword}
+		// A bare host:port stays as-is (plaintext, password from
+		// TXCO_KVSTORE_PASSWORD); a redis://|rediss:// URL is parsed for
+		// userinfo/db/TLS. The addr is rewritten to the bare host:port BEFORE
+		// the boot-probe logs it below, so a rediss:// token never reaches logs.
+		if len(conf.KVStoreAddrs) == 0 {
+			logger.Fatal("TXCO_KVSTORE=redis requires TXCO_KVSTORE_ADDRS")
+		}
+		rc, addr, rerr := redisConfigFromAddr(conf.KVStoreAddrs[0], conf.KVStorePassword)
+		if rerr != nil {
+			logger.Fatal("invalid TXCO_KVSTORE_ADDRS", zap.Error(rerr))
+		}
+		conf.KVStoreAddrs = []string{addr}
+		kvCfg = rc
 	default: // boltdb (bucket-backed)
 		kvCfg = &boltdb.Config{Bucket: conf.KVStoreBucket}
 	}
