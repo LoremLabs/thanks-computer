@@ -1622,26 +1622,41 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusInternalServerError, "clear_files", map[string]any{"err": err.Error()})
 		return
 	}
-	for _, f := range req.Files {
-		// content_hash is BOTH the content-addressed store key (materialise)
-		// AND the static-index fingerprint (RebuildTenant skips empty-hash
-		// rows). The client may omit it — collectFileAssets historically sent
-		// "" for FILES assets — so backfill it from the content here. Without
-		// this, a stack's FILES are invisible to txco://read-file. A
-		// fingerprint-only row (content already stripped, hash supplied) keeps
-		// its supplied hash.
-		hash := f.ContentHash
-		if hash == "" && f.Content != "" {
-			hash = sha256Hex(f.Content)
+	// Batched multi-row INSERTs: on a Postgres runtime every statement is a
+	// network round trip, and a version carries hundreds of files — one
+	// INSERT per row turns an upload into minutes of sequential RTTs and
+	// times the request out at the edge (local SQLite writes never noticed).
+	// 200 rows × 4 params stays under every engine's bind-parameter cap.
+	const fileInsertChunk = 200
+	for start := 0; start < len(req.Files); start += fileInsertChunk {
+		chunk := req.Files[start:min(start+fileInsertChunk, len(req.Files))]
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO stack_files (version_id, path, content, content_hash) VALUES `)
+		args := make([]any, 0, len(chunk)*4)
+		for i, f := range chunk {
+			// content_hash is BOTH the content-addressed store key (materialise)
+			// AND the static-index fingerprint (RebuildTenant skips empty-hash
+			// rows). The client may omit it — collectFileAssets historically sent
+			// "" for FILES assets — so backfill it from the content here. Without
+			// this, a stack's FILES are invisible to txco://read-file. A
+			// fingerprint-only row (content already stripped, hash supplied) keeps
+			// its supplied hash.
+			hash := f.ContentHash
+			if hash == "" && f.Content != "" {
+				hash = sha256Hex(f.Content)
+			}
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString("(?, ?, ?, ?)")
+			// content binds as []byte: on the Postgres runtime the column is BYTEA
+			// (raw binary; PG has no implicit text→bytea cast), on SQLite it lands
+			// as BLOB — reads, length() and hashing are byte-identical either way.
+			args = append(args, versionID, f.Path, []byte(f.Content), hash)
 		}
-		// content binds as []byte: on the Postgres runtime the column is BYTEA
-		// (raw binary; PG has no implicit text→bytea cast), on SQLite it lands
-		// as BLOB — reads, length() and hashing are byte-identical either way.
-		if _, err := tx.ExecContext(r.Context(),
-			c.rb(`INSERT INTO stack_files (version_id, path, content, content_hash)
-			 VALUES (?, ?, ?, ?)`), versionID, f.Path, []byte(f.Content), hash); err != nil {
+		if _, err := tx.ExecContext(r.Context(), c.rb(sb.String()), args...); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "insert_file",
-				map[string]any{"path": f.Path, "err": err.Error()})
+				map[string]any{"first_path": chunk[0].Path, "batch": len(chunk), "err": err.Error()})
 			return
 		}
 	}
@@ -1985,14 +2000,35 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 	}
 
+	// Batched like the stack_files upload: one INSERT per op row is a network
+	// round trip each on a Postgres runtime, and a stack activates hundreds of
+	// ops. 100 rows × 7 params stays under every engine's bind-parameter cap.
+	type opRow struct {
+		scope            int
+		name, txcl       string
+		mockReq, mockRes string
+	}
+	var opRows []opRow
 	for scope, sd := range scopes {
 		for nm, txc := range sd.rules {
-			if _, err := tx.ExecContext(ctx,
-				c.rb(`INSERT INTO ops (tenant_id, stack, scope, name, txcl, mock_req, mock_res)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`),
-				tenantID, stackName, scope, nm, txc, sd.mockReq, sd.mockRes); err != nil {
-				return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "insert_ops", map[string]any{"scope": scope, "name": nm, "err": err.Error()}}
+			opRows = append(opRows, opRow{scope, nm, txc, sd.mockReq, sd.mockRes})
+		}
+	}
+	const opInsertChunk = 100
+	for start := 0; start < len(opRows); start += opInsertChunk {
+		chunk := opRows[start:min(start+opInsertChunk, len(opRows))]
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO ops (tenant_id, stack, scope, name, txcl, mock_req, mock_res) VALUES `)
+		args := make([]any, 0, len(chunk)*7)
+		for i, or := range chunk {
+			if i > 0 {
+				sb.WriteString(", ")
 			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, tenantID, stackName, or.scope, or.name, or.txcl, or.mockReq, or.mockRes)
+		}
+		if _, err := tx.ExecContext(ctx, c.rb(sb.String()), args...); err != nil {
+			return currentActiveID, targetVersionID, &materialiseError{http.StatusInternalServerError, "insert_ops", map[string]any{"batch": len(chunk), "err": err.Error()}}
 		}
 	}
 
