@@ -21,6 +21,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/usage"
@@ -42,6 +43,7 @@ type Config struct {
 // in tests).
 type Mailer struct {
 	db            *sql.DB
+	dialect       registry.Dialect // runtime DB dialect; nil ⇒ SQLite (see dia)
 	usage         usage.Sink
 	log           *zap.Logger
 	maxRecipients int
@@ -52,14 +54,16 @@ type Mailer struct {
 }
 
 // NewMailer builds a Mailer. db must be the real runtime DB (e.g.
-// pu.RuntimeDB); usage/log may be nil.
-func NewMailer(db *sql.DB, u usage.Sink, log *zap.Logger, cfg Config) *Mailer {
+// pu.RuntimeDB) and dialect its DB dialect (pu.RuntimeDialect) so the runtime
+// queries rebind for Postgres; usage/log may be nil.
+func NewMailer(db *sql.DB, dialect registry.Dialect, u usage.Sink, log *zap.Logger, cfg Config) *Mailer {
 	max := cfg.MaxRecipients
 	if max <= 0 {
 		max = 50
 	}
 	return &Mailer{
 		db:            db,
+		dialect:       dialect,
 		usage:         u,
 		log:           log,
 		maxRecipients: max,
@@ -69,6 +73,18 @@ func NewMailer(db *sql.DB, u usage.Sink, log *zap.Logger, cfg Config) *Mailer {
 		rl:            newRateLimiter(parseRateRules(cfg.RateLimits)),
 	}
 }
+
+// dia returns the runtime dialect, defaulting to SQLite for a zero-value
+// Mailer (tests) or a file: runtime. rb rebinds `?` placeholders through it —
+// identity on SQLite, `$N` on Postgres — so m.db queries work on both.
+func (m *Mailer) dia() registry.Dialect {
+	if m.dialect == nil {
+		return registry.SQLite
+	}
+	return m.dialect
+}
+
+func (m *Mailer) rb(q string) string { return m.dia().Rebind(q) }
 
 type recipient struct {
 	addr    mail.Address

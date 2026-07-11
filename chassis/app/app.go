@@ -275,7 +275,7 @@ func Run(bi BuildInfo) int {
 			slugToID := func(ctx context.Context, slug string) (string, error) {
 				var id string
 				err := runtimeDB.QueryRowContext(ctx,
-					`SELECT tenant_id FROM tenants WHERE slug = ? AND revoked_at IS NULL`,
+					runtimeDialect.Rebind(`SELECT tenant_id FROM tenants WHERE slug = ? AND revoked_at IS NULL`),
 					slug).Scan(&id)
 				if err != nil {
 					return "", fmt.Errorf("tenant slug %q not found: %w", slug, err)

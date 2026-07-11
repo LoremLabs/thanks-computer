@@ -20,11 +20,11 @@ func (m *Mailer) fromDomainVerified(ctx context.Context, slug, domain string) (b
 	}
 	var verifiedAt sql.NullString
 	err := m.db.QueryRowContext(ctx,
-		`SELECT h.verified_at
+		m.rb(`SELECT h.verified_at
 		   FROM tenant_hostnames h
 		   JOIN tenants t ON t.tenant_id = h.tenant_id
 		  WHERE h.hostname = ? AND t.slug = ?
-		    AND h.revoked_at IS NULL AND t.revoked_at IS NULL`,
+		    AND h.revoked_at IS NULL AND t.revoked_at IS NULL`),
 		domain, slug).Scan(&verifiedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -37,8 +37,7 @@ func (m *Mailer) fromDomainVerified(ctx context.Context, slug, domain string) (b
 		}
 	}
 	// We serve DNS for this domain (apex or subdomain) ⟹ verified.
-	// nil dialect ⇒ SQLite (m.db is SQLite today; Phase-1 revisit).
-	return tenants.DomainCoveredByZone(ctx, m.db, slug, domain, nil)
+	return tenants.DomainCoveredByZone(ctx, m.db, slug, domain, m.dia())
 }
 
 // domainOf extracts the lowercased domain from a bare email address
