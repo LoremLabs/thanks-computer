@@ -30,6 +30,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -257,6 +258,9 @@ func (c *Controller) recordFailure(ctx context.Context, rowID int64, err error) 
 	if len(short) > 200 {
 		short = short[:200]
 	}
+	// A byte cut can split a multi-byte rune; Postgres TEXT rejects the
+	// resulting invalid UTF-8 and the bookkeeping UPDATE itself would fail.
+	short = strings.ToValidUTF8(short, "")
 	_, uerr := c.pu.RuntimeDB.ExecContext(ctx,
 		c.rb(`UPDATE control_events_outbox
 		    SET attempt_count = attempt_count + 1,

@@ -585,10 +585,14 @@ func (s *Store) RecordChallengeAttempt(ctx context.Context, id, lastError string
 		return err
 	}
 	// Truncate the error so a misbehaving DNS resolver can't pour
-	// 4KB into the row.
+	// 4KB into the row. Re-validate after the byte cut: splitting a
+	// multi-byte rune (the error text embeds attacker-influenceable DNS
+	// TXT / http-01 bytes) leaves invalid UTF-8, which Postgres TEXT
+	// rejects — failing the bookkeeping UPDATE itself.
 	if len(lastError) > 512 {
 		lastError = lastError[:512]
 	}
+	lastError = strings.ToValidUTF8(lastError, "")
 	_, err := s.exec(ctx,
 		`UPDATE tenant_hostname_challenges
 		    SET attempted_at = ?, last_error = ?

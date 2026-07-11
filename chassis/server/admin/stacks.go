@@ -830,21 +830,33 @@ func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Req
 
 	// Going headless on stacks with live URLs is destructive — gather the hosts
 	// BEFORE the tx so the force-check is a clean precondition, and refuse the
-	// WHOLE batch without --force (don't half-apply).
+	// WHOLE batch without --force (don't half-apply). ONE query for the whole
+	// tenant, filtered to the chassis-minted kinds + matched stacks in Go —
+	// the per-stack SELECT (+ per-host lookup) shape was thousands of
+	// sequential round trips on a shared Postgres runtime; a
+	// publications-scale batch could not finish inside an edge timeout.
 	hostsByStack := map[string][]tenants.Hostname{}
 	var withLive []string
 	if goingHeadless {
+		matchedNames := make(map[string]bool, len(matched))
 		for _, ms := range matched {
-			hosts, herr := c.listManagedStackHosts(r.Context(), ac.TenantID, ms.name)
-			if herr != nil {
-				writeJSONError(w, http.StatusInternalServerError, "lookup_hosts", map[string]any{"err": herr.Error(), "stack": ms.name})
-				return
-			}
-			if len(hosts) > 0 {
-				hostsByStack[ms.name] = hosts
-				withLive = append(withLive, ms.name)
+			matchedNames[ms.name] = true
+		}
+		all, herr := c.tenants.ListHostnames(r.Context(), ac.TenantID, false)
+		if herr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "lookup_hosts", map[string]any{"err": herr.Error()})
+			return
+		}
+		for _, h := range all {
+			if (h.CreatedBy == tenants.SystemStructuredHostCreatedBy || h.CreatedBy == tenants.SystemZoneHostCreatedBy) &&
+				matchedNames[h.Stack] {
+				if len(hostsByStack[h.Stack]) == 0 {
+					withLive = append(withLive, h.Stack)
+				}
+				hostsByStack[h.Stack] = append(hostsByStack[h.Stack], h)
 			}
 		}
+		sort.Strings(withLive)
 		if len(withLive) > 0 && !req.Force {
 			sample := withLive
 			if len(sample) > 10 {
@@ -872,10 +884,43 @@ func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Req
 		mint = 1
 	}
 
-	// One tx for the whole batch: atomic, and a single write-lock hold + single
-	// reload instead of one per stack. (If a tenant ever has a match set large
-	// enough that this lock-hold matters, chunking is the follow-up — busy_timeout
-	// is 30s and these are sub-second row updates, so one tx is fine in practice.)
+	// Flatten the force-revoke set and, on a fleet, upload ONE RowsArtifact
+	// carrying every post-revoke row BEFORE the tx (producer contract; the
+	// per-host upload-in-tx shape held row locks across an R2 round trip
+	// per host). One hostname.revoked event ships all rows.
+	var toRevoke []tenants.Hostname
+	if goingHeadless && req.Force {
+		for _, ms := range matched {
+			toRevoke = append(toRevoke, hostsByStack[ms.name]...)
+		}
+	}
+	var revokeRef, revokeSum string
+	if len(toRevoke) > 0 && c.fleetEnabled() {
+		artRows := make([]map[string]any, 0, len(toRevoke))
+		for _, h := range toRevoke {
+			post := h
+			post.RevokedAt = &nowT
+			artRows = append(artRows, hostnameToRow(post))
+		}
+		art := controlevent.RowsArtifact{
+			DB:    "runtime",
+			Table: "tenant_hostnames",
+			Op:    "upsert",
+			Rows:  artRows,
+		}
+		key := fmt.Sprintf("rows/tenant_hostnames/batch/%s/%d", ac.TenantID, nowT.UnixNano())
+		ref, sum, _, uerr := c.fleetUploadArtifact(r.Context(), key, art)
+		if uerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "fleet_upload", map[string]any{"err": uerr.Error()})
+			return
+		}
+		revokeRef, revokeSum = ref, sum
+	}
+
+	// One tx for the whole batch: atomic, a single reload — and every
+	// statement is a CHUNKED set operation, because on a shared Postgres
+	// runtime each statement is a network round trip (the per-stack /
+	// per-host loops were 35s+ of sequential RTTs at publications scale).
 	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
@@ -888,24 +933,54 @@ func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Req
 		}
 	}()
 
-	for _, ms := range matched {
-		if _, err := tx.ExecContext(r.Context(),
-			c.rb(`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND name = ?`),
-			mint, ac.TenantID, ms.name); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "update_settings", map[string]any{"err": err.Error(), "stack": ms.name})
+	const settingsChunk = 200 // ids per statement; portable IN-list, well under bind caps
+	for start := 0; start < len(matched); start += settingsChunk {
+		chunk := matched[start:min(start+settingsChunk, len(matched))]
+		var sb strings.Builder
+		sb.WriteString(`UPDATE stacks SET mint_hostname = ? WHERE tenant_id = ? AND stack_id IN (`)
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, mint, ac.TenantID)
+		for i, ms := range chunk {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString("?")
+			args = append(args, ms.id)
+		}
+		sb.WriteString(")")
+		if _, err := tx.ExecContext(r.Context(), c.rb(sb.String()), args...); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "update_settings", map[string]any{"err": err.Error()})
 			return
 		}
 	}
-	revoked := make([]string, 0)
-	if goingHeadless && req.Force {
-		for _, ms := range matched {
-			for _, h := range hostsByStack[ms.name] {
-				if err := c.revokeManagedHostTx(r.Context(), tx, ac.TenantID, h, nowT); err != nil {
-					writeJSONError(w, http.StatusInternalServerError, "revoke_host", map[string]any{"err": err.Error(), "hostname": h.Hostname})
-					return
-				}
-				revoked = append(revoked, h.Hostname)
+
+	revoked := make([]string, 0, len(toRevoke))
+	revokedAtStr := nowT.Format(time.RFC3339)
+	for start := 0; start < len(toRevoke); start += settingsChunk {
+		chunk := toRevoke[start:min(start+settingsChunk, len(toRevoke))]
+		var sb strings.Builder
+		sb.WriteString(`UPDATE tenant_hostnames SET revoked_at = ? WHERE tenant_id = ? AND revoked_at IS NULL AND hostname IN (`)
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, revokedAtStr, ac.TenantID)
+		for i, h := range chunk {
+			if i > 0 {
+				sb.WriteString(", ")
 			}
+			sb.WriteString("?")
+			args = append(args, h.Hostname)
+			revoked = append(revoked, h.Hostname)
+		}
+		sb.WriteString(")")
+		if _, err := tx.ExecContext(r.Context(), c.rb(sb.String()), args...); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "revoke_host", map[string]any{"err": err.Error()})
+			return
+		}
+	}
+	if len(toRevoke) > 0 && c.fleetEnabled() {
+		if _, qerr := c.fleetQueueEvent(r.Context(), tx,
+			controlevent.TypeHostnameRevoked, ac.TenantID, "", 0, 0, revokeRef, revokeSum); qerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "fleet_queue", map[string]any{"err": qerr.Error()})
+			return
 		}
 	}
 
@@ -1524,6 +1599,22 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		seen[f.Path] = true
+		// Binary encodings are for ASSET paths only. An op-file path
+		// (anything that materialises into ops.txcl/mock_req/mock_res at
+		// activation) must arrive as a plain JSON string: Go's JSON decode
+		// guarantees UTF-8 there, whereas base64 smuggles raw bytes that
+		// Postgres TEXT rejects at ACTIVATION (SQLSTATE 22021 — the whole
+		// activation fails). The bundled CLI only ever base64s assets;
+		// this closes the same door for direct API clients.
+		if f.Encoding != "" &&
+			!strings.HasPrefix(f.Path, "FILES/") &&
+			storeseed.KindForPath(f.Path) == "" &&
+			!dataset.IsDatasetPath(f.Path) {
+			writeJSONError(w, http.StatusBadRequest, "encoding_not_allowed",
+				map[string]any{"index": i, "path": f.Path, "encoding": f.Encoding,
+					"hint": "base64/cas encodings are for FILES/, VECTORS/, KV/ and DATASETS/ assets; op files are plain UTF-8 strings"})
+			return
+		}
 		// A fingerprint-only row (Encoding "cas"): the bytes were streamed to
 		// the CAS via the blob endpoint and only the hash rides the draft.
 		// The integrity guard is non-negotiable — a row must never reference
@@ -1575,7 +1666,7 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		f.ContentHash = sha256Hex(f.Content)
 	}
 
-	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	tx, err := c.dia().BeginWrite(r.Context(), c.pu.RuntimeDB)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
 		return
@@ -1587,7 +1678,20 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		}
 	}()
 
-	stackID, _, err := c.lookupStack(r.Context(), tx, ac.TenantID, name)
+	// Lock the stacks row: two concurrent PUTs on the same draft (the CLI's
+	// 502-retry racing a not-actually-dead predecessor) must serialize.
+	// Without the lock, under Postgres READ COMMITTED each tx's DELETE
+	// misses the other's uncommitted inserts and disjoint paths commit as a
+	// silently MERGED file set whose manifest_hash matches neither request
+	// — poisoning the diff endpoint and incremental apply. (SQLite's
+	// _txlock=immediate always serialized this.) LockClause() has no
+	// placeholders, so appending it inside c.rb() is safe.
+	var stackID string
+	var activeVersionID sql.NullInt64
+	err = tx.QueryRowContext(r.Context(),
+		c.rb(`SELECT stack_id, active_version FROM stacks
+		 WHERE tenant_id = ? AND name = ?`+c.dia().LockClause()),
+		ac.TenantID, name).Scan(&stackID, &activeVersionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSONError(w, http.StatusNotFound, "stack_not_found", map[string]any{"name": name})
 		return
@@ -2065,28 +2169,45 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	// (then fleet-publishes the row); the data-plane applier passes false
 	// so it never mints a divergent random host (see the func doc).
 	if mintHosts && isMintableStack(stackName) && c.stackMintsHost(ctx, tx, tenantID, stackName) {
-		origin, ok, zerr := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID, c.pu.RuntimeDialect)
+		// Each mint path rides its own SAVEPOINT: "a mint failure must NEVER
+		// fail an activation" only holds on Postgres if the failure leaves
+		// the enclosing tx healthy — ANY statement error (the zone lookup,
+		// either mint's SELECT, a non-unique INSERT error) otherwise aborts
+		// the tx (25P02) and every later activation statement fails with a
+		// misleading code. Rolling back to the savepoint restores it; the
+		// inner ezh/ehs savepoints keep their unique-conflict adopt behavior.
+		var zoneApplies bool
+		zerr := registry.RunInSavepoint(ctx, tx, "sp_mint_zone", func() error {
+			origin, ok, e := tenants.ActivePatternZoneOriginTx(ctx, tx, tenantID, c.pu.RuntimeDialect)
+			if e != nil {
+				return fmt.Errorf("delegated-zone lookup: %w", e)
+			}
+			zoneApplies = ok
+			if !ok {
+				return nil
+			}
+			if _, e := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, stackName, origin, now, c.pu.RuntimeDialect); e != nil {
+				return fmt.Errorf("zone hostname mint (origin %s): %w", origin, e)
+			}
+			return nil
+		})
 		if zerr != nil {
-			// A zone-lookup failure must never skip the structured-host
-			// fallback (or fail activation): log and treat it as "no
-			// delegated zone", preserving the pre-delegated-zone behavior.
-			c.pu.Logger.Warn("delegated-zone lookup failed; using structured-host suffix",
+			c.pu.Logger.Warn("zone hostname mint skipped (activation unaffected)",
 				zap.String("tenant", tenantID), zap.String("stack", stackName),
 				zap.String("err", zerr.Error()))
-			ok = false
 		}
-		switch {
-		case ok:
-			if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, stackName, origin, now, c.pu.RuntimeDialect); merr != nil {
-				c.pu.Logger.Warn("zone hostname mint skipped (activation unaffected)",
-					zap.String("tenant", tenantID), zap.String("stack", stackName),
-					zap.String("origin", origin), zap.String("err", merr.Error()))
-			}
-		case c.pu.Conf.StructuredHostSuffix != "":
-			if _, merr := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, c.pu.Conf.StructuredHostSuffix, now, c.pu.RuntimeDialect); merr != nil {
+		// Structured fallback when no delegated zone applied — including a
+		// failed zone LOOKUP (the savepoint restored the tx, so the
+		// pre-delegated-zone fallback behavior holds on both engines).
+		if !zoneApplies && c.pu.Conf.StructuredHostSuffix != "" {
+			serr := registry.RunInSavepoint(ctx, tx, "sp_mint_struct", func() error {
+				_, e := tenants.EnsureSystemHostnameTx(ctx, tx, tenantID, stackName, c.pu.Conf.StructuredHostSuffix, now, c.pu.RuntimeDialect)
+				return e
+			})
+			if serr != nil {
 				c.pu.Logger.Warn("structured hostname mint skipped (activation unaffected)",
 					zap.String("tenant", tenantID), zap.String("stack", stackName),
-					zap.String("err", merr.Error()))
+					zap.String("err", serr.Error()))
 			}
 		}
 	}

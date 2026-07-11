@@ -150,15 +150,12 @@ func (c *Controller) handleSuspendTenant(w http.ResponseWriter, r *http.Request)
 			map[string]any{"deny_status": denyStatus, "hint": "must be a 1xx-5xx HTTP status (typically 402 or 403)"})
 		return
 	}
-	rr, err := c.loadRuntimeRow(r.Context(), ac.TenantID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "load_runtime_state", map[string]any{"err": err.Error()})
-		return
-	}
 	// Operator disable drives the `enabled` column; leave `suspended` (the
-	// programmatic gate) untouched so a credit gate isn't clobbered.
-	rr.Enabled, rr.DenyStatus, rr.DenyReason = 0, denyStatus, denyReason
-	c.writeRuntimeRow(w, r, ac, rr)
+	// programmatic gate) untouched so a credit gate isn't clobbered. The
+	// mutation runs on the CURRENT row under applyRuntimeRow's lock.
+	c.writeRuntimeRow(w, r, ac, func(rr *runtimeRow) {
+		rr.Enabled, rr.DenyStatus, rr.DenyReason = 0, denyStatus, denyReason
+	})
 }
 
 func (c *Controller) handleResumeTenant(w http.ResponseWriter, r *http.Request) {
@@ -166,17 +163,14 @@ func (c *Controller) handleResumeTenant(w http.ResponseWriter, r *http.Request) 
 	if ac == nil {
 		return
 	}
-	rr, err := c.loadRuntimeRow(r.Context(), ac.TenantID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "load_runtime_state", map[string]any{"err": err.Error()})
-		return
-	}
 	// Operator re-enable drives the `enabled` column; leave `suspended` (the
 	// programmatic gate) untouched. Clear the shared deny reason only if the
-	// row is now fully open (no still-active programmatic gate).
-	rr.Enabled = 1
-	rr.clearDenyIfOpen()
-	c.writeRuntimeRow(w, r, ac, rr)
+	// row is now fully open (no still-active programmatic gate) — which is
+	// exactly why this must read the CURRENT row under the lock.
+	c.writeRuntimeRow(w, r, ac, func(rr *runtimeRow) {
+		rr.Enabled = 1
+		rr.clearDenyIfOpen()
+	})
 }
 
 func (c *Controller) handleSetTenantLimits(w http.ResponseWriter, r *http.Request) {
@@ -191,38 +185,35 @@ func (c *Controller) handleSetTenantLimits(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body", map[string]any{"err": err.Error()})
 		return
 	}
-	rr, err := c.loadRuntimeRow(r.Context(), ac.TenantID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "load_runtime_state", map[string]any{"err": err.Error()})
+	// Request-shape validation stays outside the lock; the patch itself runs
+	// on the CURRENT row under applyRuntimeRow's lock (nil => leave as-is).
+	if req.RPS != nil && *req.RPS < 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid_rps", map[string]any{"rps": *req.RPS})
 		return
 	}
-	// Patch only what was provided (nil => leave as-is).
-	if req.RPS != nil {
-		if *req.RPS < 0 {
-			writeJSONError(w, http.StatusBadRequest, "invalid_rps", map[string]any{"rps": *req.RPS})
-			return
+	if req.Concurrency != nil && *req.Concurrency < 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid_concurrency", map[string]any{"concurrency": *req.Concurrency})
+		return
+	}
+	c.writeRuntimeRow(w, r, ac, func(rr *runtimeRow) {
+		if req.RPS != nil {
+			rr.RateLimitRPS = *req.RPS
 		}
-		rr.RateLimitRPS = *req.RPS
-	}
-	if req.Burst != nil {
-		rr.RateBurst = *req.Burst
-	}
-	if req.Concurrency != nil {
-		if *req.Concurrency < 0 {
-			writeJSONError(w, http.StatusBadRequest, "invalid_concurrency", map[string]any{"concurrency": *req.Concurrency})
-			return
+		if req.Burst != nil {
+			rr.RateBurst = *req.Burst
 		}
-		rr.ConcurrencyLimit = *req.Concurrency
-	}
-	// Burst defaults to ceil(2*rps) (min 1) when a rate is set but burst is
-	// unset/invalid — a more useful protection shape than burst==rps.
-	if rr.RateLimitRPS > 0 && rr.RateBurst < 1 {
-		rr.RateBurst = int(math.Ceil(2 * rr.RateLimitRPS))
-		if rr.RateBurst < 1 {
-			rr.RateBurst = 1
+		if req.Concurrency != nil {
+			rr.ConcurrencyLimit = *req.Concurrency
 		}
-	}
-	c.writeRuntimeRow(w, r, ac, rr)
+		// Burst defaults to ceil(2*rps) (min 1) when a rate is set but burst
+		// is unset/invalid — a more useful protection shape than burst==rps.
+		if rr.RateLimitRPS > 0 && rr.RateBurst < 1 {
+			rr.RateBurst = int(math.Ceil(2 * rr.RateLimitRPS))
+			if rr.RateBurst < 1 {
+				rr.RateBurst = 1
+			}
+		}
+	})
 }
 
 // handleGetTenantRuntimeState returns a tenant's current admission/runtime
@@ -268,30 +259,24 @@ type runtimeWriteError struct {
 func (e *runtimeWriteError) Error() string { return e.err.Error() }
 func (e *runtimeWriteError) Unwrap() error { return e.err }
 
-// applyRuntimeRow upserts the full row (local + fleet artifact), queues the
-// entitlement.updated event, commits, and reloads the dbcache mirror. The
-// fleet artifact carries the same full row, so a replica's INSERT OR REPLACE
-// never drops a column this write didn't touch. This is the one true write
-// path: the HTTP operator verbs (via writeRuntimeRow) and the in-process
-// programmatic gate (SetGate) both route through here, so neither can emit a
-// partial row.
-func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, rr runtimeRow) error {
-	row := rr.toMap(tenantID)
-
-	// Fleet-sync producer: upload the artifact BEFORE the tx so an orphaned
-	// upload (commit fails) is GC-recoverable. Single-node skips this.
-	var fleetRef, fleetSum string
-	if c.fleetEnabled() {
-		ref, sum, ferr := c.fleetUploadEntitlementUpsert(ctx, tenantID, row)
-		if ferr != nil {
-			return &runtimeWriteError{"fleet_upload", ferr}
-		}
-		fleetRef, fleetSum = ref, sum
-	}
-
-	tx, err := c.pu.RuntimeDB.BeginTx(ctx, nil)
+// applyRuntimeRow atomically read-modify-writes the tenant's runtime row:
+// it vivifies + LOCKS the row, applies mutate() to the CURRENT values, and
+// upserts the full row (local + fleet artifact + entitlement.updated event)
+// in the same tx. The lock matters because the writers own DIFFERENT
+// columns of one row — operator /suspend|/resume|/limits own `enabled` and
+// the limits, the credit reconciler's SetGate owns `suspended` — and an
+// unlocked load→apply pair lets the loser's full-row write revert the
+// winner's column (e.g. a gate release silently UN-suspending a tenant the
+// operator just disabled). The fleet artifact carries the same full row, so
+// a replica's INSERT OR REPLACE never drops a column this write didn't
+// touch; its upload rides the locked window (same transitional trade as
+// RotateSecret: rare action, artifact-store only, no self-deadlock). This is
+// the one true write path: the HTTP operator verbs (via writeRuntimeRow) and
+// the in-process programmatic gate (SetGate) both route through here.
+func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, mutate func(*runtimeRow)) (runtimeRow, error) {
+	tx, err := c.dia().BeginWrite(ctx, c.pu.RuntimeDB)
 	if err != nil {
-		return &runtimeWriteError{"begin_tx", err}
+		return runtimeRow{}, &runtimeWriteError{"begin_tx", err}
 	}
 	committed := false
 	defer func() {
@@ -299,6 +284,47 @@ func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, rr ru
 			_ = tx.Rollback()
 		}
 	}()
+
+	// Vivify so the FOR UPDATE below always has a row to serialize on —
+	// otherwise two first-ever writers race the upsert unlocked. DO NOTHING
+	// keeps an existing row untouched.
+	def := defaultRuntimeRow().toMap(tenantID)
+	if _, err := tx.ExecContext(ctx,
+		c.rb(`INSERT INTO tenant_runtime_state
+		   (tenant_id, enabled, suspended, deny_status, deny_reason,
+		    rate_limit_rps, rate_burst, concurrency_limit, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(tenant_id) DO NOTHING`),
+		def["tenant_id"], def["enabled"], def["suspended"], def["deny_status"], def["deny_reason"],
+		def["rate_limit_rps"], def["rate_burst"], def["concurrency_limit"], def["updated_at"],
+	); err != nil {
+		return runtimeRow{}, &runtimeWriteError{"vivify_runtime_state", err}
+	}
+
+	rr := defaultRuntimeRow()
+	if err := tx.QueryRowContext(ctx,
+		c.rb(`SELECT enabled, suspended, deny_status, deny_reason, rate_limit_rps, rate_burst, concurrency_limit
+		   FROM tenant_runtime_state WHERE tenant_id = ?`+c.dia().LockClause()), tenantID).Scan(
+		&rr.Enabled, &rr.Suspended, &rr.DenyStatus, &rr.DenyReason,
+		&rr.RateLimitRPS, &rr.RateBurst, &rr.ConcurrencyLimit); err != nil {
+		return runtimeRow{}, &runtimeWriteError{"load_runtime_state", err}
+	}
+
+	mutate(&rr)
+	row := rr.toMap(tenantID)
+
+	// Fleet-sync producer: the artifact needs the FINAL row, which is only
+	// known under the lock, so the upload runs inside the locked window
+	// (see the doc comment). An orphaned upload (commit fails) is
+	// GC-recoverable. Single-node skips this.
+	var fleetRef, fleetSum string
+	if c.fleetEnabled() {
+		ref, sum, ferr := c.fleetUploadEntitlementUpsert(ctx, tenantID, row)
+		if ferr != nil {
+			return runtimeRow{}, &runtimeWriteError{"fleet_upload", ferr}
+		}
+		fleetRef, fleetSum = ref, sum
+	}
 
 	// Portable upsert. This writer always supplies all 9 columns, so
 	// ON CONFLICT DO UPDATE is row-identical to the old INSERT OR REPLACE
@@ -320,19 +346,19 @@ func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, rr ru
 		row["tenant_id"], row["enabled"], row["suspended"], row["deny_status"], row["deny_reason"],
 		row["rate_limit_rps"], row["rate_burst"], row["concurrency_limit"], row["updated_at"],
 	); err != nil {
-		return &runtimeWriteError{"write_runtime_state", err}
+		return runtimeRow{}, &runtimeWriteError{"write_runtime_state", err}
 	}
 
 	if c.fleetEnabled() {
 		if _, qerr := c.fleetQueueEvent(ctx, tx,
 			controlevent.TypeEntitlementUpdated, tenantID, "", 0, 0, fleetRef, fleetSum,
 		); qerr != nil {
-			return &runtimeWriteError{"fleet_queue", qerr}
+			return runtimeRow{}, &runtimeWriteError{"fleet_queue", qerr}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return &runtimeWriteError{"commit", err}
+		return runtimeRow{}, &runtimeWriteError{"commit", err}
 	}
 	committed = true
 
@@ -342,13 +368,15 @@ func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, rr ru
 		c.pu.Logger.Warn("dbcache reload after tenant runtime-state write failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}
-	return nil
+	return rr, nil
 }
 
 // writeRuntimeRow is the HTTP wrapper around applyRuntimeRow: it applies the
-// row and renders the resulting record (or the per-step error code).
-func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac *auth.Context, rr runtimeRow) {
-	if err := c.applyRuntimeRow(r.Context(), ac.TenantID, rr); err != nil {
+// mutation under the row lock and renders the resulting record (or the
+// per-step error code).
+func (c *Controller) writeRuntimeRow(w http.ResponseWriter, r *http.Request, ac *auth.Context, mutate func(*runtimeRow)) {
+	rr, err := c.applyRuntimeRow(r.Context(), ac.TenantID, mutate)
+	if err != nil {
 		code := "write_runtime_state"
 		var we *runtimeWriteError
 		if errors.As(err, &we) {

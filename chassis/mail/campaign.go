@@ -2,6 +2,8 @@ package mail
 
 import (
 	"context"
+	"errors"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 )
@@ -14,6 +16,18 @@ import (
 // dbcache snapshot) so the just-written row is visible to a subsequent claim
 // in the same request.
 func (m *Mailer) claimCampaign(ctx context.Context, tenant, campaign, recipient, now string) (claimed bool, err error) {
+	// (tenant_id, campaign, recipient) is the table's PRIMARY KEY — a
+	// Postgres btree tuple caps at 2704 bytes, and campaign is a raw
+	// envelope string (mail-derived envelopes aren't even UTF-8-safe,
+	// which PG TEXT also rejects). Refuse loudly on both engines instead
+	// of engine-dependently at the INSERT. recipient went through
+	// mail.ParseAddress so charset is fine; length is not.
+	if len(campaign) > 256 || !utf8.ValidString(campaign) {
+		return false, errors.New("campaign id exceeds 256 bytes or is not valid UTF-8")
+	}
+	if len(recipient) > 320 { // RFC 5321 maximum path length
+		return false, errors.New("recipient exceeds 320 bytes")
+	}
 	res, err := m.db.ExecContext(ctx,
 		m.rb(`INSERT INTO mail_campaign_sends (tenant_id, campaign, recipient, status, sent_at)
 		 VALUES (?, ?, ?, 'claimed', ?)

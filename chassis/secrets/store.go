@@ -442,25 +442,48 @@ func (s *Store) UpdateSecretDescription(ctx context.Context,
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
-	// Load the full active row first: the fleet REPLACE artifact needs every
-	// column (a description-only patch would otherwise blank created_at etc.).
-	meta, err := s.lookupMetadataExact(ctx, tenantID, stack, name)
+	// Pre-lock lookup: only to learn secret_id for the row lock below.
+	meta0, err := s.lookupMetadataExact(ctx, tenantID, stack, name)
 	if err != nil {
 		return nil, err // ErrSecretNotFound bubbles
 	}
-	meta.Description = newDescription
+	secretID := meta0.SecretID
 
-	// Parent-only change → nil version row.
-	inTx, err := s.publishUpsert(ctx, tenantID, nil, parentRowMap(meta))
-	if err != nil {
-		return nil, fmt.Errorf("secrets: fleet publish: %w", err)
-	}
-
-	tx, err := s.DB.BeginTx(ctx, nil)
+	// Lock the parent row, then RE-READ the metadata under the lock: the
+	// fleet REPLACE artifact carries every parent column, and building it
+	// from a pre-lock read races RotateSecret — a concurrent rotation's
+	// key_version/last_rotated_at/version_no would be reverted on data-plane
+	// nodes, whose AAD-bound decrypts then fail. This is the mirror image of
+	// the race RotateSecret re-reads under its own lock to avoid.
+	tx, err := s.dia().BeginWrite(ctx, s.DB)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	var lockedID string
+	if err := tx.QueryRowContext(ctx,
+		s.rb(`SELECT secret_id FROM tenant_secrets WHERE secret_id = ?`+s.dia().LockClause()),
+		secretID).Scan(&lockedID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrSecretNotFound // vanished between the lookup and the lock
+		}
+		return nil, fmt.Errorf("secrets: lock secret: %w", err)
+	}
+	meta, err := s.lookupMetadataExactVia(ctx, tx, tenantID, stack, name)
+	if err != nil {
+		return nil, err // ErrSecretNotFound if it was revoked under us
+	}
+	meta.Description = newDescription
+
+	// Parent-only change → nil version row. The upload runs inside the
+	// locked window — same TRANSITIONAL COMPROMISE as RotateSecret (see the
+	// comment there): artifact store only, no runtime-DB touch, rare
+	// operator action.
+	inTx, err := s.publishUpsert(ctx, tenantID, nil, parentRowMap(meta))
+	if err != nil {
+		return nil, fmt.Errorf("secrets: fleet publish: %w", err)
+	}
 
 	res, err := tx.ExecContext(ctx, s.rb(`
 		UPDATE tenant_secrets

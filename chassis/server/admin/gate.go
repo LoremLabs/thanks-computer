@@ -24,15 +24,16 @@ func (c *Controller) SetGate(ctx context.Context, slug string, suspended bool, d
 		return err
 	}
 
-	rr, err := c.loadRuntimeRow(ctx, tenantID)
-	if err != nil {
-		return err
-	}
-	if suspended {
-		rr.Suspended, rr.DenyStatus, rr.DenyReason = 1, denyStatus, denyReason
-	} else {
-		rr.Suspended = 0
-		rr.clearDenyIfOpen()
-	}
-	return c.applyRuntimeRow(ctx, tenantID, rr)
+	// The mutation runs on the CURRENT row under applyRuntimeRow's lock —
+	// without it, a gate release racing an operator /suspend could write a
+	// stale full row and silently un-suspend the tenant.
+	_, err = c.applyRuntimeRow(ctx, tenantID, func(rr *runtimeRow) {
+		if suspended {
+			rr.Suspended, rr.DenyStatus, rr.DenyReason = 1, denyStatus, denyReason
+		} else {
+			rr.Suspended = 0
+			rr.clearDenyIfOpen()
+		}
+	})
+	return err
 }

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -96,11 +97,25 @@ func (s *Store) Enqueue(ctx context.Context, tenant, idempotencyKey string, at t
 	if idempotencyKey == "" {
 		return "", errors.New("scheduled: empty idempotency_key")
 	}
+	// Keys are op-authored and often embed external input (subscriber
+	// emails); (tenant, idempotency_key) is a UNIQUE btree key, and on
+	// Postgres an index tuple caps at 2704 bytes — an unbounded key fails
+	// the INSERT with SQLSTATE 54000 and the drip is silently unscheduled.
+	if len(idempotencyKey) > 512 {
+		return "", fmt.Errorf("scheduled: idempotency_key exceeds 512 bytes (%d)", len(idempotencyKey))
+	}
 	if len(payload) == 0 {
 		payload = json.RawMessage("{}")
 	}
 	if !json.Valid(payload) {
 		return "", errors.New("scheduled: payload is not valid JSON")
+	}
+	// json.Valid does NOT reject invalid UTF-8 inside string literals, but
+	// the Postgres TEXT payload column does (SQLSTATE 22021) — and envelopes
+	// can carry mail-derived bytes that are not UTF-8. Fail loud here, on
+	// both engines, rather than engine-dependently at the INSERT.
+	if !utf8.Valid(payload) {
+		return "", errors.New("scheduled: payload is not valid UTF-8")
 	}
 
 	id := "sched_" + hxid.NewTimeSort().String()

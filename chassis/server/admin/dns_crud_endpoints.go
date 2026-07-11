@@ -13,6 +13,7 @@ package admin
 // internal docs/todo-dns-authority.md §9.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -180,12 +181,15 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	// A pending zone (verification on) confers nothing yet, so defer wiring
 	// stacks + fleet-publishing to verify time (handleVerifyZone). Verified at
 	// creation (default) → do them now.
+	var pendingZoneHosts []pendingHostEvent
 	if z.VerifiedAt != "" && (z.Mode == "" || strings.EqualFold(z.Mode, "pattern")) {
-		if err := c.reconcileZoneHostnames(r.Context(), tx, z.TenantID, z.Origin); err != nil {
+		pending, rerr := c.reconcileZoneHostnames(r.Context(), tx, z.TenantID, z.Origin)
+		if rerr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "reconcile_zone_hostnames",
-				map[string]any{"err": err.Error()})
+				map[string]any{"err": rerr.Error()})
 			return
 		}
+		pendingZoneHosts = pending
 	}
 	// Fleet-sync the zone row so data-plane nodes hold the delegated-zone state
 	// (re-derive routing hosts on future activations; serve it with the dns
@@ -207,6 +211,13 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	committed = true
+	// Publish the reconciled routing-host artifacts + events now that the
+	// zone is durable (uploads must not run inside the tx). Non-fatal: the
+	// zone exists; SQLite fleets heal with `txco fleet resync`.
+	if perr := c.publishHostEvents(context.WithoutCancel(r.Context()), pendingZoneHosts); perr != nil {
+		c.pu.Logger.Error("zone create: post-commit hostname publish failed — run `txco fleet resync` to heal fleet routing hosts",
+			zap.String("tenant", z.TenantID), zap.String("origin", z.Origin), zap.String("err", perr.Error()))
+	}
 	if err := c.pu.Dbc.Reload(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns zone create failed; FS watcher will retry",
 			zap.String("err", err.Error()))
@@ -297,11 +308,14 @@ func (c *Controller) handleVerifyZone(w http.ResponseWriter, r *http.Request) {
 	}
 	// Now live: wire already-active stacks into the zone + fleet-publish the
 	// verified row (mirrors the verified-at-create path in handleCreateZone).
+	var pendingZoneHosts []pendingHostEvent
 	if zone.Mode == "" || strings.EqualFold(zone.Mode, "pattern") {
-		if err := c.reconcileZoneHostnames(r.Context(), tx, ac.TenantID, origin); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "reconcile_zone_hostnames", map[string]any{"err": err.Error()})
+		pending, rerr := c.reconcileZoneHostnames(r.Context(), tx, ac.TenantID, origin)
+		if rerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "reconcile_zone_hostnames", map[string]any{"err": rerr.Error()})
 			return
 		}
+		pendingZoneHosts = pending
 	}
 	if c.fleetEnabled() {
 		persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zone.ID, c.pu.RuntimeDialect)
@@ -319,6 +333,13 @@ func (c *Controller) handleVerifyZone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	committed = true
+	// Publish the reconciled routing-host artifacts + events now that the
+	// verify is durable (uploads must not run inside the tx). Non-fatal:
+	// SQLite fleets heal with `txco fleet resync`.
+	if perr := c.publishHostEvents(context.WithoutCancel(r.Context()), pendingZoneHosts); perr != nil {
+		c.pu.Logger.Error("zone verify: post-commit hostname publish failed — run `txco fleet resync` to heal fleet routing hosts",
+			zap.String("tenant", ac.TenantID), zap.String("origin", origin), zap.String("err", perr.Error()))
+	}
 	if err := c.pu.Dbc.Reload(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns zone verify failed; FS watcher will retry",
 			zap.String("err", err.Error()))

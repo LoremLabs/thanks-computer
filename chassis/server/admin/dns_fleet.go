@@ -29,6 +29,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/hxid"
+
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
@@ -236,25 +238,95 @@ func (c *Controller) activeMintableStacks(ctx context.Context, tx *sql.Tx, tenan
 }
 
 // reconcileZoneHostnames mints the routing host for every active stack of the
-// tenant under origin (idempotent), then fleet-publishes them. Called from zone
-// create so a zone created AFTER its stacks were activated still wires them up —
-// the activation-time mint only fires when the zone already exists. A single
-// mint failure is logged and skipped (it must never fail the zone create, like
-// the activation path); a fleet-publish failure is returned (atomic with the tx).
-func (c *Controller) reconcileZoneHostnames(ctx context.Context, tx *sql.Tx, tenantID, origin string) error {
+// tenant under origin (idempotent) and returns the tenant's zone-host rows as
+// pending fleet events for the CALLER to publish AFTER commit (see
+// pendingHostEvent — R2 uploads must not run inside the zone tx). Called from
+// zone create/verify so a zone created AFTER its stacks were activated still
+// wires them up — the activation-time mint only fires when the zone already
+// exists.
+//
+// Set-based: one SELECT for the existing hosts, then chunked multi-row
+// INSERT … ON CONFLICT DO NOTHING for the missing ones (labels are
+// deterministic, so the row content is computable in Go). The previous
+// per-stack EnsureZoneHostnameTx loop was ~4 statements × every active stack
+// — minutes of sequential round trips inside one interactive tx at
+// publications scale. An invalid label is logged and skipped (it must never
+// fail the zone op); a hostname already owned elsewhere no-ops on the unique
+// index, matching the old warn-and-continue.
+func (c *Controller) reconcileZoneHostnames(ctx context.Context, tx *sql.Tx, tenantID, origin string) ([]pendingHostEvent, error) {
 	now := time.Now().UTC().Format(zoneHostTSLayout)
 	stacks, err := c.activeMintableStacks(ctx, tx, tenantID)
 	if err != nil {
-		return fmt.Errorf("load active stacks: %w", err)
+		return nil, fmt.Errorf("load active stacks: %w", err)
 	}
+
+	// Stacks that already carry a zone host — one query, skipped in Go.
+	have := map[string]bool{}
+	rows, err := tx.QueryContext(ctx,
+		c.rb(`SELECT stack FROM tenant_hostnames
+		  WHERE tenant_id = ? AND created_by = ? AND revoked_at IS NULL`),
+		tenantID, tenants.SystemZoneHostCreatedBy)
+	if err != nil {
+		return nil, fmt.Errorf("load existing zone hosts: %w", err)
+	}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		have[s] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	type mintRow struct{ id, hostname, stack string }
+	var missing []mintRow
+	suffix := strings.TrimSuffix(origin, ".")
 	for _, s := range stacks {
-		if _, merr := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, s, origin, now, c.pu.RuntimeDialect); merr != nil {
-			c.pu.Logger.Warn("zone-create reconcile: hostname mint skipped (zone create unaffected)",
-				zap.String("tenant", tenantID), zap.String("stack", s),
-				zap.String("origin", origin), zap.String("err", merr.Error()))
+		if have[s] {
+			continue
+		}
+		label := tenants.StackLabel(s)
+		if label == "" {
+			continue
+		}
+		canon, ok := tenants.CanonicalizeHost(label + "." + suffix)
+		if !ok || !tenants.IsValidHostname(canon) {
+			c.pu.Logger.Warn("zone reconcile: invalid host label skipped (zone op unaffected)",
+				zap.String("tenant", tenantID), zap.String("stack", s), zap.String("origin", origin))
+			continue
+		}
+		missing = append(missing, mintRow{id: "thn_" + hxid.New().String(), hostname: canon, stack: s})
+	}
+
+	const mintChunk = 100 // 7 params/row → 700, under every engine's bind cap
+	for start := 0; start < len(missing); start += mintChunk {
+		chunk := missing[start:min(start+mintChunk, len(missing))]
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO tenant_hostnames
+		     (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
+		 VALUES `)
+		args := make([]any, 0, len(chunk)*7)
+		for i, m := range chunk {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, m.id, m.hostname, tenantID, m.stack, now, tenants.SystemZoneHostCreatedBy, now)
+		}
+		// Bare DO NOTHING (no conflict target) is valid on both engines and
+		// covers any unique index, including a duplicate label within the
+		// same statement (first row wins, like the old per-row order).
+		sb.WriteString(` ON CONFLICT DO NOTHING`)
+		if _, err := tx.ExecContext(ctx, c.rb(sb.String()), args...); err != nil {
+			return nil, fmt.Errorf("mint zone hosts (batch of %d): %w", len(chunk), err)
 		}
 	}
-	return c.queueZoneHostnameUpserts(ctx, tx, tenantID, "")
+
+	return c.collectZoneHostUpserts(ctx, tx, tenantID, "")
 }
 
 // queueZoneHostnameUpserts fleet-publishes the tenant's delegated-zone routing

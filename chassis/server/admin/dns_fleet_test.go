@@ -30,7 +30,7 @@ func reconcileZone(t *testing.T, c *Controller, origin string) {
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
-	if err := c.reconcileZoneHostnames(context.Background(), tx, testTenant, origin); err != nil {
+	if _, err := c.reconcileZoneHostnames(context.Background(), tx, testTenant, origin); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("reconcileZoneHostnames: %v", err)
 	}
