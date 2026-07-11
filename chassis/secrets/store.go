@@ -12,6 +12,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/opname"
 )
 
 // Sentinel errors.
@@ -119,11 +120,30 @@ func (s *Store) queryRow(ctx context.Context, q string, a ...any) *sql.Row {
 // Returns ErrSecretExists if (tenant_id, stack, name) is already
 // active (the COALESCE-bound unique index catches NULL-stack dupes
 // too — see db/schema/sqlite/runtime/0008_tenant_secrets.sql).
+// validateStackScope guards the OPTIONAL stack scope on writes: it lands in
+// the active-name unique index (tenant_id, COALESCE(stack,”), name) — a
+// btree key, capped at 2704 bytes/tuple on Postgres — so an unvalidated
+// stack value could 54000 the INSERT. Real stacks already satisfy
+// opname.ValidStack (stack creation enforces it), so this only rejects
+// values that could never match a stack anyway.
+func validateStackScope(stack *string) error {
+	if stack == nil || *stack == "" {
+		return nil
+	}
+	if err := opname.ValidStack(*stack); err != nil {
+		return fmt.Errorf("secrets: invalid stack scope: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) CreateSecret(ctx context.Context,
 	tenantID string, stack *string, name, description, createdBy string,
 	value []byte,
 ) (*SecretMetadata, error) {
 	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	if err := validateStackScope(stack); err != nil {
 		return nil, err
 	}
 	if s.MK == nil {

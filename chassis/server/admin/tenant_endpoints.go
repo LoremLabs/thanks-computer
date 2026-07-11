@@ -185,6 +185,14 @@ func (c *Controller) handleCreateTenant(w http.ResponseWriter, r *http.Request) 
 	}()
 
 	if err := c.tenants.CreateTx(r.Context(), tx, t); err != nil {
+		// The pre-check above races a concurrent create; the UNIQUE
+		// backstop on tenants.slug catches the loser — surface it as the
+		// same 409 the pre-check gives, not a 500.
+		if c.dia().IsUniqueViolationGeneric(err) {
+			writeJSONError(w, http.StatusConflict, "tenant_slug_taken",
+				map[string]any{"slug": slug})
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "create_tenant",
 			map[string]any{"err": err.Error()})
 		return

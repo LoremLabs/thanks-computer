@@ -175,6 +175,11 @@ func (s *Store) Create(ctx context.Context, t Tenant) error {
 	if slug == "" {
 		return errors.New("tenants: empty tenant slug")
 	}
+	// tenants.slug is UNIQUE — a btree key, capped at 2704 bytes per tuple
+	// on Postgres (SQLSTATE 54000 past it). 128 is far above any real slug.
+	if len(slug) > 128 {
+		return fmt.Errorf("tenants: slug exceeds 128 bytes (%d)", len(slug))
+	}
 	// Defence in depth: the create endpoint rejects reserved slugs with
 	// a clean 400, but the Store is also reachable from the CLI server
 	// path, so guard here too. The migration that seeds `_sys` inserts
@@ -479,11 +484,26 @@ func (s *Store) CreateChallenge(ctx context.Context, hostnameID, method, created
 	}
 
 	now := time.Now().UTC()
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := s.dia().BeginWrite(ctx, s.DB)
 	if err != nil {
 		return Challenge{}, err
 	}
 	defer tx.Rollback()
+
+	// Serialize concurrent creates for the same hostname on its parent row:
+	// on Postgres (no single-writer), two racing creates would otherwise
+	// both pass the soft-revoke and collide on the active-challenge unique
+	// index — a 500 instead of the clean rotate this tx implements. (On
+	// SQLite the clause is empty; BeginWrite + _txlock already serialize.)
+	var lockedID string
+	if err := tx.QueryRowContext(ctx,
+		s.rb(`SELECT id FROM tenant_hostnames WHERE id = ?`+s.dia().LockClause()),
+		hostnameID).Scan(&lockedID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Challenge{}, ErrNotFound
+		}
+		return Challenge{}, fmt.Errorf("lock hostname: %w", err)
+	}
 
 	// Soft-revoke any prior active challenge for this pair.
 	if _, err := tx.ExecContext(ctx,

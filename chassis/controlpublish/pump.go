@@ -190,12 +190,59 @@ func (c *Controller) drainOnce(ctx context.Context) {
 			zap.String("err", err.Error()))
 		return
 	}
+	// Publish each event, then write ALL the successes back in ONE
+	// statement: on a shared Postgres runtime the per-event UPDATE was one
+	// network round trip per published row (1.6s of write-backs for a full
+	// 64-row backlog pass). Crash semantics are unchanged in kind — an
+	// event published but not yet recorded is republished next tick with
+	// the same event_id, which the sink/consumer dedup absorbs; batching
+	// only widens that window from one event to one pass.
+	type published struct {
+		id int64
+		cv uint64
+	}
+	var done []published
 	for _, p := range batch {
-		c.publishOne(ctx, p.id, p.eventID, p.payload)
+		if cv, ok := c.publishOne(ctx, p.id, p.eventID, p.payload); ok {
+			done = append(done, published{id: p.id, cv: cv})
+		}
+	}
+	if len(done) == 0 {
+		return
+	}
+	now := time.Now().UTC().Format(tsLayout)
+	var sb strings.Builder
+	sb.WriteString(`UPDATE control_events_outbox SET published_at = ?, published_control_version = CASE id`)
+	args := make([]any, 0, len(done)*3+1)
+	args = append(args, now)
+	for _, d := range done {
+		sb.WriteString(" WHEN ? THEN ?")
+		args = append(args, d.id, d.cv)
+	}
+	sb.WriteString(` END WHERE id IN (`)
+	for i, d := range done {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("?")
+		args = append(args, d.id)
+	}
+	sb.WriteString(")")
+	if _, uerr := c.pu.RuntimeDB.ExecContext(ctx, c.rb(sb.String()), args...); uerr != nil {
+		// Published to the broker but failed to record locally. The rows
+		// stay pending → republished next tick; same event_id → backend
+		// dedup returns the same control_version (and the consumer-side
+		// applied_events check protects regardless). Loud-log for operators.
+		c.pu.Logger.Error("control-event publisher: batch write-back failed; rows will republish",
+			zap.Int("published", len(done)),
+			zap.String("err", uerr.Error()))
 	}
 }
 
-func (c *Controller) publishOne(ctx context.Context, rowID int64, eventID string, payload []byte) {
+// publishOne decodes, sanity-checks, and publishes one outbox row. Returns
+// the broker-assigned control_version and true on success; the CALLER
+// records the write-back (batched per pass).
+func (c *Controller) publishOne(ctx context.Context, rowID int64, eventID string, payload []byte) (uint64, bool) {
 	var ev controlevent.Event
 	if err := json.Unmarshal(payload, &ev); err != nil {
 		// Outbox row is corrupt — record the failure so it stays
@@ -203,7 +250,7 @@ func (c *Controller) publishOne(ctx context.Context, rowID int64, eventID string
 		// We don't drop the row; an operator can DELETE it after
 		// inspecting.
 		c.recordFailure(ctx, rowID, fmt.Errorf("decode payload_json: %w", err))
-		return
+		return 0, false
 	}
 	// Defense-in-depth: ensure the wire EventID matches the row's
 	// canonical event_id column. The handler helper writes both from
@@ -211,41 +258,23 @@ func (c *Controller) publishOne(ctx context.Context, rowID int64, eventID string
 	if ev.EventID != eventID {
 		c.recordFailure(ctx, rowID,
 			fmt.Errorf("event_id mismatch: row=%q payload=%q", eventID, ev.EventID))
-		return
+		return 0, false
 	}
 
 	out, err := c.sink.Append(ctx, ev)
 	if err != nil {
 		c.recordFailure(ctx, rowID, err)
-		return
+		return 0, false
 	}
 	if out.ControlVersion == 0 {
 		c.recordFailure(ctx, rowID, fmt.Errorf("sink returned zero control_version"))
-		return
-	}
-	now := time.Now().UTC().Format(tsLayout)
-	_, uerr := c.pu.RuntimeDB.ExecContext(ctx,
-		c.rb(`UPDATE control_events_outbox
-		    SET published_control_version = ?, published_at = ?
-		  WHERE id = ?`),
-		out.ControlVersion, now, rowID)
-	if uerr != nil {
-		// Published to the broker but failed to record it locally.
-		// On next tick the row is still pending → republish, same
-		// event_id → backend dedup returns the same control_version
-		// (or the applied_events check protects the consumer
-		// regardless). Loud-log so operators see the race.
-		c.pu.Logger.Error("control-event publisher: row updated remotely but write-back failed",
-			zap.Int64("outbox_id", rowID),
-			zap.String("event_id", eventID),
-			zap.Uint64("control_version", out.ControlVersion),
-			zap.String("err", uerr.Error()))
-		return
+		return 0, false
 	}
 	c.pu.Logger.Info("control-event published",
 		zap.String("event_id", eventID),
 		zap.String("type", ev.Type),
 		zap.Uint64("control_version", out.ControlVersion))
+	return out.ControlVersion, true
 }
 
 // recordFailure increments attempt_count and stamps last_error +
@@ -321,6 +350,56 @@ func AppendOutbox(
 		nullableString(artifactRef), nullableString(checksum),
 		payloadJSON, now)
 	return err
+}
+
+// OutboxRow is one prepared control_events_outbox row for AppendOutboxBatch.
+type OutboxRow struct {
+	EventID, EventType, TenantID, StackID string
+	Version, BaseVersion                  int64
+	ArtifactRef, Checksum                 string
+	PayloadJSON                           []byte
+}
+
+// AppendOutboxBatch appends many outbox rows with chunked multi-row INSERTs
+// — one network round trip per ~60 rows instead of one per event, which
+// matters on a shared Postgres runtime (a driplit-scale fleet resync queues
+// thousands of events; per-row appends held the tx open for minutes).
+// Row order is preserved (the auto-increment id follows insert order), so
+// ordering contracts like "secret version row before its parent" hold.
+func AppendOutboxBatch(ctx context.Context, tx *sql.Tx, rows []OutboxRow, d registry.Dialect) error {
+	if d == nil {
+		d = registry.SQLite
+	}
+	now := time.Now().UTC().Format(tsLayout)
+	const chunkRows = 60 // 10 params/row → 600, under every engine's bind cap
+	for start := 0; start < len(rows); start += chunkRows {
+		chunk := rows[start:min(start+chunkRows, len(rows))]
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO control_events_outbox
+		(event_id, event_type, tenant_id, stack_id, version, base_version,
+		 artifact_ref, checksum, payload_json, created_at)
+		VALUES `)
+		args := make([]any, 0, len(chunk)*10)
+		for i, r := range chunk {
+			if r.EventID == "" || r.EventType == "" || len(r.PayloadJSON) == 0 {
+				return fmt.Errorf("controlpublish: AppendOutboxBatch row %d missing event_id/event_type/payload_json", start+i)
+			}
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args,
+				r.EventID, r.EventType,
+				nullableString(r.TenantID), nullableString(r.StackID),
+				nullableInt(r.Version), nullableInt(r.BaseVersion),
+				nullableString(r.ArtifactRef), nullableString(r.Checksum),
+				r.PayloadJSON, now)
+		}
+		if _, err := tx.ExecContext(ctx, d.Rebind(sb.String()), args...); err != nil {
+			return fmt.Errorf("controlpublish: append outbox batch of %d: %w", len(chunk), err)
+		}
+	}
+	return nil
 }
 
 func nullableString(s string) any {

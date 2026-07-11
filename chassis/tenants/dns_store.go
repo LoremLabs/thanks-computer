@@ -31,23 +31,38 @@ var ErrZoneExists = errors.New("dns zone already exists")
 const SystemZoneHostCreatedBy = "system:dns-zone-host"
 
 // ActivePatternZoneOriginTx returns the tenant's active pattern-mode
-// zone origin (lexically first when several exist), or ok=false. Read
+// zone origin (byte-order first when several exist), or ok=false. Read
 // inside the activation tx so the minted routing host is consistent
 // with the same transaction's view of the zone set.
+//
+// The pick happens in Go, not via ORDER BY … LIMIT 1: a SQL text sort
+// follows the database collation on Postgres but byte order on SQLite,
+// so with 2+ zones the two engines could mint DIFFERENT hostnames for
+// the same stack (and a SQLite→Postgres migration would flip the pick).
+// Go string comparison is byte order on both.
 func ActivePatternZoneOriginTx(ctx context.Context, tx *sql.Tx, tenantID string, d registry.Dialect) (string, bool, error) {
-	var origin string
-	err := tx.QueryRowContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		orSQLite(d).Rebind(`SELECT origin FROM dns_zones
 		  WHERE tenant_id = ? AND mode = 'pattern'
-		    AND revoked_at IS NULL AND verified_at IS NOT NULL
-		  ORDER BY origin LIMIT 1`), tenantID).Scan(&origin)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
+		    AND revoked_at IS NULL AND verified_at IS NOT NULL`), tenantID)
 	if err != nil {
 		return "", false, err
 	}
-	return origin, origin != "", nil
+	defer rows.Close()
+	best := ""
+	for rows.Next() {
+		var origin string
+		if err := rows.Scan(&origin); err != nil {
+			return "", false, err
+		}
+		if origin != "" && (best == "" || origin < best) {
+			best = origin
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	return best, best != "", nil
 }
 
 // DomainCoveredByZone reports whether `domain` (apex or any subdomain) falls

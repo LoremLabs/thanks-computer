@@ -7,11 +7,14 @@ import (
 	"net/http"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
+	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
+	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
 
@@ -63,6 +66,24 @@ type resyncEvent struct {
 	ref       string
 	sum       string
 }
+
+// resyncJob is one event whose artifact upload (and any heavy read feeding
+// it, like a stack's file set) has been DEFERRED so the jobs can run
+// concurrently. Enumeration stays sequential and ordered; only the
+// upload closures fan out.
+type resyncJob struct {
+	eventType string
+	tenantID  string
+	stackID   string
+	version   int64
+	upload    func(ctx context.Context) (ref, sum string, err error)
+}
+
+// resyncUploadParallelism bounds concurrent artifact uploads (and stack
+// file reads) during a resync — enough to hide the per-object R2 + DB
+// latency that made a sequential driplit-scale resync take minutes,
+// without monopolizing the runtime pool.
+const resyncUploadParallelism = 8
 
 func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 	if err := policy.RequireSuperAdmin(r.Context()); err != nil {
@@ -131,12 +152,38 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 			_ = tx.Rollback()
 		}
 	}()
+	// Chunked multi-row appends: one statement per ~60 events instead of
+	// one per event (a driplit-scale resync queues thousands — per-row
+	// appends held this tx open for minutes on a shared Postgres).
+	// Event ids are minted in pending order, so ordering contracts
+	// (secret version row before its parent) survive the batch.
+	outRows := make([]controlpublish.OutboxRow, 0, len(pending))
 	for _, e := range pending {
-		if _, qerr := c.fleetQueueEvent(r.Context(), tx,
-			e.eventType, e.tenantID, e.stackID, e.version, 0, e.ref, e.sum); qerr != nil {
-			writeJSONError(w, http.StatusInternalServerError, "fleet_queue", map[string]any{"err": qerr.Error()})
+		eventID := "evt_" + hxid.NewTimeSort().String()
+		payload, merr := json.Marshal(controlevent.Event{
+			EventID:     eventID,
+			Type:        e.eventType,
+			TenantID:    e.tenantID,
+			StackID:     e.stackID,
+			Version:     e.version,
+			ArtifactRef: e.ref,
+			Checksum:    e.sum,
+		})
+		if merr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "fleet_queue", map[string]any{"err": merr.Error()})
 			return
 		}
+		outRows = append(outRows, controlpublish.OutboxRow{
+			EventID: eventID, EventType: e.eventType,
+			TenantID: e.tenantID, StackID: e.stackID,
+			Version:     e.version,
+			ArtifactRef: e.ref, Checksum: e.sum,
+			PayloadJSON: payload,
+		})
+	}
+	if err := controlpublish.AppendOutboxBatch(r.Context(), tx, outRows, c.pu.RuntimeDialect); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "fleet_queue", map[string]any{"err": err.Error()})
+		return
 	}
 	if err := tx.Commit(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
@@ -162,24 +209,34 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 
 // buildResyncEvents uploads the artifacts for every target tenant's current
 // state (tenant row, active hostnames, active stack versions) and returns the
-// pending events to enqueue. No DB writes here beyond reads.
+// pending events to enqueue. No DB writes here beyond reads. Enumeration is
+// sequential (cheap SQL, deterministic event order); the artifact uploads —
+// and the per-stack file reads that feed them — run CONCURRENTLY afterwards
+// (resyncUploadParallelism), because sequential per-object round trips made
+// a publications-scale resync take minutes.
 func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Tenant) ([]resyncEvent, fleetResyncCounts, error) {
-	var pending []resyncEvent
+	var jobs []resyncJob
 	var counts fleetResyncCounts
 
 	for _, t := range targets {
 		// tenant.created
-		tArt := controlevent.RowsArtifact{
-			DB:    "runtime",
-			Table: "tenants",
-			Op:    "upsert",
-			Rows:  []map[string]any{tenantToRow(t)},
-		}
-		ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/tenants/%s", t.TenantID), tArt)
-		if err != nil {
-			return nil, counts, fmt.Errorf("tenant %s: %w", t.TenantID, err)
-		}
-		pending = append(pending, resyncEvent{eventType: controlevent.TypeTenantCreated, tenantID: t.TenantID, ref: ref, sum: sum})
+		t := t
+		jobs = append(jobs, resyncJob{
+			eventType: controlevent.TypeTenantCreated, tenantID: t.TenantID,
+			upload: func(ctx context.Context) (string, string, error) {
+				tArt := controlevent.RowsArtifact{
+					DB:    "runtime",
+					Table: "tenants",
+					Op:    "upsert",
+					Rows:  []map[string]any{tenantToRow(t)},
+				}
+				ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/tenants/%s", t.TenantID), tArt)
+				if err != nil {
+					return "", "", fmt.Errorf("tenant %s: %w", t.TenantID, err)
+				}
+				return ref, sum, nil
+			},
+		})
 		counts.TenantCreated++
 
 		// hostname.bound for each active hostname
@@ -188,11 +245,17 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 			return nil, counts, fmt.Errorf("tenant %s hostnames: %w", t.TenantID, err)
 		}
 		for _, h := range hns {
-			hRef, hSum, herr := c.fleetUploadHostnameUpsert(ctx, h)
-			if herr != nil {
-				return nil, counts, fmt.Errorf("hostname %s: %w", h.ID, herr)
-			}
-			pending = append(pending, resyncEvent{eventType: controlevent.TypeHostnameBound, tenantID: t.TenantID, ref: hRef, sum: hSum})
+			h := h
+			jobs = append(jobs, resyncJob{
+				eventType: controlevent.TypeHostnameBound, tenantID: t.TenantID,
+				upload: func(ctx context.Context) (string, string, error) {
+					ref, sum, err := c.fleetUploadHostnameUpsert(ctx, h)
+					if err != nil {
+						return "", "", fmt.Errorf("hostname %s: %w", h.ID, err)
+					}
+					return ref, sum, nil
+				},
+			})
 			counts.HostnameBound++
 		}
 
@@ -204,17 +267,23 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 			return nil, counts, fmt.Errorf("tenant %s zones: %w", t.TenantID, zerr)
 		}
 		for _, z := range zones {
-			zArt := controlevent.RowsArtifact{
-				DB:    "runtime",
-				Table: "dns_zones",
-				Op:    "upsert",
-				Rows:  []map[string]any{zoneToRow(z)},
-			}
-			zRef, zSum, _, zuerr := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/dns_zones/%s", z.ID), zArt)
-			if zuerr != nil {
-				return nil, counts, fmt.Errorf("zone %s: %w", z.ID, zuerr)
-			}
-			pending = append(pending, resyncEvent{eventType: controlevent.TypeDNSZoneUpserted, tenantID: t.TenantID, ref: zRef, sum: zSum})
+			z := z
+			jobs = append(jobs, resyncJob{
+				eventType: controlevent.TypeDNSZoneUpserted, tenantID: t.TenantID,
+				upload: func(ctx context.Context) (string, string, error) {
+					zArt := controlevent.RowsArtifact{
+						DB:    "runtime",
+						Table: "dns_zones",
+						Op:    "upsert",
+						Rows:  []map[string]any{zoneToRow(z)},
+					}
+					ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/dns_zones/%s", z.ID), zArt)
+					if err != nil {
+						return "", "", fmt.Errorf("zone %s: %w", z.ID, err)
+					}
+					return ref, sum, nil
+				},
+			})
 			counts.DNSZoneUpserted++
 		}
 
@@ -224,11 +293,17 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 		if cs, ok, cerr := tenants.LoadCronSettings(ctx, c.pu.RuntimeDB, t.TenantID, c.pu.RuntimeDialect); cerr != nil {
 			return nil, counts, fmt.Errorf("tenant %s cron settings: %w", t.TenantID, cerr)
 		} else if ok {
-			cRef, cSum, cuerr := c.fleetUploadCronSettingsUpsert(ctx, t.TenantID, cs.Timezone, cs.UpdatedAt, cs.UpdatedBy)
-			if cuerr != nil {
-				return nil, counts, fmt.Errorf("tenant %s cron settings upload: %w", t.TenantID, cuerr)
-			}
-			pending = append(pending, resyncEvent{eventType: controlevent.TypeCronSettingsUpserted, tenantID: t.TenantID, ref: cRef, sum: cSum})
+			cs := cs
+			jobs = append(jobs, resyncJob{
+				eventType: controlevent.TypeCronSettingsUpserted, tenantID: t.TenantID,
+				upload: func(ctx context.Context) (string, string, error) {
+					ref, sum, err := c.fleetUploadCronSettingsUpsert(ctx, t.TenantID, cs.Timezone, cs.UpdatedAt, cs.UpdatedBy)
+					if err != nil {
+						return "", "", fmt.Errorf("tenant %s cron settings upload: %w", t.TenantID, err)
+					}
+					return ref, sum, nil
+				},
+			})
 			counts.CronSettingsUpserted++
 		}
 
@@ -243,28 +318,39 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 				return nil, counts, fmt.Errorf("tenant %s secrets: %w", t.TenantID, serr)
 			}
 			for _, rr := range resyncRows {
-				vArt := controlevent.RowsArtifact{
-					DB: "runtime", Table: "tenant_secret_versions", Op: "upsert",
-					Rows: []map[string]any{rr.VersionRow},
-				}
-				vRef, vSum, _, verr := c.fleetUploadArtifact(ctx,
-					fmt.Sprintf("rows/tenant_secret_versions/%s", rr.VersionID), vArt)
-				if verr != nil {
-					return nil, counts, fmt.Errorf("secret version %s: %w", rr.VersionID, verr)
-				}
-				pending = append(pending, resyncEvent{eventType: controlevent.TypeSecretChanged, tenantID: t.TenantID, ref: vRef, sum: vSum})
+				rr := rr
+				jobs = append(jobs, resyncJob{
+					eventType: controlevent.TypeSecretChanged, tenantID: t.TenantID,
+					upload: func(ctx context.Context) (string, string, error) {
+						vArt := controlevent.RowsArtifact{
+							DB: "runtime", Table: "tenant_secret_versions", Op: "upsert",
+							Rows: []map[string]any{rr.VersionRow},
+						}
+						ref, sum, _, err := c.fleetUploadArtifact(ctx,
+							fmt.Sprintf("rows/tenant_secret_versions/%s", rr.VersionID), vArt)
+						if err != nil {
+							return "", "", fmt.Errorf("secret version %s: %w", rr.VersionID, err)
+						}
+						return ref, sum, nil
+					},
+				})
 				counts.SecretChanged++
 
-				pArt := controlevent.RowsArtifact{
-					DB: "runtime", Table: "tenant_secrets", Op: "upsert",
-					Rows: []map[string]any{rr.ParentRow},
-				}
-				pRef, pSum, _, perr := c.fleetUploadArtifact(ctx,
-					fmt.Sprintf("rows/tenant_secrets/%s", rr.SecretID), pArt)
-				if perr != nil {
-					return nil, counts, fmt.Errorf("secret parent %s: %w", rr.SecretID, perr)
-				}
-				pending = append(pending, resyncEvent{eventType: controlevent.TypeSecretChanged, tenantID: t.TenantID, ref: pRef, sum: pSum})
+				jobs = append(jobs, resyncJob{
+					eventType: controlevent.TypeSecretChanged, tenantID: t.TenantID,
+					upload: func(ctx context.Context) (string, string, error) {
+						pArt := controlevent.RowsArtifact{
+							DB: "runtime", Table: "tenant_secrets", Op: "upsert",
+							Rows: []map[string]any{rr.ParentRow},
+						}
+						ref, sum, _, err := c.fleetUploadArtifact(ctx,
+							fmt.Sprintf("rows/tenant_secrets/%s", rr.SecretID), pArt)
+						if err != nil {
+							return "", "", fmt.Errorf("secret parent %s: %w", rr.SecretID, err)
+						}
+						return ref, sum, nil
+					},
+				})
 				counts.SecretChanged++
 			}
 		}
@@ -301,31 +387,60 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 		_ = rows.Close()
 
 		for _, s := range stacks {
-			files, ferr := c.readStackFilesForArtifact(ctx, t.TenantID, s.name, s.version)
-			if ferr != nil {
-				return nil, counts, fmt.Errorf("stack %s/%s files: %w", t.TenantID, s.name, ferr)
-			}
-			sArt := controlevent.StackActivatedArtifact{
-				TenantID: t.TenantID,
-				Stack:    s.name,
-				Version:  s.version,
-				Files:    files,
-			}
-			sRef, sSum, _, serr := c.fleetUploadArtifact(ctx,
-				fmt.Sprintf("stacks/%s/%s/%d", t.TenantID, s.name, s.version), sArt)
-			if serr != nil {
-				return nil, counts, fmt.Errorf("stack %s/%s: %w", t.TenantID, s.name, serr)
-			}
-			pending = append(pending, resyncEvent{
+			s := s
+			jobs = append(jobs, resyncJob{
 				eventType: controlevent.TypeStackActivated,
 				tenantID:  t.TenantID,
 				stackID:   s.stackID,
 				version:   s.version,
-				ref:       sRef,
-				sum:       sSum,
+				upload: func(ctx context.Context) (string, string, error) {
+					// The heavy per-stack file read rides the concurrent
+					// phase too — sequentially it alone was ~1 round trip
+					// per stack.
+					files, err := c.readStackFilesForArtifact(ctx, t.TenantID, s.name, s.version)
+					if err != nil {
+						return "", "", fmt.Errorf("stack %s/%s files: %w", t.TenantID, s.name, err)
+					}
+					sArt := controlevent.StackActivatedArtifact{
+						TenantID: t.TenantID,
+						Stack:    s.name,
+						Version:  s.version,
+						Files:    files,
+					}
+					ref, sum, _, uerr := c.fleetUploadArtifact(ctx,
+						fmt.Sprintf("stacks/%s/%s/%d", t.TenantID, s.name, s.version), sArt)
+					if uerr != nil {
+						return "", "", fmt.Errorf("stack %s/%s: %w", t.TenantID, s.name, uerr)
+					}
+					return ref, sum, nil
+				},
 			})
 			counts.StackActivated++
 		}
+	}
+
+	// Concurrent upload phase: results land at their job's index, so the
+	// pending slice keeps enumeration order exactly.
+	pending := make([]resyncEvent, len(jobs))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(resyncUploadParallelism)
+	for i, j := range jobs {
+		i, j := i, j
+		g.Go(func() error {
+			ref, sum, err := j.upload(gctx)
+			if err != nil {
+				return err
+			}
+			pending[i] = resyncEvent{
+				eventType: j.eventType, tenantID: j.tenantID,
+				stackID: j.stackID, version: j.version,
+				ref: ref, sum: sum,
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, counts, err
 	}
 	return pending, counts, nil
 }

@@ -284,8 +284,13 @@ func sha256Hex(s string) string {
 // local file set, so without this every code re-apply would needlessly re-mint a
 // version. Returns "" (no error) when the stack has no active version.
 func (c *Controller) codeManifestHash(ctx context.Context, tenantID, name string) (string, error) {
+	// Ship content only for legacy rows whose hash needs backfilling — the
+	// CASE keeps a book-sized stack's inline bytes off the wire (this runs
+	// on every `txco stack get`, against a remote Postgres on cloud).
 	rows, err := c.pu.RuntimeDB.QueryContext(ctx, c.rb(`
-		SELECT sf.path, sf.content, sf.content_hash
+		SELECT sf.path,
+		       CASE WHEN sf.content_hash = '' THEN sf.content ELSE '' END,
+		       sf.content_hash
 		  FROM stack_files sf
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
@@ -394,6 +399,21 @@ func validateStackFilePath(p string) error {
 			return fmt.Errorf("empty path segment")
 		case ".", "..":
 			return fmt.Errorf("'.' and '..' segments are not allowed")
+		}
+	}
+	// The asset-dir prefixes are EXACT-case everywhere downstream (SQL LIKE
+	// 'FILES/%' classification, the pgmirror row filter, store-seed and
+	// dataset discovery — and Postgres LIKE, unlike SQLite's, is
+	// case-sensitive). A near-miss like "files/x" would silently classify
+	// as an ordinary code file: not mirrored, not seeded, wrong DELETE
+	// branch on re-upload. Reject it loudly instead.
+	if first, _, _ := strings.Cut(p, "/"); first != "" {
+		up := strings.ToUpper(first)
+		switch up {
+		case "FILES", "VECTORS", "KV", "DATASETS":
+			if first != up {
+				return fmt.Errorf("directory %q must be exact-case %q", first, up)
+			}
 		}
 	}
 	// FILES/** are tenant static assets served by txco://static (or read by
@@ -667,7 +687,7 @@ func (c *Controller) handlePatchStackSettings(w http.ResponseWriter, r *http.Req
 	nowT := time.Now().UTC()
 	now := nowT.Format("2006-01-02T15:04:05.000Z")
 
-	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	tx, err := c.dia().BeginWrite(r.Context(), c.pu.RuntimeDB)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
 		return
@@ -679,18 +699,34 @@ func (c *Controller) handlePatchStackSettings(w http.ResponseWriter, r *http.Req
 		}
 	}()
 
-	// Look up or auto-vivify the stack (mirrors handleCreateDraft).
+	// Look up or auto-vivify the stack — mirrors handleCreateDraft
+	// INCLUDING its row lock and vivify savepoint: without them, two
+	// concurrent settings PATCHes for a not-yet-existing stack race the
+	// INSERT and the loser 500s on the unique backstop (and on Postgres
+	// the violation would poison this tx).
 	var stackID string
 	var activeVersionID sql.NullInt64
 	switch err = tx.QueryRowContext(r.Context(),
-		c.rb(`SELECT stack_id, active_version FROM stacks WHERE tenant_id = ? AND name = ?`),
+		c.rb(`SELECT stack_id, active_version FROM stacks
+		 WHERE tenant_id = ? AND name = ?`+c.dia().LockClause()),
 		ac.TenantID, name).Scan(&stackID, &activeVersionID); {
 	case errors.Is(err, sql.ErrNoRows):
 		stackID = "stk_" + hxid.NewTimeSort().String()
-		if _, err := tx.ExecContext(r.Context(),
-			c.rb(`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`),
-			stackID, ac.TenantID, name, now); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": err.Error()})
+		ierr := registry.RunInSavepoint(r.Context(), tx, "sp_vivify_settings", func() error {
+			_, e := tx.ExecContext(r.Context(),
+				c.rb(`INSERT INTO stacks (stack_id, tenant_id, name, created_at) VALUES (?, ?, ?, ?)`),
+				stackID, ac.TenantID, name, now)
+			return e
+		})
+		if ierr != nil && c.dia().IsUniqueViolationGeneric(ierr) {
+			// Lost the vivify race — adopt the winner's row (locking it).
+			ierr = tx.QueryRowContext(r.Context(),
+				c.rb(`SELECT stack_id, active_version FROM stacks
+				 WHERE tenant_id = ? AND name = ?`+c.dia().LockClause()),
+				ac.TenantID, name).Scan(&stackID, &activeVersionID)
+		}
+		if ierr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "create_stack", map[string]any{"err": ierr.Error()})
 			return
 		}
 	case err != nil:

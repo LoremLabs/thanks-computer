@@ -51,9 +51,15 @@ func (c *Controller) handleListOps(w http.ResponseWriter, r *http.Request) {
 		rows, err = c.pu.RuntimeDB.QueryContext(r.Context(),
 			`SELECT stack, scope, name, txcl, mock_req, mock_res FROM ops ORDER BY stack, scope, name, txcl`)
 	} else {
+		// Case-insensitive on BOTH arms, explicitly: SQLite LIKE was
+		// ASCII-case-insensitive and Postgres LIKE is not, so without
+		// lower() the descendants arm silently returns fewer rows for
+		// mixed-case stack names depending on the engine. Stack names are
+		// ASCII ([A-Za-z0-9_-/]), where lower() behaves identically on
+		// both. Admin listing only — low QPS, the seq scan is fine.
 		rows, err = c.pu.RuntimeDB.QueryContext(r.Context(),
 			c.rb(`SELECT stack, scope, name, txcl, mock_req, mock_res FROM ops
-			 WHERE stack = ? OR stack LIKE ?
+			 WHERE lower(stack) = lower(?) OR lower(stack) LIKE lower(?)
 			 ORDER BY stack, scope, name, txcl`),
 			prefix, prefix+"/%")
 	}
