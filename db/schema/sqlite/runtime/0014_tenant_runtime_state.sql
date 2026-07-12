@@ -22,8 +22,12 @@ CREATE TABLE IF NOT EXISTS tenant_runtime_state (
     deny_reason        TEXT    NOT NULL DEFAULT '',  -- short machine token (response header)
     -- Phase-2 reserved (unused in Phase 1; present now so Phase 2 needs
     -- no migration and the fleet-sync row shape is stable from day one):
-    rate_limit_rps     INTEGER NOT NULL DEFAULT 0,   -- 0 => unlimited
-    rate_burst         INTEGER NOT NULL DEFAULT 0,
+    -- rate_limit_rps is REAL: the limiter rate is a float64 (x/time/rate),
+    -- so sub-1-rps limits (e.g. --rate 50/m => 0.833) store faithfully.
+    -- Postgres mirror declares this DOUBLE PRECISION for the same reason;
+    -- SQLite's INTEGER affinity already tolerated fractional, PG does not.
+    rate_limit_rps     REAL    NOT NULL DEFAULT 0,   -- 0 => unlimited
+    rate_burst         INTEGER NOT NULL DEFAULT 0,   -- token-bucket size (int)
     concurrency_limit  INTEGER NOT NULL DEFAULT 0,   -- 0 => unlimited
     updated_at         TEXT    NOT NULL DEFAULT ''
 );
