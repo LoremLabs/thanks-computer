@@ -134,6 +134,7 @@ func (web *WebController) LogFromRequest(crw *contextResponseWriter, r *http.Req
 	}
 
 	web.Log(LogEntry{
+		Host:        r.Host,
 		UserIp:      userIp,
 		Method:      r.Method,
 		URL:         r.RequestURI,
@@ -151,7 +152,11 @@ func (web *WebController) LogFromRequest(crw *contextResponseWriter, r *http.Req
 }
 
 func (web *WebController) Log(entry LogEntry) {
+	// "host" is the node's own FQDN (logger base field); the request's
+	// Host header rides "web.host" so multi-tenant traffic stays
+	// attributable per site.
 	fields := []zap.Field{
+		zap.String("web.host", entry.Host),
 		zap.String("url", entry.URL),
 		zap.String("rid", entry.Rid),
 		zap.String("userIp", entry.UserIp),
