@@ -36,6 +36,10 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/tetratelabs/wazero v1.11.0
 	github.com/tidwall/gjson v1.19.0
+	// sjson is PINNED at v1.0.4: it PREPENDS new keys (v1.2.x appends),
+	// and envelope byte-identity — golden tests, traces, the
+	// chassis/processor merge fast path, and chassis/jsonx — depends on
+	// that ordering. Do not bump.
 	github.com/tidwall/sjson v1.0.4
 	github.com/yaronf/httpsign v0.5.1
 	github.com/yuin/goldmark v1.4.13

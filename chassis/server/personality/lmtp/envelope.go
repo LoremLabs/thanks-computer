@@ -1,6 +1,8 @@
 package lmtp
 
 import (
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
+
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,7 +16,6 @@ import (
 
 	"github.com/jhillyerd/enmime/v2"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // bounceDetected reports whether an inbound message is a bounce / auto-generated
@@ -190,42 +191,42 @@ func parseMessage(raw []byte) (jsonOut string, err error) {
 		return "", err
 	}
 
-	out := "{}"
+	out := jsonx.NewObject()
 
 	if id := env.GetHeader("Message-ID"); id != "" {
-		out, _ = sjson.Set(out, "id", id)
+		out.Set("id", id)
 	}
 	if d, derr := env.Date(); derr == nil && !d.IsZero() {
-		out, _ = sjson.Set(out, "date", d.UTC().Format(time.RFC3339))
+		out.Set("date", d.UTC().Format(time.RFC3339))
 	}
 	if s := env.GetHeader("Subject"); s != "" {
-		out, _ = sjson.Set(out, "subject", s)
+		out.Set("subject", s)
 	}
 
 	if addrs := addressList(env, "From"); len(addrs) > 0 {
-		out, _ = sjson.SetRaw(out, "from", addrsJSON(addrs))
+		out.SetRaw("from", addrsJSON(addrs))
 	}
 	if addrs := addressList(env, "To"); len(addrs) > 0 {
-		out, _ = sjson.SetRaw(out, "to", addrsJSON(addrs))
+		out.SetRaw("to", addrsJSON(addrs))
 	}
 	if addrs := addressList(env, "Cc"); len(addrs) > 0 {
-		out, _ = sjson.SetRaw(out, "cc", addrsJSON(addrs))
+		out.SetRaw("cc", addrsJSON(addrs))
 	}
 
 	if env.Text != "" {
-		out, _ = sjson.Set(out, "text", env.Text)
+		out.Set("text", env.Text)
 	}
 	if env.HTML != "" {
-		out, _ = sjson.Set(out, "html", env.HTML)
+		out.Set("html", env.HTML)
 	}
 
-	out, _ = sjson.SetRaw(out, "headers", headersJSON(env))
+	out.SetRaw("headers", headersJSON(env))
 
 	if atts := attachmentsJSON(env); atts != "" {
-		out, _ = sjson.SetRaw(out, "attachments", atts)
+		out.SetRaw("attachments", atts)
 	}
 
-	return out, nil
+	return out.String(), nil
 }
 
 // addressList wraps env.AddressList with a nil-safe fallback. enmime
@@ -245,13 +246,13 @@ func addrsJSON(addrs []*mail.Address) string {
 	if len(addrs) == 0 {
 		return "[]"
 	}
-	out := "[]"
+	out := jsonx.NewArray()
 	for i, a := range addrs {
-		out, _ = sjson.Set(out, "-1", map[string]string{})
-		out, _ = sjson.Set(out, jsonIdx(i)+".name", a.Name)
-		out, _ = sjson.Set(out, jsonIdx(i)+".addr", a.Address)
+		out.Set("-1", map[string]string{})
+		out.Set(jsonIdx(i)+".name", a.Name)
+		out.Set(jsonIdx(i)+".addr", a.Address)
 	}
-	return out
+	return out.String()
 }
 
 // jsonIdx renders an integer index for sjson paths.
@@ -305,16 +306,19 @@ func headersJSON(env *enmime.Envelope) string {
 	// for trace storage, signing, and any downstream consumer that
 	// hashes the envelope.
 	sort.Strings(keys)
-	out := "{}"
+	// NOTE: per-key prepend means the serialized object comes out
+	// REVERSE-alphabetical — long-standing sjson-chain fallout that
+	// downstream consumers may hash; jsonx reproduces it exactly.
+	out := jsonx.NewObject()
 	for _, k := range keys {
 		lk := strings.ToLower(k)
 		vals := env.GetHeaderValues(k)
 		if len(vals) == 0 {
 			continue
 		}
-		out, _ = sjson.Set(out, escapeKey(lk), vals)
+		out.Set(escapeKey(lk), vals)
 	}
-	return out
+	return out.String()
 }
 
 // escapeKey wraps a header key so sjson treats it as a single literal
@@ -343,7 +347,7 @@ func attachmentsJSON(env *enmime.Envelope) string {
 	if len(all) == 0 {
 		return ""
 	}
-	out := "[]"
+	out := jsonx.NewArray()
 	for i, p := range all {
 		sum := sha256.Sum256(p.Content)
 		entry := map[string]interface{}{
@@ -353,8 +357,8 @@ func attachmentsJSON(env *enmime.Envelope) string {
 			"sha256":  hex.EncodeToString(sum[:]),
 			"content": base64.StdEncoding.EncodeToString(p.Content),
 		}
-		out, _ = sjson.Set(out, "-1", entry)
+		out.Set("-1", entry)
 		_ = i
 	}
-	return out
+	return out.String()
 }

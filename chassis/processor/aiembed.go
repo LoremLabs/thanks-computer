@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/embed"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
@@ -188,14 +188,14 @@ func emitEmbedCompletionEvent(ctx context.Context, providerName string, resp emb
 // underscore-prefixed `_embed` so they don't leak into the default web
 // projection while remaining readable by downstream ops (`@_embed.vectors`).
 func buildEmbedResponseEnvelope(resp embed.Response, runErr error, routing string, single bool) string {
-	raw := "{}"
+	b := jsonx.NewObject()
 
 	if runErr == nil {
 		vecsJSON, _ := json.Marshal(resp.Vectors)
-		raw, _ = sjson.SetRaw(raw, "_embed.vectors", string(vecsJSON))
+		b.SetRaw("_embed.vectors", string(vecsJSON))
 		if single && len(resp.Vectors) > 0 {
 			v0JSON, _ := json.Marshal(resp.Vectors[0])
-			raw, _ = sjson.SetRaw(raw, "_embed.vector", string(v0JSON))
+			b.SetRaw("_embed.vector", string(v0JSON))
 		}
 	} else {
 		errBody := map[string]any{"message": runErr.Error()}
@@ -204,37 +204,37 @@ func buildEmbedResponseEnvelope(resp embed.Response, runErr error, routing strin
 		} else {
 			errBody["code"] = "txco_embed_unknown"
 		}
-		raw, _ = sjson.Set(raw, "embed.error", errBody)
+		b.Set("embed.error", errBody)
 	}
 
-	raw, _ = sjson.Set(raw, "_embed.provider", resp.Provider)
-	raw, _ = sjson.Set(raw, "_embed.model", resp.Model)
-	raw, _ = sjson.Set(raw, "_embed.dimensions", resp.Dimensions)
-	raw, _ = sjson.Set(raw, "_embed.tokens", resp.Tokens)
-	raw, _ = sjson.Set(raw, "_embed.latency_ms", resp.LatencyMS)
-	raw, _ = sjson.Set(raw, "_embed.retries", resp.Retries)
+	b.Set("_embed.provider", resp.Provider)
+	b.Set("_embed.model", resp.Model)
+	b.Set("_embed.dimensions", resp.Dimensions)
+	b.Set("_embed.tokens", resp.Tokens)
+	b.Set("_embed.latency_ms", resp.LatencyMS)
+	b.Set("_embed.retries", resp.Retries)
 	if routing != "" {
-		raw, _ = sjson.Set(raw, "_embed.routing_decision", routing)
+		b.Set("_embed.routing_decision", routing)
 	}
-	return raw
+	return b.String()
 }
 
 // embedErrorPayload builds the envelope for execEmbed's pre-Embed error paths
 // (decode-WITH failure, no backend, secret materialization failure).
 func embedErrorPayload(op operation.Operation, providerName, routing string, err error) event.Payload {
-	raw := "{}"
+	b := jsonx.NewObject()
 	errBody := map[string]any{"message": err.Error()}
 	if coded, ok := err.(embed.CodedError); ok {
 		errBody["code"] = coded.Code()
 	} else {
 		errBody["code"] = "txco_embed_unknown"
 	}
-	raw, _ = sjson.Set(raw, "embed.error", errBody)
+	b.Set("embed.error", errBody)
 	if providerName != "" {
-		raw, _ = sjson.Set(raw, "_embed.provider", providerName)
+		b.Set("_embed.provider", providerName)
 	}
 	if routing != "" {
-		raw, _ = sjson.Set(raw, "_embed.routing_decision", routing)
+		b.Set("_embed.routing_decision", routing)
 	}
-	return event.Payload{Raw: raw, Type: event.JSON, Meta: op.Meta}
+	return event.Payload{Raw: b.String(), Type: event.JSON, Meta: op.Meta}
 }

@@ -16,13 +16,13 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
@@ -187,20 +187,23 @@ func (web *WebController) Start() {
 				ctx = context.WithValue(ctx, config.CtxKeyRid, rid)
 				web.pu.Logger.Debug("web rid", zap.String("rid", rid))
 
-				// create the payload
-				payload, _ := sjson.Set("", "_txc.src", "http")
-				payload, _ = sjson.Set(payload, "_txc.rid", rid)
-				payload, _ = sjson.Set(payload, "_txc.web.req.headers", r.Header)
-				payload, _ = sjson.Set(payload, "_txc.web.req.host", r.Host)
-				payload, _ = sjson.Set(payload, "_txc.web.req.proto", r.Proto)
-				payload, _ = sjson.Set(payload, "_txc.web.req.method", r.Method)
+				// create the payload (single-serialize builder; the old
+				// per-Set sjson chain re-copied the growing envelope —
+				// headers + base64 body — a dozen-plus times per request)
+				pb := jsonx.New()
+				pb.Set("_txc.src", "http")
+				pb.Set("_txc.rid", rid)
+				pb.Set("_txc.web.req.headers", r.Header)
+				pb.Set("_txc.web.req.host", r.Host)
+				pb.Set("_txc.web.req.proto", r.Proto)
+				pb.Set("_txc.web.req.method", r.Method)
 
 				// Header-driven mock interception. Gated by WebMockHeader so
 				// production chassis can't be coerced into mocking by a hostile
 				// caller; flip it on per-environment in dev.
 				if web.pu.Conf.WebMockHeader {
 					if patterns := splitMocksHeader(r.Header.Get("X-Txco-Mocks")); len(patterns) > 0 {
-						payload, _ = sjson.Set(payload, "_txc.mocks", patterns)
+						pb.Set("_txc.mocks", patterns)
 					}
 				}
 
@@ -219,23 +222,23 @@ func (web *WebController) Start() {
 							cookies[cookie.Name] = append(c, cookie.Value)
 						}
 					}
-					payload, _ = sjson.Set(payload, "_txc.web.req.cookies", cookies)
+					pb.Set("_txc.web.req.cookies", cookies)
 				}
-				payload, _ = sjson.Set(payload, "_txc.web.req.url.full", r.URL.String())
+				pb.Set("_txc.web.req.url.full", r.URL.String())
 				if r.URL.Scheme != "" {
-					payload, _ = sjson.Set(payload, "_txc.web.req.url.scheme", r.URL.Scheme)
+					pb.Set("_txc.web.req.url.scheme", r.URL.Scheme)
 				}
 				if r.URL.Path != "" {
-					payload, _ = sjson.Set(payload, "_txc.web.req.url.path", r.URL.Path)
+					pb.Set("_txc.web.req.url.path", r.URL.Path)
 				}
 				if r.URL.User != nil {
-					payload, _ = sjson.Set(payload, "_txc.web.req.url.user", r.URL.User.Username)
+					pb.Set("_txc.web.req.url.user", r.URL.User.Username)
 				}
 				if r.URL.Hostname() != "" {
-					payload, _ = sjson.Set(payload, "_txc.web.req.url.hostname", r.URL.Hostname())
+					pb.Set("_txc.web.req.url.hostname", r.URL.Hostname())
 				}
 				if r.URL.Port() != "" {
-					payload, _ = sjson.Set(payload, "_txc.web.req.url.port", r.URL.Port())
+					pb.Set("_txc.web.req.url.port", r.URL.Port())
 				}
 				if r.URL.RawQuery != "" {
 					qp, err := url.ParseQuery(r.URL.RawQuery)
@@ -250,8 +253,8 @@ func (web *WebController) Start() {
 						cancel() // shut down the request
 						return
 					}
-					payload, _ = sjson.Set(payload, "_txc.web.req.url.query", qp)
-					payload, _ = sjson.Set(payload, "_txc.web.req.url.query.raw", r.URL.RawQuery)
+					pb.Set("_txc.web.req.url.query", qp)
+					pb.Set("_txc.web.req.url.query.raw", r.URL.RawQuery)
 				}
 
 				body, err := io.ReadAll(r.Body)
@@ -268,10 +271,10 @@ func (web *WebController) Start() {
 				}
 				if len(body) > 0 {
 					body := base64.StdEncoding.EncodeToString([]byte(body))
-					payload, _ = sjson.Set(payload, "_txc.web.req.body", body)
+					pb.Set("_txc.web.req.body", body)
 				}
 
-				payload, _ = sjson.Set(payload, "_ts", now.Format(time.RFC3339))
+				pb.Set("_ts", now.Format(time.RFC3339))
 
 				// Breakpoint plumbing: when --debug-breakpoints is on,
 				// stamp the gating flag and pull ?_txc.break=N from the
@@ -280,7 +283,7 @@ func (web *WebController) Start() {
 				// no-op there (defense in depth: even if a rule SETs
 				// _txc.break, the processor ignores it without the flag).
 				if web.pu.Conf.DebugBreakpoints {
-					payload, _ = sjson.Set(payload, "_txc.flag_breakpoint", true)
+					pb.Set("_txc.flag_breakpoint", true)
 					if bs := r.URL.Query().Get("_txc.break"); bs != "" {
 						// Two accepted forms:
 						//   ?_txc.break=N            — any stack, break at scope ≥ N
@@ -294,9 +297,9 @@ func (web *WebController) Start() {
 							scopeStr = bs[i+1:]
 						}
 						if n, parseErr := strconv.Atoi(scopeStr); parseErr == nil {
-							payload, _ = sjson.Set(payload, "_txc.break", n)
+							pb.Set("_txc.break", n)
 							if breakStack != "" {
-								payload, _ = sjson.Set(payload, "_txc.break_stack", breakStack)
+								pb.Set("_txc.break_stack", breakStack)
 							}
 						}
 					}
@@ -311,7 +314,7 @@ func (web *WebController) Start() {
 				// stack — so the poll flows through the normal traced
 				// pipeline. Not debug-gated: this is a product feature.
 				if rc := r.URL.Query().Get("_txc.continuation"); rc != "" {
-					payload, _ = sjson.Set(payload, "_txc.continuation", rc)
+					pb.Set("_txc.continuation", rc)
 				}
 
 				// Private-fields plumbing: when --debug-private is on,
@@ -321,12 +324,13 @@ func (web *WebController) Start() {
 				// the response is a clean public interface — survives
 				// stage merging without leaking chassis internals.
 				if web.pu.Conf.DebugPrivate {
-					payload, _ = sjson.Set(payload, "_txc.flag_private", true)
+					pb.Set("_txc.flag_private", true)
 				}
 
 				// TODO: create a goroutine/channel to get os.Stat(host + path)
 
 				// send event for processing
+				payload := pb.String()
 				var resCh = make(chan event.Payload) // response channel
 				var envelope = event.PackageJSON(ctx, payload, resCh, "http")
 				web.pu.Bus <- envelope
@@ -388,10 +392,11 @@ func (web *WebController) Start() {
 					output, status := checkStatus(output)
 					output = checkContentType(output)
 
-					// output any headers
+					// output any headers — iterate the held value Result;
+					// re-resolving the dotted path per header re-scanned
+					// the full response doc every time
 					gjson.Get(output, "_txc.web.res.headers").ForEach(func(key, value gjson.Result) bool {
-						hp := "_txc.web.res.headers." + key.String()
-						gjson.Get(output, hp).ForEach(func(k, v gjson.Result) bool {
+						value.ForEach(func(k, v gjson.Result) bool {
 							w.Header().Set(key.String(), v.String())
 							return true
 						})

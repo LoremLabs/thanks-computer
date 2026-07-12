@@ -15,6 +15,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
 
@@ -303,29 +304,30 @@ func (s *lmtpSession) dispatchGroup(
 	rid := hxid.NewTimeSort().String()
 	now := time.Now()
 
-	payload, _ := sjson.Set("", "_txc.src", "lmtp")
-	payload, _ = sjson.Set(payload, "_txc.rid", rid)
-	payload, _ = sjson.Set(payload, "_ts", now.Format(time.RFC3339))
-	payload, _ = sjson.Set(payload, "_txc.lmtp.listener", s.listener)
-	payload, _ = sjson.Set(payload, "_txc.lmtp.mail.from", s.mailFrom)
-	payload, _ = sjson.Set(payload, "_txc.lmtp.mail.size", len(body))
+	lb := jsonx.New()
+	lb.Set("_txc.src", "lmtp")
+	lb.Set("_txc.rid", rid)
+	lb.Set("_ts", now.Format(time.RFC3339))
+	lb.Set("_txc.lmtp.listener", s.listener)
+	lb.Set("_txc.lmtp.mail.from", s.mailFrom)
+	lb.Set("_txc.lmtp.mail.size", len(body))
 	// Group sublist for routing/verdict purposes.
-	payload, _ = sjson.Set(payload, "_txc.lmtp.rcpt", groupRcpts)
+	lb.Set("_txc.lmtp.rcpt", groupRcpts)
 	// Full transaction rcpt list — informational. Rules that care
 	// about who else was on the delivery (sibling-tenant rcpts,
 	// Bcc-style fan-out detection) read this.
-	payload, _ = sjson.Set(payload, "_txc.lmtp.transaction_rcpt", s.rcpts)
+	lb.Set("_txc.lmtp.transaction_rcpt", s.rcpts)
 
 	// Pre-stamp the route proposal so detectTenantBody short-circuits
 	// without re-resolving. The boot/100 route op promotes
 	// `_txc.route.*` to `_txc.tenant` / `_txc.stack` / `_txc.goto` —
 	// same machinery the HTTP path uses, just with a pre-decided
 	// proposal instead of a runtime lookup.
-	payload, _ = sjson.Set(payload, "_txc.route.tenant", key.tenant)
-	payload, _ = sjson.Set(payload, "_txc.route.stack", key.stack)
-	payload, _ = sjson.Set(payload, "_txc.route.ingress", key.ingressKey)
-	payload, _ = sjson.Set(payload, "_txc.route.hostname_verified", key.verified)
-	payload, _ = sjson.Set(payload, "_txc.route.to", key.stack+"/0")
+	lb.Set("_txc.route.tenant", key.tenant)
+	lb.Set("_txc.route.stack", key.stack)
+	lb.Set("_txc.route.ingress", key.ingressKey)
+	lb.Set("_txc.route.hostname_verified", key.verified)
+	lb.Set("_txc.route.to", key.stack+"/0")
 
 	// Best-effort MIME parse — same as Phase 1.
 	msgJSON, perr := parseMessage(body)
@@ -337,11 +339,11 @@ func (s *lmtpSession) dispatchGroup(
 	}
 	msgJSON, _ = sjson.Set(msgJSON, "raw",
 		base64.StdEncoding.EncodeToString(body))
-	payload, _ = sjson.SetRaw(payload, "_txc.lmtp.msg", msgJSON)
+	lb.SetRaw("_txc.lmtp.msg", msgJSON)
 
 	// Bounce / DSN detector for stacks to halt on before auto-replying
 	// (`WHEN @lmtp.is_bounce`). Null reverse-path or a delivery-status report.
-	payload, _ = sjson.Set(payload, "_txc.lmtp.is_bounce", bounceDetected(s.mailFrom, msgJSON))
+	lb.Set("_txc.lmtp.is_bounce", bounceDetected(s.mailFrom, msgJSON))
 
 	// Inbound spam/auth facts from the upstream Rspamd milter's headers,
 	// normalized under `_txc.mail.*` (read as `@mail.*`). Phase 1 is
@@ -349,32 +351,32 @@ func (s *lmtpSession) dispatchGroup(
 	// policy in txcl. When Rspamd added no headers (down/skipped), available is
 	// false and verdict is "unknown" — mail still flows (milter accepts).
 	meta := parseMailHeaders(msgJSON, s.ctrl.spamBands)
-	payload, _ = sjson.Set(payload, "_txc.mail.spam.source", "rspamd")
-	payload, _ = sjson.Set(payload, "_txc.mail.spam.available", meta.available)
-	payload, _ = sjson.Set(payload, "_txc.mail.spam.verdict", meta.verdict)
+	lb.Set("_txc.mail.spam.source", "rspamd")
+	lb.Set("_txc.mail.spam.available", meta.available)
+	lb.Set("_txc.mail.spam.verdict", meta.verdict)
 	if meta.hasScore {
-		payload, _ = sjson.Set(payload, "_txc.mail.spam.score", meta.score)
+		lb.Set("_txc.mail.spam.score", meta.score)
 	}
 	if meta.spf != "" {
-		payload, _ = sjson.Set(payload, "_txc.mail.auth.spf", meta.spf)
+		lb.Set("_txc.mail.auth.spf", meta.spf)
 	}
 	if meta.dkim != "" {
-		payload, _ = sjson.Set(payload, "_txc.mail.auth.dkim", meta.dkim)
+		lb.Set("_txc.mail.auth.dkim", meta.dkim)
 	}
 	if meta.dmarc != "" {
-		payload, _ = sjson.Set(payload, "_txc.mail.auth.dmarc", meta.dmarc)
+		lb.Set("_txc.mail.auth.dmarc", meta.dmarc)
 	}
 
 	// Connection metadata.
-	payload, _ = sjson.Set(payload, "_txc.lmtp.client.helo", s.conn.Hostname())
+	lb.Set("_txc.lmtp.client.helo", s.conn.Hostname())
 	if addr := s.conn.Conn().RemoteAddr(); addr != nil {
 		if ta, ok := addr.(*net.TCPAddr); ok && ta != nil {
-			payload, _ = sjson.Set(payload, "_txc.lmtp.client.ip", ta.IP.String())
-			payload, _ = sjson.Set(payload, "_txc.client.ip", ta.IP.String())
+			lb.Set("_txc.lmtp.client.ip", ta.IP.String())
+			lb.Set("_txc.client.ip", ta.IP.String())
 		}
 	}
 	if s.ctrl.pu.Conf.DebugPrivate {
-		payload, _ = sjson.Set(payload, "_txc.flag_private", true)
+		lb.Set("_txc.flag_private", true)
 	}
 
 	if s.ctrl.pu.Logger.Core().Enabled(zap.DebugLevel) {
@@ -391,7 +393,7 @@ func (s *lmtpSession) dispatchGroup(
 	ctx = context.WithValue(ctx, config.CtxKeyRid, rid)
 
 	resCh := make(chan event.Payload)
-	envelope := event.PackageJSON(ctx, payload, resCh, "lmtp")
+	envelope := event.PackageJSON(ctx, lb.String(), resCh, "lmtp")
 	s.ctrl.pu.Bus <- envelope
 
 	select {

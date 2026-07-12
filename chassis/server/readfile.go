@@ -13,6 +13,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
@@ -108,7 +109,7 @@ func readFile(ctx context.Context, ix *static.Index, fcas filecas.Store, in []by
 		}
 	}
 
-	resp := `{}`
+	resp := jsonx.NewObject()
 	seen := make(map[string]struct{}, len(files.Array()))
 
 	for i, f := range files.Array() {
@@ -154,8 +155,8 @@ func readFile(ctx context.Context, ix *static.Index, fcas filecas.Store, in []by
 				return readFileErr(fmt.Sprintf("read-file: %q not found", path)),
 					fmt.Errorf("read-file: %q not found", path)
 			}
-			resp, _ = sjson.Set(resp, base+".found", false)
-			resp, _ = sjson.Set(resp, base+".path", path)
+			resp.Set(base+".found", false)
+			resp.Set(base+".path", path)
 			continue
 		}
 
@@ -172,18 +173,18 @@ func readFile(ctx context.Context, ix *static.Index, fcas filecas.Store, in []by
 
 		content, enc := encodeReadFile(body, encode)
 
-		resp, _ = sjson.Set(resp, base+".found", true)
-		resp, _ = sjson.Set(resp, base+".path", path)
-		resp, _ = sjson.Set(resp, base+".encoding", enc)
-		resp, _ = sjson.Set(resp, base+".ctype", r.Ctype)
-		resp, _ = sjson.Set(resp, base+".size", origLen)
+		resp.Set(base+".found", true)
+		resp.Set(base+".path", path)
+		resp.Set(base+".encoding", enc)
+		resp.Set(base+".ctype", r.Ctype)
+		resp.Set(base+".size", origLen)
 		if truncated {
-			resp, _ = sjson.Set(resp, base+".truncated", true)
+			resp.Set(base+".truncated", true)
 		}
-		resp, _ = sjson.Set(resp, base+".content", content)
+		resp.Set(base+".content", content)
 	}
 
-	return event.Payload{Raw: resp, Type: event.JSON}, nil
+	return event.Payload{Raw: resp.String(), Type: event.JSON}, nil
 }
 
 // encodeReadFile renders file bytes per the requested encoding, returning

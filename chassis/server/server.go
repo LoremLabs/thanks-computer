@@ -50,6 +50,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	_ "github.com/loremlabs/thanks-computer/chassis/filecas/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/mail"
@@ -137,13 +138,22 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	// per-(tenant,stack) envelope). Echo the existing proposal back
 	// so the boot/100 route op picks it up unchanged; the chassis
 	// owns the field, so a hostile inlet can't fake this.
-	if gjson.GetBytes(in, "_txc.route.to").String() != "" {
+	// One scan of the envelope for every field the branches below
+	// consult (the old per-branch Gets re-scanned `in` up to 7 times).
+	fields := gjson.GetManyBytes(in,
+		"_txc.route.to", "_txc.continuation", "_txc.src",
+		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
+		"_txc.scheduled.tenant")
+	routeTo, continuation, src := fields[0], fields[1], fields[2]
+	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
+
+	if routeTo.String() != "" {
 		return `{}`
 	}
-	if gjson.GetBytes(in, "_txc.continuation").String() != "" {
-		raw := "{}"
-		raw, _ = sjson.Set(raw, "_txc.route.to", "txc-continuation/0")
-		return raw
+	if continuation.String() != "" {
+		b := jsonx.NewObject()
+		b.Set("_txc.route.to", "txc-continuation/0")
+		return b.String()
 	}
 	// Per-tenant cron tick. The cron controller fans out one envelope
 	// per tenant that authored a `_cron` stack, stamping the target
@@ -152,15 +162,15 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	// tenant's `_cron/0`; boot/100's visible `WHEN @route.to != ""`
 	// promotes it and maybeRetenant performs the sanctioned _sys→tenant
 	// pin — same machinery as a hostname-routed request, no bypass.
-	if gjson.GetBytes(in, "_txc.src").String() == "cron" {
-		if ct := gjson.GetBytes(in, "_txc.cron.tenant").String(); ct != "" {
-			raw := "{}"
-			raw, _ = sjson.Set(raw, "_txc.route.tenant", ct)
-			raw, _ = sjson.Set(raw, "_txc.route.stack", "_cron")
-			raw, _ = sjson.Set(raw, "_txc.route.ingress", "cron")
-			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
-			raw, _ = sjson.Set(raw, "_txc.route.to", "_cron/0")
-			return raw
+	if src.String() == "cron" {
+		if ct := cronTenant.String(); ct != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", ct)
+			b.Set("_txc.route.stack", "_cron")
+			b.Set("_txc.route.ingress", "cron")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_cron/0")
+			return b.String()
 		}
 	}
 	// Room message. The room inlet (admin POST /v1/tenants/{t}/rooms/{room}/
@@ -169,15 +179,15 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	// tenant's `_room/0` — the same sanctioned _sys→tenant pin as cron and
 	// hostname routing, no bypass. A tenant with no `_room` stack falls through
 	// to the 404 like any unrouted request.
-	if gjson.GetBytes(in, "_txc.src").String() == "room" {
-		if rt := gjson.GetBytes(in, "_txc.room.tenant").String(); rt != "" {
-			raw := "{}"
-			raw, _ = sjson.Set(raw, "_txc.route.tenant", rt)
-			raw, _ = sjson.Set(raw, "_txc.route.stack", "_room")
-			raw, _ = sjson.Set(raw, "_txc.route.ingress", "room")
-			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
-			raw, _ = sjson.Set(raw, "_txc.route.to", "_room/0")
-			return raw
+	if src.String() == "room" {
+		if rt := roomTenant.String(); rt != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", rt)
+			b.Set("_txc.route.stack", "_room")
+			b.Set("_txc.route.ingress", "room")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_room/0")
+			return b.String()
 		}
 	}
 	// Inspect request. The inspect inlet (admin POST /v1/tenants/{t}/inspect)
@@ -186,15 +196,15 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	// tenant's `_inspect/0` — the same sanctioned _sys→tenant pin as room. A
 	// tenant with no `_inspect` stack falls through to the 404 like any
 	// unrouted request; the inlet reports that as "no inspector answered".
-	if gjson.GetBytes(in, "_txc.src").String() == "inspect" {
-		if it := gjson.GetBytes(in, "_txc.inspect.tenant").String(); it != "" {
-			raw := "{}"
-			raw, _ = sjson.Set(raw, "_txc.route.tenant", it)
-			raw, _ = sjson.Set(raw, "_txc.route.stack", "_inspect")
-			raw, _ = sjson.Set(raw, "_txc.route.ingress", "inspect")
-			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
-			raw, _ = sjson.Set(raw, "_txc.route.to", "_inspect/0")
-			return raw
+	if src.String() == "inspect" {
+		if it := inspectTenant.String(); it != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", it)
+			b.Set("_txc.route.stack", "_inspect")
+			b.Set("_txc.route.ingress", "inspect")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_inspect/0")
+			return b.String()
 		}
 	}
 	// Scheduled event. The scheduled personality fires a claimed due event,
@@ -203,28 +213,28 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	// client input). Propose a route into that tenant's `_scheduled/0` — the
 	// same sanctioned _sys→tenant pin as cron/room. The tenant's stack reads
 	// the stored job off `@scheduled.payload.*`.
-	if gjson.GetBytes(in, "_txc.src").String() == "scheduled" {
-		if st := gjson.GetBytes(in, "_txc.scheduled.tenant").String(); st != "" {
-			raw := "{}"
-			raw, _ = sjson.Set(raw, "_txc.route.tenant", st)
-			raw, _ = sjson.Set(raw, "_txc.route.stack", "_scheduled")
-			raw, _ = sjson.Set(raw, "_txc.route.ingress", "scheduled")
-			raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", true)
-			raw, _ = sjson.Set(raw, "_txc.route.to", "_scheduled/0")
-			return raw
+	if src.String() == "scheduled" {
+		if st := scheduledTenant.String(); st != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", st)
+			b.Set("_txc.route.stack", "_scheduled")
+			b.Set("_txc.route.ingress", "scheduled")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_scheduled/0")
+			return b.String()
 		}
 	}
 	target, hit := resolver.Resolve(ingress.KeyFromEnvelope(string(in)))
 	if !hit {
 		return "{}"
 	}
-	raw := "{}"
-	raw, _ = sjson.Set(raw, "_txc.route.tenant", target.Tenant)
-	raw, _ = sjson.Set(raw, "_txc.route.stack", target.Stack)
-	raw, _ = sjson.Set(raw, "_txc.route.ingress", target.Ingress)
-	raw, _ = sjson.Set(raw, "_txc.route.hostname_verified", target.Verified)
-	raw, _ = sjson.Set(raw, "_txc.route.to", target.Stack+"/0")
-	return raw
+	b := jsonx.NewObject()
+	b.Set("_txc.route.tenant", target.Tenant)
+	b.Set("_txc.route.stack", target.Stack)
+	b.Set("_txc.route.ingress", target.Ingress)
+	b.Set("_txc.route.hostname_verified", target.Verified)
+	b.Set("_txc.route.to", target.Stack+"/0")
+	return b.String()
 }
 
 // routeBody is the txco://route transform — the EXECUTE half of the
@@ -249,12 +259,15 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 // halt/goto strip), so the promoted keys above are the single surviving
 // copy rather than a duplicate riding next to the inert proposal.
 func routeBody(in []byte) string {
-	to := gjson.GetBytes(in, "_txc.route.to").String()
+	fields := gjson.GetManyBytes(in,
+		"_txc.route.to", "_txc.route.tenant", "_txc.tenant",
+		"_txc.route.stack", "_txc.route.ingress", "_txc.route.hostname_verified")
+	to := fields[0].String()
 	if to == "" {
 		return "{}"
 	}
-	raw := "{}"
-	raw, _ = sjson.Set(raw, "_txc.goto", to)
+	b := jsonx.NewObject()
+	b.Set("_txc.goto", to)
 	// Tenant is ESTABLISHED once — at the _sys→concrete boot handoff — and may
 	// only be re-affirmed afterward. A (tenant) op can re-run route to re-pin the
 	// STACK for cross-stack dispatch, but it must NOT be able to SWITCH the tenant
@@ -268,21 +281,21 @@ func routeBody(in []byte) string {
 	// `cur` that differs from the proposal is a switch attempt, so it's omitted and
 	// the per-scope merge keeps the established value. (Allowing only cur=="" here
 	// silently dropped the boot promotion and broke ALL tenant routing.)
-	if tn := gjson.GetBytes(in, "_txc.route.tenant"); tn.Exists() && tn.String() != "" {
-		if cur := gjson.GetBytes(in, "_txc.tenant").String(); cur == "" || cur == tenants.SystemTenantSlug || cur == tn.String() {
-			raw, _ = sjson.Set(raw, "_txc.tenant", tn.String())
+	if tn := fields[1]; tn.Exists() && tn.String() != "" {
+		if cur := fields[2].String(); cur == "" || cur == tenants.SystemTenantSlug || cur == tn.String() {
+			b.Set("_txc.tenant", tn.String())
 		}
 	}
-	if s := gjson.GetBytes(in, "_txc.route.stack"); s.Exists() {
-		raw, _ = sjson.Set(raw, "_txc.stack", s.String())
+	if s := fields[3]; s.Exists() {
+		b.Set("_txc.stack", s.String())
 	}
-	if ig := gjson.GetBytes(in, "_txc.route.ingress"); ig.Exists() {
-		raw, _ = sjson.Set(raw, "_txc.ingress", ig.String())
+	if ig := fields[4]; ig.Exists() {
+		b.Set("_txc.ingress", ig.String())
 	}
-	if hv := gjson.GetBytes(in, "_txc.route.hostname_verified"); hv.Exists() {
-		raw, _ = sjson.Set(raw, "_txc.hostname_verified", hv.Bool())
+	if hv := fields[5]; hv.Exists() {
+		b.Set("_txc.hostname_verified", hv.Bool())
 	}
-	return raw
+	return b.String()
 }
 
 // continuationResultBody is the txco://continuation-result transform: a

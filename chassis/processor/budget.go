@@ -24,6 +24,8 @@
 package processor
 
 import (
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -268,23 +270,19 @@ func syncBudgetToEnvelope(ctx context.Context, raw string) string {
 	if s == nil {
 		return raw
 	}
-	out := raw
-	if v, err := sjson.Set(out, "_txc.fuel_used", s.fuel.Load()); err == nil {
-		out = v
-	}
-	if v, err := sjson.Set(out, "_txc.ttl", s.ttl.Load()); err == nil {
-		out = v
-	}
 	s.mu.Lock()
 	seen := make([]string, 0, len(s.seen))
 	for k := range s.seen {
 		seen = append(seen, k)
 	}
 	s.mu.Unlock()
-	if v, err := sjson.Set(out, "_txc._seen", seen); err == nil {
-		out = v
-	}
-	return out
+	// After the first sync all three paths exist, so this is one
+	// splice pass instead of three full-envelope copies per scope hop.
+	return jsonx.SetMany(raw, []jsonx.PathVal{
+		{Path: "_txc.fuel_used", Val: s.fuel.Load()},
+		{Path: "_txc.ttl", Val: s.ttl.Load()},
+		{Path: "_txc._seen", Val: seen},
+	})
 }
 
 // StripBudgetFromOutbound deletes the chassis-internal budget fields from

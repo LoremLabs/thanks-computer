@@ -37,6 +37,9 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	in := []byte(op.Input)
 	pu.Logger.Debug("ExecHttp", zap.String("opname", opName), zap.String("input", string(in)))
 
+	// One scan of op.Meta for every WITH field this handler consults.
+	metaFields := gjson.GetMany(op.Meta, "url", "method", "body_encoding", "body_path", "into")
+
 	// A `WITH url = "<resolved url>"` overrides the literal EXEC target. EXEC must be a
 	// string literal so the scheme dispatches here, but some calls need a URL built at
 	// runtime — e.g. a Stripe GET filtered by a customer id pulled from the envelope. The
@@ -44,7 +47,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	//   WITH url = &concat("https://api.stripe.com/v1/subscriptions?customer=", ._cid)
 	// Constrained to http/https so it can't jump schemes (file://, etc.) or otherwise
 	// escape the egress-guarded HTTPClient used below.
-	if override := strings.TrimSpace(gjson.Get(op.Meta, "url").String()); override != "" {
+	if override := strings.TrimSpace(metaFields[0].String()); override != "" {
 		if !strings.HasPrefix(override, "http://") && !strings.HasPrefix(override, "https://") {
 			return event.Payload{Raw: `{}`, Type: event.Null, Meta: `{"error":["http-url-override-scheme"]}`},
 				fmt.Errorf("ExecHTTP: WITH url override must be http(s), got %q", override)
@@ -82,7 +85,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	// Content-Type, so an op can call third-party GET APIs (e.g.
 	// timeapi.io) whose query params live in the URL. POST/PUT/PATCH keep
 	// the envelope-as-body behavior.
-	method := strings.ToUpper(strings.TrimSpace(gjson.Get(op.Meta, "method").String()))
+	method := strings.ToUpper(strings.TrimSpace(metaFields[1].String()))
 	if method == "" {
 		method = "POST"
 	}
@@ -98,10 +101,10 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	// operator can override Content-Type.
 	contentType := "application/json"
 	if sendBody {
-		switch strings.ToLower(strings.TrimSpace(gjson.Get(op.Meta, "body_encoding").String())) {
+		switch strings.ToLower(strings.TrimSpace(metaFields[2].String())) {
 		case "urlencoded", "form":
 			src := bodyForWire
-			if bp := normalizeEnvelopePath(gjson.Get(op.Meta, "body_path").String()); bp != "" {
+			if bp := normalizeEnvelopePath(metaFields[3].String()); bp != "" {
 				src = []byte(gjson.GetBytes(bodyForWire, bp).Raw)
 			}
 			bodyForWire = []byte(formEncode(src))
@@ -151,9 +154,10 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	if err != nil {
 		pu.Logger.Warn("HttpExec err2", zap.String("err", err.Error()))
 
-		meta, _ := sjson.Set("", "error[0]", "dial-http-exec-err")
-		meta, _ = sjson.Set(meta, "error[0]", "dial-http-exec-err")
-		meta, _ = sjson.Set(meta, "errorMsg", err.Error())
+		// sjson has no bracket syntax: the old "error[0]" path wrote a
+		// literal key named `error[0]`, invisible to every consumer of
+		// the {"error":[...]} shape the sibling emitters use.
+		meta, _ := sjson.Set(`{"error":["dial-http-exec-err"]}`, "errorMsg", err.Error())
 
 		return event.Payload{
 			Raw: `{}`,
@@ -177,7 +181,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	// the envelope's top level. Falls back to the raw body if the
 	// response isn't valid JSON.
 	out := string(body)
-	if into := normalizeEnvelopePath(gjson.Get(op.Meta, "into").String()); into != "" {
+	if into := normalizeEnvelopePath(metaFields[4].String()); into != "" {
 		if wrapped, werr := sjson.SetRaw("{}", into, out); werr == nil {
 			out = wrapped
 		}

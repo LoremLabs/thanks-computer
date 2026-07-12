@@ -46,6 +46,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
@@ -145,12 +146,13 @@ func datasetQuery(ctx context.Context, dbc *dbcache.DbCache, dsc *dataset.Cache,
 	if into == "" {
 		into = "_dataset"
 	}
-	resp, _ := sjson.Set(`{}`, into+".dataset", name)
-	resp, _ = sjson.Set(resp, into+".query", qname)
-	resp, _ = sjson.SetRaw(resp, into+".rows", rowsJSON)
-	resp, _ = sjson.Set(resp, into+".count", count)
-	resp, _ = sjson.Set(resp, into+".truncated", truncated)
-	return event.Payload{Raw: resp, Type: event.JSON}, nil
+	resp := jsonx.NewObject()
+	resp.Set(into+".dataset", name)
+	resp.Set(into+".query", qname)
+	resp.SetRaw(into+".rows", rowsJSON)
+	resp.Set(into+".count", count)
+	resp.Set(into+".truncated", truncated)
+	return event.Payload{Raw: resp.String(), Type: event.JSON}, nil
 }
 
 // resolveDataset maps (tenant slug, stack, dataset name) → the ACTIVE

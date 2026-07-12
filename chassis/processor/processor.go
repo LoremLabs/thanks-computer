@@ -35,6 +35,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
 	"github.com/loremlabs/thanks-computer/chassis/egress"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
@@ -1204,8 +1205,9 @@ func (pu *Unit) advanceAfterScope(
 	// keeps this from firing at detect@0, where the proposal must survive
 	// for route@100; a later tenant-stack goto re-runs this block but
 	// _txc.route is already gone, so the extra delete is a no-op.
-	halt := gjson.Get(resp, "_txc.halt").Bool()
-	gotoStage := pu.resolveGoto(stage, gjson.Get(resp, "_txc.goto").String())
+	ctl := gjson.GetMany(resp, "_txc.halt", "_txc.goto")
+	halt := ctl[0].Bool()
+	gotoStage := pu.resolveGoto(stage, ctl[1].String())
 	if halt || gotoStage != "" {
 		resp, _ = sjson.Delete(resp, "_txc.halt")
 		resp, _ = sjson.Delete(resp, "_txc.goto")
@@ -1229,8 +1231,11 @@ func (pu *Unit) advanceAfterScope(
 	// rule without the flag does nothing.
 	breakHere := false
 	breakAt := 0
-	if gjson.Get(resp, "_txc.flag_breakpoint").Bool() {
-		if br := gjson.Get(resp, "_txc.break"); br.Exists() {
+	// One scan for the three breakpoint fields; all are read before any
+	// mutation in this block.
+	bp := gjson.GetMany(resp, "_txc.flag_breakpoint", "_txc.break", "_txc.break_stack")
+	if bp[0].Bool() {
+		if br := bp[1]; br.Exists() {
 			N := br.Int()
 			if curStack, curScope, perr := pu.StageParse(stage); perr == nil {
 				// Optional stack gate: when `_txc.break_stack` is set
@@ -1238,7 +1243,7 @@ func (pu *Unit) advanceAfterScope(
 				// in that stack. The value stays on the envelope
 				// across scopes that don't match so it can fire
 				// once we land in the target stack.
-				wantStack := gjson.Get(resp, "_txc.break_stack").String()
+				wantStack := bp[2].String()
 				stackMatches := wantStack == "" || wantStack == curStack
 				var nextScope int64 = -1
 				hasNext := false
@@ -1294,11 +1299,14 @@ func (pu *Unit) advanceAfterScope(
 	// NOT streamed; it falls through to the normal buffered emit below,
 	// which preserves Content-Length. Breakpoints pre-empt streaming
 	// entirely so `_txc.broke_at` keeps dumping the whole envelope.
-	streamingAllowed := !gjson.Get(resp, "_txc.flag_breakpoint").Bool()
-	streamOpen := gjson.Get(resp, "_txc.runtime.http_stream_open").Bool()
+	// flag_breakpoint is deliberately RE-read here (not reused from the
+	// batch above): the breakHere block may have just deleted it.
+	sf := gjson.GetMany(resp, "_txc.flag_breakpoint", "_txc.runtime.http_stream_open", "_txc.web.res.body")
+	streamingAllowed := !sf[0].Bool()
+	streamOpen := sf[1].Bool()
 	isContinuing := !(halt || breakHere) && ((len(gotoStage) > 0) || (len(nextOps) > 0))
 	if streamingAllowed && (streamOpen || isContinuing) {
-		body := gjson.Get(resp, "_txc.web.res.body").String()
+		body := sf[2].String()
 		if isContinuing {
 			if body != "" {
 				if !streamOpen {
@@ -2073,13 +2081,16 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 // Shared by the same-scope barrier (suspendBarrierScope) and the
 // deferred-join suspend path so both emit an identical 202/303.
 func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh chan event.Payload) {
-	pollPath := gjson.Get(raw, "_txc.web.req.url.path").String()
+	reqFields := gjson.GetMany(raw,
+		"_txc.web.req.url.path", "_txc.web.req.headers.Accept.0",
+		"_txc.web.req.url.query.format.0")
+	pollPath := reqFields[0].String()
 	if pollPath == "" {
 		pollPath = "/"
 	}
 	pollURL := pollPath + "?_txc.continuation=" + rcid
-	accept := gjson.Get(raw, "_txc.web.req.headers.Accept.0").String()
-	format := gjson.Get(raw, "_txc.web.req.url.query.format.0").String()
+	accept := reqFields[1].String()
+	format := reqFields[2].String()
 	out := raw
 
 	if format != "json" && strings.Contains(accept, "text/html") {
@@ -2087,27 +2098,30 @@ func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh
 		// so a human hitting the app would just see raw JSON. Redirect
 		// (303 See Other) to the poll URL — the browser GETs it and
 		// lands on the branded waiting page, which then polls itself.
-		out, _ = sjson.Set(out, "_txc.web.res.status", 303)
-		out, _ = sjson.Set(out, "_txc.web.res.headers.location.0", pollURL)
-		out, _ = sjson.Set(out, "_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
-		out, _ = sjson.Set(out, "_txc.web.res.headers.cache-control.0", "no-store")
-		// Non-empty body: the inlet treats an empty _txc.web.res.body as
-		// "no body → emit the whole envelope". The browser discards this
-		// and follows Location.
-		out, _ = sjson.Set(out, "_txc.web.res.body",
-			base64.StdEncoding.EncodeToString([]byte("redirecting…\n")))
+		out = jsonx.SetMany(out, []jsonx.PathVal{
+			{Path: "_txc.web.res.status", Val: 303},
+			{Path: "_txc.web.res.headers.location.0", Val: pollURL},
+			{Path: "_txc.web.res.headers.content-type.0", Val: "text/plain; charset=utf-8"},
+			{Path: "_txc.web.res.headers.cache-control.0", Val: "no-store"},
+			// Non-empty body: the inlet treats an empty _txc.web.res.body as
+			// "no body → emit the whole envelope". The browser discards this
+			// and follows Location.
+			{Path: "_txc.web.res.body", Val: base64.StdEncoding.EncodeToString([]byte("redirecting…\n"))},
+		})
 	} else {
 		// Machine / curl / programmatic poller: 202 + JSON status +
 		// Location header (parsed, not auto-followed). no-store: the
 		// poll URL returns different content over time, a cached 202
 		// would strand the client on "running" forever.
-		out, _ = sjson.Set(out, "_txc.web.res.status", 202)
-		out, _ = sjson.Set(out, "_txc.web.res.headers.location.0", pollURL)
-		out, _ = sjson.Set(out, "_txc.web.res.headers.retry-after.0", "3")
-		out, _ = sjson.Set(out, "_txc.web.res.headers.content-type.0", "application/json")
-		out, _ = sjson.Set(out, "_txc.web.res.headers.cache-control.0", "no-store")
 		cbody, _ := json.Marshal(map[string]string{"status": "running", "continuation": rcid})
-		out, _ = sjson.Set(out, "_txc.web.res.body", base64.StdEncoding.EncodeToString(cbody))
+		out = jsonx.SetMany(out, []jsonx.PathVal{
+			{Path: "_txc.web.res.status", Val: 202},
+			{Path: "_txc.web.res.headers.location.0", Val: pollURL},
+			{Path: "_txc.web.res.headers.retry-after.0", Val: "3"},
+			{Path: "_txc.web.res.headers.content-type.0", Val: "application/json"},
+			{Path: "_txc.web.res.headers.cache-control.0", Val: "no-store"},
+			{Path: "_txc.web.res.body", Val: base64.StdEncoding.EncodeToString(cbody)},
+		})
 	}
 
 	select {
@@ -2315,135 +2329,6 @@ func (pu *Unit) emitResumeUsage(ss continuation.StageSuspended, finalRaw []byte,
 }
 
 // MergeJSON iterate through top level keys, add them to other struct, return it
-func (pu *Unit) MergeJSON(src string, dst string) (string, error) {
-	// doesn't deep merge. maybe https://play.golang.org/p/8jlJUbEJKf ?
-
-	// short circuit for empty strings
-	if dst == "" {
-		return src, nil
-	}
-	if src == "" {
-		return dst, nil
-	}
-
-	d := gjson.Parse(dst)
-	s := gjson.Parse(src)
-	if !d.IsObject() || !s.IsObject() {
-		return "", errors.New("Merging requires both sides to be objects")
-	}
-
-	var escapeDot = func(key string) string {
-		s := strings.ReplaceAll(key, ".", "\\.")
-		return strings.ReplaceAll(s, ":", "\\:")
-	}
-
-	var deepmerge func(x1, x2 interface{}) interface{}
-	deepmerge = func(x1, x2 interface{}) interface{} {
-		switch x1 := x1.(type) {
-		case map[string]interface{}:
-			x2, ok := x2.(map[string]interface{})
-			if !ok {
-				return x1
-			}
-			for k, v2 := range x2 {
-				if v1, ok := x1[k]; ok {
-					x1[k] = deepmerge(v1, v2)
-				} else {
-					x1[k] = v2
-				}
-			}
-		case nil:
-			// merge(nil, map[string]interface{...}) -> map[string]interface{...}
-			x2, ok := x2.(map[string]interface{})
-			if ok {
-				return x2
-			}
-		case []interface{}:
-			x2, ok := x2.([]interface{})
-			if ok {
-				merged := append(x2, x1...)
-				return merged
-			}
-			return x2
-		}
-		return x1
-	}
-
-	var derr error
-	d.ForEach(func(key, value gjson.Result) bool {
-		// if the typeof the value is not object or map, just insert
-		// otherwise, we merge insert
-		switch value.Type {
-		case gjson.JSON:
-			// see if this object exists in both source and destination
-			v := gjson.Get(src, escapeDot(key.String()))
-			if !v.Exists() {
-				// good news, we can just insert it
-				switch {
-				case value.IsObject():
-					m, ok := value.Value().(map[string]interface{})
-					if !ok {
-						derr = errors.New("merge object error")
-						return false
-					}
-					src, _ = sjson.Set(src, escapeDot(key.String()), m)
-				case value.IsArray():
-					m, ok := value.Value().([]interface{})
-					if !ok {
-						derr = errors.New("merge array error")
-						return false
-					}
-					src, _ = sjson.Set(src, escapeDot(key.String()), m)
-				}
-			} else {
-				// exists in both places, let's deepmerge, append arrays
-				switch {
-				case value.IsObject():
-					d1, dok := value.Value().(map[string]interface{})
-					s1, sok := v.Value().(map[string]interface{})
-					if !dok || !sok {
-						derr = errors.New("deepmerge obj error")
-
-						return false
-					}
-
-					merged := deepmerge(d1, s1)
-					src, _ = sjson.Set(src, escapeDot(key.String()), merged)
-				case value.IsArray():
-					d1, dok := value.Value().([]interface{})
-					s1, sok := v.Value().([]interface{})
-					if v.IsArray() {
-						if !dok || !sok {
-							derr = errors.New("deepmerge obj error")
-							return false
-						}
-						// TODO: check to see if arrays v/value are the same size and if s1 == d1.
-						// if it's the same, don't append.
-						merged := append(s1, d1...)
-						src, _ = sjson.Set(src, escapeDot(key.String()), merged)
-					} else {
-						src, _ = sjson.Set(src, escapeDot(key.String()), d1)
-					}
-				}
-			}
-
-		case gjson.String:
-			src, _ = sjson.Set(src, escapeDot(key.String()), value.String())
-		case gjson.False:
-			src, _ = sjson.Set(src, escapeDot(key.String()), false)
-		case gjson.True:
-			src, _ = sjson.Set(src, escapeDot(key.String()), true)
-		case gjson.Number:
-			src, _ = sjson.Set(src, escapeDot(key.String()), value.Num)
-		default:
-			src, _ = sjson.Set(src, escapeDot(key.String()), nil)
-		}
-
-		return true // keep iterating
-	})
-
-	return src, derr
-}
 
 // ExecCore on core execution (vs remote)
 func (pu *Unit) ExecCore(ctx context.Context, op operation.Operation) (event.Payload, error) {

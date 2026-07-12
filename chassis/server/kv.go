@@ -10,6 +10,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
@@ -259,11 +260,11 @@ func kvList(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 		into = "_kv"
 	}
 	blob, _ := json.Marshal(keys)
-	resp := `{}`
-	resp, _ = sjson.SetRaw(resp, into+".keys", string(blob))
-	resp, _ = sjson.Set(resp, into+".next", next)
-	resp, _ = sjson.Set(resp, into+".count", len(keys))
-	return event.Payload{Raw: resp, Type: event.JSON}, nil
+	resp := jsonx.NewObject()
+	resp.SetRaw(into+".keys", string(blob))
+	resp.Set(into+".next", next)
+	resp.Set(into+".count", len(keys))
+	return event.Payload{Raw: resp.String(), Type: event.JSON}, nil
 }
 
 // kvErr builds a structured error event.Payload (never includes values —

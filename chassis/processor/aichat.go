@@ -16,6 +16,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/chat"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
@@ -224,13 +225,20 @@ func decodeChatWith(meta string) (chatWith, error) {
 
 	out := chatWith{}
 
-	if r := gjson.Get(meta, "prompt"); r.Exists() {
+	// One scan for all WITH fields (the per-field Gets re-scanned the
+	// materialized meta doc ten times).
+	f := gjson.GetMany(meta,
+		"prompt", "system", "messages", "schema", "model",
+		"provider", "intent", "limits.timeout_ms", "limits.max_cost_usd",
+		"debug")
+
+	if r := f[0]; r.Exists() {
 		out.prompt = r.String()
 	}
-	if r := gjson.Get(meta, "system"); r.Exists() {
+	if r := f[1]; r.Exists() {
 		out.system = r.String()
 	}
-	if r := gjson.Get(meta, "messages"); r.Exists() {
+	if r := f[2]; r.Exists() {
 		out.useMessages = true
 		if err := json.Unmarshal([]byte(r.Raw), &out.messages); err != nil {
 			return out, &chat.InvalidWithError{
@@ -238,25 +246,25 @@ func decodeChatWith(meta string) (chatWith, error) {
 			}
 		}
 	}
-	if r := gjson.Get(meta, "schema"); r.Exists() {
+	if r := f[3]; r.Exists() {
 		out.schema = json.RawMessage(r.Raw)
 	}
-	if r := gjson.Get(meta, "model"); r.Exists() {
+	if r := f[4]; r.Exists() {
 		out.model = r.String()
 	}
-	if r := gjson.Get(meta, "provider"); r.Exists() {
+	if r := f[5]; r.Exists() {
 		out.provider = r.String()
 	}
-	if r := gjson.Get(meta, "intent"); r.Exists() {
+	if r := f[6]; r.Exists() {
 		out.intent = r.String()
 	}
-	if r := gjson.Get(meta, "limits.timeout_ms"); r.Exists() {
+	if r := f[7]; r.Exists() {
 		out.limits.TimeoutMs = int(r.Int())
 	}
-	if r := gjson.Get(meta, "limits.max_cost_usd"); r.Exists() {
+	if r := f[8]; r.Exists() {
 		out.limits.MaxCostUSD = r.Float()
 	}
-	if r := gjson.Get(meta, "debug"); r.Exists() {
+	if r := f[9]; r.Exists() {
 		out.debug = r.Bool()
 	}
 
@@ -432,12 +440,12 @@ func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat
 // `chat.error` is top-level (not under _txc) so rule authors can dispatch
 // uniformly with `WHEN @chat.error EXEC ...`.
 func buildChatResponseEnvelope(resp chat.Response, runErr error, schemaStatus string, validatedPayload json.RawMessage, routing string) string {
-	raw := "{}"
+	b := jsonx.NewObject()
 
 	if runErr == nil {
-		raw, _ = sjson.Set(raw, "text", resp.Text)
+		b.Set("text", resp.Text)
 		if len(validatedPayload) > 0 {
-			raw, _ = sjson.SetRaw(raw, "schema_validated_payload", string(validatedPayload))
+			b.SetRaw("schema_validated_payload", string(validatedPayload))
 		}
 	} else {
 		errBody := map[string]any{"message": runErr.Error()}
@@ -446,24 +454,24 @@ func buildChatResponseEnvelope(resp chat.Response, runErr error, schemaStatus st
 		} else {
 			errBody["code"] = "txco_chat_unknown"
 		}
-		raw, _ = sjson.Set(raw, "chat.error", errBody)
+		b.Set("chat.error", errBody)
 	}
 
 	// Metadata always present, even on error, so the trace + envelope
 	// agree.
-	raw, _ = sjson.Set(raw, "_txc.chat.provider", resp.Provider)
-	raw, _ = sjson.Set(raw, "_txc.chat.model", resp.Model)
-	raw, _ = sjson.Set(raw, "_txc.chat.tokens.in", resp.TokensIn)
-	raw, _ = sjson.Set(raw, "_txc.chat.tokens.out", resp.TokensOut)
-	raw, _ = sjson.Set(raw, "_txc.chat.latency_ms", resp.LatencyMS)
-	raw, _ = sjson.Set(raw, "_txc.chat.retries", resp.Retries)
+	b.Set("_txc.chat.provider", resp.Provider)
+	b.Set("_txc.chat.model", resp.Model)
+	b.Set("_txc.chat.tokens.in", resp.TokensIn)
+	b.Set("_txc.chat.tokens.out", resp.TokensOut)
+	b.Set("_txc.chat.latency_ms", resp.LatencyMS)
+	b.Set("_txc.chat.retries", resp.Retries)
 	if routing != "" {
-		raw, _ = sjson.Set(raw, "_txc.chat.routing_decision", routing)
+		b.Set("_txc.chat.routing_decision", routing)
 	}
 	if schemaStatus != "" {
-		raw, _ = sjson.Set(raw, "_txc.chat.schema_validation", schemaStatus)
+		b.Set("_txc.chat.schema_validation", schemaStatus)
 	}
-	return raw
+	return b.String()
 }
 
 // stampChatOpDebug attaches `_txc_op_debug` to raw with chat-flavored
@@ -531,24 +539,24 @@ func stampChatOpDebug(raw string, cfg chatWith, req chat.Request, resp chat.Resp
 // failure, no backend). Same shape buildChatResponseEnvelope produces
 // but without a successful Response to draw metadata from.
 func chatErrorPayload(op operation.Operation, providerName, model, routing string, err error) event.Payload {
-	raw := "{}"
+	b := jsonx.NewObject()
 	errBody := map[string]any{"message": err.Error()}
 	if coded, ok := err.(chat.CodedError); ok {
 		errBody["code"] = coded.Code()
 	} else {
 		errBody["code"] = "txco_chat_unknown"
 	}
-	raw, _ = sjson.Set(raw, "chat.error", errBody)
+	b.Set("chat.error", errBody)
 	if providerName != "" {
-		raw, _ = sjson.Set(raw, "_txc.chat.provider", providerName)
+		b.Set("_txc.chat.provider", providerName)
 	}
 	if model != "" {
-		raw, _ = sjson.Set(raw, "_txc.chat.model", model)
+		b.Set("_txc.chat.model", model)
 	}
 	if routing != "" {
-		raw, _ = sjson.Set(raw, "_txc.chat.routing_decision", routing)
+		b.Set("_txc.chat.routing_decision", routing)
 	}
-	return event.Payload{Raw: raw, Type: event.JSON, Meta: op.Meta}
+	return event.Payload{Raw: b.String(), Type: event.JSON, Meta: op.Meta}
 }
 
 // Silence unused-import linter when we're not yet referencing certain
