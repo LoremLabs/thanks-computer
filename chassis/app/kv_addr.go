@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kvtools/redis"
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 )
 
-// redisConfigFromAddr turns a KV address into a kvtools/redis Config plus the
+// redisConfigFromAddr turns a KV address into a redisstore Config plus the
 // bare host:port to hand to valkeyrie.
 //
 // A bare host:port is returned unchanged (today's behaviour): no TLS, password
@@ -22,8 +22,8 @@ import (
 // The scheme, not a separate flag, selects TLS — mirroring how the auth/runtime
 // DSN seam carries security inside postgres://…?sslmode=… (see
 // auth/registry.DialectForDSN + config.RedactDSN).
-func redisConfigFromAddr(addr, fallbackPassword string) (*redis.Config, string, error) {
-	rc := &redis.Config{Password: fallbackPassword}
+func redisConfigFromAddr(addr, fallbackPassword string) (*redisstore.Config, string, error) {
+	rc := &redisstore.Config{Password: fallbackPassword}
 	if !strings.HasPrefix(addr, "redis://") && !strings.HasPrefix(addr, "rediss://") {
 		return rc, addr, nil // bare host:port — unchanged
 	}

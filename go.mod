@@ -19,7 +19,6 @@ require (
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
 	github.com/jhillyerd/enmime/v2 v2.4.1
 	github.com/kvtools/boltdb v1.0.2
-	github.com/kvtools/redis v1.2.0
 	github.com/kvtools/valkeyrie v1.0.0
 	github.com/lestrrat-go/jwx/v2 v2.1.2
 	github.com/libdns/libdns v1.1.1

@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/kvtools/boltdb"
-	"github.com/kvtools/redis"
 	"github.com/kvtools/valkeyrie"
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
@@ -36,6 +35,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
+	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/repl"
 	"github.com/loremlabs/thanks-computer/chassis/scheduled"
@@ -153,7 +153,7 @@ func Run(bi BuildInfo) int {
 	// SnapshotBootstrapRef (not bootstrapWanted, which is zeroed below for
 	// Postgres-runtime nodes that are still fleet members). Scoped to
 	// bootstrapped nodes, so single-node/dev (boltdb default) are unchanged.
-	if conf.SnapshotBootstrapRef != "" && conf.KVStore != redis.StoreName {
+	if conf.SnapshotBootstrapRef != "" && conf.KVStore != redisstore.StoreName {
 		logger.Fatal("snapshot-bootstrapped node requires a shared KV backend",
 			zap.String("kvstore", conf.KVStore),
 			zap.String("hint", "set TXCO_KVSTORE=redis — this node bootstraps from a shared snapshot; node-local boltdb would diverge from the fleet"))
@@ -424,7 +424,7 @@ func Run(bi BuildInfo) int {
 	// store. Switch via --kvstore. The op-writable KV (txco://kv/*) uses this.
 	var kvCfg valkeyrie.Config
 	switch conf.KVStore {
-	case redis.StoreName:
+	case redisstore.StoreName:
 		// A bare host:port stays as-is (plaintext, password from
 		// TXCO_KVSTORE_PASSWORD); a redis://|rediss:// URL is parsed for
 		// userinfo/db/TLS. The addr is rewritten to the bare host:port BEFORE
@@ -451,7 +451,7 @@ func Run(bi BuildInfo) int {
 	// probe. The probe is NON-FATAL: go-redis reconnects on its own, so an
 	// unreachable redis is a WARN (KV ops fail until it returns), not a boot
 	// failure. boltdb is a local file, so no probe is needed.
-	if conf.KVStore == redis.StoreName {
+	if conf.KVStore == redisstore.StoreName {
 		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		_, perr := kv.Exists(pctx, "_txc:kv:bootprobe", nil)
 		cancel()
