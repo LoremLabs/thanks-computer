@@ -160,12 +160,23 @@ func (c *Controller) BackfillStructuredHostDKIM(ctx context.Context) (int, error
 		if terr != nil {
 			return keyed, terr
 		}
-		if _, uerr := tx.ExecContext(ctx,
+		// The empty-key guard is the multi-admin claim: two admins backfilling
+		// concurrently generate DIFFERENT keypairs, and an unconditional UPDATE
+		// would let the loser overwrite the winner's key in the DB while BOTH
+		// fleet-publish their own — data-plane signer and published DNS TXT
+		// could then disagree forever. Losing the conditional UPDATE means the
+		// other admin keyed (and published) this host — skip it entirely.
+		res, uerr := tx.ExecContext(ctx,
 			c.rb(`UPDATE tenant_hostnames SET dkim_selector = ?, dkim_private_pem = ?, dkim_public_b64 = ?
-			  WHERE id = ?`),
-			h.DKIMSelector, h.DKIMPrivatePEM, h.DKIMPublicB64, h.ID); uerr != nil {
+			  WHERE id = ? AND dkim_private_pem = ''`),
+			h.DKIMSelector, h.DKIMPrivatePEM, h.DKIMPublicB64, h.ID)
+		if uerr != nil {
 			_ = tx.Rollback()
 			return keyed, uerr
+		}
+		if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
+			_ = tx.Rollback()
+			continue // raced — a competing admin keyed it; its event is canonical
 		}
 		if c.fleetEnabled() {
 			if _, qerr := c.fleetQueueEvent(ctx, tx,

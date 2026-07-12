@@ -254,3 +254,42 @@ func TestActivationHelpers(t *testing.T) {
 		t.Fatal("zone hostname should be pre-verified")
 	}
 }
+
+// A user-created binding of the deterministic zone host to the SAME
+// (tenant, stack) must be adopted silently — the active-hostname unique
+// index is hostname-global, so without adoption the mint fails (and warns)
+// on every activation forever. A host owned by a DIFFERENT tenant must
+// still surface the conflict.
+func TestEnsureZoneHostnameAdoptsSameOwnerRow(t *testing.T) {
+	_, db := newDNSStore(t)
+	ctx := context.Background()
+
+	tx, _ := db.BeginTx(ctx, nil)
+	defer func() { _ = tx.Commit() }()
+
+	// Pre-existing USER binding of www.ops.example.com → (t1, www).
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO tenant_hostnames (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
+		 VALUES ('thn_user1', 'www.ops.example.com', 't1', 'www', '2026-01-01T00:00:00Z', 'user', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed user row: %v", err)
+	}
+	host, err := EnsureZoneHostnameTx(ctx, tx, "t1", "www", "ops.example.com", "2026-07-12T00:00:00Z", nil)
+	if err != nil || host != "www.ops.example.com" {
+		t.Fatalf("adopt same-owner row: host=%q err=%v", host, err)
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM tenant_hostnames WHERE hostname = 'www.ops.example.com' AND revoked_at IS NULL`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("adoption must not mint a second row: n=%d err=%v", n, err)
+	}
+
+	// Same hostname owned by a DIFFERENT tenant → conflict surfaces.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO tenant_hostnames (id, hostname, tenant_id, stack, created_at, created_by, verified_at)
+		 VALUES ('thn_other1', 'api.ops.example.com', 't2', 'api', '2026-01-01T00:00:00Z', 'user', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed foreign row: %v", err)
+	}
+	if _, err := EnsureZoneHostnameTx(ctx, tx, "t1", "api", "ops.example.com", "2026-07-12T00:00:00Z", nil); err == nil {
+		t.Fatal("foreign-owned hostname must surface the conflict, not adopt")
+	}
+}

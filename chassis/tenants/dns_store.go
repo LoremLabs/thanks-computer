@@ -155,10 +155,37 @@ func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, orig
 			return "", false, err
 		}
 	}
+	// Adoption lookup: the active-hostname unique index is hostname-GLOBAL
+	// (one active row per hostname, any creator), so a user-created binding
+	// of the SAME deterministic host to the SAME (tenant, stack) — e.g. the
+	// host was bound by hand before the zone was delegated — blocks the mint
+	// forever while being functionally identical to its outcome. Adopt it
+	// silently; only a host owned by a DIFFERENT tenant/stack is a real
+	// conflict. (Observed: www.dripl.it warned on every activation.)
+	lookupSameOwner := func() (bool, error) {
+		var one int
+		err := tx.QueryRowContext(ctx,
+			d.Rebind(`SELECT 1 FROM tenant_hostnames
+			  WHERE hostname = ? AND tenant_id = ? AND stack = ? AND revoked_at IS NULL
+			  LIMIT 1`), canon, tenantID, stack).Scan(&one)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			return false, nil
+		default:
+			return false, err
+		}
+	}
 	if h, found, err := lookupExisting(); err != nil {
 		return "", err
 	} else if found {
 		return h, nil
+	}
+	if found, err := lookupSameOwner(); err != nil {
+		return "", err
+	} else if found {
+		return canon, nil
 	}
 	id := "thn_" + hxid.New().String()
 	// SAVEPOINT-wrap the INSERT so a unique-violation doesn't poison the enclosing
@@ -178,13 +205,20 @@ func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, orig
 	}
 	if d.IsUniqueViolationGeneric(ierr) {
 		// A concurrent activation of THIS (tenant, stack) may have just minted the
-		// identical deterministic host — adopt it idempotently. If the hostname is
-		// instead owned by a different tenant/stack, the lookup finds nothing and
-		// we surface the conflict (the caller treats a mint failure as non-fatal).
+		// identical deterministic host — adopt it idempotently. Same for a
+		// same-owner row that appeared since the pre-checks (lookupSameOwner).
+		// If the hostname is instead owned by a different tenant/stack, both
+		// lookups find nothing and we surface the conflict (the caller treats
+		// a mint failure as non-fatal).
 		if h, found, lerr := lookupExisting(); lerr != nil {
 			return "", lerr
 		} else if found {
 			return h, nil
+		}
+		if found, lerr := lookupSameOwner(); lerr != nil {
+			return "", lerr
+		} else if found {
+			return canon, nil
 		}
 	}
 	return "", ierr

@@ -68,17 +68,15 @@ func NewController(ctx context.Context, pu *processor.Unit, sink feed.Sink) *Con
 
 func (c *Controller) enabled() bool {
 	// Narrow the drainer to the admin personality. The outbox is produced only by
-	// admin handlers, so no other node has business draining it. This is an
-	// OPERATIONAL NARROWING, not a shared-Postgres concurrency guarantee: the
-	// admin *personality* is not a singleton, so two admin instances against one
-	// shared runtime Postgres would both drain the same outbox and double-publish.
-	// A real shared-PG drainer needs atomic row claiming (SELECT … FOR UPDATE SKIP
-	// LOCKED, or an UPDATE … RETURNING claim) plus sink-level idempotency to
-	// tolerate "published then crashed before marking done" replay — deferred,
-	// and likely moot because pure-PG retires the runtime outbox entirely (Phase
-	// 3). Until then, exactly-one-admin is a deployment invariant, not a
-	// mechanism. (The pump is the outbox DRAINER; the producers are the admin
-	// handlers that AppendOutbox.)
+	// admin handlers, so no other node has business draining it. On a shared
+	// Postgres runtime, concurrent admin drainers are additionally safe: each
+	// pass claims its rows with SELECT … FOR UPDATE SKIP LOCKED inside one tx
+	// (drainOnceClaimed), so competitors partition the pending set instead of
+	// double-publishing; sink idempotency (JetStream Nats-Msg-Id / the
+	// consumer-side applied_events dedup) absorbs the crashed-before-markdone
+	// replay that claiming alone can't prevent. On SQLite the outbox is
+	// per-node, so a single drainer is structural. (The pump is the outbox
+	// DRAINER; the producers are the admin handlers that AppendOutbox.)
 	return c.sink != nil && c.pu.Conf.FeedSink != "" && c.pu.Conf.FeedSink != "nop" &&
 		c.pu.Conf.HasPersonality("admin")
 }
@@ -151,6 +149,15 @@ func (c *Controller) batchSize() int {
 	return n
 }
 
+// queryExecer is the subset of *sql.DB / *sql.Tx a drain pass needs: the
+// claimed (Postgres) path routes every statement through its claim tx so
+// the row locks, failure bookkeeping, and write-back commit together; the
+// SQLite path passes the bare handle.
+type queryExecer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // drainOnce runs one pump pass: select pending rows, Append each,
 // record success/failure. Failures don't halt the pass — the failed
 // row stays pending with attempt_count incremented; subsequent rows
@@ -158,12 +165,59 @@ func (c *Controller) batchSize() int {
 // tick rate (no per-row backoff in v1; the doc reserves
 // --feed-sink-backoff-max for that addition if needed).
 func (c *Controller) drainOnce(ctx context.Context) {
-	rows, err := c.pu.RuntimeDB.QueryContext(ctx,
+	d := c.pu.RuntimeDialect
+	if d == nil {
+		d = registry.SQLite
+	}
+	if d.SkipLockedClause() == "" {
+		// SQLite: the outbox is per-node, so a single drainer is structural —
+		// no claim needed. Deliberately NO transaction: any BeginTx on the
+		// runtime DSN takes the whole-DB write lock (_txlock=immediate), and
+		// holding it across broker publishes would starve co-located writers.
+		c.drainPass(ctx, c.pu.RuntimeDB, "")
+		return
+	}
+	// Shared Postgres: one READ COMMITTED tx spans claim → publish →
+	// write-back. The SELECT's FOR UPDATE SKIP LOCKED row locks ARE the
+	// multi-admin claim — a competing drainer's pass skips our rows instead
+	// of double-publishing them. The tx is held across the broker publishes
+	// deliberately (releasing it would release the claim); worst case it
+	// spans batch × sink-append timeout. A crash mid-pass rolls back to
+	// plain pending rows; the retry reuses the same event_id, which the
+	// sink/consumer dedup absorbs.
+	tx, err := d.BeginWrite(ctx, c.pu.RuntimeDB)
+	if err != nil {
+		c.pu.Logger.Error("control-event publisher: begin claim tx",
+			zap.String("err", err.Error()))
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	c.drainPass(ctx, tx, d.SkipLockedClause())
+	// Commit even when nothing published — failure bookkeeping
+	// (attempt_count / last_error) rides this tx too.
+	if cerr := tx.Commit(); cerr != nil {
+		c.pu.Logger.Error("control-event publisher: commit claim tx; rows will republish",
+			zap.String("err", cerr.Error()))
+		return
+	}
+	committed = true
+}
+
+// drainPass is one select→publish→write-back pass over q (bare DB handle on
+// SQLite, the claim tx on Postgres). lockClause is appended to the pending
+// SELECT (empty or the dialect's FOR UPDATE SKIP LOCKED).
+func (c *Controller) drainPass(ctx context.Context, q queryExecer, lockClause string) {
+	rows, err := q.QueryContext(ctx,
 		c.rb(`SELECT id, event_id, payload_json
 		   FROM control_events_outbox
 		  WHERE published_control_version IS NULL
 		  ORDER BY id
-		  LIMIT ?`), c.batchSize())
+		  LIMIT ?`+lockClause), c.batchSize())
 	if err != nil {
 		c.pu.Logger.Error("control-event publisher: select pending",
 			zap.String("err", err.Error()))
@@ -203,7 +257,7 @@ func (c *Controller) drainOnce(ctx context.Context) {
 	}
 	var done []published
 	for _, p := range batch {
-		if cv, ok := c.publishOne(ctx, p.id, p.eventID, p.payload); ok {
+		if cv, ok := c.publishOne(ctx, q, p.id, p.eventID, p.payload); ok {
 			done = append(done, published{id: p.id, cv: cv})
 		}
 	}
@@ -232,7 +286,7 @@ func (c *Controller) drainOnce(ctx context.Context) {
 		args = append(args, d.id)
 	}
 	sb.WriteString(")")
-	if _, uerr := c.pu.RuntimeDB.ExecContext(ctx, c.rb(sb.String()), args...); uerr != nil {
+	if _, uerr := q.ExecContext(ctx, c.rb(sb.String()), args...); uerr != nil {
 		// Published to the broker but failed to record locally. The rows
 		// stay pending → republished next tick; same event_id → backend
 		// dedup returns the same control_version (and the consumer-side
@@ -245,33 +299,34 @@ func (c *Controller) drainOnce(ctx context.Context) {
 
 // publishOne decodes, sanity-checks, and publishes one outbox row. Returns
 // the broker-assigned control_version and true on success; the CALLER
-// records the write-back (batched per pass).
-func (c *Controller) publishOne(ctx context.Context, rowID int64, eventID string, payload []byte) (uint64, bool) {
+// records the write-back (batched per pass). q is the pass's statement
+// runner (claim tx on Postgres) so failure bookkeeping shares the claim.
+func (c *Controller) publishOne(ctx context.Context, q queryExecer, rowID int64, eventID string, payload []byte) (uint64, bool) {
 	var ev controlevent.Event
 	if err := json.Unmarshal(payload, &ev); err != nil {
 		// Outbox row is corrupt — record the failure so it stays
 		// visible in the pending set with an explanatory last_error.
 		// We don't drop the row; an operator can DELETE it after
 		// inspecting.
-		c.recordFailure(ctx, rowID, fmt.Errorf("decode payload_json: %w", err))
+		c.recordFailure(ctx, q, rowID, fmt.Errorf("decode payload_json: %w", err))
 		return 0, false
 	}
 	// Defense-in-depth: ensure the wire EventID matches the row's
 	// canonical event_id column. The handler helper writes both from
 	// the same source, but if they drift we want to know loudly.
 	if ev.EventID != eventID {
-		c.recordFailure(ctx, rowID,
+		c.recordFailure(ctx, q, rowID,
 			fmt.Errorf("event_id mismatch: row=%q payload=%q", eventID, ev.EventID))
 		return 0, false
 	}
 
 	out, err := c.sink.Append(ctx, ev)
 	if err != nil {
-		c.recordFailure(ctx, rowID, err)
+		c.recordFailure(ctx, q, rowID, err)
 		return 0, false
 	}
 	if out.ControlVersion == 0 {
-		c.recordFailure(ctx, rowID, fmt.Errorf("sink returned zero control_version"))
+		c.recordFailure(ctx, q, rowID, fmt.Errorf("sink returned zero control_version"))
 		return 0, false
 	}
 	c.pu.Logger.Info("control-event published",
@@ -283,9 +338,12 @@ func (c *Controller) publishOne(ctx context.Context, rowID int64, eventID string
 
 // recordFailure increments attempt_count and stamps last_error +
 // last_attempt_at. The row stays in the pending set; the next tick
-// will retry. We don't fail the whole drainOnce on this — it's just
-// diagnostic bookkeeping.
-func (c *Controller) recordFailure(ctx context.Context, rowID int64, err error) {
+// will retry. We don't fail the whole drain pass on this — it's just
+// diagnostic bookkeeping. On the claimed (Postgres) path q is the claim
+// tx: a SQL error here aborts that tx (25P02), the pass's remaining
+// bookkeeping fails, and the rollback returns everything to pending —
+// safe, loud, and retried next tick.
+func (c *Controller) recordFailure(ctx context.Context, q queryExecer, rowID int64, err error) {
 	now := time.Now().UTC().Format(tsLayout)
 	short := err.Error()
 	if len(short) > 200 {
@@ -294,7 +352,7 @@ func (c *Controller) recordFailure(ctx context.Context, rowID int64, err error) 
 	// A byte cut can split a multi-byte rune; Postgres TEXT rejects the
 	// resulting invalid UTF-8 and the bookkeeping UPDATE itself would fail.
 	short = strings.ToValidUTF8(short, "")
-	_, uerr := c.pu.RuntimeDB.ExecContext(ctx,
+	_, uerr := q.ExecContext(ctx,
 		c.rb(`UPDATE control_events_outbox
 		    SET attempt_count = attempt_count + 1,
 		        last_error = ?,
