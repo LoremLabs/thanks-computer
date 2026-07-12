@@ -216,7 +216,11 @@ func (c *Controller) drainOnce(ctx context.Context) {
 	args := make([]any, 0, len(done)*3+1)
 	args = append(args, now)
 	for _, d := range done {
-		sb.WriteString(" WHEN ? THEN ?")
+		// CAST is load-bearing on Postgres: every THEN branch is a bare
+		// placeholder, so without it PG types the whole CASE as text and
+		// the assignment to the integer column fails (42804). SQLite is
+		// indifferent (CAST AS BIGINT = INTEGER affinity).
+		sb.WriteString(" WHEN ? THEN CAST(? AS BIGINT)")
 		args = append(args, d.id, d.cv)
 	}
 	sb.WriteString(` END WHERE id IN (`)
