@@ -23,6 +23,18 @@ func (s *stubResolver) Resolve(ingress.RouteKey) (ingress.RouteTarget, bool) {
 	return s.target, s.hit
 }
 
+// errStubResolver simulates a resolver whose lookup FAILED transiently
+// (saturated mirror connection) — distinct from a miss.
+type errStubResolver struct{ err error }
+
+func (s *errStubResolver) Resolve(ingress.RouteKey) (ingress.RouteTarget, bool) {
+	return ingress.RouteTarget{}, false
+}
+
+func (s *errStubResolver) ResolveErr(ingress.RouteKey) (ingress.RouteTarget, bool, error) {
+	return ingress.RouteTarget{}, false, s.err
+}
+
 // TestDispatchEnvelopeStampsSystemTenant: every request now enters the
 // editable _sys/boot pipeline. dispatchEnvelope no longer resolves the
 // tenant (that moved to txco://detect-tenant); it just stamps the
@@ -113,6 +125,37 @@ func TestDetectTenantBodyHit(t *testing.T) {
 	}
 	if gjson.Get(body, "_txc.tenant").Exists() {
 		t.Errorf("detect must not set _txc.tenant (decide-only); got %q", gjson.Get(body, "_txc.tenant").String())
+	}
+}
+
+// TestDetectTenantBodyTransientErrorServes503 pins fix 2 of
+// todo-route-resolution-404-under-load: when the hostname lookup FAILS
+// (saturated mirror connection, deadline blown) — as opposed to
+// missing — detect must shape a retryable 503 and halt, never fall
+// through to the boot/1000 notfound, which would mis-serve a real
+// hostname as a 404.
+func TestDetectTenantBodyTransientErrorServes503(t *testing.T) {
+	resolver := &errStubResolver{err: context.DeadlineExceeded}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"http","web":{"req":{"host":"www.driplit.co"}}}}`))
+	if got := gjson.Get(body, "_txc.web.res.status").Int(); got != 503 {
+		t.Fatalf("_txc.web.res.status = %d, want 503; body=%s", got, body)
+	}
+	if !gjson.Get(body, "_txc.halt").Bool() {
+		t.Errorf("_txc.halt missing — the request would keep flowing to notfound")
+	}
+	if !gjson.Get(body, "_txc.route.unavailable").Bool() {
+		t.Errorf("_txc.route.unavailable missing — the trace can't show why")
+	}
+	if got := gjson.Get(body, "_txc.web.res.headers.retry-after.0").String(); got != "1" {
+		t.Errorf("retry-after = %q, want \"1\"", got)
+	}
+	raw, err := base64.StdEncoding.DecodeString(gjson.Get(body, "_txc.web.res.body").String())
+	if err != nil || string(raw) != "503 service unavailable\n" {
+		t.Errorf("body = %q (err %v), want 503 line", raw, err)
+	}
+	// No route proposal: nothing may jump or re-tenant off a failed lookup.
+	if gjson.Get(body, "_txc.route.to").Exists() {
+		t.Errorf("_txc.route.to must not be set on a transient failure")
 	}
 }
 

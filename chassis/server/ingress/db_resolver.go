@@ -42,6 +42,13 @@ type DBResolver struct {
 	logger          *zap.Logger
 	requireVerified bool
 
+	// hostCache, when set (SetHostRouteCache), serves HTTP host→stack
+	// lookups from the precomputed in-process map instead of a
+	// per-request mirror query — see route_cache.go. Mail lookups keep
+	// the SQL path. Set once at startup, before the resolver serves
+	// traffic; not synchronized for later swaps.
+	hostCache *HostRouteCache
+
 	// warned tracks hostnames we've already emitted a "routing an
 	// unverified hostname" WARN for, so a misconfigured row doesn't
 	// spam the log on every request. Cleared on each chassis reboot.
@@ -76,6 +83,11 @@ func NewDBResolverFunc(inner Resolver, dbFn func() *sql.DB, logger *zap.Logger, 
 	}
 	return &DBResolver{inner: inner, dbFn: dbFn, logger: logger, requireVerified: requireVerified}
 }
+
+// SetHostRouteCache installs the precomputed host→stack cache the HTTP
+// resolve path reads instead of querying the mirror per request. Call
+// once at startup before the resolver serves traffic.
+func (r *DBResolver) SetHostRouteCache(c *HostRouteCache) { r.hostCache = c }
 
 // ResolveRecipient implements MailResolver with Strategy B layered
 // in. Resolution order, per `internal docs/todo-lmtp-routing-v2.md` §2.5:
@@ -258,43 +270,74 @@ func (r *DBResolver) lookupMailDomain(db *sql.DB, canonical string) (RouteTarget
 // Resolve implements Resolver. YAML wins for backward compatibility;
 // the DB lookup is consulted only on YAML miss and only for HTTP
 // sources (the `tenant_hostnames` table doesn't carry TCP listeners
-// or cron jobs).
+// or cron jobs). A transient lookup failure collapses to a miss here —
+// callers that must distinguish a saturated mirror from a genuinely
+// unknown hostname (the detect-tenant op, which serves an honest 503
+// instead of fabricating a 404) use ResolveErr.
 func (r *DBResolver) Resolve(key RouteKey) (RouteTarget, bool) {
+	t, ok, _ := r.ResolveErr(key)
+	return t, ok
+}
+
+// ResolveErr is Resolve with the failure channel exposed: err is
+// non-nil ONLY for a transient lookup failure (mirror-connection
+// contention blowing the query deadline, a mid-reload hiccup) — never
+// for a genuine miss, which stays (zero, false, nil). Introduced for
+// todo-route-resolution-404-under-load fix 2: under request
+// concurrency the single-connection mirror was blowing the 250ms
+// lookup deadline and the swallowed error mis-served real hostnames
+// as 404s.
+func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
 	if r.inner != nil {
 		if t, ok := r.inner.Resolve(key); ok {
-			return t, true
+			return t, true, nil
 		}
 	}
-	if r.dbFn == nil || key.Src != "http" || key.Hostname == "" {
-		return RouteTarget{}, false
-	}
-	db := r.dbFn() // current mirror, post any reload
-	if db == nil {
-		return RouteTarget{}, false
+	if key.Src != "http" || key.Hostname == "" {
+		return RouteTarget{}, false, nil
 	}
 	canon, ok := canonicalizeHost(key.Hostname)
 	if !ok {
-		return RouteTarget{}, false
+		return RouteTarget{}, false, nil
 	}
-	target, ok := r.lookupHTTP(db, canon)
-	if !ok {
-		return RouteTarget{}, false
+	// Fast path (todo-route-resolution-404-under-load fix 1): the
+	// precomputed host→stack map, rebuilt on every dbcache reload. An
+	// O(1) in-process read — the hot path never queues on the mirror's
+	// single connection, so request concurrency can't manufacture
+	// lookup timeouts. A ready-cache miss is authoritative (same row
+	// filters as the query below); before the first successful build
+	// the cache reports not-ready and the SQL path keeps serving.
+	if r.hostCache != nil {
+		if row, found, ready := r.hostCache.lookup(canon); ready {
+			if !found {
+				return RouteTarget{}, false, nil
+			}
+			t, ok := r.shapeHTTPTarget(row.Tenant, row.Stack, row.Verified, canon)
+			return t, ok, nil
+		}
 	}
-	return target, true
+	if r.dbFn == nil {
+		return RouteTarget{}, false, nil
+	}
+	db := r.dbFn() // current mirror, post any reload
+	if db == nil {
+		return RouteTarget{}, false, nil
+	}
+	return r.lookupHTTP(db, canon)
 }
 
 // lookupHTTP runs the resolver query against the dbcache mirror. One
 // row at most thanks to the partial unique index on hostname WHERE
-// revoked_at IS NULL. The 250ms timeout is defensive — in practice the
-// in-memory mirror returns in microseconds, but bounding the query
-// stops a pathological lock event from stalling the bus loop.
+// revoked_at IS NULL. The 250ms timeout is defensive — an idle
+// in-memory mirror returns in microseconds, but the handle is pinned
+// to ONE connection, so under request concurrency lookups queue and
+// the deadline CAN fire (the todo-route-resolution-404-under-load
+// incident). That failure is returned as an error, not conflated with
+// a miss — see ResolveErr.
 //
 // `verified_at` decides routing alongside the chassis-level
-// `requireVerified` flag:
-//   - requireVerified=false (permissive default): unverified rows
-//     still route; emit a once-per-row WARN.
-//   - requireVerified=true (production): unverified rows miss.
-func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string) (RouteTarget, bool) {
+// `requireVerified` flag — see shapeHTTPTarget.
+func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string) (RouteTarget, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	var slug, stack string
@@ -314,17 +357,30 @@ func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string) (RouteTarget, bool
 		    AND t.revoked_at IS NULL`, canonical).Scan(&slug, &stack, &verifiedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return RouteTarget{}, false
+		return RouteTarget{}, false, nil
 	case err != nil:
-		// Don't crash the data plane on a transient cache error — log
-		// and miss. The bus falls back to boot/%/0, same as any other
-		// unmatched route.
+		// A transient failure is NOT a miss: we don't know whether the
+		// hostname routes, so reporting "no route" here would mis-serve
+		// a real site as a 404. Log and surface the error; Resolve()
+		// collapses it to a miss for callers with no error channel,
+		// detect-tenant turns it into a retryable 503.
 		r.logger.Warn("ingress db lookup failed",
 			zap.String("hostname", canonical),
 			zap.Error(err))
-		return RouteTarget{}, false
+		return RouteTarget{}, false, err
 	}
-	if !verifiedAt.Valid {
+	t, ok := r.shapeHTTPTarget(slug, stack, verifiedAt.Valid, canonical)
+	return t, ok, nil
+}
+
+// shapeHTTPTarget applies the verified/requireVerified routing policy
+// and shapes the RouteTarget. Shared by the cached and SQL lookup
+// paths so both enforce one policy:
+//   - requireVerified=false (permissive default): unverified rows
+//     still route; emit a once-per-row WARN.
+//   - requireVerified=true (production): unverified rows miss.
+func (r *DBResolver) shapeHTTPTarget(slug, stack string, verified bool, canonical string) (RouteTarget, bool) {
+	if !verified {
 		if r.requireVerified {
 			return RouteTarget{}, false
 		}
@@ -340,7 +396,7 @@ func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string) (RouteTarget, bool
 		Tenant:   slug,
 		Stack:    stack,
 		Ingress:  "host:" + canonical,
-		Verified: verifiedAt.Valid,
+		Verified: verified,
 	}, true
 }
 

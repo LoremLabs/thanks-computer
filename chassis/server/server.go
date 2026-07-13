@@ -224,7 +224,27 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			return b.String()
 		}
 	}
-	target, hit := resolver.Resolve(ingress.KeyFromEnvelope(string(in)))
+	target, hit, rerr := resolveForDetect(resolver, ingress.KeyFromEnvelope(string(in)))
+	if rerr != nil {
+		// Transient resolver failure (todo-route-resolution-404-under-load
+		// fix 2): the hostname lookup ERRORED — we do not know whether it
+		// routes, so falling through to the boot/1000 notfound would
+		// mis-serve a real site as a 404. Shape an honest retryable 503
+		// and halt — the same Go-shaped terminal response as static's
+		// owned-prefix 404 and the admission gate's denials (this is
+		// irreducible mechanism, not routable policy: no stack can answer
+		// when routing itself is unavailable). `_txc.route.unavailable`
+		// rides the envelope so the trace shows why.
+		b := jsonx.NewObject()
+		b.Set("_txc.route.unavailable", true)
+		b.Set("_txc.web.res.status", 503)
+		b.Set("_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
+		b.Set("_txc.web.res.headers.retry-after.0", "1")
+		b.Set("_txc.web.res.body",
+			base64.StdEncoding.EncodeToString([]byte("503 service unavailable\n")))
+		b.Set("_txc.halt", true)
+		return b.String()
+	}
 	if !hit {
 		return "{}"
 	}
@@ -235,6 +255,24 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	b.Set("_txc.route.hostname_verified", target.Verified)
 	b.Set("_txc.route.to", target.Stack+"/0")
 	return b.String()
+}
+
+// errAwareResolver is the optional failure channel a Resolver may
+// expose (DBResolver does): err non-nil means the lookup FAILED
+// transiently — distinct from a miss, which stays (zero, false, nil).
+type errAwareResolver interface {
+	ResolveErr(key ingress.RouteKey) (ingress.RouteTarget, bool, error)
+}
+
+// resolveForDetect resolves with the error channel when the resolver
+// offers one; plain Resolvers (YAML-only, test stubs) can never report
+// a transient failure, so their misses pass through unchanged.
+func resolveForDetect(resolver ingress.Resolver, key ingress.RouteKey) (ingress.RouteTarget, bool, error) {
+	if er, ok := resolver.(errAwareResolver); ok {
+		return er.ResolveErr(key)
+	}
+	t, ok := resolver.Resolve(key)
+	return t, ok, nil
 }
 
 // routeBody is the txco://route transform — the EXECUTE half of the
@@ -810,6 +848,36 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// post-boot binds/mints (operator or auto-minted) would 404 until
 	// restart. Snapshot returns the live handle per request.
 	resolver := ingress.NewDBResolverFunc(yamlResolver, dbc.Snapshot, logger, conf.RequireHostnameVerification)
+
+	// Host→stack route cache (todo-route-resolution-404-under-load
+	// fix 1): the per-request hostname lookup becomes an O(1) read of an
+	// in-process map rebuilt on every dbcache reload, so the data-plane
+	// hot path never queues on the mirror's single :memory: connection.
+	// Completeness rides the mirror's own contract — every
+	// tenant_hostnames mutation (admin write or fleet control event)
+	// funnels through a reload. Rebuild failure keeps the previous map
+	// serving (or, before the first successful build, the resolver's
+	// per-request SQL fallback).
+	if dbc != nil {
+		hostRoutes := ingress.NewHostRouteCache()
+		if rerr := hostRoutes.Rebuild(dbc.Snapshot()); rerr != nil {
+			logger.Warn("host route cache initial build failed",
+				zap.String("err", rerr.Error()))
+		}
+		prevOnReload := dbc.OnReload
+		dbc.OnReload = func(db *sql.DB) error {
+			var perr error
+			if prevOnReload != nil {
+				perr = prevOnReload(db)
+			}
+			if rerr := hostRoutes.Rebuild(db); rerr != nil {
+				logger.Warn("host route cache reload failed",
+					zap.String("err", rerr.Error()))
+			}
+			return perr
+		}
+		resolver.SetHostRouteCache(hostRoutes)
+	}
 
 	// Redact/omit registry: per-(tenant, stack) lists harvested from
 	// every rule's WITH clause. The trace sink consults it on the
