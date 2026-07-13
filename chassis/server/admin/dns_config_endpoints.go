@@ -152,8 +152,17 @@ func (c *Controller) handlePutDNSConfig(w http.ResponseWriter, r *http.Request) 
 			_ = tx.Rollback()
 		}
 	}()
-	if err := tenants.PutDNSSettingsTx(r.Context(), tx, s, c.pu.RuntimeDialect); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "put_dns_config", map[string]any{"err": err.Error()})
+	persisted, perr := tenants.PutDNSSettingsTx(r.Context(), tx, s, c.pu.RuntimeDialect)
+	if perr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "put_dns_config", map[string]any{"err": perr.Error()})
+		return
+	}
+	// Fleet-sync the singleton so every dns head synthesizes from the same
+	// config. Without this event the set was admin-local: heads kept their
+	// boot-flag view until an unrelated event nudged a reload (the same
+	// silent gap dns.record.upserted closed).
+	if err := c.fleetPublishDNSSettings(r.Context(), tx, persisted); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "publish_dns_config", map[string]any{"err": err.Error()})
 		return
 	}
 	if err := tx.Commit(); err != nil {

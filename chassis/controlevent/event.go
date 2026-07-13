@@ -59,6 +59,12 @@ const (
 	// op=upsert; clearing a timezone is an upsert with timezone=''). Lets every
 	// node localize a tenant's @cron.* wall-clock fields consistently.
 	TypeCronSettingsUpserted = "cron.settings.upserted"
+	// TypeDNSSettingsUpserted carries the singleton dns_settings row
+	// (RowsArtifact, op=upsert). Chassis-global synthesis config (NS/edge/MX/
+	// TTL): without it a `dns config set` was admin-local and every dns head
+	// kept synthesizing from its own boot flags until an unrelated event
+	// nudged a reload — the same silent gap dns.record.upserted closed.
+	TypeDNSSettingsUpserted = "dns.settings.upserted"
 	// TypeSecretChanged carries a tenant_secrets OR tenant_secret_versions row
 	// (RowsArtifact, op=upsert). A create/rotate emits two of these — the
 	// version row first, then the parent — so a consumer never briefly sees a
@@ -79,7 +85,7 @@ var knownTypes = map[string]bool{
 	TypeKeyChanged: true, TypeMembershipChanged: true,
 	TypeEntitlementUpdated: true, TypeSystemOpstack: true,
 	TypeDNSZoneUpserted: true, TypeDNSRecordUpserted: true,
-	TypeCronSettingsUpserted: true,
+	TypeDNSSettingsUpserted: true, TypeCronSettingsUpserted: true,
 	TypeSecretChanged: true, TypeSecretRevoked: true,
 }
 

@@ -315,24 +315,28 @@ func LoadDNSSettings(ctx context.Context, q rowQueryer, d registry.Dialect) (DNS
 	return s, true, nil
 }
 
-// PutDNSSettingsTx upserts the singleton dns_settings row.
-func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings, d registry.Dialect) error {
-	now := s.UpdatedAt
-	if now == "" {
-		now = time.Now().UTC().Format(time.RFC3339)
+// PutDNSSettingsTx upserts the singleton dns_settings row. Returns the
+// row exactly as persisted (defaults + trimming applied) so a producer
+// can fleet-publish it without re-deriving the normalization.
+func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings, d registry.Dialect) (DNSSettings, error) {
+	if s.UpdatedAt == "" {
+		s.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	var updatedByArg any
 	if s.UpdatedBy != "" {
 		updatedByArg = s.UpdatedBy
 	}
-	ttl := s.SynthTTL
-	if ttl <= 0 {
-		ttl = 60
+	if s.SynthTTL <= 0 {
+		s.SynthTTL = 60
 	}
-	pri := s.MXPriority
-	if pri < 0 {
-		pri = 10
+	if s.MXPriority < 0 {
+		s.MXPriority = 10
 	}
+	// Round-trip through the column encoding so the returned lists match
+	// the persisted CSV exactly (trimmed, blanks dropped).
+	s.Nameservers = splitCSV(joinCSV(s.Nameservers))
+	s.EdgeIPs = splitCSV(joinCSV(s.EdgeIPs))
+	s.MXHost = strings.TrimSpace(s.MXHost)
 	_, err := tx.ExecContext(ctx,
 		orSQLite(d).Rebind(`INSERT INTO dns_settings
 		     (singleton, nameservers, edge_ips, mx_host, mx_priority, synth_ttl, updated_at, updated_by)
@@ -345,9 +349,9 @@ func PutDNSSettingsTx(ctx context.Context, tx *sql.Tx, s DNSSettings, d registry
 		     synth_ttl   = excluded.synth_ttl,
 		     updated_at  = excluded.updated_at,
 		     updated_by  = excluded.updated_by`),
-		joinCSV(s.Nameservers), joinCSV(s.EdgeIPs), strings.TrimSpace(s.MXHost),
-		pri, ttl, now, updatedByArg)
-	return err
+		joinCSV(s.Nameservers), joinCSV(s.EdgeIPs), s.MXHost,
+		s.MXPriority, s.SynthTTL, s.UpdatedAt, updatedByArg)
+	return s, err
 }
 
 // splitCSV / joinCSV (de)serialize the comma-list settings columns,

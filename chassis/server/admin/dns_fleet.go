@@ -700,3 +700,46 @@ func (c *Controller) fleetPublishRecord(ctx context.Context, tx *sql.Tx, tenantI
 	}
 	return nil
 }
+
+// dnsSettingsToRow projects the singleton DNSSettings onto the
+// dns_settings column set (0013), CSV-encoding the list fields exactly
+// as PutDNSSettingsTx persists them.
+func dnsSettingsToRow(s tenants.DNSSettings) map[string]any {
+	row := map[string]any{
+		"singleton":   1,
+		"nameservers": strings.Join(s.Nameservers, ","),
+		"edge_ips":    strings.Join(s.EdgeIPs, ","),
+		"mx_host":     s.MXHost,
+		"mx_priority": s.MXPriority,
+		"synth_ttl":   s.SynthTTL,
+		"updated_at":  s.UpdatedAt,
+	}
+	if s.UpdatedBy != "" {
+		row["updated_by"] = s.UpdatedBy
+	}
+	return row
+}
+
+// fleetPublishDNSSettings uploads the singleton dns_settings row artifact
+// and queues a TypeDNSSettingsUpserted event in tx. No-op when fleet sync
+// is off. Chassis-global (no tenant), so the event carries no tenant_id.
+func (c *Controller) fleetPublishDNSSettings(ctx context.Context, tx *sql.Tx, s tenants.DNSSettings) error {
+	if !c.fleetEnabled() {
+		return nil
+	}
+	art := controlevent.RowsArtifact{
+		DB:    "runtime",
+		Table: "dns_settings",
+		Op:    "upsert",
+		Rows:  []map[string]any{dnsSettingsToRow(s)},
+	}
+	ref, sum, _, err := c.fleetUploadArtifact(ctx, "rows/dns_settings/singleton", art)
+	if err != nil {
+		return fmt.Errorf("upload dns settings: %w", err)
+	}
+	if _, err := c.fleetQueueEvent(ctx, tx,
+		controlevent.TypeDNSSettingsUpserted, "", "", 0, 0, ref, sum); err != nil {
+		return fmt.Errorf("queue dns settings: %w", err)
+	}
+	return nil
+}

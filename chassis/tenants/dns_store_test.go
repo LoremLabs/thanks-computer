@@ -41,7 +41,7 @@ func newDNSStore(t *testing.T) (*Store, *sql.DB) {
 			id         TEXT PRIMARY KEY,
 			zone_id    TEXT NOT NULL,
 			name       TEXT NOT NULL,
-			type       TEXT NOT NULL CHECK (type IN ('NS','A','AAAA','MX','TXT')),
+			type       TEXT NOT NULL CHECK (type IN ('NS','A','AAAA','MX','TXT','CNAME')),
 			ttl        INTEGER,
 			rdata      TEXT NOT NULL,
 			created_at TEXT NOT NULL,
@@ -180,7 +180,7 @@ func TestDNSSettingsRoundTrip(t *testing.T) {
 	}
 
 	tx, _ := db.BeginTx(ctx, nil)
-	if err := PutDNSSettingsTx(ctx, tx, DNSSettings{
+	if _, err := PutDNSSettingsTx(ctx, tx, DNSSettings{
 		Nameservers: []string{"ns1.txco.io", "ns2.txco.io"},
 		EdgeIPs:     []string{"203.0.113.10"},
 		MXHost:      "mx.txco.io", MXPriority: 10, SynthTTL: 300, UpdatedBy: "op",
@@ -199,7 +199,7 @@ func TestDNSSettingsRoundTrip(t *testing.T) {
 
 	// Upsert (singleton) — change MX; must replace, not duplicate.
 	tx2, _ := db.BeginTx(ctx, nil)
-	if err := PutDNSSettingsTx(ctx, tx2, DNSSettings{
+	if _, err := PutDNSSettingsTx(ctx, tx2, DNSSettings{
 		Nameservers: got.Nameservers, EdgeIPs: got.EdgeIPs,
 		MXHost: "mx2.txco.io", MXPriority: 20, SynthTTL: 600,
 	}, nil); err != nil {

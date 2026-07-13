@@ -227,6 +227,16 @@ CREATE TABLE dns_records (
 	updated_at  TEXT NOT NULL,
 	revoked_at  TEXT
 );
+CREATE TABLE dns_settings (
+	singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+	nameservers TEXT NOT NULL DEFAULT '',
+	edge_ips    TEXT NOT NULL DEFAULT '',
+	mx_host     TEXT NOT NULL DEFAULT '',
+	mx_priority INTEGER NOT NULL DEFAULT 10,
+	synth_ttl   INTEGER NOT NULL DEFAULT 60,
+	updated_at  TEXT NOT NULL,
+	updated_by  TEXT
+);
 CREATE TABLE cron_settings (
 	tenant_id  TEXT PRIMARY KEY,
 	timezone   TEXT NOT NULL DEFAULT '',

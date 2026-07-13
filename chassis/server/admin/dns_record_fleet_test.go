@@ -242,3 +242,51 @@ func TestCNAMERecordRules(t *testing.T) {
 		}
 	})
 }
+
+// TestDNSConfigSetPublishesFleetEvent: a `dns config set` must queue a
+// dns.settings.upserted event carrying the persisted singleton row —
+// synthesis config is chassis-global, so a set that stays admin-local
+// leaves every dns head synthesizing from its own boot flags.
+func TestDNSConfigSetPublishesFleetEvent(t *testing.T) {
+	c := newTestController(t, config.Config{
+		Personalities:  "admin",
+		DNSNameservers: []string{"ns1.txco.io", "ns2.txco.io"},
+		FeedSink:       "file",
+	})
+	withAStore(t, c)
+
+	body := mustJSON(t, map[string]any{"edge_ips": []string{"203.0.113.10"}, "mx_host": "mx.txco.io"})
+	r := muxRequest(http.MethodPut, "/v1/dns/config", body, nil)
+	ac := &auth.Context{Source: "signed", ActorID: "actor_test", KeyID: "key_test", SuperAdmin: true}
+	r = r.WithContext(auth.WithContext(r.Context(), ac))
+	rr := httptest.NewRecorder()
+	c.handlePutDNSConfig(rr, r)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config set: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var ref string
+	if err := c.pu.RuntimeDB.QueryRow(
+		`SELECT artifact_ref FROM control_events_outbox WHERE event_type = ?`,
+		controlevent.TypeDNSSettingsUpserted).Scan(&ref); err != nil {
+		t.Fatalf("dns.settings.upserted outbox row missing (config set not propagated): %v", err)
+	}
+	data, _, err := c.astore.Get(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("artifact get: %v", err)
+	}
+	var art controlevent.RowsArtifact
+	if err := json.Unmarshal(data, &art); err != nil {
+		t.Fatalf("artifact decode: %v", err)
+	}
+	if art.Table != "dns_settings" || len(art.Rows) != 1 {
+		t.Fatalf("artifact wrong: table=%s rows=%d", art.Table, len(art.Rows))
+	}
+	row := art.Rows[0]
+	// First set seeds unspecified fields from boot flags; the passed
+	// fields land as CSV/scalars exactly as persisted.
+	if row["edge_ips"] != "203.0.113.10" || row["mx_host"] != "mx.txco.io" ||
+		row["nameservers"] != "ns1.txco.io,ns2.txco.io" {
+		t.Fatalf("artifact row wrong: %v", row)
+	}
+}

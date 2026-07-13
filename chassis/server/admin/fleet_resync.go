@@ -47,6 +47,7 @@ type fleetResyncCounts struct {
 	StackActivated       int `json:"stack_activated"`
 	DNSZoneUpserted      int `json:"dns_zone_upserted"`
 	DNSRecordUpserted    int `json:"dns_record_upserted"`
+	DNSSettingsUpserted  int `json:"dns_settings_upserted"`
 	CronSettingsUpserted int `json:"cron_settings_upserted"`
 	SecretChanged        int `json:"secret_changed"`
 }
@@ -198,6 +199,7 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 		zap.Int("hostname_bound", counts.HostnameBound),
 		zap.Int("dns_zone_upserted", counts.DNSZoneUpserted),
 		zap.Int("dns_record_upserted", counts.DNSRecordUpserted),
+		zap.Int("dns_settings_upserted", counts.DNSSettingsUpserted),
 		zap.Int("cron_settings_upserted", counts.CronSettingsUpserted),
 		zap.Int("secret_changed", counts.SecretChanged),
 		zap.Int("stack_activated", counts.StackActivated))
@@ -219,6 +221,31 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Tenant) ([]resyncEvent, fleetResyncCounts, error) {
 	var jobs []resyncJob
 	var counts fleetResyncCounts
+
+	// dns.settings.upserted — the chassis-global synthesis config
+	// (singleton, tenant-independent), emitted once per resync so a
+	// healed head serves the same NS/edge/MX/TTL as the admin.
+	if ds, found, derr := tenants.LoadDNSSettings(ctx, c.pu.RuntimeDB, c.pu.RuntimeDialect); derr != nil {
+		return nil, counts, fmt.Errorf("dns settings: %w", derr)
+	} else if found {
+		jobs = append(jobs, resyncJob{
+			eventType: controlevent.TypeDNSSettingsUpserted,
+			upload: func(ctx context.Context) (string, string, error) {
+				dArt := controlevent.RowsArtifact{
+					DB:    "runtime",
+					Table: "dns_settings",
+					Op:    "upsert",
+					Rows:  []map[string]any{dnsSettingsToRow(ds)},
+				}
+				ref, sum, _, err := c.fleetUploadArtifact(ctx, "rows/dns_settings/singleton", dArt)
+				if err != nil {
+					return "", "", fmt.Errorf("dns settings: %w", err)
+				}
+				return ref, sum, nil
+			},
+		})
+		counts.DNSSettingsUpserted++
+	}
 
 	for _, t := range targets {
 		// tenant.created

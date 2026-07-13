@@ -32,6 +32,7 @@ CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INTEGER, name TEXT, txcl TEX
 CREATE TABLE applied_events (event_id TEXT PRIMARY KEY, control_version INTEGER NOT NULL, applied_at TEXT NOT NULL);
 CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT, origin TEXT, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT, created_at TEXT, created_by TEXT, updated_at TEXT, revoked_at TEXT, verified_at TEXT);
 CREATE TABLE dns_records (id TEXT PRIMARY KEY, zone_id TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, ttl INTEGER, rdata TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT, updated_at TEXT NOT NULL, revoked_at TEXT);
+CREATE TABLE dns_settings (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), nameservers TEXT NOT NULL DEFAULT '', edge_ips TEXT NOT NULL DEFAULT '', mx_host TEXT NOT NULL DEFAULT '', mx_priority INTEGER NOT NULL DEFAULT 10, synth_ttl INTEGER NOT NULL DEFAULT 60, updated_at TEXT NOT NULL, updated_by TEXT);
 CREATE TABLE cron_settings (tenant_id TEXT PRIMARY KEY, timezone TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, updated_by TEXT);
 INSERT INTO tenants VALUES ('tnt_a','a');
 `
@@ -457,5 +458,38 @@ func TestChecksumMismatchHaltsAndDoesNotAdvance(t *testing.T) {
 	_ = h.db.QueryRow(`SELECT COUNT(*) FROM tenants WHERE tenant_id='tnt_c'`).Scan(&n)
 	if n != 0 {
 		t.Fatalf("no partial state allowed on mismatch; got %d", n)
+	}
+}
+
+// TestDNSSettingsUpsertLandsOnNode: a node applying dns.settings.upserted
+// gains the chassis-global synthesis config, so its dns head serves the
+// same NS/edge/MX/TTL the operator set on the admin.
+func TestDNSSettingsUpsertLandsOnNode(t *testing.T) {
+	h := newHarness(t)
+	rows := RowsArtifact{DB: "runtime", Table: "dns_settings", Op: "upsert",
+		Rows: []map[string]any{{
+			"singleton": 1, "nameservers": "ns1.txco.io,ns2.txco.io",
+			"edge_ips": "203.0.113.10", "mx_host": "mx.txco.io",
+			"mx_priority": 10, "synth_ttl": 60,
+			"updated_at": "2026-06-04T00:00:00Z", "updated_by": "op",
+		}}}
+	data, _ := json.Marshal(rows)
+	_ = h.astore.Put(context.Background(), "rows/dns_settings/singleton", data, []byte(`{}`))
+	h.putEvent(t, "e1.json", controlevent.Event{
+		EventID: "evt-dnssettings-1",
+		Type:    controlevent.TypeDNSSettingsUpserted, ArtifactRef: "rows/dns_settings/singleton",
+		Checksum: "sha256:" + sha256Hex(data), ControlVersion: 3,
+	})
+	h.c.pollOnce(context.Background())
+
+	var edge string
+	if err := h.db.QueryRow(`SELECT edge_ips FROM dns_settings WHERE singleton=1`).Scan(&edge); err != nil {
+		t.Fatalf("dns_settings row not applied on node: %v", err)
+	}
+	if edge != "203.0.113.10" {
+		t.Fatalf("edge_ips=%q", edge)
+	}
+	if h.cursor(t) != 3 {
+		t.Fatalf("cursor=%d want 3", h.cursor(t))
 	}
 }
