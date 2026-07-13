@@ -48,6 +48,13 @@ const (
 	// itself and (with the dns personality) can serve the zone — see
 	// internal docs/todo-dns-authority.md §9 fleet note.
 	TypeDNSZoneUpserted = "dns.zone.upserted"
+	// TypeDNSRecordUpserted carries a dns_records row (RowsArtifact, op=upsert;
+	// revocation is an upsert with revoked_at set, mirroring dns.zone.upserted).
+	// Without it an override-record write is admin-local: a SQLite data-plane
+	// node only sees dns_records via snapshot re-bootstrap, and a shared-PG node
+	// only on the next unrelated event's mirror reload — so a dns head can serve
+	// a zone whose records lag the control plane indefinitely.
+	TypeDNSRecordUpserted = "dns.record.upserted"
 	// TypeCronSettingsUpserted carries a cron_settings row (RowsArtifact,
 	// op=upsert; clearing a timezone is an upsert with timezone=''). Lets every
 	// node localize a tenant's @cron.* wall-clock fields consistently.
@@ -71,7 +78,8 @@ var knownTypes = map[string]bool{
 	TypeHostnameRevoked: true, TypeActorChanged: true,
 	TypeKeyChanged: true, TypeMembershipChanged: true,
 	TypeEntitlementUpdated: true, TypeSystemOpstack: true,
-	TypeDNSZoneUpserted: true, TypeCronSettingsUpserted: true,
+	TypeDNSZoneUpserted: true, TypeDNSRecordUpserted: true,
+	TypeCronSettingsUpserted: true,
 	TypeSecretChanged: true, TypeSecretRevoked: true,
 }
 

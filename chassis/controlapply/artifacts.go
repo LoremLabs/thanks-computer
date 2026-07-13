@@ -33,6 +33,7 @@ var tableWhitelist = map[string]map[string]bool{
 		"tenant_hostnames":     true,
 		"tenant_runtime_state": true, // designed-not-shipped; skipped if absent
 		"dns_zones":            true, // delegated-zone state; lets a data-plane node re-derive routing hosts + (with the dns head) serve the zone
+		"dns_records":          true, // zone override/extra records; ride with dns_zones so the dns head serves what the admin renders
 		"cron_settings":        true, // per-tenant cron timezone; lets every node localize @cron.* consistently
 		// Per-tenant secret store. The two tables ride together: the parent
 		// (tenant_secrets) carries identity + active key_version, the child

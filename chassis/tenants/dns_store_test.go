@@ -159,8 +159,10 @@ func TestRecordCRUD(t *testing.T) {
 	_ = btx.Rollback()
 
 	rtx, _ := db.BeginTx(ctx, nil)
-	if err := s.RevokeRecordTx(ctx, rtx, zid, "@", "TXT"); err != nil {
+	if ids, err := s.RevokeRecordTx(ctx, rtx, zid, "@", "TXT"); err != nil {
 		t.Fatalf("RevokeRecordTx: %v", err)
+	} else if len(ids) != 1 {
+		t.Fatalf("RevokeRecordTx returned %d ids, want 1", len(ids))
 	}
 	_ = rtx.Commit()
 	if rs, _ := s.ListRecords(ctx, zid); len(rs) != 0 {

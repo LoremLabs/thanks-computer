@@ -515,6 +515,23 @@ func (c *Controller) handleCreateRecord(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "create_record", map[string]any{"err": err.Error()})
 		return
 	}
+	// Fleet-sync the record row so data-plane nodes serve what the admin
+	// renders. Without this event the write is admin-local: a SQLite fleet
+	// member only picks records up on snapshot re-bootstrap, a shared-PG
+	// member only on the next unrelated event's mirror reload. Read the
+	// persisted row so CreateRecordTx's normalization ('@' apex, uppercased
+	// type, timestamp defaults) rides the artifact.
+	if c.fleetEnabled() {
+		persisted, gerr := tenants.GetRecordByIDTx(r.Context(), tx, rec.ID, c.pu.RuntimeDialect)
+		if gerr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "load_record", map[string]any{"err": gerr.Error()})
+			return
+		}
+		if perr := c.fleetPublishRecord(r.Context(), tx, ac.TenantID, persisted); perr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "publish_record", map[string]any{"err": perr.Error()})
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
 		return
@@ -585,10 +602,25 @@ func (c *Controller) handleRevokeRecord(w http.ResponseWriter, r *http.Request) 
 			_ = tx.Rollback()
 		}
 	}()
-	rerr := c.tenants.RevokeRecordTx(r.Context(), tx, zone.ID, name, rtype)
+	revokedIDs, rerr := c.tenants.RevokeRecordTx(r.Context(), tx, zone.ID, name, rtype)
 	if rerr != nil && !errors.Is(rerr, tenants.ErrNotFound) {
 		writeJSONError(w, http.StatusInternalServerError, "revoke_record", map[string]any{"err": rerr.Error()})
 		return
+	}
+	// Fleet-sync the flipped rows (revocation = upsert with revoked_at set)
+	// so data-plane nodes stop serving them — see handleCreateRecord.
+	if c.fleetEnabled() {
+		for _, id := range revokedIDs {
+			persisted, gerr := tenants.GetRecordByIDTx(r.Context(), tx, id, c.pu.RuntimeDialect)
+			if gerr != nil {
+				writeJSONError(w, http.StatusInternalServerError, "load_record", map[string]any{"err": gerr.Error()})
+				return
+			}
+			if perr := c.fleetPublishRecord(r.Context(), tx, ac.TenantID, persisted); perr != nil {
+				writeJSONError(w, http.StatusInternalServerError, "publish_record", map[string]any{"err": perr.Error()})
+				return
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})

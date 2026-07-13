@@ -214,6 +214,19 @@ CREATE TABLE dns_zones (
 	dkim_private_pem TEXT NOT NULL DEFAULT '',
 	dkim_public_b64  TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE dns_records (
+	id          TEXT PRIMARY KEY,
+	zone_id     TEXT NOT NULL REFERENCES dns_zones(id),
+	name        TEXT NOT NULL,
+	type        TEXT NOT NULL
+	            CHECK (type IN ('NS','A','AAAA','MX','TXT')),
+	ttl         INTEGER,
+	rdata       TEXT NOT NULL,
+	created_at  TEXT NOT NULL,
+	created_by  TEXT,
+	updated_at  TEXT NOT NULL,
+	revoked_at  TEXT
+);
 CREATE TABLE cron_settings (
 	tenant_id  TEXT PRIMARY KEY,
 	timezone   TEXT NOT NULL DEFAULT '',

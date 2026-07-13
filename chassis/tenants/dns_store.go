@@ -652,21 +652,70 @@ func (s *Store) ListRecords(ctx context.Context, zoneID string) ([]DNSRecord, er
 }
 
 // RevokeRecordTx soft-revokes active records matching (zoneID, name,
-// type). Returns ErrNotFound when none matched.
-func (s *Store) RevokeRecordTx(ctx context.Context, tx *sql.Tx, zoneID, name, rtype string) error {
+// type). Returns the revoked row ids so the caller can fleet-publish
+// the flipped rows; ErrNotFound when none matched.
+func (s *Store) RevokeRecordTx(ctx context.Context, tx *sql.Tx, zoneID, name, rtype string) ([]string, error) {
 	if name == "" {
 		name = "@"
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := tx.ExecContext(ctx,
-		s.rb(`UPDATE dns_records SET revoked_at = ?
+	// Ids first, then update by id: (zone, name, type) is not unique
+	// (multi-rdata MX/TXT sets), and the id set pins exactly the rows
+	// this call flipped — a timestamp match could catch a neighbour.
+	rows, err := tx.QueryContext(ctx,
+		s.rb(`SELECT id FROM dns_records
 		  WHERE zone_id = ? AND name = ? AND type = ? AND revoked_at IS NULL`),
-		now, zoneID, name, strings.ToUpper(rtype))
+		zoneID, name, strings.ToUpper(rtype))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
 	}
-	return nil
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, now)
+	ph := make([]string, len(ids))
+	for i, id := range ids {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	if _, err := tx.ExecContext(ctx,
+		s.rb(`UPDATE dns_records SET revoked_at = ? WHERE id IN (`+strings.Join(ph, ", ")+`)`),
+		args...); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// GetRecordByIDTx loads a single record (active or revoked) by id from the tx,
+// so a producer can read the fully-normalized persisted row — '@' apex,
+// uppercased type, timestamp defaults filled by CreateRecordTx — to
+// fleet-publish it. Mirrors GetZoneByIDTx. Returns ErrNotFound if absent.
+func GetRecordByIDTx(ctx context.Context, tx *sql.Tx, id string, d registry.Dialect) (DNSRecord, error) {
+	var r DNSRecord
+	err := tx.QueryRowContext(ctx,
+		orSQLite(d).Rebind(`SELECT id, zone_id, name, type, ttl, rdata, created_at,
+		        COALESCE(created_by, ''), updated_at, COALESCE(revoked_at, '')
+		   FROM dns_records
+		  WHERE id = ?`), id).Scan(&r.ID, &r.ZoneID, &r.Name, &r.Type, &r.TTL,
+		&r.Rdata, &r.CreatedAt, &r.CreatedBy, &r.UpdatedAt, &r.RevokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DNSRecord{}, ErrNotFound
+	}
+	if err != nil {
+		return DNSRecord{}, err
+	}
+	return r, nil
 }

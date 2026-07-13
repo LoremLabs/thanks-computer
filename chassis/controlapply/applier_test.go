@@ -31,6 +31,7 @@ CREATE TABLE stack_files (version_id INTEGER, path TEXT, content TEXT, content_h
 CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INTEGER, name TEXT, txcl TEXT, mock_req TEXT, mock_res TEXT);
 CREATE TABLE applied_events (event_id TEXT PRIMARY KEY, control_version INTEGER NOT NULL, applied_at TEXT NOT NULL);
 CREATE TABLE dns_zones (id TEXT PRIMARY KEY, tenant_id TEXT, origin TEXT, mname TEXT, rname TEXT, refresh INTEGER, retry INTEGER, expire INTEGER, minimum INTEGER, default_ttl INTEGER, mode TEXT, created_at TEXT, created_by TEXT, updated_at TEXT, revoked_at TEXT, verified_at TEXT);
+CREATE TABLE dns_records (id TEXT PRIMARY KEY, zone_id TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, ttl INTEGER, rdata TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT, updated_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE cron_settings (tenant_id TEXT PRIMARY KEY, timezone TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, updated_by TEXT);
 INSERT INTO tenants VALUES ('tnt_a','a');
 `
@@ -228,6 +229,68 @@ func TestDNSZoneUpsertLandsOnNode(t *testing.T) {
 	}
 	if revoked == "" {
 		t.Fatal("zone not revoked on node after revoke event")
+	}
+}
+
+// TestDNSRecordUpsertLandsOnNode: a data-plane node applying a
+// dns.record.upserted event gains the zone's override record (and later loses
+// it when the revocation upsert arrives), so the dns head serves what the
+// admin renders. Before this event type existed a record write was
+// admin-local — a node only saw dns_records via snapshot re-bootstrap.
+func TestDNSRecordUpsertLandsOnNode(t *testing.T) {
+	h := newHarness(t)
+	rows := RowsArtifact{DB: "runtime", Table: "dns_records", Op: "upsert",
+		Rows: []map[string]any{{
+			"id": "dnr_1", "zone_id": "dnz_1", "name": "www", "type": "A",
+			"rdata": "192.0.2.10",
+			"created_at": "2026-06-04T00:00:00Z", "updated_at": "2026-06-04T00:00:00Z",
+		}}}
+	data, _ := json.Marshal(rows)
+	_ = h.astore.Put(context.Background(), "rows/dns_records/dnr_1", data, []byte(`{}`))
+	h.putEvent(t, "e1.json", controlevent.Event{
+		EventID: "evt-dnsrecord-1",
+		Type:    controlevent.TypeDNSRecordUpserted, ArtifactRef: "rows/dns_records/dnr_1",
+		Checksum: "sha256:" + sha256Hex(data), ControlVersion: 3,
+	})
+	h.c.pollOnce(context.Background())
+
+	var rdata string
+	var ttl sql.NullInt64
+	if err := h.db.QueryRow(`SELECT rdata, ttl FROM dns_records WHERE id='dnr_1'`).Scan(&rdata, &ttl); err != nil {
+		t.Fatalf("dns_records row not applied on node: %v", err)
+	}
+	if rdata != "192.0.2.10" {
+		t.Fatalf("record applied wrong: rdata=%q", rdata)
+	}
+	if ttl.Valid {
+		t.Fatalf("ttl should be NULL (absent key), got %d", ttl.Int64)
+	}
+	if h.cursor(t) != 3 {
+		t.Fatalf("cursor=%d want 3", h.cursor(t))
+	}
+
+	// Revocation arrives as an upsert with revoked_at set → row flips inactive.
+	rev := RowsArtifact{DB: "runtime", Table: "dns_records", Op: "upsert",
+		Rows: []map[string]any{{
+			"id": "dnr_1", "zone_id": "dnz_1", "name": "www", "type": "A",
+			"rdata": "192.0.2.10",
+			"created_at": "2026-06-04T00:00:00Z", "updated_at": "2026-06-04T00:00:00Z",
+			"revoked_at": "2026-06-04T01:00:00Z",
+		}}}
+	rdata2, _ := json.Marshal(rev)
+	_ = h.astore.Put(context.Background(), "rows/dns_records/dnr_1-rev", rdata2, []byte(`{}`))
+	h.putEvent(t, "e2.json", controlevent.Event{
+		EventID: "evt-dnsrecord-2",
+		Type:    controlevent.TypeDNSRecordUpserted, ArtifactRef: "rows/dns_records/dnr_1-rev",
+		Checksum: "sha256:" + sha256Hex(rdata2), ControlVersion: 4,
+	})
+	h.c.pollOnce(context.Background())
+	var revoked string
+	if err := h.db.QueryRow(`SELECT COALESCE(revoked_at,'') FROM dns_records WHERE id='dnr_1'`).Scan(&revoked); err != nil {
+		t.Fatalf("read revoked: %v", err)
+	}
+	if revoked == "" {
+		t.Fatal("record not revoked on node after revoke event")
 	}
 }
 

@@ -46,6 +46,7 @@ type fleetResyncCounts struct {
 	HostnameBound        int `json:"hostname_bound"`
 	StackActivated       int `json:"stack_activated"`
 	DNSZoneUpserted      int `json:"dns_zone_upserted"`
+	DNSRecordUpserted    int `json:"dns_record_upserted"`
 	CronSettingsUpserted int `json:"cron_settings_upserted"`
 	SecretChanged        int `json:"secret_changed"`
 }
@@ -196,6 +197,7 @@ func (c *Controller) handleFleetResync(w http.ResponseWriter, r *http.Request) {
 		zap.Int("tenant_created", counts.TenantCreated),
 		zap.Int("hostname_bound", counts.HostnameBound),
 		zap.Int("dns_zone_upserted", counts.DNSZoneUpserted),
+		zap.Int("dns_record_upserted", counts.DNSRecordUpserted),
 		zap.Int("cron_settings_upserted", counts.CronSettingsUpserted),
 		zap.Int("secret_changed", counts.SecretChanged),
 		zap.Int("stack_activated", counts.StackActivated))
@@ -285,6 +287,35 @@ func (c *Controller) buildResyncEvents(ctx context.Context, targets []tenants.Te
 				},
 			})
 			counts.DNSZoneUpserted++
+
+			// dns.record.upserted for each active override record of the
+			// zone — without these a resynced node serves the zone minus
+			// its records (dns_records rows travel only by event or
+			// snapshot re-bootstrap; see fleetPublishRecord).
+			recs, rerr := c.tenants.ListRecords(ctx, z.ID)
+			if rerr != nil {
+				return nil, counts, fmt.Errorf("zone %s records: %w", z.ID, rerr)
+			}
+			for _, rec := range recs {
+				rec := rec
+				jobs = append(jobs, resyncJob{
+					eventType: controlevent.TypeDNSRecordUpserted, tenantID: t.TenantID,
+					upload: func(ctx context.Context) (string, string, error) {
+						rArt := controlevent.RowsArtifact{
+							DB:    "runtime",
+							Table: "dns_records",
+							Op:    "upsert",
+							Rows:  []map[string]any{recordToRow(rec)},
+						}
+						ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/dns_records/%s", rec.ID), rArt)
+						if err != nil {
+							return "", "", fmt.Errorf("record %s: %w", rec.ID, err)
+						}
+						return ref, sum, nil
+					},
+				})
+				counts.DNSRecordUpserted++
+			}
 		}
 
 		// cron.settings.upserted — the tenant's cron timezone, so a resynced

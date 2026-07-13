@@ -922,6 +922,7 @@ type FleetResyncCounts struct {
 	HostnameBound        int `json:"hostname_bound"`
 	StackActivated       int `json:"stack_activated"`
 	DNSZoneUpserted      int `json:"dns_zone_upserted"`
+	DNSRecordUpserted    int `json:"dns_record_upserted"`
 	CronSettingsUpserted int `json:"cron_settings_upserted"`
 	SecretChanged        int `json:"secret_changed"`
 }

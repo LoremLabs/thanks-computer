@@ -649,3 +649,54 @@ func (c *Controller) fleetPublishZone(ctx context.Context, tx *sql.Tx, z tenants
 	}
 	return nil
 }
+
+// recordToRow projects a DNSRecord onto the JSON-row shape the consumer
+// applier uses for RowsArtifact upserts. Mirrors the dns_records column set
+// (migration 0011). NULL ttl is carried by omission (absent key → NULL on
+// the consumer's INSERT OR REPLACE), like created_by/revoked_at.
+func recordToRow(r tenants.DNSRecord) map[string]any {
+	row := map[string]any{
+		"id":         r.ID,
+		"zone_id":    r.ZoneID,
+		"name":       r.Name,
+		"type":       r.Type,
+		"rdata":      r.Rdata,
+		"created_at": r.CreatedAt,
+		"updated_at": r.UpdatedAt,
+	}
+	if r.TTL.Valid {
+		row["ttl"] = r.TTL.Int64
+	}
+	if r.CreatedBy != "" {
+		row["created_by"] = r.CreatedBy
+	}
+	if r.RevokedAt != "" {
+		row["revoked_at"] = r.RevokedAt
+	}
+	return row
+}
+
+// fleetPublishRecord uploads a dns_records row artifact and queues a
+// TypeDNSRecordUpserted event in tx. No-op when fleet sync is off. Revocation
+// is just an upsert of the same row with revoked_at set (mirrors
+// fleetPublishZone). The artifact key is id-keyed so retries overwrite.
+func (c *Controller) fleetPublishRecord(ctx context.Context, tx *sql.Tx, tenantID string, r tenants.DNSRecord) error {
+	if !c.fleetEnabled() {
+		return nil
+	}
+	art := controlevent.RowsArtifact{
+		DB:    "runtime",
+		Table: "dns_records",
+		Op:    "upsert",
+		Rows:  []map[string]any{recordToRow(r)},
+	}
+	ref, sum, _, err := c.fleetUploadArtifact(ctx, fmt.Sprintf("rows/dns_records/%s", r.ID), art)
+	if err != nil {
+		return fmt.Errorf("upload dns record %s: %w", r.ID, err)
+	}
+	if _, err := c.fleetQueueEvent(ctx, tx,
+		controlevent.TypeDNSRecordUpserted, tenantID, "", 0, 0, ref, sum); err != nil {
+		return fmt.Errorf("queue dns record %s: %w", r.ID, err)
+	}
+	return nil
+}
