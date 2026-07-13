@@ -153,7 +153,7 @@ func TestRecordCRUD(t *testing.T) {
 
 	// Invalid type rejected.
 	btx, _ := db.BeginTx(ctx, nil)
-	if err := s.CreateRecordTx(ctx, btx, DNSRecord{ID: NewRecordID(), ZoneID: zid, Name: "@", Type: "CNAME", Rdata: "x"}); err == nil {
+	if err := s.CreateRecordTx(ctx, btx, DNSRecord{ID: NewRecordID(), ZoneID: zid, Name: "@", Type: "SRV", Rdata: "x"}); err == nil {
 		t.Fatal("expected invalid type error")
 	}
 	_ = btx.Rollback()

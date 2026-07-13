@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth"
@@ -157,4 +158,87 @@ func TestRecordRevokePublishesFleetEvent(t *testing.T) {
 			t.Fatalf("revoke artifact %q missing revoked_at: %v", ref, row)
 		}
 	}
+}
+
+// createRecord posts one record and returns the recorder.
+func createRecord(t *testing.T, c *Controller, origin string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	c.handleCreateRecord(rr, superRecordReq(t, http.MethodPost, origin, mustJSON(t, body), ""))
+	return rr
+}
+
+// TestCNAMERecordRules: the write-path protocol guards for CNAME —
+// forbidden at the apex, exclusive at its owner (no other data beside a
+// CNAME, no CNAME beside other data, at most one CNAME), target
+// normalized to a canonical FQDN in the stored rdata and the artifact.
+func TestCNAMERecordRules(t *testing.T) {
+	c := fleetDNSController(t, "ops.example.com")
+
+	t.Run("apex CNAME refused", func(t *testing.T) {
+		for _, name := range []string{"@", ""} {
+			rr := createRecord(t, c, "ops.example.com", map[string]any{"name": name, "type": "CNAME", "rdata": "x.example.com."})
+			if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "cname_at_apex") {
+				t.Fatalf("name=%q: status=%d body=%s", name, rr.Code, rr.Body.String())
+			}
+		}
+	})
+
+	t.Run("garbage target refused", func(t *testing.T) {
+		rr := createRecord(t, c, "ops.example.com", map[string]any{"name": "blog", "type": "CNAME", "rdata": "not a hostname"})
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_rdata") {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("create normalizes target and fleet-publishes", func(t *testing.T) {
+		rr := createRecord(t, c, "ops.example.com", map[string]any{"name": "blog", "type": "cname", "rdata": "Target.Example.COM"})
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		refs := recordOutboxRefs(t, c)
+		if len(refs) != 1 {
+			t.Fatalf("outbox rows = %d, want 1", len(refs))
+		}
+		row := artifactRow(t, c, refs[0])
+		if row["type"] != "CNAME" || row["rdata"] != "target.example.com." {
+			t.Fatalf("artifact not normalized: type=%v rdata=%v", row["type"], row["rdata"])
+		}
+	})
+
+	t.Run("second CNAME at same owner refused", func(t *testing.T) {
+		rr := createRecord(t, c, "ops.example.com", map[string]any{"name": "blog", "type": "CNAME", "rdata": "other.example.com."})
+		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "cname_exclusive") {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("other data beside a CNAME refused", func(t *testing.T) {
+		rr := createRecord(t, c, "ops.example.com", map[string]any{"name": "blog", "type": "A", "rdata": "192.0.2.9"})
+		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "cname_exclusive") {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("CNAME beside other data refused", func(t *testing.T) {
+		if rr := createRecord(t, c, "ops.example.com", map[string]any{"name": "www", "type": "A", "rdata": "192.0.2.10"}); rr.Code != http.StatusCreated {
+			t.Fatalf("seed A: status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		rr := createRecord(t, c, "ops.example.com", map[string]any{"name": "www", "type": "CNAME", "rdata": "x.example.com."})
+		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "cname_exclusive") {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("revoked CNAME frees the name", func(t *testing.T) {
+		del := httptest.NewRecorder()
+		c.handleRevokeRecord(del, superRecordReq(t, http.MethodDelete, "ops.example.com", nil, "name=blog&type=CNAME"))
+		if del.Code != http.StatusOK {
+			t.Fatalf("revoke: status=%d body=%s", del.Code, del.Body.String())
+		}
+		rr := createRecord(t, c, "ops.example.com", map[string]any{"name": "blog", "type": "A", "rdata": "192.0.2.11"})
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("A after revoked CNAME: status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	})
 }

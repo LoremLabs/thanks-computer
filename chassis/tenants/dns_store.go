@@ -375,10 +375,37 @@ func joinCSV(in []string) string {
 // ValidDNSRecordType reports whether t is a Phase-1/2 supported type.
 func ValidDNSRecordType(t string) bool {
 	switch strings.ToUpper(strings.TrimSpace(t)) {
-	case "NS", "A", "AAAA", "MX", "TXT":
+	case "NS", "A", "AAAA", "MX", "TXT", "CNAME":
 		return true
 	}
 	return false
+}
+
+// ActiveRecordTypesAtNameTx returns the distinct active record types at
+// (zoneID, name) in tx, name-normalized like CreateRecordTx ('' → '@').
+// Feeds the write-path CNAME exclusivity check (RFC 1034 §3.6.2: a CNAME
+// owner carries no other data, and at most one CNAME).
+func ActiveRecordTypesAtNameTx(ctx context.Context, tx *sql.Tx, zoneID, name string, d registry.Dialect) ([]string, error) {
+	if strings.TrimSpace(name) == "" {
+		name = "@"
+	}
+	rows, err := tx.QueryContext(ctx,
+		orSQLite(d).Rebind(`SELECT DISTINCT type FROM dns_records
+		  WHERE zone_id = ? AND name = ? AND revoked_at IS NULL`),
+		zoneID, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // zoneSOADefaults fills sane SOA timers/TTL when a field is left zero.

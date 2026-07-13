@@ -431,7 +431,7 @@ func runDNSRecordAdd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	f := registerDNSFlags(fs)
 	name := fs.String("name", "@", "record name (relative label, or @ for apex)")
-	rtype := fs.String("type", "", "record type: NS|A|AAAA|MX|TXT")
+	rtype := fs.String("type", "", "record type: NS|A|AAAA|MX|TXT|CNAME")
 	rdata := fs.String("rdata", "", "record data in zone-file form (e.g. '10 mail.example.com.' for MX)")
 	ttl := fs.Int64("ttl", -1, "record TTL in seconds (default: inherit zone default)")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
@@ -499,7 +499,7 @@ func runDNSRecordRm(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	f := registerDNSFlags(fs)
 	name := fs.String("name", "@", "record name (relative label, or @ for apex)")
-	rtype := fs.String("type", "", "record type: NS|A|AAAA|MX|TXT")
+	rtype := fs.String("type", "", "record type: NS|A|AAAA|MX|TXT|CNAME")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)

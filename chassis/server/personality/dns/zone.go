@@ -197,7 +197,10 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 		// Materialized records: in pattern mode the FIRST record for a
 		// given (owner,type) clears the synthesized set for that
 		// (owner,type) (override); subsequent ones of the same key add
-		// to it. In manual mode there is nothing synthesized to clear.
+		// to it. A CNAME clears EVERY synthesized type at its owner —
+		// a CNAME owner carries no other data (RFC 1034 §3.6.2), so a
+		// synthesized A left beside it would serve an illegal node.
+		// In manual mode there is nothing synthesized to clear.
 		cleared := map[string]bool{}
 		for _, rec := range matRecs {
 			effTTL := z.defaultTTL
@@ -219,7 +222,11 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 			if pattern {
 				key := fmt.Sprintf("%s|%d", owner, rtype)
 				if !cleared[key] {
-					z.clearOwnerType(owner, rtype)
+					if rtype == dns.TypeCNAME {
+						z.clearOwner(owner)
+					} else {
+						z.clearOwnerType(owner, rtype)
+					}
 					cleared[key] = true
 				}
 			}
@@ -299,6 +306,13 @@ func (z *zone) clearOwnerType(ownerFQDN string, t uint16) {
 	}
 }
 
+// clearOwner drops every RRset at an owner so a materialized CNAME can
+// occlude the whole node. Leaves z.names intact (the CNAME is added
+// immediately after).
+func (z *zone) clearOwner(ownerFQDN string) {
+	delete(z.rr, strings.ToLower(ownerFQDN))
+}
+
 // add inserts an already-built RR into the zone's index + name set.
 func (z *zone) add(rr dns.RR) {
 	owner := strings.ToLower(rr.Header().Name)
@@ -360,8 +374,9 @@ func txtRdata(raw string) string {
 //	rcode NOERROR + ns(SOA)     → NODATA: name exists, type absent
 //	rcode NXDOMAIN + ns(SOA)    → name does not exist in the zone
 //
-// ANY is refused (no ANY expansion — anti-amplification). CNAME chasing
-// and wildcards are out of scope for Phase 1.
+// ANY is refused (no ANY expansion — anti-amplification). A name owning
+// a CNAME answers every other qtype with that CNAME, followed in-zone
+// (RFC 1034 §4.3.2(3a)); out-of-zone targets are the resolver's job.
 func (s *ZoneSnapshot) Lookup(q dns.Question) (answer, ns []dns.RR, rcode int) {
 	qname := strings.ToLower(dns.Fqdn(q.Name))
 	z := s.zoneFor(qname)
@@ -375,6 +390,9 @@ func (s *ZoneSnapshot) Lookup(q dns.Question) (answer, ns []dns.RR, rcode int) {
 	if byType, ok := z.rr[qname]; ok {
 		if rrs := byType[q.Qtype]; len(rrs) > 0 {
 			return rrs, nil, dns.RcodeSuccess
+		}
+		if cn := byType[dns.TypeCNAME]; len(cn) > 0 && q.Qtype != dns.TypeCNAME {
+			return z.chaseCNAME(cn, q.Qtype), nil, dns.RcodeSuccess
 		}
 		// Name exists, requested type doesn't → NODATA.
 		return nil, []dns.RR{z.soa}, dns.RcodeSuccess
@@ -399,10 +417,59 @@ func (s *ZoneSnapshot) Lookup(q dns.Question) (answer, ns []dns.RR, rcode int) {
 			}
 			return out, nil, dns.RcodeSuccess
 		}
+		if cn := byType[dns.TypeCNAME]; len(cn) > 0 && q.Qtype != dns.TypeCNAME {
+			// Wildcard CNAME: synthesize with the queried name as owner,
+			// then chase like an exact-match CNAME.
+			cp := dns.Copy(cn[0])
+			cp.Header().Name = qname
+			return z.chaseCNAME([]dns.RR{cp}, q.Qtype), nil, dns.RcodeSuccess
+		}
 		// Wildcard owner exists but not this type → NODATA.
 		return nil, []dns.RR{z.soa}, dns.RcodeSuccess
 	}
 	return nil, []dns.RR{z.soa}, dns.RcodeNameError
+}
+
+// chaseCNAME returns the CNAME RRs plus, while each target stays inside
+// THIS zone, the target's RRset for qtype — following further in-zone
+// CNAMEs up to a fixed depth (RFC 1034 §4.3.2(3a)). An out-of-zone
+// target ends the chain: the resolver re-queries it (answering from a
+// sibling served zone here would be out-of-bailiwick data most
+// resolvers discard anyway). A missing in-zone target simply ends the
+// answer — the resolver observes the dangling CNAME.
+func (z *zone) chaseCNAME(start []dns.RR, qtype uint16) []dns.RR {
+	out := append([]dns.RR(nil), start...)
+	seen := map[string]bool{}
+	cur := start[0]
+	for depth := 0; depth < 8; depth++ {
+		cn, ok := cur.(*dns.CNAME)
+		if !ok {
+			break
+		}
+		target := strings.ToLower(cn.Target)
+		if seen[target] {
+			break // loop guard
+		}
+		seen[target] = true
+		if target != z.originFQDN && !strings.HasSuffix(target, "."+z.originFQDN) {
+			break // out of zone
+		}
+		byType := z.rr[target]
+		if byType == nil {
+			break
+		}
+		if rrs := byType[qtype]; len(rrs) > 0 {
+			out = append(out, rrs...)
+			break
+		}
+		next := byType[dns.TypeCNAME]
+		if len(next) == 0 {
+			break
+		}
+		out = append(out, next...)
+		cur = next[0]
+	}
+	return out
 }
 
 // zoneFor returns the most specific served zone whose origin is a suffix

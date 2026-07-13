@@ -311,3 +311,108 @@ func TestTenantScoping(t *testing.T) {
 		t.Fatalf("OriginsForTenant(other) = %v", got)
 	}
 }
+
+// TestLookupCNAME covers the CNAME answer semantics: any qtype at a
+// CNAME owner answers with the CNAME, chased while targets stay in-zone
+// (RFC 1034 §4.3.2(3a)); out-of-zone targets and loops end the chain.
+func TestLookupCNAME(t *testing.T) {
+	db := newTestDB(t)
+	seedZone(t, db, fixedTS)
+	cnames := []struct{ id, name, rdata string }{
+		{"dr_cn_blog", "blog", "www.ops.example.com."},
+		{"dr_cn_alias", "alias", "blog.ops.example.com."},
+		{"dr_cn_ext", "ext", "driplit.github.io."},
+		{"dr_cn_loop1", "loop1", "loop2.ops.example.com."},
+		{"dr_cn_loop2", "loop2", "loop1.ops.example.com."},
+	}
+	for _, r := range cnames {
+		if _, err := db.Exec(`INSERT INTO dns_records
+			(id, zone_id, name, type, ttl, rdata, created_at, created_by, updated_at)
+			VALUES (?, 'dz_1', ?, 'CNAME', NULL, ?, ?, 'actor_x', ?)`,
+			r.id, r.name, r.rdata, fixedTS, fixedTS); err != nil {
+			t.Fatalf("insert cname %s: %v", r.id, err)
+		}
+	}
+	snap := buildOrDie(t, db, SynthConfig{})
+
+	t.Run("A query at CNAME owner chases to the in-zone A", func(t *testing.T) {
+		ans, _, rc := snap.Lookup(q("blog.ops.example.com.", dns.TypeA))
+		if rc != dns.RcodeSuccess || len(ans) != 2 {
+			t.Fatalf("rc=%d ans=%v", rc, ans)
+		}
+		if _, ok := ans[0].(*dns.CNAME); !ok {
+			t.Fatalf("first RR not CNAME: %T", ans[0])
+		}
+		if a, ok := ans[1].(*dns.A); !ok || a.A.String() != "192.0.2.20" {
+			t.Fatalf("chased A wrong: %v", ans[1])
+		}
+	})
+	t.Run("CNAME qtype answers just the CNAME", func(t *testing.T) {
+		ans, _, rc := snap.Lookup(q("blog.ops.example.com.", dns.TypeCNAME))
+		if rc != dns.RcodeSuccess || len(ans) != 1 {
+			t.Fatalf("rc=%d ans=%v", rc, ans)
+		}
+	})
+	t.Run("two-link in-zone chain", func(t *testing.T) {
+		ans, _, rc := snap.Lookup(q("alias.ops.example.com.", dns.TypeA))
+		if rc != dns.RcodeSuccess || len(ans) != 3 {
+			t.Fatalf("rc=%d ans=%v", rc, ans)
+		}
+		if a, ok := ans[2].(*dns.A); !ok || a.A.String() != "192.0.2.20" {
+			t.Fatalf("chain tail wrong: %v", ans[2])
+		}
+	})
+	t.Run("out-of-zone target is left to the resolver", func(t *testing.T) {
+		ans, _, rc := snap.Lookup(q("ext.ops.example.com.", dns.TypeA))
+		if rc != dns.RcodeSuccess || len(ans) != 1 {
+			t.Fatalf("rc=%d ans=%v", rc, ans)
+		}
+		if cn, ok := ans[0].(*dns.CNAME); !ok || cn.Target != "driplit.github.io." {
+			t.Fatalf("CNAME wrong: %v", ans[0])
+		}
+	})
+	t.Run("CNAME loop terminates", func(t *testing.T) {
+		ans, _, rc := snap.Lookup(q("loop1.ops.example.com.", dns.TypeA))
+		if rc != dns.RcodeSuccess || len(ans) < 1 || len(ans) > 3 {
+			t.Fatalf("loop not bounded: rc=%d ans=%v", rc, ans)
+		}
+	})
+	t.Run("qtype absent at chased target ends the answer at the CNAME", func(t *testing.T) {
+		ans, _, rc := snap.Lookup(q("blog.ops.example.com.", dns.TypeTXT))
+		if rc != dns.RcodeSuccess || len(ans) != 1 {
+			t.Fatalf("rc=%d ans=%v", rc, ans)
+		}
+		if _, ok := ans[0].(*dns.CNAME); !ok {
+			t.Fatalf("not CNAME: %T", ans[0])
+		}
+	})
+}
+
+// TestCNAMEOverrideOccludesSynth: in a pattern zone a materialized CNAME
+// must clear EVERY synthesized type at its owner, not just (owner,CNAME)
+// — a synthesized A left beside it would serve an illegal node.
+func TestCNAMEOverrideOccludesSynth(t *testing.T) {
+	db := newTestDB(t)
+	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+	seedActiveStack(t, db, patTenant, "shop", fixedTS)
+	if _, err := db.Exec(`INSERT INTO dns_records
+		(id, zone_id, name, type, ttl, rdata, created_at, created_by, updated_at)
+		VALUES ('dr_cn_shop', 'dz_pat', 'shop', 'CNAME', NULL, 'edge.pat.example.com.', ?, 'actor_x', ?)`,
+		fixedTS, fixedTS); err != nil {
+		t.Fatalf("insert cname: %v", err)
+	}
+	snap := buildOrDie(t, db, patCfg())
+
+	ans, _, rc := snap.Lookup(q("shop.pat.example.com.", dns.TypeA))
+	if rc != dns.RcodeSuccess || len(ans) == 0 {
+		t.Fatalf("rc=%d ans=%v", rc, ans)
+	}
+	if _, ok := ans[0].(*dns.CNAME); !ok {
+		t.Fatalf("first RR must be the CNAME override, got %T (synthesized A not occluded?)", ans[0])
+	}
+	for _, rr := range ans {
+		if a, ok := rr.(*dns.A); ok && a.Header().Name == "shop.pat.example.com." {
+			t.Fatalf("synthesized A survived beside the CNAME: %v", ans)
+		}
+	}
+}

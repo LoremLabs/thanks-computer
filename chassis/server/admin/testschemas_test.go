@@ -219,7 +219,7 @@ CREATE TABLE dns_records (
 	zone_id     TEXT NOT NULL REFERENCES dns_zones(id),
 	name        TEXT NOT NULL,
 	type        TEXT NOT NULL
-	            CHECK (type IN ('NS','A','AAAA','MX','TXT')),
+	            CHECK (type IN ('NS','A','AAAA','MX','TXT','CNAME')),
 	ttl         INTEGER,
 	rdata       TEXT NOT NULL,
 	created_at  TEXT NOT NULL,

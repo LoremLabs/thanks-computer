@@ -488,6 +488,26 @@ func (c *Controller) handleCreateRecord(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "invalid_type", map[string]any{"type": req.Type})
 		return
 	}
+	// CNAME protocol rules the schema can't express (RFC 1034 §3.6.2):
+	// never at the apex (it would alias away the SOA/NS node), and the
+	// target must be a hostname — normalized to a canonical FQDN so the
+	// stored rdata is unambiguous (a bare name in zone-file presentation
+	// would otherwise parse as absolute anyway, silently).
+	isCNAME := strings.EqualFold(strings.TrimSpace(req.Type), "CNAME")
+	if isCNAME {
+		if n := strings.TrimSpace(req.Name); n == "" || n == "@" {
+			writeJSONError(w, http.StatusBadRequest, "cname_at_apex",
+				map[string]any{"hint": "a CNAME cannot live at the zone apex (it would alias away SOA/NS); use an A/AAAA record there"})
+			return
+		}
+		target, ok := tenants.CanonicalizeHost(strings.TrimSuffix(strings.TrimSpace(req.Rdata), "."))
+		if !ok || !tenants.IsValidHostname(target) {
+			writeJSONError(w, http.StatusBadRequest, "invalid_rdata",
+				map[string]any{"rdata": req.Rdata, "hint": "CNAME rdata must be a hostname, e.g. target.example.com."})
+			return
+		}
+		req.Rdata = target + "."
+	}
 	rec := tenants.DNSRecord{
 		ID:        tenants.NewRecordID(),
 		ZoneID:    zone.ID,
@@ -511,6 +531,28 @@ func (c *Controller) handleCreateRecord(w http.ResponseWriter, r *http.Request) 
 			_ = tx.Rollback()
 		}
 	}()
+	// CNAME exclusivity, checked in the create tx: a CNAME owner carries
+	// no other data — and at most one CNAME — so refuse a CNAME where any
+	// active record exists, and any record where an active CNAME exists.
+	// (Materialized records only; in pattern zones a CNAME occludes the
+	// synthesized set at its owner by design, like every other override.)
+	existing, cerr := tenants.ActiveRecordTypesAtNameTx(r.Context(), tx, zone.ID, req.Name, c.pu.RuntimeDialect)
+	if cerr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "record_conflict_check", map[string]any{"err": cerr.Error()})
+		return
+	}
+	hasCNAME := false
+	for _, t := range existing {
+		if t == "CNAME" {
+			hasCNAME = true
+		}
+	}
+	if (isCNAME && len(existing) > 0) || (!isCNAME && hasCNAME) {
+		writeJSONError(w, http.StatusConflict, "cname_exclusive",
+			map[string]any{"name": req.Name, "existing_types": existing,
+				"hint": "a name with a CNAME can hold no other records (and only one CNAME); revoke the conflicting record(s) first"})
+		return
+	}
 	if err := c.tenants.CreateRecordTx(r.Context(), tx, rec); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "create_record", map[string]any{"err": err.Error()})
 		return
