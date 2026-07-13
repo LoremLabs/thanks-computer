@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mr-tron/base58"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -348,5 +350,34 @@ func TestBootstrapCarriesSuperAdmin(t *testing.T) {
 	s2, _ := r.CreateSession(ctx, b2, "ua", "", time.Hour)
 	if g2, _ := r.GetSession(ctx, s2.SessionID); g2.SuperAdmin {
 		t.Fatalf("non-super session must be false")
+	}
+}
+
+// TestNewSessionID pins the security contract of the session cookie: it
+// carries the bsn_ prefix, decodes to sessionRandomBytes of crypto/rand
+// entropy, and never repeats. (Regression guard for the pre-fix bug where
+// the id came from the process-global math/rand hxid stream.)
+func TestNewSessionID(t *testing.T) {
+	const n = 2000
+	seen := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		id, err := newSessionID()
+		if err != nil {
+			t.Fatalf("newSessionID: %v", err)
+		}
+		if !strings.HasPrefix(id, sessionIDPrefix) {
+			t.Fatalf("session id %q missing %q prefix", id, sessionIDPrefix)
+		}
+		raw, err := base58.Decode(strings.TrimPrefix(id, sessionIDPrefix))
+		if err != nil {
+			t.Fatalf("session id %q not base58: %v", id, err)
+		}
+		if len(raw) != sessionRandomBytes {
+			t.Fatalf("session id %q decodes to %d bytes, want %d", id, len(raw), sessionRandomBytes)
+		}
+		if seen[id] {
+			t.Fatalf("duplicate session id %q after %d mints", id, i)
+		}
+		seen[id] = true
 	}
 }

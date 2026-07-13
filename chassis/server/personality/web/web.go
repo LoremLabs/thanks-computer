@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -70,6 +71,39 @@ func isNoBodyStatus(status int) bool {
 // error log).
 func canWriteBody(r *http.Request, status int) bool {
 	return r.Method != http.MethodHead && !isNoBodyStatus(status)
+}
+
+// readCappedRequestBody reads r.Body with an optional size cap
+// (maxBytes; 0 disables the cap). On success it returns the bytes and
+// ok=true. On an over-limit body it writes 413 and returns ok=false; on
+// any other read error it writes 500 and returns ok=false — in both
+// failure cases the caller must stop processing the request. The cap
+// matters because the web inlet buffers the whole body into the envelope
+// before admission/rate-limiting runs, so an unbounded unauthenticated
+// body is a memory-exhaustion vector.
+func readCappedRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int, log *zap.Logger) ([]byte, bool) {
+	if maxBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
+	}
+	body, err := io.ReadAll(r.Body)
+	if err == nil {
+		return body, true
+	}
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		log.Info("web request body too large", zap.Int("limit_bytes", maxBytes))
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		if _, werr := w.Write([]byte("request body too large")); werr != nil {
+			log.Error("write error", zap.String("err", werr.Error()))
+		}
+		return nil, false
+	}
+	log.Info("error reading body", zap.Reflect("err", err))
+	w.WriteHeader(http.StatusInternalServerError)
+	if _, werr := w.Write([]byte("error reading body")); werr != nil {
+		log.Error("write error", zap.String("err", werr.Error()))
+	}
+	return nil, false
 }
 
 func splitMocksHeader(h string) []string {
@@ -257,15 +291,13 @@ func (web *WebController) Start() {
 					pb.Set("_txc.web.req.url.query.raw", r.URL.RawQuery)
 				}
 
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					web.pu.Logger.Info("error reading body", zap.Reflect("err", err))
-					w.WriteHeader(http.StatusInternalServerError)
-					_, err := w.Write([]byte("error reading body"))
-					if err != nil {
-						// TODO: error handling
-						web.pu.Logger.Error("write error", zap.String("err", err.Error()))
-					}
+				// Read the request body, capped at --web-max-body-bytes.
+				// This read is unauthenticated and runs ahead of admission/
+				// rate-limiting, so an unbounded body is a memory-exhaustion
+				// vector. readCappedRequestBody writes the 413/500 itself; we
+				// just tear the request down when it says so.
+				body, ok := readCappedRequestBody(w, r, web.pu.Conf.WebMaxBodyBytes, web.pu.Logger)
+				if !ok {
 					cancel() // shut down the request
 					return
 				}
@@ -434,7 +466,7 @@ func (web *WebController) Start() {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusServiceUnavailable)
 					if canWriteBody(r, http.StatusServiceUnavailable) {
-						if _, err = w.Write([]byte("timeout")); err != nil {
+						if _, err := w.Write([]byte("timeout")); err != nil {
 							web.pu.Logger.Error("write error", zap.String("err", err.Error()))
 						}
 					}
@@ -443,7 +475,7 @@ func (web *WebController) Start() {
 					web.pu.Logger.Info("web service shutdown")
 					w.WriteHeader(http.StatusServiceUnavailable)
 					if canWriteBody(r, http.StatusServiceUnavailable) {
-						if _, err = w.Write([]byte("shutting down")); err != nil {
+						if _, err := w.Write([]byte("shutting down")); err != nil {
 							web.pu.Logger.Error("write error", zap.String("err", err.Error()))
 						}
 					}

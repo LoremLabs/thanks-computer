@@ -22,4 +22,5 @@ exec ./chassis/bin/txco serve \
   --env=dev \
   --web-addr=:8080 \
   --tcp-listen-addrs=:5050 \
+  --egress-policy=open \
   "$@"

@@ -308,6 +308,7 @@ func (c *Controller) Start() {
 		Skew:           5 * time.Minute,
 		Sessions:       c.registry,
 		AllowedOrigins: c.allowedBrowserOrigins(),
+		AllowOpen:      c.adminAllowOpen(),
 	}
 
 	// /auth/browser/exchange is the one credential-mint endpoint that
@@ -654,11 +655,18 @@ func (c *Controller) Start() {
 	}
 
 	// Startup WARNs:
-	//  - legacy open-dev mode (no basic-auth and not signed-only),
+	//  - open-dev vs fail-closed posture (no basic-auth and not signed-only),
 	//  - dev enrollment status (operator-supplied OR auto-generated).
 	if c.pu.Conf.AdminUser == "" && c.pu.Conf.AuthMode != string(auth.ModeSigned) {
-		c.pu.Logger.Warn("admin server: no basic-auth configured (dev only)",
-			zap.String("addr", c.pu.Conf.AdminAddr))
+		if c.adminAllowOpen() {
+			c.pu.Logger.Warn("admin server: UNAUTHENTICATED (open-dev, admin:all) — no basic-auth configured; dev only, NEVER expose in production",
+				zap.String("addr", c.pu.Conf.AdminAddr),
+				zap.String("env", c.pu.Conf.Environment))
+		} else {
+			c.pu.Logger.Warn("admin server: failing CLOSED — no basic-auth configured and not signed-only; the admin API will reject all requests. Set --admin-user/--admin-pass, use --auth-mode=signed, or (trusted env only) --admin-allow-open",
+				zap.String("addr", c.pu.Conf.AdminAddr),
+				zap.String("env", c.pu.Conf.Environment))
+		}
 	}
 	c.logDevEnrollBanner()
 
@@ -752,6 +760,16 @@ func (c *Controller) resolveDevEnrollSecret() {
 	}
 	c.devEnrollSecret = secret
 	c.devEnrollAutoGen = true
+}
+
+// adminAllowOpen reports whether the admin API may run WITHOUT
+// authentication (open-dev, admin:all) when no basic creds are set and
+// auth-mode is basic/both. True only when explicitly enabled via
+// --admin-allow-open or when running a dev --env (the established
+// dev-predicate, cf. config WebDebug rewrite + logging). A network-
+// reachable production environment (non-dev env, flag off) fails closed.
+func (c *Controller) adminAllowOpen() bool {
+	return c.pu.Conf.AdminAllowOpen || strings.HasPrefix(c.pu.Conf.Environment, "dev")
 }
 
 // logDevEnrollBanner prints the appropriate startup banner for the

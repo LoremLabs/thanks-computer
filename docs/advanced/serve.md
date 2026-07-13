@@ -61,10 +61,15 @@ Roots are configurable (`--db-root-dir`, `--kvstore-addrs`,
 
 ## Network policy
 
-`--egress-policy` controls what ops may dial out to: `open` (default)
-allows any address; `private` blocks loopback, RFC 1918, link-local,
-CGNAT, cloud-metadata ranges, and anything in `--egress-deny-cidrs`.
-Set `private` on any chassis that runs untrusted rules.
+`--egress-policy` controls what ops may dial out to: `private` (default)
+blocks loopback, RFC 1918, link-local, CGNAT, cloud-metadata ranges, and
+anything in `--egress-deny-cidrs`; `open` allows any address. The default
+is `private` so a chassis running tenant-authored ops can't be steered
+into an SSRF against `169.254.169.254` (cloud metadata), the admin API,
+or other internal services. Set `--egress-policy=open` (or whitelist a
+specific range with `--egress-allow-cidrs`) only when your own rules must
+reach internal/localhost services. `txco dev` and `start.sh` opt into
+`open` for local development.
 
 ## Routing and tenancy
 

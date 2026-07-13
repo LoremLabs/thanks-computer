@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/mr-tron/base58"
 )
 
 // Browser-friendly auth: bootstrap tokens + session cookies.
@@ -26,7 +26,9 @@ import (
 //
 // Token shape: `btk_<base64url(32 random bytes)>` — 256 bits of
 // entropy, stored as sha256 hex so the plaintext never persists.
-// Session id shape: `bsn_<hxid time-sortable>`.
+// Session id shape: `bsn_<base58(16 crypto-random bytes)>` — the value
+// IS the bearer credential, so it comes from crypto/rand (never the
+// process-global math/rand hxid stream).
 
 const (
 	// bootstrapTokenPrefix is prepended to the base64url-encoded random
@@ -37,6 +39,10 @@ const (
 	// sessionIDPrefix is on every session_id; useful both for grepping
 	// audit logs and for parsing cookies defensively.
 	sessionIDPrefix = "bsn_"
+	// sessionRandomBytes is the crypto/rand entropy behind a session id
+	// (~128 bits at base58). The session cookie is an unauthenticated
+	// bearer credential, so this must be high-entropy and unguessable.
+	sessionRandomBytes = 16
 )
 
 // Bootstrap is one row of browser_bootstrap.
@@ -120,6 +126,20 @@ func newBootstrapToken() (plaintext, hash string, err error) {
 	plaintext = bootstrapTokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
 	hash = hashBootstrapToken(plaintext)
 	return plaintext, hash, nil
+}
+
+// newSessionID returns a fresh, unguessable session id: `bsn_` + base58
+// of 16 crypto/rand bytes (~128 bits). Mirrors the continuation randID
+// primitive. The value is the session cookie AND the DB lookup key with
+// no separate secret, so it must come from crypto/rand — never the
+// process-global hxid stream (math/rand-seeded, and also feeds the
+// client-visible X-Request-ID, which would make it a live PRNG oracle).
+func newSessionID() (string, error) {
+	raw := make([]byte, sessionRandomBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
+	}
+	return sessionIDPrefix + base58.Encode(raw), nil
 }
 
 // CreateBootstrap mints a new exchange token for the given actor +
@@ -219,7 +239,10 @@ func (r *Registry) ConsumeBootstrap(ctx context.Context, plaintext, consumerIP s
 // re-resolved from memberships, so a capability change after this
 // point requires a session revoke + fresh login to take effect.
 func (r *Registry) CreateSession(ctx context.Context, b *Bootstrap, ua, ip string, ttl time.Duration) (*Session, error) {
-	sessionID := sessionIDPrefix + hxid.NewTimeSort().String()
+	sessionID, err := newSessionID()
+	if err != nil {
+		return nil, fmt.Errorf("mint session id: %w", err)
+	}
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
 	capsJSON, err := json.Marshal(b.Capabilities)

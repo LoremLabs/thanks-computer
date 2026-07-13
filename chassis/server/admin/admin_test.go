@@ -184,18 +184,21 @@ func TestAuthMiddlewareBasicMode(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareOpenDev verifies the legacy open-dev mode: when
-// AdminUser is empty AND AuthMode is basic-or-both, the middleware
-// lets requests through with an in-memory admin:all context.
+// TestAuthMiddlewareOpenDev verifies open-dev mode: when AdminUser is
+// empty AND AuthMode is basic-or-both AND AllowOpen is set (dev env or
+// --admin-allow-open), the middleware lets requests through with an
+// in-memory admin:all context. Without AllowOpen it fails closed — see
+// TestAuthMiddlewareFailsClosedWithoutAllowOpen in chassis/auth.
 func TestAuthMiddlewareOpenDev(t *testing.T) {
 	conf := config.Config{Personalities: "admin", AuthMode: "basic"}
 	c := newTestController(t, conf)
 
 	gated := auth.Middleware(auth.Config{
-		Mode:     auth.AuthMode(conf.AuthMode),
-		Registry: c.registry,
-		Verifier: c.verifier,
-		Nonces:   c.nonces,
+		Mode:      auth.AuthMode(conf.AuthMode),
+		AllowOpen: true, // dev-env / --admin-allow-open equivalent
+		Registry:  c.registry,
+		Verifier:  c.verifier,
+		Nonces:    c.nonces,
 	}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := auth.FromContext(r.Context())
 		if ctx == nil || ctx.Source != "open" {

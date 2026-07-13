@@ -59,9 +59,18 @@ type Config struct {
 	Mode AuthMode
 
 	// Basic-auth credentials. When both are empty AND Mode != Signed,
-	// the middleware enters open-dev mode for backward compat.
+	// the middleware enters open-dev mode (admin:all, unauthenticated) —
+	// but ONLY if AllowOpen is true. Otherwise it fails closed.
 	BasicUser string
 	BasicPass string
+
+	// AllowOpen gates the open-dev fallback: when true, empty basic creds
+	// under Mode basic/both grant admin:all to unauthenticated callers
+	// (local-dev convenience). When false (production default), the same
+	// request is denied. The admin server sets this from
+	// --admin-allow-open OR a dev --env (see server.go). Signed mode never
+	// consults this.
+	AllowOpen bool
 
 	// Signed-request inputs.
 	Registry *registry.Registry
@@ -143,7 +152,7 @@ func (cfg *Config) authenticate(r *http.Request) (*Context, error) {
 				return ctx, nil
 			}
 		}
-		if cfg.BasicUser == "" && cfg.BasicPass == "" {
+		if cfg.AllowOpen && cfg.BasicUser == "" && cfg.BasicPass == "" {
 			return openDevContext(), nil
 		}
 		return nil, &signature.AuthError{Code: signature.ErrMissingSignatureHeaders, Cause: errors.New("Basic credentials required")}
@@ -161,7 +170,7 @@ func (cfg *Config) authenticate(r *http.Request) (*Context, error) {
 		if hasBasic {
 			return cfg.verifyBasic(r)
 		}
-		if cfg.BasicUser == "" && cfg.BasicPass == "" {
+		if cfg.AllowOpen && cfg.BasicUser == "" && cfg.BasicPass == "" {
 			return openDevContext(), nil
 		}
 		return nil, &signature.AuthError{Code: signature.ErrMissingSignatureHeaders}

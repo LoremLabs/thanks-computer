@@ -34,6 +34,7 @@ func browserAuthTestServer(t *testing.T, mode auth.AuthMode) (*Controller, *http
 
 	authCfg := auth.Config{
 		Mode:           mode,
+		AllowOpen:      true, // empty-creds harness relies on open-dev (cf. TestSessionGetOpenDev)
 		Registry:       c.registry,
 		Verifier:       c.verifier,
 		Nonces:         c.nonces,

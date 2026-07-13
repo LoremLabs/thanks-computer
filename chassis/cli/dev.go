@@ -985,6 +985,12 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		// addresses; the SSRF blocklist would reject them in
 		// production. Allow the verifier through in dev.
 		"TXCO_VERIFY_ALLOW_PRIVATE_ADDRESSES": "true",
+		// Same rationale for the outbound OP dial path: dev rules
+		// legitimately EXEC http://localhost:… mock services and call
+		// each other over loopback. The serve default is `private`
+		// (SSRF-safe); dev opts into `open`. Set-if-missing, so
+		// `TXCO_EGRESS_POLICY=private txco dev` re-enables the guard.
+		"TXCO_EGRESS_POLICY": "open",
 		// Zero-flag structured hostnames in dev: every activated stack
 		// is reachable at http://<stack>-<rand>.localhost:<webport>
 		// (*.localhost is loopback + a browser secure context over
