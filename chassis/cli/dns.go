@@ -206,6 +206,9 @@ func runDNSZoneCreate(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "created zone %s (mode=%s)\n\n", res.Zone.Origin, res.Zone.Mode)
 	fmt.Fprintln(stdout, res.Delegation)
+	if res.Warning != "" {
+		fmt.Fprintf(stderr, "\nWARNING: %s\n", res.Warning)
+	}
 	return 0
 }
 
@@ -232,6 +235,9 @@ func runDNSZoneVerify(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "verified %s — the zone is now live.\n", res.Origin)
+	if res.Warning != "" {
+		fmt.Fprintf(stderr, "\nWARNING: %s\n", res.Warning)
+	}
 	return 0
 }
 

@@ -362,9 +362,11 @@ func (c *Controller) applyRuntimeRow(ctx context.Context, tenantID string, mutat
 	}
 	committed = true
 
-	// Synchronously refresh the dbcache so the admission provider picks up
-	// the change on the next request. Matches the hostname/activate flow.
-	if err := c.pu.Dbc.Reload(); err != nil {
+	// Refresh the dbcache so the admission provider picks up the change:
+	// synchronous on the SQLite runtime, background-coalesced on shared
+	// Postgres (where the row is already durable and every node converges
+	// via the control feed anyway). Matches the hostname flow.
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after tenant runtime-state write failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}

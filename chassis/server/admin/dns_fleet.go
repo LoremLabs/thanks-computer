@@ -248,6 +248,24 @@ func (c *Controller) activeMintableStacks(ctx context.Context, tx *sql.Tx, tenan
 	return out, rows.Err()
 }
 
+// zoneFanOutWarnThreshold: a pattern-mode zone reconcile mints one routing
+// host + one fleet control event PER active stack, and every fleet node
+// refreshes its mirror on those events. Past this many stacks, surface the
+// blast radius to the operator — a 1,470-stack reconcile once put the admin
+// node into a ~28-minute reload treadmill (todo-control-plane-reload-scaling.md,
+// fix F).
+const zoneFanOutWarnThreshold = 100
+
+// zoneFanOutWarning returns a human-facing blast-radius note when a
+// pattern-mode reconcile fanned out past zoneFanOutWarnThreshold, "" otherwise.
+func zoneFanOutWarning(origin string, hosts int) string {
+	if hosts <= zoneFanOutWarnThreshold {
+		return ""
+	}
+	return fmt.Sprintf("high fan-out: wiring %d active stacks into %s minted %d routing hosts and published %d fleet events. Zones that don't need per-stack <label>.%s hosts should use --mode manual.",
+		hosts, origin, hosts, hosts, origin)
+}
+
 // reconcileZoneHostnames mints the routing host for every active stack of the
 // tenant under origin (idempotent) and returns the tenant's zone-host rows as
 // pending fleet events for the CALLER to publish AFTER commit (see

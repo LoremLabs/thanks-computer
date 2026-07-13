@@ -63,6 +63,7 @@ type CreateZoneResult struct {
 	Zone        DNSZoneInfo `json:"zone"`
 	Nameservers []string    `json:"nameservers"`
 	Delegation  string      `json:"delegation"`
+	Warning     string      `json:"warning,omitempty"` // blast-radius note on a high fan-out reconcile
 }
 
 // DNSRecordInfo mirrors the admin record DTO.
@@ -106,6 +107,7 @@ func (c *Client) CreateZone(ctx context.Context, origin, mode string) (*CreateZo
 type VerifyZoneResult struct {
 	Origin     string `json:"origin"`
 	VerifiedAt string `json:"verified_at"`
+	Warning    string `json:"warning,omitempty"` // blast-radius note on a high fan-out reconcile
 }
 
 // VerifyZone confirms a zone's NS delegate to the chassis (POST

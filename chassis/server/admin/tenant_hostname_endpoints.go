@@ -246,10 +246,11 @@ func (c *Controller) handleCreateHostname(w http.ResponseWriter, r *http.Request
 	}
 	committed = true
 
-	// Synchronously refresh the dbcache so the next request through
-	// the resolver sees this hostname. Matches the activate flow's
-	// pattern at stacks.go:981.
-	if err := c.pu.Dbc.Reload(); err != nil {
+	// Refresh the dbcache so the resolver sees this hostname:
+	// synchronous on the SQLite runtime, background-coalesced on shared
+	// Postgres — see Dbc.ReloadAfterWrite for why blocking the response
+	// on a full mirror rebuild is wrong there.
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after hostname create failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}
@@ -362,7 +363,7 @@ func (c *Controller) handleMintHostname(w http.ResponseWriter, r *http.Request) 
 	}
 	committed = true
 
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after hostname mint failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}
@@ -476,7 +477,7 @@ func (c *Controller) handleRevokeHostname(w http.ResponseWriter, r *http.Request
 	}
 	committed = true
 
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after hostname revoke failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}
@@ -610,7 +611,7 @@ func (c *Controller) handleAttachHostname(w http.ResponseWriter, r *http.Request
 	}
 	committed = true
 
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after attach failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}
@@ -950,7 +951,7 @@ func (c *Controller) handleVerifyHostname(w http.ResponseWriter, r *http.Request
 	}
 	committed = true
 
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after verification failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}

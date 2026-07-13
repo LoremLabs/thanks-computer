@@ -3,8 +3,11 @@ package dbcache
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
@@ -43,11 +46,12 @@ func has(t *testing.T, db *sql.DB, k string) bool {
 }
 
 // TestReloadOverlayNeverPartiallyVisible is the regression guard for the
-// reloadMu/Mu split. The dump+replay now runs OUTSIDE Mu (so it can't block
-// readers), but the swap + OnReload overlay still share Mu — so a Snapshot()
-// reader must never observe a freshly reloaded row ('b') without the overlay
-// row that OnReload applies in the same critical section. If a future change
-// moves the swap out from under the overlay, this fails.
+// overlay-before-publish ordering. The dump+replay AND the OnReload overlay
+// both run off Mu now — the overlay is applied to the still-private new
+// mirror BEFORE the pointer swap — so a Snapshot() reader must never observe
+// a freshly reloaded row ('b') without the overlay row. If a future change
+// swaps first and overlays after (or overlays a published handle), this
+// fails.
 func TestReloadOverlayNeverPartiallyVisible(t *testing.T) {
 	src := newTestSource(t)
 	defer src.Close()
@@ -102,6 +106,140 @@ func TestReloadOverlayNeverPartiallyVisible(t *testing.T) {
 	if !has(t, snap, "a") || !has(t, snap, "b") || !has(t, snap, "overlay") {
 		t.Errorf("final mirror missing rows: a=%v b=%v overlay=%v",
 			has(t, snap, "a"), has(t, snap, "b"), has(t, snap, "overlay"))
+	}
+}
+
+// TestSnapshotNotBlockedDuringSlowOnReload pins the A″ fix from
+// todo-control-plane-reload-scaling.md: the OnReload derived-cache chain is
+// O(fleet) at production scale, so it must run off Mu — a Snapshot() caller
+// must get the PREVIOUS mirror promptly while the hook chain is still
+// running, never queue behind it.
+func TestSnapshotNotBlockedDuringSlowOnReload(t *testing.T) {
+	src := newTestSource(t)
+	defer src.Close()
+
+	dbc, err := New(config.Config{}, zap.NewNop(), context.Background(), src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := dbc.Reload(); err != nil {
+		t.Fatalf("initial reload: %v", err)
+	}
+	before := dbc.Snapshot()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	dbc.OnReload = func(db *sql.DB) error {
+		close(entered)
+		<-release
+		_, e := db.Exec(`INSERT INTO t (k) VALUES ('overlay')`)
+		return e
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- dbc.Reload() }()
+	<-entered
+
+	// The hook chain is now mid-flight. Snapshot() must return the previous
+	// (still-published) mirror without waiting for it.
+	got := make(chan *sql.DB, 1)
+	go func() { got <- dbc.Snapshot() }()
+	select {
+	case snap := <-got:
+		if snap != before {
+			t.Error("Snapshot() during OnReload returned an unpublished mirror")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Snapshot() blocked while OnReload was running (hook chain is back under Mu)")
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !has(t, dbc.Snapshot(), "overlay") {
+		t.Error("published mirror missing the overlay row")
+	}
+}
+
+// TestReloadAfterWriteSQLiteIsSynchronous pins the dialect split: on the
+// local SQLite file runtime the file IS the source of truth, so a reader
+// immediately after ReloadAfterWrite returns must see the new row.
+func TestReloadAfterWriteSQLiteIsSynchronous(t *testing.T) {
+	src := newTestSource(t)
+	defer src.Close()
+
+	dbc, err := New(config.Config{}, zap.NewNop(), context.Background(), src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := dbc.Reload(); err != nil {
+		t.Fatalf("initial reload: %v", err)
+	}
+	if _, err := src.Exec(`INSERT INTO t (k) VALUES ('written')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := dbc.ReloadAfterWrite(); err != nil {
+		t.Fatalf("ReloadAfterWrite: %v", err)
+	}
+	if !has(t, dbc.Snapshot(), "written") {
+		t.Error("row not visible immediately after ReloadAfterWrite on the SQLite runtime")
+	}
+}
+
+// TestReloadAfterWritePostgresIsAsyncAndCoalesced pins the shared-runtime
+// behavior: ReloadAfterWrite returns immediately, a burst of calls coalesces
+// into ~one background reload, and the mirror catches up shortly after.
+func TestReloadAfterWritePostgresIsAsyncAndCoalesced(t *testing.T) {
+	// Each load stamps its generation so the test can watch a NEW mirror
+	// arrive (the row's presence, not just the handle, proves the reload ran).
+	var loads atomic.Int64
+	RegisterLoader("postgres", func(ctx context.Context, dst, src *sql.DB, _ string) error {
+		n := loads.Add(1)
+		if _, err := dst.ExecContext(ctx, `CREATE TABLE t (k TEXT PRIMARY KEY)`); err != nil {
+			return err
+		}
+		_, err := dst.ExecContext(ctx, `INSERT INTO t (k) VALUES (?)`, fmt.Sprintf("gen-%d", n))
+		return err
+	})
+
+	src := newTestSource(t)
+	defer src.Close()
+
+	dbc, err := New(config.Config{DbRuntimeDsn: "postgres://ignored"}, zap.NewNop(), context.Background(), src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := dbc.Reload(); err != nil { // gen-1 mirror
+		t.Fatalf("initial reload: %v", err)
+	}
+	baseline := loads.Load()
+
+	// A write burst: every call must return without blocking on a reload.
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		if err := dbc.ReloadAfterWrite(); err != nil {
+			t.Fatalf("ReloadAfterWrite: %v", err)
+		}
+	}
+	if took := time.Since(start); took > reloadDebounceQuiet/2 {
+		t.Errorf("ReloadAfterWrite burst took %v — it must not block on a reload", took)
+	}
+
+	// Trailing-edge debounce: one background reload ~reloadDebounceQuiet
+	// after the last call. Poll for the next-generation mirror.
+	want := fmt.Sprintf("gen-%d", baseline+1)
+	deadline := time.Now().Add(10 * time.Second)
+	for !has(t, dbc.Snapshot(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("mirror never refreshed to %s after debounced ReloadAfterWrite", want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Coalescing: 5 tightly-spaced calls must not cost 5 reloads. Allow 2 in
+	// case a scheduler hiccup lets the quiet window elapse mid-burst.
+	if got := loads.Load() - baseline; got > 2 {
+		t.Errorf("burst of 5 ReloadAfterWrite calls ran %d reloads, want coalesced (≤2)", got)
 	}
 }
 

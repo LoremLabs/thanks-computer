@@ -19,7 +19,7 @@ import (
 // Postgres needed; it guards the seam Seam B introduced.
 func TestReloadFailingLoaderKeepsSnapshot(t *testing.T) {
 	var failNow atomic.Bool
-	RegisterLoader("postgres", func(ctx context.Context, dst, src *sql.DB) error {
+	RegisterLoader("postgres", func(ctx context.Context, dst, src *sql.DB, _ string) error {
 		if failNow.Load() {
 			return errors.New("simulated store outage")
 		}

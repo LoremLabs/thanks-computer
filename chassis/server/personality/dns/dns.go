@@ -184,12 +184,12 @@ func (c *DNSController) Stop() {
 // mutation rebuilds + swaps it with no restart (same chaining shape as
 // the static-asset index).
 //
-// CRITICAL: the OnReload hook runs INSIDE Reload while dbc.Mu is held,
-// and is handed the freshly-built mirror as `db`. It MUST rebuild from
-// that `db`, never from dbc.Snapshot() — Snapshot() locks dbc.Mu, which
-// Reload already holds, so calling it there deadlocks the whole chassis
-// (every later Snapshot blocks forever). The initial build runs outside
-// Reload, so Snapshot() is safe there.
+// CRITICAL: the OnReload hook runs INSIDE Reload, handed the freshly-
+// built mirror as `db` BEFORE it is published. It MUST rebuild from that
+// `db`, never from dbc.Snapshot() — Snapshot() still returns the
+// PREVIOUS mirror at that point, so a Snapshot()-based rebuild would
+// silently pin stale zones every reload. The initial build runs outside
+// Reload, so Snapshot() is correct there.
 func (c *DNSController) installReload() {
 	if c.pu.Dbc == nil {
 		c.rebuild(nil)

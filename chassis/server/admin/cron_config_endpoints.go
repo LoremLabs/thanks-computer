@@ -137,7 +137,7 @@ func (c *Controller) handlePutCronConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	committed = true
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after cron config set failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}

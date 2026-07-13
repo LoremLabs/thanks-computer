@@ -764,7 +764,7 @@ func (c *Controller) handlePatchStackSettings(w http.ResponseWriter, r *http.Req
 	// so refresh the cache like handleRevokeHostname does. The column flip alone
 	// needs no reload (mint_hostname is read only at activate).
 	if len(revoked) > 0 {
-		if err := c.pu.Dbc.Reload(); err != nil {
+		if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 			c.pu.Logger.Warn("dbcache reload after stack-headless revoke failed; FS watcher will retry",
 				zap.String("err", err.Error()))
 		}
@@ -1030,7 +1030,7 @@ func (c *Controller) handleBatchStackSettings(w http.ResponseWriter, r *http.Req
 	// so refresh the cache ONCE for the whole batch. The column flip alone needs
 	// no reload (mint_hostname is read only at activate).
 	if len(revoked) > 0 {
-		if err := c.pu.Dbc.Reload(); err != nil {
+		if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 			c.pu.Logger.Warn("dbcache reload after batch stack-headless revoke failed; FS watcher will retry",
 				zap.String("err", err.Error()))
 		}
@@ -2551,16 +2551,13 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 	// version. Do it ASYNC: the activation is already durably committed and
 	// the data plane has it via the control event published above, so
 	// blocking the HTTP response on the multi-second dump+replay only times
-	// out at the edge (502) with no correctness benefit. The FS watcher is
-	// the backstop if this reload errors. Trade-off: this node's in-memory
-	// mirror may lag the commit by one reload cycle; acceptable since the
-	// commit is durable and the fleet event is the source of truth.
-	go func() {
-		if err := c.pu.Dbc.Reload(); err != nil {
-			c.pu.Logger.Warn("async dbcache reload after activate failed; FS watcher will retry",
-				zap.String("err", err.Error()))
-		}
-	}()
+	// out at the edge (502) with no correctness benefit. ReloadDebounced
+	// coalesces a bulk-activate burst into ~one reload and retries on
+	// failure (with the FS watcher as a further backstop on the SQLite
+	// runtime). Trade-off: this node's in-memory mirror may lag the commit
+	// by one reload cycle; acceptable since the commit is durable and the
+	// fleet event is the source of truth.
+	c.pu.Dbc.ReloadDebounced()
 
 	// Materialise declarative store-seed packs (VECTORS/, KV/) into the runtime
 	// stores — post-commit + async, like the reload above: the packs are durable

@@ -44,6 +44,11 @@ const cursorVar = "txco-control-version"
 
 const tsLayout = "2006-01-02T15:04:05.000Z"
 
+// drainMaxEvents caps how many events pollOnceInvalidate accumulates before
+// reloading — 64 feed batches. Purely a memory bound: events past the cap
+// stay queued (or redeliver) and cost one more reload next cycle.
+const drainMaxEvents = 4096
+
 // Controller is the background applier. Lifecycle mirrors the continuation
 // sweeper (Start/Stop, ticker, ctx.Done, errors logged not fatal).
 type Controller struct {
@@ -164,9 +169,13 @@ func (c *Controller) invalidateOnly() bool {
 // pollOnceInvalidate is the shared-Postgres apply path. Under a postgres://
 // runtime the admin node writes the authoritative rows straight to the shared
 // store, so a data-plane node has NOTHING to materialize — it only needs to
-// refresh its :memory: read mirror from Postgres. So: poll, do ONE coalesced
-// Dbc.Reload() for the whole batch (Reload re-sources the full current PG
-// state, subsuming every event), then Ack.
+// refresh its :memory: read mirror from Postgres. So: DRAIN the queue (keep
+// polling until it's empty, capped), do ONE coalesced Dbc.Reload() for
+// everything drained (Reload re-sources the full current PG state, subsuming
+// every event fetched), then Ack. Draining before reloading is what keeps a
+// burst O(1) reloads instead of O(N/batch): a 1,470-event zone fan-out
+// consumed batch-at-a-time was ~23 back-to-back ~60s full reloads — a
+// ~28-minute treadmill (see todo-control-plane-reload-scaling.md).
 //
 // Deliberately skips, versus the SQLite path:
 //   - the cursor + applied_events — both would live in the SHARED runtime DB, so
@@ -186,10 +195,31 @@ func (c *Controller) invalidateOnly() bool {
 func (c *Controller) pollOnceInvalidate(ctx context.Context) {
 	// cursor arg unused for the durable NATS consumer (it tracks its own
 	// position); pass 0 rather than reading the shared runtime DB.
-	events, err := c.src.Poll(ctx, 0)
-	if err != nil {
-		c.pu.Logger.Error("control-event applier: poll", zap.String("err", err.Error()))
-		return
+	var events []controlevent.Event
+	for {
+		batch, err := c.src.Poll(ctx, 0)
+		if err != nil {
+			if len(events) == 0 {
+				c.pu.Logger.Error("control-event applier: poll", zap.String("err", err.Error()))
+				return
+			}
+			// Partial drain: refresh what was fetched (the reload subsumes
+			// it regardless); the un-fetched remainder redelivers.
+			c.pu.Logger.Warn("control-event applier: poll during drain failed; refreshing fetched events",
+				zap.Int("events", len(events)), zap.String("err", err.Error()))
+			break
+		}
+		if len(batch) == 0 {
+			break
+		}
+		events = append(events, batch...)
+		if len(events) >= drainMaxEvents {
+			// Bound memory under a pathological backlog; the remainder is
+			// picked up (with one more reload) next cycle.
+			c.pu.Logger.Warn("control-event drain cap reached; remainder handled next cycle",
+				zap.Int("events", len(events)))
+			break
+		}
 	}
 	if len(events) == 0 {
 		return

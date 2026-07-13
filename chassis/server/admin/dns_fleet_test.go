@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
@@ -36,6 +37,24 @@ func reconcileZone(t *testing.T, c *Controller, origin string) {
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
+	}
+}
+
+// TestZoneFanOutWarning pins the fix-F guardrail: quiet under the threshold,
+// a blast-radius note (mentioning the count and the --mode manual escape
+// hatch) above it.
+func TestZoneFanOutWarning(t *testing.T) {
+	if w := zoneFanOutWarning("example.com", zoneFanOutWarnThreshold); w != "" {
+		t.Errorf("at threshold: want no warning, got %q", w)
+	}
+	w := zoneFanOutWarning("example.com", 1470)
+	if w == "" {
+		t.Fatal("above threshold: want a warning, got none")
+	}
+	for _, must := range []string{"1470", "example.com", "--mode manual"} {
+		if !strings.Contains(w, must) {
+			t.Errorf("warning missing %q: %s", must, w)
+		}
 	}
 }
 

@@ -1568,11 +1568,11 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 					err = prev(db)
 				}
 				// ACME is network-bound — a DNS-01 obtain for a freshly minted
-				// host can take tens of seconds. The OnReload hook runs while
-				// Dbc.Mu is held, so calling Manage synchronously here stalls
-				// EVERY reader (healthz, ingress resolver, DNS) for the whole
-				// obtain → that's the dbcache-reload 502 on stack activation.
-				// Run it in the background instead; certMu serializes passes.
+				// host can take tens of seconds. The OnReload chain runs off
+				// Dbc.Mu now, but it still gates the mirror swap (readers keep
+				// the PREVIOUS snapshot until every hook returns), so a
+				// synchronous Manage here would delay every reload by a whole
+				// obtain. Run it in the background; certMu serializes passes.
 				go manageCerts()
 				return err
 			}

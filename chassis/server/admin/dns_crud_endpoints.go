@@ -83,7 +83,8 @@ type createZoneRequest struct {
 type createZoneResponse struct {
 	Zone        dnsZoneDTO `json:"zone"`
 	Nameservers []string   `json:"nameservers"`
-	Delegation  string     `json:"delegation"` // human-facing "set these NS records" hint
+	Delegation  string     `json:"delegation"`        // human-facing "set these NS records" hint
+	Warning     string     `json:"warning,omitempty"` // blast-radius note on a high fan-out reconcile
 }
 
 // handleCreateZone registers a delegated zone for the URL's tenant.
@@ -218,9 +219,16 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		c.pu.Logger.Error("zone create: post-commit hostname publish failed — run `txco fleet resync` to heal fleet routing hosts",
 			zap.String("tenant", z.TenantID), zap.String("origin", z.Origin), zap.String("err", perr.Error()))
 	}
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns zone create failed; FS watcher will retry",
 			zap.String("err", err.Error()))
+	}
+
+	warning := zoneFanOutWarning(z.Origin, len(pendingZoneHosts))
+	if warning != "" {
+		c.pu.Logger.Warn("zone create: high fan-out reconcile",
+			zap.String("tenant", z.TenantID), zap.String("origin", z.Origin),
+			zap.Int("hosts", len(pendingZoneHosts)))
 	}
 
 	zoneSOADefaultsForDTO(&z)
@@ -233,6 +241,7 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		Zone:        zoneToDTO(z),
 		Nameservers: nameservers,
 		Delegation:  delegation,
+		Warning:     warning,
 	})
 }
 
@@ -340,11 +349,18 @@ func (c *Controller) handleVerifyZone(w http.ResponseWriter, r *http.Request) {
 		c.pu.Logger.Error("zone verify: post-commit hostname publish failed — run `txco fleet resync` to heal fleet routing hosts",
 			zap.String("tenant", ac.TenantID), zap.String("origin", origin), zap.String("err", perr.Error()))
 	}
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns zone verify failed; FS watcher will retry",
 			zap.String("err", err.Error()))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"origin": origin, "verified_at": now})
+	resp := map[string]any{"origin": origin, "verified_at": now}
+	if warning := zoneFanOutWarning(origin, len(pendingZoneHosts)); warning != "" {
+		c.pu.Logger.Warn("zone verify: high fan-out reconcile",
+			zap.String("tenant", ac.TenantID), zap.String("origin", origin),
+			zap.Int("hosts", len(pendingZoneHosts)))
+		resp["warning"] = warning
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleListZones lists the tenant's zones (?history=true includes revoked).
@@ -426,7 +442,7 @@ func (c *Controller) handleRevokeZone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	committed = true
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns zone revoke failed; FS watcher will retry", zap.String("err", err.Error()))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "origin": canon})
@@ -504,7 +520,7 @@ func (c *Controller) handleCreateRecord(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	committed = true
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns record create failed; FS watcher will retry", zap.String("err", err.Error()))
 	}
 	writeJSON(w, http.StatusCreated, recordToDTO(rec))
@@ -579,7 +595,7 @@ func (c *Controller) handleRevokeRecord(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	committed = true
-	if err := c.pu.Dbc.Reload(); err != nil {
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns record revoke failed; FS watcher will retry", zap.String("err", err.Error()))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "name": name, "type": strings.ToUpper(rtype)})

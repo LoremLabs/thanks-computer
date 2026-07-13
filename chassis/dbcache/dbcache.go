@@ -46,6 +46,13 @@ const supersededDBCloseGrace = 30 * time.Second
 // MirrorLoader (re)builds the in-memory read mirror: given a freshly-opened,
 // empty :memory: SQLite handle `dst` and the chassis's authoritative runtime
 // store `src`, it populates `dst` with the rows the hot read path serves.
+// `srcDSN` is the runtime DSN `src` was opened from: a loader whose dump
+// would otherwise contend with request traffic on the shared `src` pool may
+// open its OWN small pool from it (the overlay's Postgres loader does — a
+// multi-second dump transaction on the shared handle can queue admin
+// queries behind it). The built-in SQLite loader ignores it: there the dump
+// MUST ride a borrowed `src` connection (see DbCache.Source for the WAL
+// rationale).
 //
 // The mirror is ALWAYS SQLite (every reader assumes a :memory: SQLite
 // snapshot — see chassis/processor and chassis/server/ingress); only the
@@ -54,7 +61,7 @@ const supersededDBCloseGrace = 30 * time.Second
 // registers a "postgres" loader that applies the SQLite runtime schema to
 // `dst` and copies the hot tables out of Postgres — keeping every Postgres
 // line out of open-core (open-core compiles no Postgres driver).
-type MirrorLoader func(ctx context.Context, dst, src *sql.DB) error
+type MirrorLoader func(ctx context.Context, dst, src *sql.DB, srcDSN string) error
 
 var (
 	loaderMu sync.Mutex
@@ -87,7 +94,7 @@ func init() { RegisterLoader("sqlite", sqliteBackupLoad) }
 // which was O(n²) in go-sqlite3's no-args Exec — ~35s for a 1MB DB; the
 // backup is O(db size), ~ms). Running over the existing Source *connection*
 // keeps the WAL .db-shm race the old dump avoided still avoided.
-func sqliteBackupLoad(ctx context.Context, dst, src *sql.DB) error {
+func sqliteBackupLoad(ctx context.Context, dst, src *sql.DB, _ string) error {
 	srcConn, err := src.Conn(ctx)
 	if err != nil {
 		return err
@@ -156,13 +163,22 @@ type DbCache struct {
 	// means there is no second connection to race.
 	Source *sql.DB
 
-	// OnReload, if set, runs at the end of every Reload against the
-	// freshly-built in-memory DB while the cache lock is still held —
+	// OnReload, if set, runs inside every Reload against the freshly-built
+	// in-memory DB BEFORE it is published — the new mirror is still private,
 	// so no request ever observes the snapshot before the overlay is
-	// applied. Used by chassis/sysops to re-apply the trusted system
-	// opstacks (Reload rebuilds :memory: from the runtime.db dump and
-	// would otherwise drop them). A hook error is logged, not fatal:
-	// the previous snapshot stays live rather than going dark.
+	// applied, and (deliberately) no reader is blocked behind the hook
+	// chain: only the pointer swap afterwards takes Mu. Used by
+	// chassis/sysops to re-apply the trusted system opstacks (Reload
+	// rebuilds :memory: from the runtime dump and would otherwise drop
+	// them), and by derived-cache rebuilds (redact registry, admission,
+	// static index, DNS zones). Hooks MUST read from the `*sql.DB` they are
+	// handed, never from Snapshot(): Snapshot() still returns the PREVIOUS
+	// mirror at that point. Hooks that rebuild global in-memory caches
+	// therefore publish new derived state a moment BEFORE the mirror swap —
+	// each hook already swaps atomically and keeps its prior state on
+	// error, and nothing reads cache+mirror as one consistent pair. A hook
+	// error is logged, not fatal: the freshly-built mirror is still
+	// published (same as it always was).
 	OnReload func(*sql.DB) error
 
 	// gen counts IN-PLACE mutations of the live snapshot. Reload never
@@ -178,6 +194,11 @@ type DbCache struct {
 	// online backup) for a file: runtime, "postgres" (overlay-registered)
 	// for a postgres:// runtime. Resolved once in New from the runtime DSN.
 	loaderName string
+
+	// reloadDebounce coalesces ReloadDebounced() calls (lazily built under
+	// debounceMu so a zero-value DbCache in tests works too).
+	debounceMu     sync.Mutex
+	reloadDebounce func(func())
 }
 
 // Gen returns the in-place mutation generation of the live snapshot.
@@ -261,27 +282,27 @@ func (dbc *DbCache) Snapshot() *sql.DB {
 // auth DB (when present) is owned exclusively by the admin role and is
 // never mirrored into the read cache.
 //
-// Concurrency: the dump+replay+swap runs under reloadMu (serializing
-// reloads end-to-end) while only the swap+overlay touches Mu — so the
-// expensive dump never blocks Snapshot() readers. Serialization is still
-// required: two concurrent writers each calling Reload after their
-// commits would otherwise dump in parallel (each capturing a snapshot
-// before some of the OTHER writer's commits land), and the reload that
-// finishes its dump LAST would publish a STALE snapshot, silently
-// clobbering durably-committed rows from the mirror. Symptom: a row on
-// disk but missing from the resolver until the next (unrelated) reload
-// happens to dump after every commit settled. reloadMu held across
-// dump+swap keeps the second reload's dump strictly after the first's
-// swap. (This costs serial reloads under write bursts, but the dump was
-// the dominant cost regardless — concurrent dumps were a parallelism
-// mirage.)
+// Concurrency: the dump+replay+overlay runs under reloadMu (serializing
+// reloads end-to-end) while ONLY the pointer swap touches Mu — so neither
+// the expensive dump nor the OnReload chain ever blocks Snapshot()
+// readers. Serialization is still required: two concurrent writers each
+// calling Reload after their commits would otherwise dump in parallel
+// (each capturing a snapshot before some of the OTHER writer's commits
+// land), and the reload that finishes its dump LAST would publish a STALE
+// snapshot, silently clobbering durably-committed rows from the mirror.
+// Symptom: a row on disk but missing from the resolver until the next
+// (unrelated) reload happens to dump after every commit settled. reloadMu
+// held across dump+swap keeps the second reload's dump strictly after the
+// first's swap. (This costs serial reloads under write bursts, but the
+// dump was the dominant cost regardless — concurrent dumps were a
+// parallelism mirage.)
 func (dbc *DbCache) Reload() error {
 	// Serialize reloads under reloadMu — NOT Mu. The expensive dump+replay
 	// below ran under Mu (the lock Snapshot() takes), so a large stack
 	// activation stalled every reader (healthz, ingress resolver, DNS) for
 	// the whole multi-second dump → edge 502s / "web response timeout".
 	// reloadMu keeps reloads strictly serial without blocking readers; only
-	// the brief swap+overlay critical section below takes Mu.
+	// the pointer-swap critical section below takes Mu.
 	dbc.reloadMu.Lock()
 	defer dbc.reloadMu.Unlock()
 
@@ -319,29 +340,50 @@ func (dbc *DbCache) Reload() error {
 		_ = dbNew.Close()
 		return fmt.Errorf("dbcache: mirror loader %q not registered", name)
 	}
-	if berr := loader(bctx, dbNew, dbc.Source); berr != nil {
+
+	// Pool-wait delta on the shared Source across this reload: any request
+	// queries queueing behind the dump (or anything else) during the window
+	// show up here, so pool starvation is visible in prod, not inferred.
+	var poolBefore sql.DBStats
+	if dbc.Source != nil {
+		poolBefore = dbc.Source.Stats()
+	}
+
+	loadStart := time.Now()
+	if berr := loader(bctx, dbNew, dbc.Source, dbc.Conf.DbRuntimeDsn); berr != nil {
 		dbc.Logger.Warn("reload cachedb load err",
 			zap.String("loader", dbc.loaderName), zap.String("err", berr.Error()))
 		_ = dbNew.Close()
 		return berr
 	}
-	// Brief critical section under Mu — the only part Snapshot() readers can
-	// wait on. Publish the mirror and run the OnReload overlay here, in the
-	// SAME order as before, so no reader observes dbNew before sysops has
-	// re-applied the trusted opstacks into it. Milliseconds (a pointer swap +
-	// the bounded overlay), not the multi-second dump above.
-	dbc.Mu.Lock()
-	old := dbc.Db
-	dbc.Db = dbNew
+	loadDur := time.Since(loadStart)
+
+	// Run the OnReload overlay against dbNew while it is still PRIVATE —
+	// before the swap, off Mu. No reader can observe dbNew before sysops
+	// has re-applied the trusted opstacks into it (stronger than the old
+	// under-Mu ordering), and no Snapshot() caller ever waits behind the
+	// derived-cache chain (sysops + redact + admission + static index + DNS
+	// zones is O(fleet), not "milliseconds", at production scale — holding
+	// Mu across it stalled every reader once per reload).
+	overlayStart := time.Now()
 	if dbc.OnReload != nil {
 		if herr := dbc.OnReload(dbNew); herr != nil {
-			// Non-fatal: log loudly and keep serving with the snapshot
-			// as-is. A broken overlay must not take the chassis dark.
+			// Non-fatal: log loudly and publish the snapshot as-is. A
+			// broken overlay must not take the chassis dark.
 			dbc.Logger.Error("dbcache OnReload hook failed",
 				zap.String("err", herr.Error()))
 		}
 	}
+	overlayDur := time.Since(overlayStart)
+
+	// Publish. This pointer swap is the ONLY part a Snapshot() reader can
+	// ever wait on — microseconds.
+	swapStart := time.Now()
+	dbc.Mu.Lock()
+	old := dbc.Db
+	dbc.Db = dbNew
 	dbc.Mu.Unlock()
+	swapDur := time.Since(swapStart)
 
 	// Close the superseded mirror after a grace window that dwarfs any
 	// in-flight Snapshot() query. The PREVIOUS handle must be closed or every
@@ -369,9 +411,92 @@ func (dbc *DbCache) Reload() error {
 		}(old)
 	}
 
-	dbc.Logger.Info("reload cachedb complete")
+	fields := []zap.Field{
+		zap.Duration("load", loadDur),
+		zap.Duration("overlay", overlayDur),
+		zap.Duration("swap", swapDur),
+	}
+	if dbc.Source != nil {
+		after := dbc.Source.Stats()
+		fields = append(fields,
+			zap.Duration("source_pool_wait", after.WaitDuration-poolBefore.WaitDuration),
+			zap.Int64("source_pool_wait_count", after.WaitCount-poolBefore.WaitCount))
+	}
+	dbc.Logger.Info("reload cachedb complete", fields...)
 
 	return nil
+}
+
+// reloadDebounceQuiet is the trailing-edge quiet window for
+// ReloadDebounced: a burst of writes (or watcher events) coalesces into
+// one background reload this long after the last one.
+const reloadDebounceQuiet = 1000 * time.Millisecond
+
+// reloadRetryMax bounds the background retry loop. Give-up is safe: the
+// previous mirror keeps serving (the availability buffer) and the next
+// write / watch event re-arms a fresh reload.
+const reloadRetryMax = 5
+
+// ReloadDebounced schedules a background, coalesced Reload: it returns
+// immediately, and one reload runs ~reloadDebounceQuiet after the most
+// recent call. Trailing-edge only (bep/debounce), which fits the callers —
+// a write burst or watcher-event burst ends. Unlike the control-feed
+// applier, this path has no redelivery, so a failed background reload
+// retries with backoff (reloadWithRetry) instead of silently leaving the
+// mirror stale until the next unrelated write.
+func (dbc *DbCache) ReloadDebounced() {
+	dbc.debounceMu.Lock()
+	if dbc.reloadDebounce == nil {
+		dbc.reloadDebounce = debounce.New(reloadDebounceQuiet)
+	}
+	fire := dbc.reloadDebounce
+	dbc.debounceMu.Unlock()
+	fire(func() { go dbc.reloadWithRetry() })
+}
+
+func (dbc *DbCache) reloadWithRetry() {
+	backoff := time.Second
+	for attempt := 1; ; attempt++ {
+		err := dbc.Reload()
+		if err == nil {
+			return
+		}
+		if attempt >= reloadRetryMax {
+			dbc.Logger.Error("background mirror reload failed; keeping previous mirror (next write or watch event retries)",
+				zap.Int("attempts", attempt), zap.String("err", err.Error()))
+			return
+		}
+		dbc.Logger.Warn("background mirror reload failed; retrying",
+			zap.Int("attempt", attempt), zap.Duration("backoff", backoff),
+			zap.String("err", err.Error()))
+		var done <-chan struct{}
+		if dbc.Ctx != nil {
+			done = dbc.Ctx.Done()
+		}
+		select {
+		case <-time.After(backoff):
+		case <-done:
+			return
+		}
+		backoff *= 2
+	}
+}
+
+// ReloadAfterWrite refreshes the read mirror after a write to the
+// authoritative runtime store. On a shared (postgres) runtime the write is
+// already durable in the shared store and the local mirror is only a read
+// cache, so the reload runs in the background, coalesced — blocking the
+// caller on a full mirror rebuild couples write latency to total fleet
+// size (~60s on a large tenant, past every CLI deadline). On the local
+// SQLite file runtime the file IS the source of truth and a reader
+// immediately after the write must see it, so the reload stays
+// synchronous and the error is returned for the caller to log.
+func (dbc *DbCache) ReloadAfterWrite() error {
+	if dbc.loaderName == "postgres" {
+		dbc.ReloadDebounced()
+		return nil
+	}
+	return dbc.Reload()
 }
 
 // Watch a db file for changes
@@ -403,9 +528,6 @@ func (dbc *DbCache) Watch() {
 	runtimeBase := filepath.Base(strings.TrimPrefix(dbc.Conf.DbRuntimeDsn, "file:"))
 
 	go func() {
-		// this may miss some updates if they come within the same second?
-		debounced := debounce.New(1000 * time.Millisecond)
-
 		for {
 			select {
 			case event := <-w.Event:
@@ -413,14 +535,7 @@ func (dbc *DbCache) Watch() {
 					continue
 				}
 				dbc.Logger.Info("watch event", zap.String("watchEvent", event.String()))
-				debounced(func() {
-					go func() {
-						err := dbc.Reload()
-						if err != nil {
-							dbc.Logger.Info("dbc reload error", zap.String("err", err.Error()))
-						}
-					}()
-				})
+				dbc.ReloadDebounced()
 			case err := <-w.Error:
 				dbc.Logger.Info("watch error", zap.String("err", err.Error()))
 			case <-w.Closed:

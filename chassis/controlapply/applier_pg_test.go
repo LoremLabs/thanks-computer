@@ -14,20 +14,22 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
 
-// fakePGSource returns one batch of events then goes empty, and records Acks.
+// fakePGSource serves its batches in order then goes empty, and records Acks.
 type fakePGSource struct {
-	events []controlevent.Event
-	polled bool
-	acks   []string
+	batches [][]controlevent.Event
+	polls   int
+	acks    []string
 }
 
 func (f *fakePGSource) Name() string { return "fake-pg" }
 func (f *fakePGSource) Poll(ctx context.Context, since uint64) ([]controlevent.Event, error) {
-	if f.polled {
+	if f.polls >= len(f.batches) {
+		f.polls++
 		return nil, nil
 	}
-	f.polled = true
-	return f.events, nil
+	b := f.batches[f.polls]
+	f.polls++
+	return b, nil
 }
 func (f *fakePGSource) Ack(ctx context.Context, eventID string) error {
 	f.acks = append(f.acks, eventID)
@@ -43,7 +45,7 @@ func TestApplierInvalidateOnlyOnPostgres(t *testing.T) {
 	ctx := context.Background()
 
 	var reloads atomic.Int64
-	dbcache.RegisterLoader("postgres", func(ctx context.Context, dst, src *sql.DB) error {
+	dbcache.RegisterLoader("postgres", func(ctx context.Context, dst, src *sql.DB, _ string) error {
 		reloads.Add(1)
 		_, err := dst.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS mirror_marker (x INTEGER)`)
 		return err
@@ -67,10 +69,10 @@ func TestApplierInvalidateOnlyOnPostgres(t *testing.T) {
 	}
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), RuntimeDB: db, Dbc: dbc}
 
-	src := &fakePGSource{events: []controlevent.Event{
+	src := &fakePGSource{batches: [][]controlevent.Event{{
 		{EventID: "e1", Type: controlevent.TypeStackActivated, ControlVersion: 10},
 		{EventID: "e2", Type: "tenant.updated", ControlVersion: 11},
-	}}
+	}}}
 	// admin + astore are nil: the invalidate path uses neither.
 	c := NewController(ctx, pu, nil, src, nil)
 
@@ -100,5 +102,52 @@ func TestApplierInvalidateOnlyOnPostgres(t *testing.T) {
 	c.PollOnceForTest(ctx)
 	if got := reloads.Load() - before; got != 1 {
 		t.Errorf("reloads after empty poll = %d, want still 1", got)
+	}
+}
+
+// TestApplierInvalidateDrainsBeforeReload pins the drain-then-reload shape:
+// a burst spanning several feed batches must cost ONE mirror reload, not one
+// per batch (the reload-treadmill class — see
+// todo-control-plane-reload-scaling.md), with every drained event acked only
+// after the reload succeeds.
+func TestApplierInvalidateDrainsBeforeReload(t *testing.T) {
+	ctx := context.Background()
+
+	var reloads atomic.Int64
+	dbcache.RegisterLoader("postgres", func(ctx context.Context, dst, src *sql.DB, _ string) error {
+		reloads.Add(1)
+		_, err := dst.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS mirror_marker (x INTEGER)`)
+		return err
+	})
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	conf := config.Config{DbRuntimeDsn: "postgres://ignored", FeedSource: "nats", FeedPollPeriod: 1}
+	dbc, err := dbcache.New(conf, zap.NewNop(), ctx, db)
+	if err != nil {
+		t.Fatalf("dbcache.New: %v", err)
+	}
+	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), RuntimeDB: db, Dbc: dbc}
+
+	// Three consecutive batches, as the durable consumer would serve a burst.
+	src := &fakePGSource{batches: [][]controlevent.Event{
+		{{EventID: "e1", ControlVersion: 10}, {EventID: "e2", ControlVersion: 11}},
+		{{EventID: "e3", ControlVersion: 12}},
+		{{EventID: "e4", ControlVersion: 13}, {EventID: "e5", ControlVersion: 14}},
+	}}
+	c := NewController(ctx, pu, nil, src, nil)
+
+	before := reloads.Load()
+	c.PollOnceForTest(ctx)
+
+	if got := reloads.Load() - before; got != 1 {
+		t.Errorf("mirror reloads = %d, want 1 (drain the burst, then one coalesced reload)", got)
+	}
+	if len(src.acks) != 5 {
+		t.Errorf("acks = %v, want all 5 drained events acked", src.acks)
 	}
 }

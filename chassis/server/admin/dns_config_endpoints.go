@@ -161,6 +161,12 @@ func (c *Controller) handlePutDNSConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	committed = true
+	// Deliberately SYNCHRONOUS on every runtime (not ReloadAfterWrite):
+	// the response below is effectiveDNSConfigDTO, which reads the just-
+	// written settings back through the MIRROR (EffectiveSynthConfig over
+	// Dbc.Snapshot()) — with a background reload it would echo the
+	// pre-write config. The one write handler whose response depends on
+	// the reload; see todo-control-plane-reload-scaling.md §③.
 	if err := c.pu.Dbc.Reload(); err != nil {
 		c.pu.Logger.Warn("dbcache reload after dns config set failed; FS watcher will retry",
 			zap.String("err", err.Error()))

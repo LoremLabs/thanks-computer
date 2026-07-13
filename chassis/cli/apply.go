@@ -81,6 +81,52 @@ func spin(w io.Writer, msg string, fn func() error) error {
 	return err
 }
 
+// scanProgress paints a throttled "checking N/total" spinner while apply's
+// incremental fast-skip loop runs. That loop emits nothing per stack on an
+// all-unchanged run — every stack short-circuits with a bare `continue` — so a
+// large tree looked hung between the target
+// prompt and the final recap. Non-TTY writers (pipe/CI/--json to a file) get
+// nothing, matching spin's discipline.
+type scanProgress struct {
+	w         io.Writer
+	tty       bool
+	total     int
+	done      int
+	frame     int
+	lastPaint time.Time
+}
+
+func newScanProgress(w io.Writer, total int) *scanProgress {
+	f, ok := w.(*os.File)
+	return &scanProgress{w: w, tty: ok && term.IsTerminal(int(f.Fd())), total: total}
+}
+
+// tick advances the counter (call once per stack) and repaints at most every
+// ~90ms so the braille frame animates without flooding the terminal.
+func (s *scanProgress) tick() {
+	if s == nil || !s.tty {
+		return
+	}
+	s.done++
+	now := time.Now()
+	if now.Sub(s.lastPaint) < 90*time.Millisecond {
+		return
+	}
+	s.lastPaint = now
+	frames := []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+	fmt.Fprintf(s.w, "\r\x1b[2K%c checking %d/%d stacks…", frames[s.frame%len(frames)], s.done, s.total)
+	s.frame++
+}
+
+// clear erases the progress line — call before any real per-stack output and
+// once the loop ends so the counter never bleeds into a deploy line or recap.
+func (s *scanProgress) clear() {
+	if s == nil || !s.tty {
+		return
+	}
+	fmt.Fprint(s.w, "\r\x1b[2K")
+}
+
 // retryBackoffBase is the initial inter-attempt delay in retryStep (it doubles
 // each retry, capped at 8s). A package var only so tests can shrink it; not
 // user-facing.
@@ -505,7 +551,13 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	// Best-effort: a list failure just falls back to per-stack checks.
 	serverByName := map[string]client.StackRecord{}
 	if onlyStack == "" && !opts.changed && !opts.force {
-		if recs, lerr := c.ListStacks(ctx); lerr == nil {
+		var recs []client.StackRecord
+		var lerr error
+		_ = spin(progress, "listing stacks…", func() error {
+			recs, lerr = c.ListStacks(ctx)
+			return nil
+		})
+		if lerr == nil {
 			for _, r := range recs {
 				serverByName[r.Name] = r
 			}
@@ -514,7 +566,17 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		}
 	}
 
+	// Live scan progress for whole-tree applies: the fast-skip loop below is
+	// silent on an all-unchanged run, so a big tree looked hung. tick() paints a
+	// throttled counter; clear() wipes it before deploy output and at the end.
+	// Nil for single-stack `push` (one iteration, no scanning to narrate).
+	var scan *scanProgress
+	if onlyStack == "" {
+		scan = newScanProgress(progress, len(stacks))
+	}
+
 	for _, stack := range sortedKeys(stacks) {
+		scan.tick()
 		files := opsToFiles(stacks[stack])
 		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
 		if aerr != nil {
@@ -598,6 +660,11 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 				continue
 			}
 		}
+
+		// This stack is actually deploying: wipe the scan counter so its
+		// per-stack output (blob probes, upload/validate/activate spinners, the
+		// ✓ line) starts on a clean line. The next iteration repaints below it.
+		scan.clear()
 
 		// Make dataset artifact bytes resident in the chassis CAS before any
 		// draft references them (HEAD per hash, streamed PUT for misses) — the
@@ -746,6 +813,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			fmt.Fprintf(stdout, "  → %s\n", act.StructuredURL)
 		}
 	}
+	scan.clear() // wipe any residual counter before the recap
 
 	if opts.jsonOut {
 		// `push` deploys exactly one stack → emit a single object; `apply`
