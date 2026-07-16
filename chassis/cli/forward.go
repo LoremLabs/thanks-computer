@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -142,7 +143,7 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 		if res.Stderr != "" {
 			fmt.Fprint(stderr, res.Stderr)
 		}
-		if res.OpenURL != "" && !noOpen && banner.IsTTY(stdout) {
+		if res.OpenURL != "" && !noOpen && banner.IsTTY(stdout) && confirmOpen(stderr) {
 			_ = openBrowser(res.OpenURL) // best-effort; URL already printed as fallback
 		}
 		if res.PollAfterMs <= 0 {
@@ -150,5 +151,23 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 		}
 		cursor = res.Cursor
 		time.Sleep(time.Duration(res.PollAfterMs) * time.Millisecond)
+	}
+}
+
+// confirmOpen asks whether to open the just-printed URL in the browser, default
+// yes (Enter = open). Only called on an interactive terminal, so it reads
+// os.Stdin directly; a read error (EOF / no stdin) declines rather than
+// surprise-opening. The prompt goes to stderr so stdout stays the command's own.
+func confirmOpen(out io.Writer) bool {
+	fmt.Fprint(out, "Open in your browser? [Y/n] ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "y", "yes":
+		return true
+	default:
+		return false
 	}
 }
