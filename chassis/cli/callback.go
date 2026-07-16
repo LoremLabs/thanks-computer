@@ -85,17 +85,16 @@ func (lb *loopback) close() { _ = lb.srv.Close() }
 // we couldn't), so nothing will call back — don't hang.
 func awaitCallback(lb *loopback, opened bool, stdout, stderr io.Writer) int {
 	if !opened {
-		fmt.Fprintln(stderr, "Open the URL above to finish; not waiting for a result.")
 		return 1
 	}
 	fmt.Fprintln(stderr, "\nWaiting for you to finish in the browser (Ctrl-C to stop)…")
 	res, ok := lb.wait(callbackTimeout)
 	if !ok {
-		fmt.Fprintln(stderr, "Timed out waiting for the browser.")
+		fmt.Fprintln(stderr, "Timed out waiting.")
 		return 1
 	}
 	if res.status == "success" {
-		fmt.Fprintln(stdout, "\n✓ Completed in the browser.")
+		fmt.Fprintln(stdout, "\n✓ Completed.")
 		return 0
 	}
 	fmt.Fprintln(stdout, "\nCanceled.")
