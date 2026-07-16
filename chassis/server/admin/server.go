@@ -429,6 +429,11 @@ func (c *Controller) Start() {
 	for _, m := range serverext.TenantMounters() {
 		m(tenantR)
 	}
+	// Tenant-scoped zero-install command exec — the sibling of /v1/cli for
+	// self-serve overlay verbs (`txco credits buy` → POST /v1/tenants/{t}/cli).
+	// Membership-gated (not super-admin); the CLI forwards here after /v1/cli
+	// 404s. Open core registers no tenant commands, so this 404s cleanly.
+	tenantR.HandleFunc("/cli", c.handleTenantCLIExec).Methods(http.MethodPost)
 	tenantR.HandleFunc("/ops", c.handleListOps).Methods(http.MethodGet)
 	// Per-tenant cron timezone (txco cron config show|set). Localizes the
 	// tenant's @cron.* wall-clock fields; @cron.bucket stays UTC.

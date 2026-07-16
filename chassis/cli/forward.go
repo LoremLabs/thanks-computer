@@ -87,22 +87,44 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 	if target.Addr == "" {
 		return 0, false // not logged in / no chassis configured
 	}
+	// Follow the same tenant the chassis URL + signature do, so a self-serve
+	// verb runs under the caller's tenant (mirrors runClientCmd).
+	target.Tenant = resolveTenant(globals["tenant"], effectiveProfile(globals["target"], globals["profile"]))
 	c := client.New(target)
 	argv := append([]string{name}, rest...)
 
+	// Endpoint order: try the super-admin /v1/cli FIRST (the unchanged legacy
+	// path — operator verbs like `credit grant` live there). If the server
+	// doesn't implement the command there (404) AND a tenant is resolvable,
+	// retry the SAME first call against the tenant-scoped /v1/tenants/{t}/cli,
+	// where self-serve overlay verbs (`credits`/`billing`) live. 404 on the
+	// applicable endpoint(s) → fall through to the unknown-subcommand error.
+	// Admin-first keeps every existing forwarded command's behaviour identical;
+	// tenant exec is purely an additive fallback.
+	tenantMode := false
+	cursor := ""
+	first := true
 	// Poll loop: a single request for the common case; a POLLABLE command
 	// (Result.PollAfterMs > 0) makes us print, wait, and re-run with the
 	// returned cursor, until it stops or the user interrupts (Ctrl-C kills the
 	// process, the server sees the dropped connection and cleans up).
-	cursor := ""
-	first := true
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), forwardRequestTimeout)
-		res, err := c.RunCommandCursor(ctx, argv, cursor)
+		var res *client.CommandResult
+		var err error
+		if tenantMode {
+			res, err = c.RunTenantCommandCursor(ctx, target.Tenant, argv, cursor)
+		} else {
+			res, err = c.RunCommandCursor(ctx, argv, cursor)
+		}
 		cancel()
 		if err != nil {
 			if first && errors.Is(err, client.ErrCommandUnsupported) {
-				return 0, false // server doesn't implement it → graceful fall-through
+				if !tenantMode && target.Tenant != "" {
+					tenantMode = true // admin exec 404'd → try the tenant endpoint
+					continue
+				}
+				return 0, false // unsupported on the applicable endpoint(s) → graceful fall-through
 			}
 			fmt.Fprintf(stderr, "txco: %v\n", err)
 			return 1, true

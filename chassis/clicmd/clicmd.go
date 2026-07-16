@@ -53,6 +53,28 @@ func Lookup(name string) (Handler, bool) {
 	return h, ok
 }
 
+// --- tenant-scoped registry ------------------------------------------------
+//
+// Tenant commands run under a RESOLVED tenant (POST /v1/tenants/{tenant}/cli)
+// instead of the super-admin /v1/cli. That endpoint enforces MEMBERSHIP (not
+// super-admin) via resolveTenantMiddleware and stamps the tenant onto the
+// handler's context, so a handler reads its tenant with
+// auth.FromContext(ctx).TenantSlug. Same Handler/Result shape; a SEPARATE
+// registry keeps tenant verbs (e.g. self-serve `credits buy`) off the
+// super-admin endpoint and admin verbs off the tenant endpoint. The CLI's
+// forwarder tries /v1/cli first, then falls back to the tenant endpoint.
+var tenantRegistry = map[string]Handler{}
+
+// RegisterTenant adds a tenant-scoped command handler, activated by a blank
+// import like Register. Last registration wins. Open core registers none.
+func RegisterTenant(name string, h Handler) { tenantRegistry[name] = h }
+
+// LookupTenant returns the tenant-scoped handler for name, if registered.
+func LookupTenant(name string) (Handler, bool) {
+	h, ok := tenantRegistry[name]
+	return h, ok
+}
+
 type cursorCtxKey struct{}
 
 // WithCursor carries the poll cursor a forwarded command was invoked with into

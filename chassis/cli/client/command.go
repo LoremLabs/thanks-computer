@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -41,6 +42,28 @@ func (c *Client) RunCommand(ctx context.Context, args []string) (*CommandResult,
 // produces the exact legacy request shape (older servers that DisallowUnknownFields
 // never see an unexpected field).
 func (c *Client) RunCommandCursor(ctx context.Context, args []string, cursor string) (*CommandResult, error) {
+	endpoint := strings.TrimRight(c.target.Addr, "/") + "/v1/cli"
+	return c.runCommandAt(ctx, endpoint, args, cursor)
+}
+
+// RunTenantCommand forwards a CLI argv to the TENANT-scoped exec endpoint
+// (/v1/tenants/{tenant}/cli) as a signed request — the door for self-serve
+// overlay verbs (`credits`/`billing`) that must run as the tenant, not
+// super-admin. Same 404→ErrCommandUnsupported contract as RunCommand.
+func (c *Client) RunTenantCommand(ctx context.Context, tenant string, args []string) (*CommandResult, error) {
+	return c.RunTenantCommandCursor(ctx, tenant, args, "")
+}
+
+// RunTenantCommandCursor is RunTenantCommand carrying a poll cursor.
+func (c *Client) RunTenantCommandCursor(ctx context.Context, tenant string, args []string, cursor string) (*CommandResult, error) {
+	endpoint := strings.TrimRight(c.target.Addr, "/") + "/v1/tenants/" + url.PathEscape(tenant) + "/cli"
+	return c.runCommandAt(ctx, endpoint, args, cursor)
+}
+
+// runCommandAt POSTs the argv (+ optional cursor) to a /…/cli endpoint and
+// decodes the result. Shared by the admin (/v1/cli) and tenant
+// (/v1/tenants/{t}/cli) forwarders — only the endpoint differs.
+func (c *Client) runCommandAt(ctx context.Context, endpoint string, args []string, cursor string) (*CommandResult, error) {
 	reqBody := map[string]any{"args": args}
 	if cursor != "" {
 		reqBody["cursor"] = cursor
@@ -49,7 +72,6 @@ func (c *Client) RunCommandCursor(ctx context.Context, args []string, cursor str
 	if err != nil {
 		return nil, err
 	}
-	endpoint := strings.TrimRight(c.target.Addr, "/") + "/v1/cli"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

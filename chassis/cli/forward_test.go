@@ -104,6 +104,62 @@ func TestForwardToServerPollLoop(t *testing.T) {
 	}
 }
 
+// TestForwardToServerTenantFallback: a command the super-admin /v1/cli doesn't
+// implement (404) is retried against the tenant-scoped /v1/tenants/{t}/cli when a
+// tenant is resolvable — the path self-serve verbs like `credits buy` take.
+func TestForwardToServerTenantFallback(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir()) // no real profile/signer → unsigned request
+
+	var adminHits, tenantHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/cli":
+			adminHits++
+			w.WriteHeader(http.StatusNotFound) // admin registry doesn't have it
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "unknown_command"})
+		case "/v1/tenants/acme/cli":
+			tenantHits++
+			_ = json.NewEncoder(w).Encode(map[string]any{"stdout": "bought\n", "exit": 0})
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	status, ok := forwardToServer("credits", []string{"buy", "1", "--addr", srv.URL, "--tenant", "acme"}, &out, &errb)
+	if !ok || status != 0 {
+		t.Fatalf("status=%d ok=%v stderr=%q", status, ok, errb.String())
+	}
+	if adminHits != 1 || tenantHits != 1 {
+		t.Fatalf("adminHits=%d tenantHits=%d, want 1/1 (admin 404 → tenant fallback)", adminHits, tenantHits)
+	}
+	if out.String() != "bought\n" {
+		t.Fatalf("out=%q, want bought", out.String())
+	}
+}
+
+// TestForwardToServerNoTenantNoFallback: with no tenant resolvable... is not
+// reachable here because ResolveTenant always falls back to the default tenant
+// slug; the admin-first ordering means a command the admin endpoint DOES answer
+// never reaches the tenant endpoint (covered by SingleShot). This documents that
+// admin-first keeps legacy behaviour: a 404-only server falls through unchanged.
+func TestForwardToServerBothUnsupportedFallsThrough(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // neither endpoint implements it
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "unknown_command"})
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	status, ok := forwardToServer("nope", []string{"--addr", srv.URL, "--tenant", "acme"}, &out, &errb)
+	if ok || status != 0 {
+		t.Fatalf("status=%d ok=%v, want 0/false (fall through to unknown-subcommand)", status, ok)
+	}
+}
+
 // TestForwardToServerSingleShot: a non-pollable command (no poll directive) runs
 // exactly once — the classic behaviour is unchanged.
 func TestForwardToServerSingleShot(t *testing.T) {
