@@ -24,6 +24,8 @@ type cliExecResponse struct {
 	// Cursor + PollAfterMs ask the forwarding CLI to re-poll (see clicmd.Result).
 	Cursor      string `json:"cursor,omitempty"`
 	PollAfterMs int    `json:"poll_after_ms,omitempty"`
+	// OpenURL asks the forwarding CLI to open this URL in the browser.
+	OpenURL string `json:"open_url,omitempty"`
 }
 
 // handleCLIExec runs a server-side CLI command forwarded by the core CLI's
@@ -74,6 +76,7 @@ func (c *Controller) handleCLIExec(w http.ResponseWriter, r *http.Request) {
 		Exit:        res.Exit,
 		Cursor:      res.Cursor,
 		PollAfterMs: res.PollAfterMs,
+		OpenURL:     res.OpenURL,
 	})
 }
 
@@ -133,5 +136,6 @@ func (c *Controller) handleTenantCLIExec(w http.ResponseWriter, r *http.Request)
 		Exit:        res.Exit,
 		Cursor:      res.Cursor,
 		PollAfterMs: res.PollAfterMs,
+		OpenURL:     res.OpenURL,
 	})
 }

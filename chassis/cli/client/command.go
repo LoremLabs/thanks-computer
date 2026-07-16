@@ -27,6 +27,9 @@ type CommandResult struct {
 	// the CLI re-runs the command after that delay, passing Cursor back.
 	Cursor      string `json:"cursor,omitempty"`
 	PollAfterMs int    `json:"poll_after_ms,omitempty"`
+	// OpenURL asks the forwarder to open this URL in the browser (best-effort,
+	// interactive terminals only) after printing Stdout.
+	OpenURL string `json:"open_url,omitempty"`
 }
 
 // RunCommand forwards a CLI argv (e.g. ["credit","grant","add","acme","500"]) to

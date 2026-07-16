@@ -29,6 +29,13 @@ type Result struct {
 	// single-shot behaviour, so existing commands are unaffected.
 	Cursor      string
 	PollAfterMs int
+
+	// OpenURL, when set, asks the forwarding CLI to open this URL in the user's
+	// browser (best-effort, only on an interactive terminal) after printing
+	// Stdout — for commands whose result is a hosted page (a Stripe Checkout /
+	// billing-portal URL, an OAuth page, …). ALWAYS also include the URL in
+	// Stdout so headless/piped callers still get it. Empty = no-op.
+	OpenURL string
 }
 
 // Handler runs one forwarded command server-side. args is everything after the

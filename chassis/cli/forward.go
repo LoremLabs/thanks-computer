@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 )
 
@@ -101,6 +103,10 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 	// applicable endpoint(s) → fall through to the unknown-subcommand error.
 	// Admin-first keeps every existing forwarded command's behaviour identical;
 	// tenant exec is purely an additive fallback.
+	// A command may ask us to open a hosted page (Result.OpenURL) — best-effort,
+	// interactive terminals only, and suppressible with TXCO_NO_BROWSER. The URL
+	// is always printed too (in Stdout), so headless/piped callers still get it.
+	noOpen := os.Getenv("TXCO_NO_BROWSER") != ""
 	tenantMode := false
 	cursor := ""
 	first := true
@@ -135,6 +141,9 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 		}
 		if res.Stderr != "" {
 			fmt.Fprint(stderr, res.Stderr)
+		}
+		if res.OpenURL != "" && !noOpen && banner.IsTTY(stdout) {
+			_ = openBrowser(res.OpenURL) // best-effort; URL already printed as fallback
 		}
 		if res.PollAfterMs <= 0 {
 			return res.Exit, true
