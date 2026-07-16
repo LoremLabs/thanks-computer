@@ -108,6 +108,20 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 	// interactive terminals only, and suppressible with TXCO_NO_BROWSER. The URL
 	// is always printed too (in Stdout), so headless/piped callers still get it.
 	noOpen := os.Getenv("TXCO_NO_BROWSER") != ""
+
+	// On an interactive terminal, stand up a local loopback server and hand it to
+	// the command (as a callback) so a hosted-page flow can report its result
+	// back to us. Cheap; torn down on return; only AWAITED if the command asks
+	// (Result.AwaitCallback). Best-effort — a bind failure just skips the loopback.
+	var lb *loopback
+	if !noOpen && banner.IsTTY(stdout) {
+		if l, err := startLoopback(); err == nil {
+			lb = l
+			defer lb.close()
+			c.SetCallback(lb.url, lb.state)
+		}
+	}
+
 	tenantMode := false
 	cursor := ""
 	first := true
@@ -143,8 +157,13 @@ func forwardToServer(name string, args []string, stdout, stderr io.Writer) (stat
 		if res.Stderr != "" {
 			fmt.Fprint(stderr, res.Stderr)
 		}
+		opened := false
 		if res.OpenURL != "" && !noOpen && banner.IsTTY(stdout) && confirmOpen(stderr) {
 			_ = openBrowser(res.OpenURL) // best-effort; URL already printed as fallback
+			opened = true
+		}
+		if res.AwaitCallback && lb != nil {
+			return awaitCallback(lb, opened, stdout, stderr), true
 		}
 		if res.PollAfterMs <= 0 {
 			return res.Exit, true

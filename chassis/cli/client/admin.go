@@ -71,7 +71,17 @@ type Client struct {
 	// automatically for a super-admin caller (who should see every tenant);
 	// the flat view is super-admin-only server-side.
 	traceAllTenants bool
+
+	// cbURL/cbState carry a forwarded command's loopback callback (set by
+	// SetCallback). When present they ride the /v1/cli request as headers so a
+	// server command can wire them into a hosted-page return (see clicmd.Callback).
+	cbURL   string
+	cbState string
 }
+
+// SetCallback attaches a loopback callback URL + state nonce to subsequent
+// RunCommand calls, sent as request headers the server reads via clicmd.Callback.
+func (c *Client) SetCallback(url, state string) { c.cbURL, c.cbState = url, state }
 
 func New(t Target) *Client {
 	return &Client{

@@ -30,6 +30,9 @@ type CommandResult struct {
 	// OpenURL asks the forwarder to open this URL in the browser (best-effort,
 	// interactive terminals only) after printing Stdout.
 	OpenURL string `json:"open_url,omitempty"`
+	// AwaitCallback asks the forwarder to block on its loopback server after
+	// opening OpenURL, until the hosted page redirects back or times out.
+	AwaitCallback bool `json:"await_callback,omitempty"`
 }
 
 // RunCommand forwards a CLI argv (e.g. ["credit","grant","add","acme","500"]) to
@@ -80,6 +83,12 @@ func (c *Client) runCommandAt(ctx context.Context, endpoint string, args []strin
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// Loopback callback (optional) rides as headers so it's backward-compatible:
+	// an older server that doesn't read them simply won't AwaitCallback.
+	if c.cbURL != "" {
+		httpReq.Header.Set("X-Txco-Callback-URL", c.cbURL)
+		httpReq.Header.Set("X-Txco-Callback-State", c.cbState)
+	}
 	if err := c.applyAuth(httpReq, body); err != nil {
 		return nil, err
 	}

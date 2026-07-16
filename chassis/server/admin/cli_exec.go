@@ -26,6 +26,8 @@ type cliExecResponse struct {
 	PollAfterMs int    `json:"poll_after_ms,omitempty"`
 	// OpenURL asks the forwarding CLI to open this URL in the browser.
 	OpenURL string `json:"open_url,omitempty"`
+	// AwaitCallback asks the forwarding CLI to block on its loopback server.
+	AwaitCallback bool `json:"await_callback,omitempty"`
 }
 
 // handleCLIExec runs a server-side CLI command forwarded by the core CLI's
@@ -65,18 +67,22 @@ func (c *Controller) handleCLIExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := clicmd.WithCursor(r.Context(), req.Cursor)
+	if cbURL := r.Header.Get("X-Txco-Callback-URL"); cbURL != "" {
+		ctx = clicmd.WithCallback(ctx, clicmd.CallbackInfo{URL: cbURL, State: r.Header.Get("X-Txco-Callback-State")})
+	}
 	res, err := h(ctx, req.Args[1:])
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "command_failed", map[string]any{"err": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, cliExecResponse{
-		Stdout:      res.Stdout,
-		Stderr:      res.Stderr,
-		Exit:        res.Exit,
-		Cursor:      res.Cursor,
-		PollAfterMs: res.PollAfterMs,
-		OpenURL:     res.OpenURL,
+		Stdout:        res.Stdout,
+		Stderr:        res.Stderr,
+		Exit:          res.Exit,
+		Cursor:        res.Cursor,
+		PollAfterMs:   res.PollAfterMs,
+		OpenURL:       res.OpenURL,
+		AwaitCallback: res.AwaitCallback,
 	})
 }
 
@@ -125,17 +131,21 @@ func (c *Controller) handleTenantCLIExec(w http.ResponseWriter, r *http.Request)
 	}
 
 	ctx := clicmd.WithCursor(r.Context(), req.Cursor)
+	if cbURL := r.Header.Get("X-Txco-Callback-URL"); cbURL != "" {
+		ctx = clicmd.WithCallback(ctx, clicmd.CallbackInfo{URL: cbURL, State: r.Header.Get("X-Txco-Callback-State")})
+	}
 	res, err := h(ctx, req.Args[1:])
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "command_failed", map[string]any{"err": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, cliExecResponse{
-		Stdout:      res.Stdout,
-		Stderr:      res.Stderr,
-		Exit:        res.Exit,
-		Cursor:      res.Cursor,
-		PollAfterMs: res.PollAfterMs,
-		OpenURL:     res.OpenURL,
+		Stdout:        res.Stdout,
+		Stderr:        res.Stderr,
+		Exit:          res.Exit,
+		Cursor:        res.Cursor,
+		PollAfterMs:   res.PollAfterMs,
+		OpenURL:       res.OpenURL,
+		AwaitCallback: res.AwaitCallback,
 	})
 }

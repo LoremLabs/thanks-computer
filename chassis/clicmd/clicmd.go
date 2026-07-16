@@ -36,6 +36,13 @@ type Result struct {
 	// billing-portal URL, an OAuth page, …). ALWAYS also include the URL in
 	// Stdout so headless/piped callers still get it. Empty = no-op.
 	OpenURL string
+
+	// AwaitCallback tells the forwarding CLI to keep running after OpenURL and
+	// BLOCK on its local loopback server (started when it passed a callback via
+	// Callback headers — see clicmd.Callback) until the hosted page redirects
+	// back, or a timeout. Set this only when the command wired that callback URL
+	// into the hosted flow's return target. No callback provided ⇒ leave false.
+	AwaitCallback bool
 }
 
 // Handler runs one forwarded command server-side. args is everything after the
@@ -96,4 +103,33 @@ func WithCursor(ctx context.Context, cursor string) context.Context {
 func Cursor(ctx context.Context) string {
 	c, _ := ctx.Value(cursorCtxKey{}).(string)
 	return c
+}
+
+// CallbackInfo is the forwarding CLI's local loopback callback: the URL its
+// 127.0.0.1 server listens on, plus a random state nonce the CLI verifies on the
+// redirect back. A command that returns a hosted page (Stripe Checkout, OAuth)
+// can wire these into the page's return target so the result comes back to the
+// CLI; it then sets Result.AwaitCallback so the CLI blocks for it.
+type CallbackInfo struct {
+	URL   string
+	State string
+}
+
+type callbackCtxKey struct{}
+
+// WithCallback carries the forwarding CLI's loopback callback into the handler's
+// context (set by the exec endpoint from request headers). Absent ⇒ the caller
+// isn't waiting for a callback (headless / old client), so fall back to a static
+// return.
+func WithCallback(ctx context.Context, cb CallbackInfo) context.Context {
+	return context.WithValue(ctx, callbackCtxKey{}, cb)
+}
+
+// Callback returns the forwarding CLI's loopback callback, if any. url == ""
+// means none was provided.
+func Callback(ctx context.Context) (url, state string) {
+	if cb, ok := ctx.Value(callbackCtxKey{}).(CallbackInfo); ok {
+		return cb.URL, cb.State
+	}
+	return "", ""
 }
