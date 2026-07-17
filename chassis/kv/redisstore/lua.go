@@ -18,11 +18,16 @@ const (
 // Scripts execute atomically in redis, so get-compare-set here is race-free.
 // The error strings are load-bearing: runScript maps them to
 // store.ErrKeyNotFound / store.ErrKeyModified by substring match.
+//
+// KEYS/ARGV must be treated as READONLY: Upstash's Lua sandbox rejects
+// mutation ("Attempt to modify a readonly table"), unlike real Redis. That is
+// why the upstream table.remove(ARGV)/unpack dispatch was replaced with
+// explicit fixed-arity indexing.
 const casScript = `
 if #KEYS > 0 then error('No Keys should be provided') end
 if #ARGV <= 0 then error('ARGV should be provided') end
 
-local command_name = assert(table.remove(ARGV, 1), 'Must provide a command')
+local command_name = assert(ARGV[1], 'Must provide a command')
 
 local setex = function(key, val, ex)
     if ex == "0" then
@@ -57,11 +62,11 @@ local cad = function(key, old)
     return "OK"
 end
 
-local Launcher = {
-    cas = cas,
-    cad = cad
-}
-
-local command = assert(Launcher[command_name], 'Unknown command ' .. command_name)
-return command(unpack(ARGV))
+if command_name == 'cas' then
+    return cas(ARGV[2], ARGV[3], ARGV[4], ARGV[5])
+end
+if command_name == 'cad' then
+    return cad(ARGV[2], ARGV[3])
+end
+error('Unknown command ' .. command_name)
 `
