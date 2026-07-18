@@ -33,6 +33,8 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.llm.reject.status", true},
 		{"_txc.llm.upstream.url", true},
 		{"_txc.llm.headers.x-policy", true},
+		{"_txc.llm.context", true},
+		{"_txc.llm.context.0.content", true},
 		// Reserved control fields — never author-writable.
 		{"_txc", false},
 		{"_txc.tenant", false},
@@ -52,6 +54,8 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.llm.tenant", false},
 		{"_txc.llm.request_id", false},
 		{"_txc.llm.completion.status", false},
+		{"_txc.llm.completion.usage.input_tokens", false},
+		{"_txc.llm.context_result", false}, // gateway ground truth; a stack must not forge it
 		// A reserved prefix must not be defeated by a lookalike sibling.
 		{"_txc.web.response", false}, // not "web.res"
 		{"_txc.gotoxyz", false},      // not "goto"

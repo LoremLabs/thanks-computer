@@ -165,7 +165,11 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 		return
 	}
 	streamRequested := gjson.GetBytes(body, "stream").Bool()
-	model := gjson.GetBytes(body, "model").String()
+	// Model provenance: requested = the client's ask; effective = what
+	// actually goes upstream (post-stack); response model arrives later
+	// via usage capture. Three explicit fields, no "smart" single one.
+	requestedModel := gjson.GetBytes(body, "model").String()
+	effectiveModel := requestedModel
 
 	// 2. Tenant from Host — the same hostname→tenant routing every web
 	// request uses. A transient resolver failure is an honest 503, never
@@ -204,6 +208,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 	// call volume would double every _llm trace for no policy value.
 	v := verdict{request: string(body)}
 	base := g.upstream
+	var contextRows []contextResultItem
 	if runPolicy {
 		ctx, cancel := context.WithTimeout(r.Context(), g.maxWait)
 		defer cancel()
@@ -265,7 +270,26 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 		// The forwarded model may differ from the client's ask; report
 		// what actually went upstream.
 		if m := gjson.Get(v.request, "model").String(); m != "" {
-			model = m
+			effectiveModel = m
+		}
+
+		// 6b. Context injection: serialize stack-emitted @llm.context
+		// items into system blocks (guard first, budget/dedup/caps
+		// enforced here — the stack decides WHAT, the gateway decides
+		// HOW). Enabled only when both knobs are positive.
+		if v.context.IsArray() && len(v.context.Array()) > 0 {
+			maxTok, maxItems := g.pu.Conf.LLMContextMaxTokens, g.pu.Conf.LLMContextMaxItems
+			if maxTok > 0 && maxItems > 0 {
+				v.request, contextRows = injectContext(v.request, v.context, maxTok, maxItems)
+				g.log.Debug("llmgw context injection",
+					zap.String("rid", rid), zap.String("tenant", target.Tenant),
+					zap.Int("emitted", len(v.context.Array())),
+					zap.Int("injected", countInjected(contextRows)))
+			} else {
+				g.log.Debug("llmgw context injection disabled by config",
+					zap.String("rid", rid), zap.String("tenant", target.Tenant),
+					zap.Int("emitted", len(v.context.Array())))
+			}
 		}
 	}
 
@@ -279,7 +303,8 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 	if r.URL.RawQuery != "" {
 		pathAndQuery += "?" + r.URL.RawQuery
 	}
-	resp, ferr := g.forward(r.Context(), v, base, pathAndQuery, r.Header, authMode, upstreamKey)
+	resp, ferr := g.forward(r.Context(), v, base, pathAndQuery, r.Header, authMode, upstreamKey,
+		runPolicy && streamRequested)
 	if ferr != nil {
 		if r.Context().Err() != nil {
 			// Client went away while we were connecting: nothing to answer.
@@ -287,7 +312,8 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 				go g.fireCompletion(completion{
 					rid: rid, tenant: target.Tenant, verified: target.Verified, host: r.Host,
 					durationMS: time.Since(start).Milliseconds(), bytesIn: int64(len(body)),
-					model: model, stream: streamRequested, upstream: base,
+					requestedModel: requestedModel, effectiveRequestModel: effectiveModel,
+					stream: streamRequested, upstream: base, contextResult: contextRows,
 					clientDisconnected: true, errStr: "client disconnected",
 				})
 			}
@@ -301,7 +327,8 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 			go g.fireCompletion(completion{
 				rid: rid, tenant: target.Tenant, verified: target.Verified, host: r.Host,
 				durationMS: time.Since(start).Milliseconds(), bytesIn: int64(len(body)),
-				model: model, stream: streamRequested, upstream: base,
+				requestedModel: requestedModel, effectiveRequestModel: effectiveModel,
+				stream: streamRequested, upstream: base, contextResult: contextRows,
 				errStr: ferr.Error(),
 			})
 		}
@@ -312,10 +339,18 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 	// 8. Byte-transparent response: upstream status + headers verbatim
 	// (minus hop-by-hop), body streamed with per-chunk flush. Error
 	// bodies pass through untouched — the client sees exactly what the
-	// upstream said.
+	// upstream said. On the policy path a passive tee captures token
+	// usage from the same bytes (record-only; failure is never fatal).
+	var capt *usageCapture
+	var tee io.Writer
+	if runPolicy {
+		if capt = newUsageCapture(resp.Header.Get("Content-Type"), resp.Header.Get("Content-Encoding")); capt != nil {
+			tee = capt // explicit interface assignment avoids a typed-nil io.Writer
+		}
+	}
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	written, perr := proxyBody(w, resp.Body, writeStall, g.log)
+	written, perr := proxyBody(w, resp.Body, writeStall, tee, g.log)
 
 	// 9. Completion — async; the response is already done. count_tokens
 	// stays unrecorded: it ran no stack and meters nothing.
@@ -324,13 +359,25 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, runPolicy bool) 
 	}
 	c := completion{
 		rid: rid, tenant: target.Tenant, verified: target.Verified, host: r.Host,
-		status:     resp.StatusCode,
-		durationMS: time.Since(start).Milliseconds(),
-		bytesIn:    int64(len(body)),
-		bytesOut:   written,
-		model:      model,
-		stream:     streamRequested,
-		upstream:   base,
+		status:        resp.StatusCode,
+		durationMS:    time.Since(start).Milliseconds(),
+		bytesIn:       int64(len(body)),
+		bytesOut:      written,
+		stream:        streamRequested,
+		upstream:      base,
+		contextResult: contextRows,
+
+		requestedModel:        requestedModel,
+		effectiveRequestModel: effectiveModel,
+	}
+	if capt != nil {
+		c.usage = capt.finish()
+		c.responseModel = c.usage.model
+		if c.usage.skipReason != "" {
+			g.log.Debug("llmgw usage capture skipped",
+				zap.String("rid", rid), zap.String("tenant", target.Tenant),
+				zap.String("reason", c.usage.skipReason))
+		}
 	}
 	if perr != nil {
 		c.errStr = perr.Error()

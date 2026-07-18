@@ -1,0 +1,8 @@
+# OPS/_llm/95 — vector mode: matches → @llm.context items.
+#
+# The same EMIT shape the keyword path produces — the gateway can't
+# tell retrieval strategies apart, which is the point: swap the memory
+# backend, keep the contract. (select.js emits nothing in vector mode,
+# so the two paths never double-append.)
+WHEN @src == "llm" && @llm.phase == "request" && ._retrieval.mode == "vector"
+  EXEC "op://map"

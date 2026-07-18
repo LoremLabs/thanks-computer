@@ -60,7 +60,7 @@ func copyHeaders(dst, src http.Header) {
 // was the gateway key, never meant for the upstream). ctx is the client
 // request's context, so a client disconnect cancels the upstream call at
 // any point.
-func (g *Gateway) forward(ctx context.Context, v verdict, base, pathAndQuery string, clientHdr http.Header, authMode, upstreamKey string) (*http.Response, error) {
+func (g *Gateway) forward(ctx context.Context, v verdict, base, pathAndQuery string, clientHdr http.Header, authMode, upstreamKey string, forceIdentity bool) (*http.Response, error) {
 	u := strings.TrimRight(base, "/") + pathAndQuery
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader([]byte(v.request)))
 	if err != nil {
@@ -68,6 +68,19 @@ func (g *Gateway) forward(ctx context.Context, v verdict, base, pathAndQuery str
 	}
 	copyHeaders(req.Header, clientHdr)
 	req.Header.Del("Content-Length") // recomputed from the possibly-rewritten body
+	if forceIdentity {
+		// Streaming policy requests: ask the upstream for an unencoded
+		// stream so the passive usage capture can parse the SSE frames.
+		// Field finding: clients like Claude Code (Bun) send
+		// Accept-Encoding: gzip/br/zstd, the upstream edge honors it on
+		// event-streams, and an encoded stream makes capture decline
+		// (unsupported_encoding). Identity is HTTP-semantically the same
+		// content; the client sees an unencoded stream with no
+		// Content-Encoding header — valid under its own negotiation.
+		// Non-stream responses keep the client's encoding (the JSON
+		// capture path inflates gzip itself).
+		req.Header.Set("Accept-Encoding", "identity")
+	}
 	if authMode == authModeSwap {
 		// The inbound x-api-key was the tenant's gateway key; replace it
 		// with the real upstream credential and drop any client
@@ -88,13 +101,22 @@ func (g *Gateway) forward(ctx context.Context, v verdict, base, pathAndQuery str
 // the listener-level WriteTimeout alone would kill any response longer
 // than OpTimeoutMax. Both controller calls degrade gracefully when the
 // writer chain doesn't support them (buffered, still correct).
-func proxyBody(w http.ResponseWriter, body io.Reader, stall time.Duration, log *zap.Logger) (int64, error) {
+//
+// tee, when non-nil, passively observes every byte read from the
+// upstream (usage capture). It is fed BEFORE the client write so bytes
+// already received are captured even when the client write then fails
+// (the disconnect case), and it never errors or blocks — observability
+// must not be able to break the response.
+func proxyBody(w http.ResponseWriter, body io.Reader, stall time.Duration, tee io.Writer, log *zap.Logger) (int64, error) {
 	rc := http.NewResponseController(w)
 	buf := make([]byte, 32*1024)
 	var written int64
 	for {
 		n, rerr := body.Read(buf)
 		if n > 0 {
+			if tee != nil {
+				_, _ = tee.Write(buf[:n])
+			}
 			_ = rc.SetWriteDeadline(time.Now().Add(stall))
 			wn, werr := w.Write(buf[:n])
 			written += int64(wn)

@@ -1,0 +1,11 @@
+# OPS/_llm/60 — load the retrieval mode from seeded config.
+#
+# KV/retrieval.jsonl seeds the "retrieval" namespace declaratively on
+# apply (a dedicated namespace, never the stack's own — seeded
+# namespaces are desired-state synced and would wipe runtime keys).
+# "keyword" (default) retrieves hermetically via op://select; "vector"
+# switches scopes 90-95 to the embed→search path. Both fetches in this
+# scope are independent and run concurrently.
+WHEN @src == "llm" && @llm.phase == "request"
+  WITH namespace = "retrieval", key = "mode", into = "._retrieval.mode", fallback = "keyword"
+  EXEC "txco://kv/get"

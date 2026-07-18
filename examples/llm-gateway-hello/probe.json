@@ -1,5 +1,5 @@
 {
-  "note": "The reject check exercises the whole AI-gateway inlet hermetically: route registration, Host→tenant resolution, the _llm self-gate, the bus round-trip, the guard rule's EMIT verdict, and Anthropic-shaped error rendering — no upstream, no secrets. Forwarding to a real upstream needs a network + key, so it stays a manual step (README.md).",
+  "note": "The reject check exercises the whole AI-gateway inlet hermetically: route registration, Host→tenant resolution, the _llm self-gate, the bus round-trip, the guard rule's EMIT verdict, and Anthropic-shaped error rendering — no upstream, no secrets. The baseline dry-run additionally lints the retrieval stack's op://select and op://map (colocated .js builds). The OPS/_llm/KV/ seed packs are the DATA half — deployed by `txco data apply`, not `txco apply` — and context injection + usage capture need a live upstream, so those stay manual steps (README.md).",
   "bind": [{ "host": "localhost", "stack": "app" }],
   "checks": [
     {

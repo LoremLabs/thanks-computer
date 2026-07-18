@@ -1,0 +1,9 @@
+# OPS/_llm/60 — load the decision log (the tenant's memory).
+#
+# One KV key holding the whole array: kv/list returns key names only,
+# so a single "log" entry keeps retrieval to one read. 64KiB value cap
+# ⇒ a real deployment shards or moves to the vector store; the shape
+# the stack emits (@llm.context items) stays the same either way.
+WHEN @src == "llm" && @llm.phase == "request"
+  WITH namespace = "decisions", key = "log", into = "._decisions"
+  EXEC "txco://kv/get"

@@ -2,6 +2,7 @@ package llmgw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -38,6 +39,7 @@ type verdict struct {
 	request     string // raw JSON of the top-level `request` object
 	upstreamURL string // _txc.llm.upstream.url, "" = configured default
 	headers     map[string]string
+	context     gjson.Result // _txc.llm.context: stack-emitted items for the gateway to inject
 }
 
 // parseVerdict interprets the final pipeline envelope. Pure — unit-tested
@@ -49,7 +51,7 @@ func parseVerdict(raw string) verdict {
 		"_txc.admission.reason", "_txc.admission.retry_after",
 		"_txc.llm.reject",
 		"_txc.llm.upstream.url", "_txc.llm.headers",
-		"request")
+		"request", "_txc.llm.context")
 	v := verdict{
 		unavailable: fields[0].Bool(),
 		admission:   fields[1].Bool(),
@@ -57,6 +59,7 @@ func parseVerdict(raw string) verdict {
 		admReason:   fields[3].String(),
 		upstreamURL: fields[6].String(),
 		request:     fields[8].Raw,
+		context:     fields[9],
 	}
 	if fields[4].Exists() {
 		v.admRetry = strconv.Itoa(int(fields[4].Int()))
@@ -173,15 +176,25 @@ type completion struct {
 	verified bool
 	host     string
 
-	status             int   // upstream status sent to the client (0 = dial failed)
-	durationMS         int64 // whole request, first byte in → last byte out
-	bytesIn            int64 // client request body size
-	bytesOut           int64 // bytes written to the client
-	model              string
+	status     int   // upstream status sent to the client (0 = dial failed)
+	durationMS int64 // whole request, first byte in → last byte out
+	bytesIn    int64 // client request body size
+	bytesOut   int64 // bytes written to the client
+
+	// Model provenance is explicit — three fields, no "smart" single one:
+	// what the client asked for, what the stack actually forwarded, and
+	// what the upstream said it served (capture-dependent, may be "").
+	requestedModel        string
+	effectiveRequestModel string
+	responseModel         string
+
 	stream             bool
 	upstream           string // base URL actually used
 	clientDisconnected bool
 	errStr             string
+
+	usage         usageResult         // token usage captured from the response (record-only)
+	contextResult []contextResultItem // gateway ground truth of context injection
 }
 
 // fireCompletion records the exchange after the client is done: one
@@ -231,12 +244,38 @@ func (g *Gateway) fireCompletion(c completion) {
 	pb.Set("_txc.llm.completion.duration_ms", c.durationMS)
 	pb.Set("_txc.llm.completion.bytes_in", c.bytesIn)
 	pb.Set("_txc.llm.completion.bytes_out", c.bytesOut)
-	pb.Set("_txc.llm.completion.model", c.model)
+	pb.Set("_txc.llm.completion.requested_model", c.requestedModel)
+	pb.Set("_txc.llm.completion.effective_request_model", c.effectiveRequestModel)
+	if c.responseModel != "" {
+		pb.Set("_txc.llm.completion.response_model", c.responseModel)
+	}
 	pb.Set("_txc.llm.completion.stream", c.stream)
 	pb.Set("_txc.llm.completion.upstream", c.upstream)
 	pb.Set("_txc.llm.completion.client_disconnected", c.clientDisconnected)
 	if c.errStr != "" {
 		pb.Set("_txc.llm.completion.error", c.errStr)
+	}
+	// Token usage is presence-gated: absent means "not captured", never
+	// zero — mis-recording 0 tokens would be worse than recording none.
+	if c.usage.hasInput {
+		pb.Set("_txc.llm.completion.usage.input_tokens", c.usage.inputTokens)
+	}
+	if c.usage.hasOutput {
+		pb.Set("_txc.llm.completion.usage.output_tokens", c.usage.outputTokens)
+	}
+	if c.usage.hasCacheRead {
+		pb.Set("_txc.llm.completion.usage.cache_read_input_tokens", c.usage.cacheRead)
+	}
+	if c.usage.hasCacheCreation {
+		pb.Set("_txc.llm.completion.usage.cache_creation_input_tokens", c.usage.cacheCreation)
+	}
+	if c.usage.stopReason != "" {
+		pb.Set("_txc.llm.completion.stop_reason", c.usage.stopReason)
+	}
+	if len(c.contextResult) > 0 {
+		if b, err := json.Marshal(c.contextResult); err == nil {
+			pb.SetRaw("_txc.llm.context_result", string(b))
+		}
 	}
 	pb.Set("_ts", time.Now().UTC().Format(time.RFC3339))
 

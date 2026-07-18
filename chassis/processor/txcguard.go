@@ -35,6 +35,7 @@ var authorWritableTxcPaths = []string{
 	"llm.reject",   // AI gateway: stack-shaped rejection (status/type/message)
 	"llm.upstream", // AI gateway: upstream base-URL override
 	"llm.headers",  // AI gateway: extra upstream request headers
+	"llm.context",  // AI gateway: stack-emitted context items the gateway serializes into system blocks
 }
 
 // authorMayWriteTxc reports whether an author-controlled producer (a Tier-2

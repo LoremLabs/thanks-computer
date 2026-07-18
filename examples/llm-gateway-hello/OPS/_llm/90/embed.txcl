@@ -1,0 +1,10 @@
+# OPS/_llm/90 — vector mode: embed the question.
+#
+# Runs only when KV/retrieval.jsonl is flipped to "vector" (see README
+# for the one-time seeding of the "decisions" collection). Needs an
+# embedding backend: "openai" (tenant secret OPENAI_KEY) or "ollama"
+# for keyless local. Scope 92's search consumes @_embed.vector, so the
+# producer→consumer pair sits in consecutive scopes, not one.
+WHEN @src == "llm" && @llm.phase == "request" && ._retrieval.mode == "vector"
+  WITH provider = "openai", model = "text-embedding-3-small", text = @_question
+  EXEC "ai://embed"

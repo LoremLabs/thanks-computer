@@ -1,0 +1,9 @@
+# OPS/_llm/92 — vector mode: nearest decisions to the question.
+#
+# Matches land at ._hits as [{id, score, distance, metadata, text}];
+# scope 95's map nano-op shapes them into @llm.context items. Gated on
+# the embed actually producing a vector — a failed WITH eval would
+# still RUN the op with an empty env otherwise.
+WHEN @src == "llm" && @llm.phase == "request" && ._retrieval.mode == "vector"
+  WITH collection = "decisions", vector = @_embed.vector, limit = 2, into = "._hits"
+  EXEC "txco://vector/search"

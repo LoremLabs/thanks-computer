@@ -2,10 +2,21 @@
 #
 # After the upstream stream ends, the gateway fires a second envelope
 # into this same stack with @llm.phase == "completed" — the client
-# never waits on it. @llm.completion carries the transfer facts
-# (status, duration_ms, bytes_in, bytes_out, model, stream,
-# client_disconnected), ready for billing counters, audit trails, or a
-# kv/incr. This demo just stamps a marker so the completion run is
-# visible in the trace.
+# never waits on it. Available here:
+#   @llm.completion.{status,duration_ms,bytes_in,bytes_out,stream,
+#                    client_disconnected}
+#   @llm.completion.{requested_model,effective_request_model,
+#                    response_model}          — explicit provenance
+#   @llm.completion.usage.{input_tokens,output_tokens,
+#                          cache_read_input_tokens,
+#                          cache_creation_input_tokens}  — presence-
+#                    gated: absent means "not captured", never zero
+#   @llm.completion.stop_reason
+#   @llm.context_result — the gateway's ground truth of context
+#                    injection: per-item {source,title,sha256,bytes,
+#                    est_tokens,status} plus the synthetic guard row.
+#                    sha256, never content.
+# Ready for billing counters, audit trails, kv/incr budgets. This demo
+# just stamps a marker so the completion run is visible in the trace.
 WHEN @src == "llm" && @llm.phase == "completed"
   EMIT .audit = "llm request completed"

@@ -71,10 +71,12 @@ func newTestGateway(t *testing.T, upstreamURL string, stackFn func(env *event.En
 	fu := &fakeUsage{}
 	pu := &processor.Unit{
 		Conf: config.Config{
-			LLMUpstreamURL:  upstreamURL,
-			OpTimeoutMax:    "5s",
-			WebWriteTimeout: 5,
-			WebMaxBodyBytes: 1 << 20,
+			LLMUpstreamURL:      upstreamURL,
+			LLMContextMaxTokens: 2000,
+			LLMContextMaxItems:  8,
+			OpTimeoutMax:        "5s",
+			WebWriteTimeout:     5,
+			WebMaxBodyBytes:     1 << 20,
 		},
 		Logger: zap.NewNop(),
 		Usage:  fu,
@@ -205,8 +207,11 @@ func TestPassthroughTransparent(t *testing.T) {
 	if got := gjson.Get(raw, "_txc.llm.completion.bytes_out").Int(); got == 0 {
 		t.Errorf("completion.bytes_out = 0, want > 0")
 	}
-	if got := gjson.Get(raw, "_txc.llm.completion.model").String(); got != "claude-sonnet-4-5" {
-		t.Errorf("completion.model = %q", got)
+	if got := gjson.Get(raw, "_txc.llm.completion.requested_model").String(); got != "claude-sonnet-4-5" {
+		t.Errorf("completion.requested_model = %q", got)
+	}
+	if got := gjson.Get(raw, "_txc.llm.completion.effective_request_model").String(); got != "claude-sonnet-4-5" {
+		t.Errorf("completion.effective_request_model = %q", got)
 	}
 	// The completion envelope runs under its OWN rid — the trace store
 	// keys a run by rid, and sharing the request's rid overwrote the
@@ -258,8 +263,11 @@ func TestModelRewrite(t *testing.T) {
 		t.Errorf("upstream policy header = %v", got)
 	}
 	raw := waitCompletion(t, env)
-	if got := gjson.Get(raw, "_txc.llm.completion.model").String(); got != "claude-3-5-haiku-latest" {
-		t.Errorf("completion.model = %q, want the forwarded model", got)
+	if got := gjson.Get(raw, "_txc.llm.completion.requested_model").String(); got != "claude-sonnet-4-5" {
+		t.Errorf("completion.requested_model = %q, want the client's ask", got)
+	}
+	if got := gjson.Get(raw, "_txc.llm.completion.effective_request_model").String(); got != "claude-3-5-haiku-latest" {
+		t.Errorf("completion.effective_request_model = %q, want the forwarded model", got)
 	}
 }
 
@@ -762,6 +770,211 @@ func TestCountTokensPassthrough(t *testing.T) {
 	}
 	rr = doReqPath(t, env.g.HandleCountTokens, "/v1/messages/count_tokens", `{"model":"m"}`, map[string]string{"x-api-key": "wrong"})
 	assertAnthropicError(t, rr, http.StatusUnauthorized, "authentication_error")
+}
+
+// TestContextInjectionEndToEnd: the stack emits @llm.context; the
+// upstream must RECEIVE original-system → guard → delimited blocks, and
+// the completion must carry the context_result ground truth (sha256,
+// never content).
+func TestContextInjectionEndToEnd(t *testing.T) {
+	var gotSystem atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotSystem.Store(gjson.GetBytes(b, "system").Raw)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	env := newTestGateway(t, upstream.URL, func(e *event.Envelope) {
+		raw, _ := sjson.SetRaw(e.Payload.Raw, "_txc.llm.context",
+			`[{"source":"kv:decisions/adr-001","title":"Why BoltDB","content":"we chose boltdb"}]`)
+		e.ResCh <- event.Payload{Raw: raw, Type: event.JSON}
+	})
+	rr := doReq(t, env.g, `{"model":"m","system":"be terse","messages":[]}`, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", rr.Code, rr.Body.String())
+	}
+
+	sysRaw, _ := gotSystem.Load().(string)
+	sys := gjson.Parse(sysRaw)
+	if !sys.IsArray() || len(sys.Array()) != 3 {
+		t.Fatalf("upstream system = %s, want 3 blocks", sysRaw)
+	}
+	blocks := sys.Array()
+	if blocks[0].Get("text").String() != "be terse" {
+		t.Errorf("original system not first: %s", blocks[0].Raw)
+	}
+	if blocks[1].Get("text").String() != contextGuardText {
+		t.Errorf("guard not second: %s", blocks[1].Raw)
+	}
+	if txt := blocks[2].Get("text").String(); !strings.Contains(txt, "Source: kv:decisions/adr-001") ||
+		!strings.Contains(txt, "we chose boltdb") || !strings.Contains(txt, "Length: 15 bytes") {
+		t.Errorf("context block wrong:\n%s", txt)
+	}
+
+	raw := waitCompletion(t, env)
+	rows := gjson.Get(raw, "_txc.llm.context_result")
+	if !rows.IsArray() || len(rows.Array()) != 2 {
+		t.Fatalf("context_result = %s", rows.Raw)
+	}
+	if !rows.Array()[0].Get("synthetic").Bool() {
+		t.Errorf("first row not the guard: %s", rows.Array()[0].Raw)
+	}
+	item := rows.Array()[1]
+	if item.Get("status").String() != "injected" || item.Get("sha256").String() == "" {
+		t.Errorf("item row = %s", item.Raw)
+	}
+	if strings.Contains(rows.Raw, "we chose boltdb") {
+		t.Errorf("context_result leaked content: %s", rows.Raw)
+	}
+}
+
+// TestContextInjectionDisabledByConfig: either knob at 0 disables
+// injection entirely — the upstream sees the untouched request.
+func TestContextInjectionDisabledByConfig(t *testing.T) {
+	var gotSystem atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotSystem.Store(gjson.GetBytes(b, "system").Raw)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	env := newTestGateway(t, upstream.URL, func(e *event.Envelope) {
+		raw, _ := sjson.SetRaw(e.Payload.Raw, "_txc.llm.context", `[{"content":"x"}]`)
+		e.ResCh <- event.Payload{Raw: raw, Type: event.JSON}
+	})
+	env.g.pu.Conf.LLMContextMaxTokens = 0
+	rr := doReq(t, env.g, `{"model":"m","system":"s"}`, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if got, _ := gotSystem.Load().(string); got != `"s"` {
+		t.Errorf("system modified despite disabled injection: %s", got)
+	}
+	raw := waitCompletion(t, env)
+	if gjson.Get(raw, "_txc.llm.context_result").Exists() {
+		t.Errorf("context_result present when disabled")
+	}
+}
+
+// TestUsageCaptureSSEEndToEnd: a streaming upstream's usage lands on the
+// completion — with explicit model provenance (requested ≠ effective ≠
+// response).
+func TestUsageCaptureSSEEndToEnd(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, canonicalStream)
+	}))
+	defer upstream.Close()
+
+	env := newTestGateway(t, upstream.URL, func(e *event.Envelope) {
+		raw, _ := sjson.Set(e.Payload.Raw, "request.model", "rewritten-model")
+		e.ResCh <- event.Payload{Raw: raw, Type: event.JSON}
+	})
+	rr := doReq(t, env.g, `{"model":"client-model","stream":true,"messages":[]}`, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "message_stop") {
+		t.Errorf("stream not passed through: %q", rr.Body.String())
+	}
+
+	raw := waitCompletion(t, env)
+	checks := map[string]string{
+		"_txc.llm.completion.requested_model":         "client-model",
+		"_txc.llm.completion.effective_request_model": "rewritten-model",
+		"_txc.llm.completion.response_model":          "claude-haiku-4-5-20251001",
+		"_txc.llm.completion.stop_reason":             "end_turn",
+	}
+	for path, want := range checks {
+		if got := gjson.Get(raw, path).String(); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	if got := gjson.Get(raw, "_txc.llm.completion.usage.input_tokens").Int(); got != 100 {
+		t.Errorf("usage.input_tokens = %d", got)
+	}
+	if got := gjson.Get(raw, "_txc.llm.completion.usage.output_tokens").Int(); got != 42 {
+		t.Errorf("usage.output_tokens = %d (final delta must win)", got)
+	}
+	if got := gjson.Get(raw, "_txc.llm.completion.usage.cache_read_input_tokens").Int(); got != 50 {
+		t.Errorf("usage.cache_read = %d", got)
+	}
+}
+
+// TestStreamingForcesIdentityEncoding: streaming policy requests ask the
+// upstream for an unencoded stream (field finding: clients advertise
+// gzip/br/zstd, edges honor it on SSE, and an encoded stream blinds the
+// usage capture). Non-stream requests keep the client's encoding.
+func TestStreamingForcesIdentityEncoding(t *testing.T) {
+	var gotEncoding atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding.Store(r.Header.Get("Accept-Encoding"))
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	env := newTestGateway(t, upstream.URL, echoStack)
+
+	rr := doReq(t, env.g, `{"model":"m","stream":true}`, map[string]string{"Accept-Encoding": "gzip, br, zstd"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if got := gotEncoding.Load(); got != "identity" {
+		t.Errorf("streaming Accept-Encoding = %v, want identity", got)
+	}
+	waitCompletion(t, env)
+
+	rr = doReq(t, env.g, `{"model":"m"}`, map[string]string{"Accept-Encoding": "gzip, br, zstd"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if got := gotEncoding.Load(); got != "gzip, br, zstd" {
+		t.Errorf("non-stream Accept-Encoding = %v, want client's verbatim", got)
+	}
+}
+
+// TestUsageAbsentOnErrorBody: an upstream JSON error body has no usage —
+// the completion must omit the fields, not zero them.
+func TestUsageAbsentOnErrorBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"nope"}}`))
+	}))
+	defer upstream.Close()
+	env := newTestGateway(t, upstream.URL, echoStack)
+	rr := doReq(t, env.g, `{"model":"m"}`, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	raw := waitCompletion(t, env)
+	if gjson.Get(raw, "_txc.llm.completion.usage").Exists() {
+		t.Errorf("usage present on an error body: %s", gjson.Get(raw, "_txc.llm.completion.usage").Raw)
+	}
+	if gjson.Get(raw, "_txc.llm.completion.response_model").Exists() {
+		t.Errorf("response_model invented on an error body")
+	}
+}
+
+// TestRejectWithContextEmitted: a reject verdict wins even when the same
+// stack run also emitted context — nothing injects, upstream untouched.
+func TestRejectWithContextEmitted(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	env := newTestGateway(t, upstream.URL, func(e *event.Envelope) {
+		raw, _ := sjson.Set(e.Payload.Raw, "_txc.llm.reject.message", "no")
+		raw, _ = sjson.SetRaw(raw, "_txc.llm.context", `[{"content":"x"}]`)
+		e.ResCh <- event.Payload{Raw: raw, Type: event.JSON}
+	})
+	rr := doReq(t, env.g, `{"model":"m"}`, nil)
+	assertAnthropicError(t, rr, http.StatusForbidden, "permission_error")
+	if calls.Load() != 0 {
+		t.Errorf("upstream called on reject")
+	}
 }
 
 func TestParseVerdict(t *testing.T) {

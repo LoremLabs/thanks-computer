@@ -1,0 +1,13 @@
+# OPS/_llm/80 — extract the question + retrieve (keyword mode).
+#
+# op://select is a BUNDLED compute (the colocated select.js builds to
+# wasm at `txco apply` time). It does the two things txcl cannot:
+# address the LAST user message (no negative indexing in path grammar)
+# and flatten string-vs-block-array content. It writes the question to
+# `_question` for the vector path, and in keyword mode scores the
+# decision log and emits up to two `@llm.context` items — the GATEWAY
+# then owns budget, dedup, the guard block, and serialization into
+# system content. The nano-op returns ONLY its delta: returning the
+# whole envelope would array-append request.messages on merge.
+WHEN @src == "llm" && @llm.phase == "request"
+  EXEC "op://select"
