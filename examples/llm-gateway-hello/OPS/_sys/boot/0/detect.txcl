@@ -1,0 +1,3 @@
+# _sys/boot scope 0 — DECIDE (tenant detection).
+#
+EXEC "txco://detect-tenant"

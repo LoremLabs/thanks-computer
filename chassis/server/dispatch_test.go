@@ -296,6 +296,56 @@ func TestDetectTenantBodyScheduledNoTenantUnchanged(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyLLM: an AI-gateway request (src=llm with a trusted
+// _txc.llm.tenant stamped by the inlet after its own Host resolution)
+// proposes a route into that tenant's _llm/0, carrying the inlet's
+// verified flag through, even though the resolver would miss.
+func TestDetectTenantBodyLLM(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"llm","llm":{"tenant":"acme","hostname_verified":true,"phase":"request"}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_llm/0" {
+		t.Errorf("_txc.route.to = %q, want _llm/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.stack").String(); got != "_llm" {
+		t.Errorf("_txc.route.stack = %q, want _llm", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "llm" {
+		t.Errorf("_txc.route.ingress = %q, want llm", got)
+	}
+	if got := gjson.Get(body, "_txc.route.hostname_verified").Bool(); !got {
+		t.Errorf("_txc.route.hostname_verified = false, want true")
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+}
+
+// An unverified-hostname llm request keeps hostname_verified=false in the
+// proposal so _llm rules can gate on `@route.hostname_verified` / the
+// promoted `_txc.hostname_verified` like any hostname-routed request.
+func TestDetectTenantBodyLLMUnverified(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"llm","llm":{"tenant":"acme","hostname_verified":false,"phase":"request"}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_llm/0" {
+		t.Errorf("_txc.route.to = %q, want _llm/0", got)
+	}
+	if gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified = true, want false")
+	}
+}
+
+// An llm event with no _txc.llm.tenant must NOT take the llm branch — it
+// falls through to the resolver (here a miss → "{}").
+func TestDetectTenantBodyLLMNoTenantUnchanged(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"llm","llm":{"phase":"request"}}}`)); body != "{}" {
+		t.Errorf("llm body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyMiss: on a resolver miss the transform returns
 // `{}` (no proposal), so the gated route op is skipped and _sys/boot
 // scope 1000 serves the 404.

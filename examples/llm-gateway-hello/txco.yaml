@@ -1,0 +1,28 @@
+# examples/llm-gateway-hello — point an AI client at your chassis.
+#
+# An `_llm` stack that makes the AI-gateway inlet live for this tenant:
+# POST /v1/messages (Anthropic Messages protocol) runs through the stack
+# once — reject / rewrite the model / add headers — then streams the
+# upstream response back untouched. Tenants without an `_llm` stack get
+# a 404 on the same path; authoring one IS the opt-in.
+#
+# Try it (against a running chassis — e.g. `txco dev` in this directory,
+# which auto-applies and auto-binds localhost → app; web port 8080):
+#
+#   curl -sN "http://localhost:$WEB_PORT/v1/messages" \
+#        -H 'content-type: application/json' \
+#        -d '{"model":"txco-test-reject","max_tokens":8,"messages":[]}'
+#   # → {"type":"error","error":{"type":"permission_error","message":"blocked by _llm policy"}}
+#
+# (URL spelled with $WEB_PORT because the examples-smoke harness reads
+# literal localhost:<port> strings in this file as app ports to
+# health-check; README.md has the copy-pasteable version.)
+#
+# See README.md for the real-upstream and Claude Code walkthroughs.
+
+target: dev
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow

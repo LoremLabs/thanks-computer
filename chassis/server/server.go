@@ -63,6 +63,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
+	"github.com/loremlabs/thanks-computer/chassis/server/llmgw"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
@@ -143,9 +144,10 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	fields := gjson.GetManyBytes(in,
 		"_txc.route.to", "_txc.continuation", "_txc.src",
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
-		"_txc.scheduled.tenant")
+		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
+	llmTenant, llmVerified := fields[7], fields[8]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -221,6 +223,24 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "scheduled")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_scheduled/0")
+			return b.String()
+		}
+	}
+	// AI-gateway request. The llm inlet (web POST /v1/messages) resolves
+	// the Host header against tenant_hostnames itself and stamps the
+	// resolved slug in `_txc.llm.tenant` (trusted: chassis-stamped; the
+	// client's bytes are confined to the `request` key). Propose a route
+	// into that tenant's `_llm/0` — the same sanctioned _sys→tenant pin as
+	// cron/room/scheduled. Both the request phase and the fire-and-forget
+	// completion phase route here; rules distinguish them on `@llm.phase`.
+	if src.String() == "llm" {
+		if lt := llmTenant.String(); lt != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", lt)
+			b.Set("_txc.route.stack", "_llm")
+			b.Set("_txc.route.ingress", "llm")
+			b.Set("_txc.route.hostname_verified", llmVerified.Bool())
+			b.Set("_txc.route.to", "_llm/0")
 			return b.String()
 		}
 	}
@@ -1516,6 +1536,18 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 
 	webCtrl := web.NewController(ctx, pu, traceSink)
 	dnsCtrl := dnsp.NewController(ctx, pu)
+
+	// AI-gateway inlet (POST /v1/messages on the web head): one stack
+	// round-trip, then a byte-transparent proxy to the configured
+	// Anthropic-compatible upstream. Self-gates per tenant on the
+	// existence of an _llm stack; a bad --llm-upstream-url fails loudly
+	// here at boot rather than at first request.
+	llmGateway, lerr := llmgw.New(ctx, pu, resolver, guard)
+	if lerr != nil {
+		cancel()
+		return ctx, nil, lerr
+	}
+	webCtrl.SetLLMGateway(llmGateway.HandleMessages, llmGateway.HandleCountTokens)
 
 	// Bundled TLS: when --web-tls-addr is set the chassis terminates TLS
 	// itself, obtaining + renewing wildcard certs for delegated zones via

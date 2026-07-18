@@ -1,0 +1,19 @@
+# OPS/_llm/100 — the doc's success criterion: log + change the model.
+#
+# `.request` is the client's Anthropic Messages JSON; whatever this
+# stack leaves there is what the upstream receives, byte for byte. Here
+# we pin every request to a cheaper model and tag the upstream call
+# with a header so the rewrite is visible on the wire. The trace
+# (`txco trace`) is the request log — every gateway request shows up as
+# an ordinary traced pipeline run.
+#
+# Gate on the phase: without it, request-shaping rules would re-run on
+# the fire-and-forget completion envelope (phase "completed") that
+# arrives after the stream ends.
+# NOTE: pin a model id that EXISTS upstream — a stale id here makes
+# Anthropic 404 every request, and the client (correctly) sees that 404
+# verbatim but misattributes it to ITS selected model, which reads as
+# "the gateway is broken".
+WHEN @src == "llm" && @llm.phase == "request"
+  EMIT .request.model = "claude-haiku-4-5-20251001",
+       @llm.headers.x-txco-llm-policy = "model-pinned"

@@ -1,0 +1,23 @@
+{
+  "note": "The reject check exercises the whole AI-gateway inlet hermetically: route registration, Host→tenant resolution, the _llm self-gate, the bus round-trip, the guard rule's EMIT verdict, and Anthropic-shaped error rendering — no upstream, no secrets. Forwarding to a real upstream needs a network + key, so it stays a manual step (README.md).",
+  "bind": [{ "host": "localhost", "stack": "app" }],
+  "checks": [
+    {
+      "name": "landing page routes normally beside the gateway",
+      "method": "GET",
+      "host": "localhost",
+      "path": "/",
+      "status": 200,
+      "contains": "llm gateway demo"
+    },
+    {
+      "name": "gateway runs the _llm stack: guard rejects the probe model",
+      "method": "POST",
+      "host": "localhost",
+      "path": "/v1/messages",
+      "status": 403,
+      "contains": "blocked by _llm policy",
+      "body": "{\"model\":\"txco-test-reject\",\"max_tokens\":8,\"messages\":[]}"
+    }
+  ]
+}

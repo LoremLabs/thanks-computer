@@ -41,12 +41,27 @@ type WebController struct {
 	// manager's certificates. Nil ⇒ HTTP-only (a front proxy terminates).
 	tlsConfig *tls.Config
 	tlsServer *http.Server
+
+	// llmHandler / llmCountHandler, when set (via SetLLMGateway), serve
+	// POST /v1/messages and /v1/messages/count_tokens — the AI-gateway
+	// inlet. Nil ⇒ the paths fall through to the catch-all like any
+	// other request.
+	llmHandler      http.HandlerFunc
+	llmCountHandler http.HandlerFunc
 }
 
 // SetTLSConfig wires the bundled cert manager's TLS config into the web
 // head, enabling the HTTPS listener. Call before Start. No-op effect unless
 // --web-tls-addr is also set.
 func (web *WebController) SetTLSConfig(c *tls.Config) { web.tlsConfig = c }
+
+// SetLLMGateway wires the AI-gateway inlet's handlers onto POST
+// /v1/messages (stack-processed) and /v1/messages/count_tokens
+// (stackless transparent forward). Call before Start.
+func (web *WebController) SetLLMGateway(messages, countTokens http.HandlerFunc) {
+	web.llmHandler = messages
+	web.llmCountHandler = countTokens
+}
 
 // splitMocksHeader splits an X-Txco-Mocks header value into a clean
 // pattern list: comma-separated, whitespace-trimmed, empties dropped.
@@ -187,6 +202,22 @@ func (web *WebController) Start() {
 			// (see detectTenantBody short-circuit).
 			r.Path("/_txc/continuations/op/{opc}/complete").
 				HandlerFunc(web.handleContinuationComplete).Methods(http.MethodPost)
+
+			// AI-gateway inlet: Anthropic Messages requests proxied through
+			// the tenant's _llm stack. Registered BEFORE the catch-all —
+			// bypasses BasicAuth (the gateway authenticates per-tenant) and
+			// the opstack render path (the gateway owns the SSE transport;
+			// the stack owns request policy). Every hostname answers here;
+			// tenants without an _llm stack get an Anthropic-shaped 404.
+			// count_tokens is a stackless transparent forward — without it
+			// the path would fall through to the tenant's web stack and
+			// answer with something that isn't a token count.
+			if web.llmHandler != nil {
+				r.Path("/v1/messages").HandlerFunc(web.llmHandler).Methods(http.MethodPost)
+			}
+			if web.llmCountHandler != nil {
+				r.Path("/v1/messages/count_tokens").HandlerFunc(web.llmCountHandler).Methods(http.MethodPost)
+			}
 
 			r.PathPrefix("/").HandlerFunc(web.BasicAuth(func(w http.ResponseWriter, r *http.Request) {
 

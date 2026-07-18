@@ -1,0 +1,10 @@
+# OPS/app/100 — a minimal landing page for the bound hostname.
+#
+# The AI gateway hangs off the SAME hostname as ordinary web traffic:
+# POST /v1/messages is intercepted by the inlet, everything else routes
+# here like any web request. This one-op stack proves the two coexist.
+WHEN @src == "http"
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"llm gateway demo — POST /v1/messages speaks Anthropic Messages\n",
+       @halt = true

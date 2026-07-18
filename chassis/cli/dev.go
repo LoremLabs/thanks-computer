@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -315,6 +316,19 @@ Flags:
 	// web port) so they're visible here and to a separate `txco status`.
 	recordDevURLs(ctx, resolved, dir, webURL, stdout)
 
+	// Make a single-stack workspace answer on plain http://localhost:<port>.
+	// The minted structured hostname (<stack>-<rand>.localhost) only
+	// resolves in browsers — CLI clients (curl scripts, Claude Code via
+	// ANTHROPIC_BASE_URL) use the system resolver, which doesn't answer
+	// *.localhost subdomains. With exactly one non-underscore stack the
+	// bind is unambiguous, so do it; multi-stack workspaces keep the
+	// manual tip below. Gated on the startup apply so we never bind
+	// localhost to a stack the chassis doesn't have.
+	localhostStack := ""
+	if *apply {
+		localhostStack = devAutoBindLocalhost(ctx, resolved, dir, ops, webURL, stdout)
+	}
+
 	// 5b. Optional: spawn the admin-ui Vite dev server. Non-fatal —
 	// if anything's missing (admin-ui/, node_modules, package manager,
 	// port) we print a clear note and continue. The chassis still
@@ -425,11 +439,15 @@ Flags:
 		// One-shot tip: hostname routing is the recommended way to
 		// dispatch HTTP requests to a stack, not the legacy boot/*
 		// resonators. Show this so newcomers learn the modern flow up
-		// front. Always prints; doesn't probe the DB. If the user
-		// has already set up hostnames, the tip is mostly a no-op
-		// reminder of the verb.
-		fmt.Fprintln(stdout, "[txco]   tip: bind a hostname with `txco auth tenant hostnames add localhost --stack <stack>`")
-		fmt.Fprintln(stdout, "[txco]        (boot/* resonators still work; hostnames are now the recommended path)")
+		// front. Suppressed when localhost is already routed (the
+		// single-stack auto-bind above, or a bind from a previous run) —
+		// telling the user to bind what's bound reads as "it didn't work".
+		if localhostStack == "" {
+			fmt.Fprintln(stdout, "[txco]   tip: bind a hostname with `txco auth tenant hostnames add localhost --stack <stack>`")
+			fmt.Fprintln(stdout, "[txco]        (boot/* resonators still work; hostnames are now the recommended path)")
+		} else {
+			fmt.Fprintf(stdout, "[txco]   localhost → stack %q (%s routes there)\n", localhostStack, webURL)
+		}
 		if *dnsHead {
 			fmt.Fprintf(stdout, "[txco]   dns head: %s (udp+tcp). create a zone with `txco dns zone create ops.example.com`,\n", devDNSListenAddr)
 			fmt.Fprintf(stdout, "[txco]        then `dig @127.0.0.1 -p %s ops.example.com A`\n", strings.TrimPrefix(devDNSListenAddr, "127.0.0.1:"))
@@ -678,6 +696,95 @@ func recordDevURLs(ctx context.Context, resolved ResolvedTarget, dir, webURL str
 	for _, s := range stacks {
 		fmt.Fprintf(stdout, "[txco]   %s → %s\n", s, urls[s])
 	}
+}
+
+// devAutoBindLocalhost binds plain `localhost` to the workspace's stack
+// when — and only when — that choice is unambiguous: exactly one
+// non-underscore stack in the walked bundle. Underscore stacks (_llm,
+// _cron, _sys/…) are inlet/system surfaces, not hostname-routable web
+// stacks, so they don't count and don't disqualify.
+//
+// Returns the stack `localhost` routes to after this call ("" = not
+// bound): the freshly-bound stack, or the existing binding's stack when
+// a previous run (or the user) already decided — an existing row is
+// respected, never rewritten. Best-effort like recordDevURLs: any
+// admin-API failure degrades to the manual-bind tip, not an error.
+func devAutoBindLocalhost(ctx context.Context, resolved ResolvedTarget, dir string, ops []bundle.Op, webURL string, stdout io.Writer) string {
+	if webURL == "" {
+		return ""
+	}
+	// A workspace that customized the boot pipeline owns its routing —
+	// e.g. mcp-server's path-gated auto-route at boot/75 DEPENDS on
+	// unrouted requests (non-matching paths must fall through to the
+	// 404), and binding localhost would shadow that design. Checked on
+	// the filesystem, NOT via `ops`: bundle.Walk excludes the _sys tree.
+	if workspaceHasCustomBootScope(dir) {
+		return ""
+	}
+	stacks := map[string]bool{}
+	for _, op := range ops {
+		if op.Stack == "" || strings.HasPrefix(op.Stack, "_") {
+			continue
+		}
+		stacks[op.Stack] = true
+	}
+	if len(stacks) != 1 {
+		return ""
+	}
+	var stack string
+	for s := range stacks {
+		stack = s
+	}
+	c := client.New(resolved.AsClientTarget())
+	hosts, err := c.ListHostnames(ctx, false)
+	if err != nil {
+		return ""
+	}
+	for _, h := range hosts {
+		if h.Hostname == "localhost" && h.RevokedAt == "" {
+			if h.Stack != "" {
+				return h.Stack // already routed; suppress the tip, change nothing
+			}
+			return "" // claimed but unattached — the user's arrangement; leave it
+		}
+	}
+	if _, err := c.AddHostname(ctx, client.AddHostnameRequest{Hostname: "localhost", Stack: stack}); err != nil {
+		fmt.Fprintf(stdout, "[txco] warn: auto-bind localhost → %s: %v\n", stack, err)
+		return ""
+	}
+	fmt.Fprintf(stdout, "[txco] localhost auto-bound → stack %q (single-stack workspace; `txco auth tenant hostnames rm localhost` to undo)\n", stack)
+	return stack
+}
+
+// workspaceHasCustomBootScope reports whether OPS/_sys/boot contains a
+// scope directory outside the vendored canon {0 detect/healthz,
+// 50 static, 100 route, 1000 notfound} — the "operator hook" band. A
+// hook there (mcp-server's 75, playground's 25) means the workspace
+// routes on its own terms. Labeled scope dirs ("75_auto-route") count by
+// their numeric prefix, same as the OPS walker.
+func workspaceHasCustomBootScope(dir string) bool {
+	entries, err := os.ReadDir(filepath.Join(dir, "OPS", "_sys", "boot"))
+	if err != nil {
+		return false // no vendored boot at all — nothing custom
+	}
+	canon := map[int]bool{0: true, 50: true, 100: true, 1000: true}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if i := strings.IndexByte(name, '_'); i > 0 {
+			name = name[:i]
+		}
+		n, aerr := strconv.Atoi(name)
+		if aerr != nil {
+			continue // not a scope directory
+		}
+		if !canon[n] {
+			return true
+		}
+	}
+	return false
 }
 
 // devApplyToDraft is the watcher's push path. It maintains one

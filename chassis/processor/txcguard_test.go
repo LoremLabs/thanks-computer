@@ -29,6 +29,10 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.delete", true},
 		{"_txc.telemetry", true},
 		{"_txc.telemetry.metrics", true},
+		{"_txc.llm.reject", true},
+		{"_txc.llm.reject.status", true},
+		{"_txc.llm.upstream.url", true},
+		{"_txc.llm.headers.x-policy", true},
 		// Reserved control fields — never author-writable.
 		{"_txc", false},
 		{"_txc.tenant", false},
@@ -42,10 +46,17 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc._seen", false},
 		{"_txc.ttl", false}, // EMIT-only (lower-only); not output-writable
 		{"_txc.web.req.body", false},
+		// AI gateway: chassis-stamped identity/phase fields stay reserved —
+		// only the verdict subtrees (reject/upstream/headers) are writable.
+		{"_txc.llm.phase", false},
+		{"_txc.llm.tenant", false},
+		{"_txc.llm.request_id", false},
+		{"_txc.llm.completion.status", false},
 		// A reserved prefix must not be defeated by a lookalike sibling.
 		{"_txc.web.response", false}, // not "web.res"
 		{"_txc.gotoxyz", false},      // not "goto"
 		{"_txc.telemetryX", false},   // not "telemetry"
+		{"_txc.llm.rejected", false}, // not "llm.reject"
 	}
 	for _, c := range cases {
 		if got := authorMayWriteTxc(c.path); got != c.want {

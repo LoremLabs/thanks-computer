@@ -1,0 +1,18 @@
+# OPS/_llm/50 — reject before spend.
+#
+# The AI-gateway inlet (POST /v1/messages) runs every request through
+# this stack exactly once, then forwards whatever is left in `.request`
+# upstream. A rule that EMITs `@llm.reject` stops that: the gateway
+# renders it as an Anthropic-shaped error ({"type":"error",...}), so
+# clients like Claude Code surface it natively — and the upstream is
+# never contacted, so a blocked request costs nothing.
+#
+# @ is sugar for ._txc. The chassis-stamped request context
+# (@llm.phase, @llm.tenant, @llm.host, ...) is read-only; the verdict
+# subtrees (@llm.reject / @llm.upstream / @llm.headers) are the
+# stack-writable surface. EMIT (not SET) persists the verdict into the
+# envelope the gateway reads back.
+WHEN @src == "llm" && @llm.phase == "request" && .request.model == "txco-test-reject"
+  EMIT @llm.reject.status  = 403,
+       @llm.reject.type    = "permission_error",
+       @llm.reject.message = "blocked by _llm policy"

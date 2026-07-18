@@ -49,6 +49,13 @@ func (w *contextResponseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Unwrap exposes the wrapped writer so http.NewResponseController can
+// reach the underlying Flusher / write-deadline controls through this
+// middleware wrapper. Without it, streamed responses (writeStream, the
+// AI gateway proxy) silently lose per-chunk flushing and cannot extend
+// the listener write deadline mid-stream.
+func (w *contextResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // func (web *WebController) BasicAuthMiddleware(next http.Handler) http.Handler {
 // 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 // 		user, pass, _ := r.BasicAuth()

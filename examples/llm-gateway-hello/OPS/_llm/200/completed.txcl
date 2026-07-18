@@ -1,0 +1,11 @@
+# OPS/_llm/200 — react to a finished exchange.
+#
+# After the upstream stream ends, the gateway fires a second envelope
+# into this same stack with @llm.phase == "completed" — the client
+# never waits on it. @llm.completion carries the transfer facts
+# (status, duration_ms, bytes_in, bytes_out, model, stream,
+# client_disconnected), ready for billing counters, audit trails, or a
+# kv/incr. This demo just stamps a marker so the completion run is
+# visible in the trace.
+WHEN @src == "llm" && @llm.phase == "completed"
+  EMIT .audit = "llm request completed"
