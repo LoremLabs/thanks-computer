@@ -49,6 +49,10 @@ signed-mode chassis.
 `+"`bootstrap-local`"+` once to enrol your signing key, then `+"`login`"+`
 whenever you need a fresh browser session.
 
+Because the signing key is long-lived, this mints a session without any
+identity-provider prompt. To force a fresh sign-in through the identity
+provider first, use the top-level alias: `+"`txco ui <cloud-profile> --force-login`"+`.
+
 Flags:
 `)
 		fs.PrintDefaults()
@@ -129,6 +133,18 @@ Flags:
 				fmt.Fprintf(stderr, "  - if you haven't enrolled yet, run `txco auth bootstrap-local`\n")
 				fmt.Fprintf(stderr, "  - if your key was revoked, re-enrol with `txco auth bootstrap-local` or `txco auth accept`\n")
 			case http.StatusForbidden:
+				// `reauth_required` is not an authorization failure — the
+				// key is fine. It means this machine was signed out in the
+				// admin UI, and the chassis now wants a fresh
+				// identity-provider login before it hands out another
+				// browser session. Say so plainly; the generic "not a
+				// member of this tenant" hint would send the user chasing
+				// the wrong problem entirely.
+				if he.Code == "reauth_required" {
+					PrintCLIError(stderr, "auth login: signed out — this machine needs to authenticate again")
+					fmt.Fprintf(stderr, "  run `txco login` to sign in through your identity provider\n")
+					return 1
+				}
 				PrintCLIErrorf(stderr, "auth login: forbidden (%s)", he.Code)
 				fmt.Fprintf(stderr, "  this actor isn't a member of tenant %q; try `--tenant <other>`\n", target.Tenant)
 			default:

@@ -330,6 +330,63 @@ func (r *Registry) RevokeActor(ctx context.Context, actorID string) error {
 	return tx.Commit()
 }
 
+// --- re-auth marker ---------------------------------------------------------
+//
+// The bridge between the two credentials an admin-UI user holds: the
+// browser session (a cookie) and the chassis key (long-lived ed25519).
+// Signing out revokes only the former, so `txco ui cloud` would sign a
+// fresh bootstrap with the latter and walk straight back in without ever
+// visiting the identity provider.
+//
+// Sign-out stamps the marker (MarkActorReauthRequired), the browser
+// bootstrap endpoint refuses while it's set (ActorReauthRequired), and a
+// fresh OIDC enrollment clears it (ClearActorReauthRequired). See
+// db/schema/sqlite/auth/0004_actor_reauth.sql for the full rationale,
+// including why the marker is only ever stamped on a chassis that has an
+// OAuth issuer configured.
+
+// MarkActorReauthRequired stamps the actor as needing a fresh
+// identity-provider login before it can mint another browser session.
+// Idempotent: re-stamping an already-marked actor just refreshes the
+// timestamp, which is harmless (the column is a flag, not an audit
+// trail — revoked_by-style attribution lives on browser_sessions).
+func (r *Registry) MarkActorReauthRequired(ctx context.Context, actorID string) error {
+	_, err := r.ex(ctx, r.DB,
+		`UPDATE actors SET reauth_required_at = ? WHERE actor_id = ?`,
+		formatTime(time.Now().UTC()), actorID)
+	return err
+}
+
+// ClearActorReauthRequired lifts the marker after the actor has proved a
+// fresh identity-provider login. Idempotent — clearing an unmarked actor
+// is a no-op.
+func (r *Registry) ClearActorReauthRequired(ctx context.Context, actorID string) error {
+	_, err := r.ex(ctx, r.DB,
+		`UPDATE actors SET reauth_required_at = NULL WHERE actor_id = ?`,
+		actorID)
+	return err
+}
+
+// ActorReauthRequired reports whether the actor must re-authenticate
+// through the identity provider before minting a browser session.
+//
+// An unknown actor returns false, not ErrNotFound: this gates a mint
+// that is itself already authenticated, so a missing row means "nothing
+// is blocking you" and the caller's own auth checks stay the gate.
+func (r *Registry) ActorReauthRequired(ctx context.Context, actorID string) (bool, error) {
+	var at sql.NullString
+	err := r.qr(ctx, r.DB,
+		`SELECT reauth_required_at FROM actors WHERE actor_id = ?`,
+		actorID).Scan(&at)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(at.String) != "", nil
+}
+
 // --- invitations ------------------------------------------------------------
 
 // Invitation mirrors the actor_invitations table. Capabilities is the

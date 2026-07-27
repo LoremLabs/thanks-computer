@@ -114,6 +114,29 @@ func (c *Controller) handleBrowserBootstrap(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Signed out in the browser? Then holding the signing key is no
+	// longer enough to mint a new session — the actor has to prove a
+	// fresh identity-provider login first (which clears the marker at
+	// /auth/oauth/enroll). This is what makes "Sign out" mean something
+	// to a CLI that still has the key on disk.
+	//
+	// Fail CLOSED on a lookup error: the whole point of the marker is to
+	// deny, so a DB hiccup must not silently hand out a session.
+	required, err := c.registry.ActorReauthRequired(r.Context(), ac.ActorID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "reauth_check", map[string]any{"err": err.Error()})
+		return
+	}
+	if required {
+		c.pu.Logger.Info("browser bootstrap refused — re-authentication required",
+			zap.String("actor", ac.ActorID),
+			zap.String("tenant", ac.TenantID))
+		writeJSONError(w, http.StatusForbidden, "reauth_required", map[string]any{
+			"hint": "this machine was signed out in the admin UI; run `txco login` to sign in again",
+		})
+		return
+	}
+
 	var req bootstrapRequest
 	if r.ContentLength > 0 {
 		dec := json.NewDecoder(r.Body)
@@ -398,10 +421,46 @@ func (c *Controller) handleBrowserSessionDelete(w http.ResponseWriter, r *http.R
 		return
 	}
 	http.SetCookie(w, c.expiredCookie(r))
+	c.markReauthRequired(r, ac)
 	c.pu.Logger.Info("browser session revoked",
 		zap.String("session", cookie.Value),
 		zap.String("by", by))
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+// markReauthRequired stamps the signing-out actor so the next browser
+// bootstrap has to go through the identity provider again.
+//
+// Without this, sign-out is only half a sign-out: it revokes the session
+// cookie, but the CLI still holds the ed25519 key that minted it, so
+// `txco ui cloud` immediately signs a fresh bootstrap and the user is
+// back in without ever seeing a login prompt.
+//
+// Two guards, both load-bearing:
+//
+//   - No OAuth issuer configured means there is no way to CLEAR the
+//     marker (only /auth/oauth/enroll clears it), so stamping it would
+//     lock a self-hosted operator out of their own admin UI. Leave
+//     open-core behaviour exactly as it was.
+//   - No ActorID means an open-dev or basic-auth context, which has no
+//     actor row to stamp.
+//
+// Best-effort: a failure here is logged, not surfaced. The session IS
+// revoked and the cookie IS cleared by this point, so the sign-out the
+// user asked for succeeded — failing the response would wrongly suggest
+// they're still signed in.
+func (c *Controller) markReauthRequired(r *http.Request, ac *auth.Context) {
+	if c.oauthIssuer == "" || ac == nil || ac.ActorID == "" {
+		return
+	}
+	if err := c.registry.MarkActorReauthRequired(r.Context(), ac.ActorID); err != nil {
+		c.pu.Logger.Warn("mark reauth required failed",
+			zap.String("actor", ac.ActorID),
+			zap.String("err", err.Error()))
+		return
+	}
+	c.pu.Logger.Info("actor marked for re-authentication",
+		zap.String("actor", ac.ActorID))
 }
 
 // --- admin sessions (tenant-scoped, list + revoke) -------------------

@@ -283,7 +283,7 @@ var cliCommandTree = []node{
 	{Name: "auth", Desc: "Auth + identity management", Children: authChildren},
 	{Name: "use", Desc: "Switch the active signing profile (alias for 'auth profile use')"},
 	{Name: "whoami", Desc: "Show the chassis's view of your identity (alias for 'auth whoami')", Flags: []string{"url", "profile", "name"}},
-	{Name: "ui", Desc: "Open the chassis admin UI, signed in (alias for 'auth login')", Flags: []string{"profile", "tenant", "url", "no-open", "label"}},
+	{Name: "ui", Desc: "Open the chassis admin UI, signed in (alias for 'auth login')", Flags: []string{"profile", "tenant", "url", "no-open", "label", "force-login"}},
 	{Name: "login", Desc: "Sign in to the thanks-computer cloud"},
 	{Name: "logout", Desc: "Sign out of the thanks-computer cloud"},
 	{Name: "cloud", Desc: "Cloud account subcommands (login/logout/whoami)", Children: cloudChildren},

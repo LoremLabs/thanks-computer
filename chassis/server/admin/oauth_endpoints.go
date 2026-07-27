@@ -272,6 +272,22 @@ func (c *Controller) oauthEnrollIntoTenant(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// A verified id_token IS the fresh identity-provider login, so this is
+	// the moment to lift any re-auth marker an admin-UI sign-out left on
+	// the actor (see registry.MarkActorReauthRequired). Covers both branches
+	// above: a known key reusing its actor, and a newly minted one (where
+	// it's simply a no-op on a clean row).
+	//
+	// Best-effort by design — enrollment itself succeeded, and failing the
+	// response here would strand the user with a key they can't use and no
+	// way to clear the marker. A stale marker is recoverable (re-run
+	// `txco login`); a failed enrollment is not.
+	if err := c.registry.ClearActorReauthRequired(r.Context(), actorID); err != nil {
+		c.pu.Logger.Warn("clear reauth marker failed",
+			zap.String("actor_id", actorID),
+			zap.String("err", err.Error()))
+	}
+
 	// id_token is intentionally NOT logged (bearer secret).
 	c.pu.Logger.Info("oauth-enrolled actor",
 		zap.String("subject", sub),

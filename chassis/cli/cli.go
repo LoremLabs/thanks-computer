@@ -139,7 +139,14 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// UI already authenticated. Surfaced at the top level (and in help)
 		// because users look for "the admin interface", not a login verb
 		// nested under `auth`. Takes the same flags (--profile, --tenant,
-		// --url, --no-open, --label).
+		// --url, --no-open, --label), plus --force-login.
+		rest, forceLogin := takeForceLogin(rest)
+		if forceLogin {
+			cloud.ClientVersion = Build.Version
+			if code := forceCloudLogin(rest, stdout, stderr); code != 0 {
+				return code, true
+			}
+		}
 		return auth.Dispatch(append([]string{"login"}, rest...), stdout, stderr), true
 	case "login":
 		// Cloud account sign-in (OAuth against the thanks-computer cloud) —

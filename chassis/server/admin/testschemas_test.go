@@ -141,7 +141,9 @@ CREATE TABLE actors (
 	actor_id    TEXT PRIMARY KEY, label TEXT, kind TEXT,
 	subject     TEXT, tenant TEXT, stack TEXT,
 	super_admin INTEGER NOT NULL DEFAULT 0,
-	created_at  TEXT NOT NULL, revoked_at TEXT, meta TEXT
+	created_at  TEXT NOT NULL, revoked_at TEXT, meta TEXT,
+	-- db/schema/sqlite/auth/0004_actor_reauth.sql
+	reauth_required_at TEXT
 );
 CREATE TABLE actor_keys (
 	key_id     TEXT PRIMARY KEY, actor_id TEXT NOT NULL,

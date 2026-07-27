@@ -28,6 +28,10 @@
     const actorColor = $derived(
         session?.actor_id ? colorizer(session.actor_id) : ''
     )
+    // Set when the chassis still reports a live session after a sign-out
+    // that claimed success. Shown inline rather than swallowed — the whole
+    // failure mode here is a sign-out that silently doesn't happen.
+    const signOutError = $derived(store.state.signOutError)
 </script>
 
 {#if isOpenDev}
@@ -58,6 +62,15 @@
         >
             {signingOut ? 'signing out…' : 'Sign out'}
         </button>
+        {#if signOutError}
+            <span
+                class="max-w-xs truncate text-xs text-red-700"
+                title={signOutError}
+                role="alert"
+            >
+                {signOutError}
+            </span>
+        {/if}
     </span>
 {:else if session}
     <!-- signed / basic — shouldn't normally hit the UI but defensive. -->

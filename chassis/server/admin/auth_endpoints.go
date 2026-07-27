@@ -360,6 +360,26 @@ func (c *Controller) handleRevokeActor(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "revoke actor", map[string]any{"err": err.Error()})
 		return
 	}
+	// Revoking the actor and its keys stops it SIGNING anything, but says
+	// nothing about browser sessions it already minted: verifyCookie
+	// checks only the session row (not-revoked, not-expired) and never
+	// re-checks whether the actor behind it still exists. So without this,
+	// a revoked user keeps a fully working admin cookie until the session
+	// hits its 7-day TTL.
+	//
+	// Best-effort: the revoke itself already committed, so a failure here
+	// is logged rather than turned into a 500 that would wrongly imply the
+	// actor is still active. Surfaced loudly because the residue is a live
+	// session for a revoked user.
+	by := "actor_revoke"
+	if ac := auth.FromContext(r.Context()); ac != nil && ac.ActorID != "" {
+		by = ac.ActorID
+	}
+	if err := c.registry.RevokeActorSessions(r.Context(), actorID, by); err != nil {
+		c.pu.Logger.Error("revoke actor sessions failed — actor is revoked but browser sessions may still be live",
+			zap.String("actor_id", actorID),
+			zap.String("err", err.Error()))
+	}
 	c.pu.Logger.Info("actor revoked", zap.String("actor_id", actorID))
 	writeJSON(w, http.StatusOK, revokeResponse{Revoked: true, ActorID: actorID})
 }

@@ -1,0 +1,28 @@
+-- Force a fresh identity-provider login after an admin-UI sign-out.
+--
+-- Signing out of the admin UI revokes the browser session and clears the
+-- cookie, but the CLI still holds the long-lived ed25519 key that minted
+-- that session — so `txco ui cloud` (= `txco auth login --profile cloud`)
+-- simply signs a new bootstrap and walks straight back in, never touching
+-- the OIDC flow. The browser session and the chassis key are two separate
+-- credentials, and sign-out only ever revoked one of them.
+--
+-- This column is the handshake between them: sign-out stamps it, the
+-- browser-bootstrap endpoint refuses while it's set, and a fresh OIDC
+-- enrollment (POST /auth/oauth/enroll) clears it. Net effect: the next
+-- `txco ui cloud` after a sign-out has to go through the identity
+-- provider again.
+--
+-- Per-actor is per-machine: enrollment mints a NEW actor for each new
+-- public key, so signing out in the browser only forces re-auth for the
+-- machine whose key minted that session. Other machines are untouched.
+--
+-- Only stamped when the chassis has --cloud-oauth-issuer configured. A
+-- self-hosted chassis with no issuer has no way to clear the marker, so
+-- stamping it there would lock the operator out of their own admin UI.
+--
+-- RFC3339 TEXT, nullable, mirroring actors.revoked_at. NULL (the default
+-- for every existing row) means "no re-auth required" — the safe
+-- direction: existing sessions and keys keep working.
+
+ALTER TABLE actors ADD COLUMN reauth_required_at TEXT;

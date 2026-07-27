@@ -264,6 +264,11 @@ function createStore() {
         sessionLoaded: false,
         loginPending: false,
         loginError: null as string | null,
+        // Set when sign-out reported success but the chassis still hands
+        // back a live browser session — see signOut(). Rendered inline
+        // next to the Sign out button so the user isn't told they're
+        // signed out when they demonstrably aren't.
+        signOutError: null as string | null,
         intendedHash: '' as string,
         // True when this chassis exposes /v1/demo/info — set by
         // probeDemoMode() at boot. The App ladder uses it to decide
@@ -988,18 +993,49 @@ function createStore() {
         }
     }
 
-    // signOut hits the chassis's DELETE endpoint then clears local
-    // session state. We deliberately reset to "sessionLoaded but no
-    // session" so the Login view renders without a second fetch.
+    // signOut hits the chassis's DELETE endpoint, then VERIFIES the
+    // session is actually gone before clearing local state.
+    //
+    // The verification is the point. deleteSession() deliberately treats
+    // 401 as success, because an already-expired cookie 401s and that
+    // genuinely is signed out. But a CSRF-origin rejection 401s too — the
+    // middleware rejects the DELETE before the handler ever runs (which is
+    // what happens on a deploy that forgot --admin-cors-origins), leaving
+    // the session completely live. Both look identical from the response
+    // alone, so we ask the chassis instead of guessing.
+    //
+    // Only a surviving `source === 'browser'` session counts as failure:
+    // that is exactly what the DELETE targets. A chassis that answers as
+    // open-dev or basic after the revoke has genuinely dropped the browser
+    // session; we're just seeing its other auth path.
     async function signOut() {
+        state.signOutError = null
         try {
             await deleteSession()
         } catch {
-            // Server-side revoke failed — fall through to local
-            // cleanup. Cookie may or may not have been cleared by
-            // the server response; resetting local state still
-            // bounces the user to login, which is what they wanted.
+            // Network or 5xx. Don't bail — the server may have revoked the
+            // session before the response failed. The probe below is the
+            // real answer either way.
         }
+
+        let probe: SessionInfo | null = null
+        try {
+            probe = await getSession()
+        } catch {
+            // The probe itself failed (network/5xx). Treat as signed out
+            // rather than pinning the user in the authed view on the
+            // strength of a request that never completed.
+            probe = null
+        }
+
+        if (probe?.source === 'browser') {
+            state.session = probe
+            state.sessionLoaded = true
+            state.signOutError =
+                'Sign out failed — the chassis still reports an active session. Your browser may be blocked from sending the sign-out request; check the admin CORS origin configuration.'
+            return
+        }
+
         state.session = null
         state.sessionLoaded = true
         if (typeof window !== 'undefined') {
