@@ -32,7 +32,7 @@ head — requires the `dns` personality and `--acme-email`. Empty
 ## Data on disk
 
 :::note
-All state is local files — back **these** up, not the process.
+All state is local files — back **these** up.
 :::
 
 | Path                                | What                                              |
@@ -70,6 +70,24 @@ or other internal services. Set `--egress-policy=open` (or whitelist a
 specific range with `--egress-allow-cidrs`) only when your own rules must
 reach internal/localhost services. `txco dev` and `start.sh` opt into
 `open` for local development.
+
+## AI gateway
+
+The `web` head also serves the AI-gateway inlet (`POST /v1/messages`), which forwards to
+an upstream model provider after running the request through the tenant's `_llm` stack.
+It is per-tenant opt-in — a tenant enables it by authoring an `_llm` stack, so there is no
+enable flag. Full reference: [llm-gateway.md](./protocols/llm-gateway.md).
+
+| Flag                       | Default                     | Meaning                                          |
+| -------------------------- | --------------------------- | ------------------------------------------------ |
+| `--llm-upstream-url`       | `https://api.anthropic.com` | Base URL forwarded to; invalid fails at boot      |
+| `--llm-context-max-tokens` | `2000`                      | Estimated-token cap on injected context           |
+| `--llm-context-max-items`  | `8`                         | Item cap on injected context                      |
+
+:::note
+Context injection needs **both** caps positive. Setting either to `0` disables injection
+entirely, and stack-emitted items are then dropped with only a debug log.
+:::
 
 ## Routing and tenancy
 

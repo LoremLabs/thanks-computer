@@ -65,5 +65,6 @@ in an opstack's flows into the protocol.
 | [Scheduled](./scheduled.md) | in, time shifted — `txco://schedule` enqueues, fires later into `_scheduled` |
 | [TCP](./tcp.md) | bidirectional |
 | [MCP](./mcp.md) (agent tools) | out, in as diy |
+| [AI gateway](./llm-gateway.md) | in, then proxied out — an AI client's own requests, through a stack |
 | [DNS](./dns.md) | not a stack input. authoritative answers for delegated zones. |
 

@@ -4,7 +4,7 @@ _Thanks, Computer_ is a distributed runtime for coordinating business logic acro
 
 New here? The **[guided docs](docs/README.md)** walk from overview to a
 working stack — including a [2-minute quickstart](docs/quickstart.md) and an
-[end-to-end tutorial](docs/tutorial.md).
+[end-to-end tutorial](docs/tutorial/hello-world.md).
 
 Where an operating system coordinates processes on a single machine, TxCo coordinates operations across an event flow:
 
@@ -29,7 +29,7 @@ Where an operating system coordinates processes on a single machine, TxCo coordi
 An incoming event (HTTP, email, cron, queue, webhook, etc.) enters an
 operation stack (OpStack).
 
-At each step, TxCo evaluates resonators — small rules written in [txcl](docs/txcl.md) that determine
+At each step, TxCo evaluates resonators — small rules written in [txcl](docs/advanced/txcl/txcl.md) that determine
 which operations should run. Matching operations execute in parallel,
 their outputs deep-merge into a shared event document, and the flow
 continues to the next step.

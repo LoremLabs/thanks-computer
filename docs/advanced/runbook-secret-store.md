@@ -273,6 +273,22 @@ Two computed-secret ops ship with the chassis:
 Custom signing schemes: register your own op handler that reads
 `op.Secrets` via `secrets.BagFromContext(ctx)`.
 
+### Names the chassis looks up itself
+
+Some subsystems read a fixed secret name rather than one a rule names:
+
+| Name | Used by | Env fallback |
+| --- | --- | --- |
+| `OPENROUTER_KEY` | `ai://chat` — see [ai.md](../ai.md#set-the-api-key) | yes, `--ai-chat-env-fallback` |
+| `OPENAI_KEY` | `ai://embed` and the OpenAI chat backend | yes, same flag |
+| `ANTHROPIC_KEY` | [AI gateway](./protocols/llm-gateway.md) swap mode — the real upstream key | **no** |
+| `LLM_GATEWAY_KEY` | AI gateway swap mode — what clients authenticate with | **no** |
+
+The two gateway secrets are read only from the store. That is deliberate: with no env
+fallback, an operator's own exported `ANTHROPIC_API_KEY` can never be picked up as a
+tenant's upstream credential. Note the names differ — the secret is `ANTHROPIC_KEY`;
+`ANTHROPIC_API_KEY` is the client's variable, forwarded untouched in passthrough mode.
+
 ## 4. Capabilities
 
 Two capabilities gate secret-store admin endpoints:

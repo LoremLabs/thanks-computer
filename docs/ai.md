@@ -124,3 +124,11 @@ provision its own key.
   for AI ops is `--ai-default-timeout` (60s — deliberately longer than
   the 5s op default).
 
+## The other direction
+
+Everything above is *outbound*: your stack calls a model. The chassis also runs an
+**inbound** [AI gateway](./gateway.md) — point an existing AI client at it and the
+requests *it* sends become operations, which a stack can reject, rewrite, or answer with
+context the model didn't have. Different direction, different keys: the gateway reads the
+tenant secret `ANTHROPIC_KEY`, never an environment variable.
+
