@@ -8,6 +8,7 @@ import (
 	// "github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
+	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
 	"github.com/loremlabs/thanks-computer/chassis/utils/test"
 )
 
@@ -288,3 +289,81 @@ func TestWhenNilStillMatches(t *testing.T) {
 //
 // 	b.ReportAllocs()
 // }
+
+func TestWhenFunctionCallEvaluation(t *testing.T) {
+	// End-to-end: parse rule text, evaluate WhenMatches. The RHS call
+	// is envelope-independent by construction (literal args only), so
+	// each row is deterministic — except &tz, which is pinned to UTC
+	// where local wall-clock == UTC wall-clock on every date.
+	cases := []struct {
+		name      string
+		resonator string
+		rawEvent  string
+		matches   bool
+	}{
+		{"eq int result", `WHEN .n == &add(1, 2)`, `{"n":3}`, true},
+		{"eq int no match", `WHEN .n == &add(1, 2)`, `{"n":4}`, false},
+		{"gt against sub", `WHEN .n > &sub(10, 4)`, `{"n":7}`, true},
+		{"lt against div float", `WHEN .n < &div(7, 2)`, `{"n":3.4}`, true},
+		{"string result", `WHEN .s == &concat("a", "-", "b")`, `{"s":"a-b"}`, true},
+		{"bool result", `WHEN .ok == &has("{\"a\":1}", "a")`, `{"ok":true}`, true},
+		{"tz UTC hour", `WHEN .h == &tz("UTC", "hour", 9)`, `{"h":9}`, true},
+		{"numeric string envelope value coerces", `WHEN .n == &add(1, 2)`, `{"n":"3"}`, true},
+		{"nested calls", `WHEN .n == &add(1, &mul(2, 3))`, `{"n":7}`, true},
+
+		// Total semantics: a failing or nil call is FALSE, never an
+		// error — including under != where "not equal to a value that
+		// couldn't be computed" might read as true. One bad rule must
+		// not halt the scope; strict mode catches typos at authoring.
+		{"divide by zero is false", `WHEN .n == &div(1, 0)`, `{"n":1}`, false},
+		{"divide by zero under ne is still false", `WHEN .n != &div(1, 0)`, `{"n":1}`, false},
+		{"unknown zone is false", `WHEN .h == &tz("Not/AZone", "hour", 9)`, `{"h":9}`, false},
+		{"nil try_ result is false", `WHEN .s == &try_json("not json")`, `{"s":""}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := txcl.Resonator(tc.resonator)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.resonator, err)
+			}
+			if got := res.WhenMatches(tc.rawEvent); got != tc.matches {
+				t.Errorf("%q vs %s = %v, want %v", tc.resonator, tc.rawEvent, got, tc.matches)
+			}
+		})
+	}
+}
+
+func TestWhenFunctionCallUnknownNameIsFalse(t *testing.T) {
+	// Lenient parse accepts the name; evaluation treats the resolve
+	// failure as no-match. Constructed programmatically because
+	// txcl.Resonator would be identical — this pins the resonator-side
+	// contract independent of parser behavior.
+	cond := resonator.Condition{
+		Branch:    &resonator.Branch{Path: ".n"},
+		MatchType: resonator.MatchType("eq"),
+		MatchCall: &ast.FunctionCall{Name: "definitely-not-real", Args: []ast.Value{}},
+	}
+	res := resonator.Resonator{When: &resonator.When{
+		Expr: &resonator.WhenExpr{Leaf: cond, HasLeaf: true},
+	}}
+	if res.WhenMatches(`{"n":1}`) {
+		t.Errorf("unknown function should evaluate to no-match")
+	}
+}
+
+func TestWhenFunctionCallStrayPathArgIsFalse(t *testing.T) {
+	// The parser forbids path args, but Condition can be built
+	// programmatically. A stray PathRef resolves against an empty env
+	// → nil → no-match, never a read of the real envelope.
+	cond := resonator.Condition{
+		Branch:    &resonator.Branch{Path: ".n"},
+		MatchType: resonator.MatchType("eq"),
+		MatchCall: &ast.FunctionCall{Name: "concat", Args: []ast.Value{ast.PathRef{Path: "n"}}},
+	}
+	res := resonator.Resonator{When: &resonator.When{
+		Expr: &resonator.WhenExpr{Leaf: cond, HasLeaf: true},
+	}}
+	if res.WhenMatches(`{"n":"1"}`) {
+		t.Errorf("stray path arg must not read the envelope (want no-match)")
+	}
+}

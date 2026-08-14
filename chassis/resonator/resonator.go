@@ -7,6 +7,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
+	"github.com/loremlabs/thanks-computer/chassis/txcl/runtime"
 )
 
 type MatchType string
@@ -31,12 +32,20 @@ type BranchValue struct {
 }
 
 type Condition struct {
-	Star       bool         `json:"isStar,omitempty"`     // true = matches everything
-	Branch     *Branch      `json:"branch,omitempty"`     // .branch.subbranch
-	MatchType  MatchType    `json:"matchType,omitempty"`  // ==
-	MatchValue interface{}  `json:"matchValue,omitempty"` // 5
-	Adds       *BranchValue `json:"adds,omitempty"`       // for select, adding branches
-	Prunes     *BranchValue `json:"prunes,omitempty"`     // for select, removing branches
+	Star       bool        `json:"isStar,omitempty"`     // true = matches everything
+	Branch     *Branch     `json:"branch,omitempty"`     // .branch.subbranch
+	MatchType  MatchType   `json:"matchType,omitempty"`  // ==
+	MatchValue interface{} `json:"matchValue,omitempty"` // 5
+	// MatchCall is the function-call RHS form: `WHEN .h == &tz("UTC",
+	// "hour", 9)`. Exactly one of MatchValue / MatchCall is set. The
+	// parser guarantees every argument (recursively) is a literal — no
+	// PathRefs — so the call is envelope-independent: a computed
+	// constant, not a second path. That restriction is load-bearing:
+	// it keeps path-vs-path comparison inexpressible in WHEN, which is
+	// what the key-shape authorization pattern relies on.
+	MatchCall *ast.FunctionCall `json:"matchCall,omitempty"`
+	Adds      *BranchValue      `json:"adds,omitempty"`   // for select, adding branches
+	Prunes    *BranchValue      `json:"prunes,omitempty"` // for select, removing branches
 }
 
 // WhenExpr is the boolean expression tree for a WHEN clause. Exactly
@@ -95,13 +104,13 @@ type Select struct {
 // Resonator is the parsed form of one txcl rule. Built by the parser,
 // consumed by the processor at match-and-dispatch time.
 type Resonator struct {
-	When     *When                  `json:"when,omitempty"`
-	Select   *Select                `json:"select,omitempty"`
-	SetPre   *Set                   `json:"setPre,omitempty"`  // set before select
-	SetPost  *Set                   `json:"setPost,omitempty"` // set after select
-	With     map[string]ast.Value   `json:"with,omitempty"`
-	Priority int64                  `json:"priority"`
-	Exec     string                 `json:"exec,omitempty"`
+	When     *When                `json:"when,omitempty"`
+	Select   *Select              `json:"select,omitempty"`
+	SetPre   *Set                 `json:"setPre,omitempty"`  // set before select
+	SetPost  *Set                 `json:"setPost,omitempty"` // set after select
+	With     map[string]ast.Value `json:"with,omitempty"`
+	Priority int64                `json:"priority"`
+	Exec     string               `json:"exec,omitempty"`
 	// Emit overlays values onto THIS rule's response after EXEC,
 	// before the per-scope merge. Overwrite semantics (not the
 	// set-if-absent behavior of SET POST). Lets a rule contribute
@@ -124,14 +133,14 @@ const (
 
 type Phrase struct {
 	Type     PhraseType
-	When     *When                  `json:"when,omitempty"`
-	Select   *Select                `json:"select,omitempty"`
-	SetPre   *Set                   `json:"setPre,omitempty"`  // set before select
-	SetPost  *Set                   `json:"setPost,omitempty"` // set after select
-	With     map[string]ast.Value   `json:"with,omitempty"`
-	Priority int64                  `json:"priority"`
-	Exec     string                 `json:"exec,omitempty"`
-	Emit     *Set                   `json:"emit,omitempty"`
+	When     *When                `json:"when,omitempty"`
+	Select   *Select              `json:"select,omitempty"`
+	SetPre   *Set                 `json:"setPre,omitempty"`  // set before select
+	SetPost  *Set                 `json:"setPost,omitempty"` // set after select
+	With     map[string]ast.Value `json:"with,omitempty"`
+	Priority int64                `json:"priority"`
+	Exec     string               `json:"exec,omitempty"`
+	Emit     *Set                 `json:"emit,omitempty"`
 }
 
 func New() *Resonator {
@@ -215,8 +224,20 @@ func evalExpr(e *WhenExpr, input string) bool {
 	return false
 }
 
-// evalLeaf runs a single Condition against the input. The big switch
-// on MatchType is the original WhenMatches body, lifted unchanged.
+// evalLeaf runs a single Condition against the input. Literal RHS
+// (MatchValue) takes the original code path unchanged; function-call
+// RHS (MatchCall) resolves the call first, then compares through the
+// same typed switch.
+//
+// WHEN is TOTAL and stays that way: a failing call — divide by zero,
+// an unknown zone, an unregistered name — makes the condition FALSE,
+// never an error. WHEN is a filter with no op context to halt; one
+// bad rule must not poison every request through its scope. This is
+// deliberately the opposite of SET/EMIT, where the same failure
+// halts the rule loudly. A nil result (a &try_* variant swallowing
+// its error) is likewise false. Strict mode (txco lint / the
+// validate endpoint) flags unregistered names at authoring time,
+// which is where the silent-false tradeoff is paid for.
 func evalLeaf(cond *Condition, input string) bool {
 	if cond.Star {
 		return true
@@ -234,6 +255,22 @@ func evalLeaf(cond *Condition, input string) bool {
 	branch = strings.TrimPrefix(branch, ".")
 	val := gjson.Get(input, branch)
 
+	if cond.MatchCall != nil {
+		// The parser guarantees literal-only args, so the env is
+		// never consulted; an empty one keeps a programmatically-
+		// constructed PathRef harmless (it resolves to nil → false).
+		// The parser also rejects =~ / !~ with a call RHS, so only
+		// the ordered/equality comparisons reach here.
+		mv, err := runtime.Resolve(*cond.MatchCall, runtime.JSONEnv("{}"))
+		if err != nil || mv == nil {
+			return false
+		}
+		if n, ok := mv.(int); ok { // defensive: registry contract is int64
+			mv = int64(n)
+		}
+		return compareTyped(val, cond.MatchType, mv)
+	}
+
 	switch cond.MatchType {
 	case "=~":
 		re, err := regexp.Compile(cond.MatchValue.(string))
@@ -245,8 +282,22 @@ func evalLeaf(cond *Condition, input string) bool {
 		if err == nil {
 			return !re.MatchString(val.String())
 		}
+	default:
+		return compareTyped(val, cond.MatchType, cond.MatchValue)
+	}
+	return false
+}
+
+// compareTyped is the ordered/equality comparison switch, lifted
+// verbatim from the original evalLeaf body. gjson's total coercion
+// (val.Int() / .Float() / .String() / .Bool()) is the WHEN semantic:
+// a missing path or type mismatch coerces to a zero value and the
+// comparison quietly answers, never errors. An unhandled RHS type
+// returns false.
+func compareTyped(val gjson.Result, matchType MatchType, mv interface{}) bool {
+	switch matchType {
 	case "eq":
-		switch v := cond.MatchValue.(type) {
+		switch v := mv.(type) {
 		case int64:
 			return val.Int() == v
 		case float64:
@@ -257,7 +308,7 @@ func evalLeaf(cond *Condition, input string) bool {
 			return val.Bool() == v
 		}
 	case "ne":
-		switch v := cond.MatchValue.(type) {
+		switch v := mv.(type) {
 		case int64:
 			return val.Int() != v
 		case float64:
@@ -268,7 +319,7 @@ func evalLeaf(cond *Condition, input string) bool {
 			return val.Bool() != v
 		}
 	case "lt":
-		switch v := cond.MatchValue.(type) {
+		switch v := mv.(type) {
 		case int64:
 			return val.Int() < v
 		case float64:
@@ -277,7 +328,7 @@ func evalLeaf(cond *Condition, input string) bool {
 			return val.String() < v
 		}
 	case "gt":
-		switch v := cond.MatchValue.(type) {
+		switch v := mv.(type) {
 		case int64:
 			return val.Int() > v
 		case float64:
@@ -286,7 +337,7 @@ func evalLeaf(cond *Condition, input string) bool {
 			return val.String() > v
 		}
 	case "gteq":
-		switch v := cond.MatchValue.(type) {
+		switch v := mv.(type) {
 		case int64:
 			return val.Int() >= v
 		case float64:
@@ -295,7 +346,7 @@ func evalLeaf(cond *Condition, input string) bool {
 			return val.String() >= v
 		}
 	case "lteq":
-		switch v := cond.MatchValue.(type) {
+		switch v := mv.(type) {
 		case int64:
 			return val.Int() <= v
 		case float64:

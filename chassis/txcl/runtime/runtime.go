@@ -3,8 +3,8 @@
 // Env and returns a concrete Go value.
 //
 // Every consumer of a txcl Value (the processor's SET / EMIT / WITH
-// paths; eventually the resonator's WHEN evaluator) calls Resolve
-// rather than reaching inside Value nodes directly. This keeps the
+// paths; the resonator's WHEN evaluator for function-call RHS) calls
+// Resolve rather than reaching inside Value nodes directly. This keeps the
 // dispatch logic in one place and means new value shapes
 // (FunctionCall when PR 3 wires it in, future node types after) add
 // to one switch instead of being scattered.

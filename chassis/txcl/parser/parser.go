@@ -9,6 +9,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
+	"github.com/loremlabs/thanks-computer/chassis/txcl/funcs"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/lexer"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/token"
 )
@@ -804,8 +805,45 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 
 	p.nextToken()
 
+	// Function-call RHS: `WHEN .h == &tz("UTC", "hour", 9)`. Args must
+	// be literals (recursively) so the call stays envelope-independent
+	// — a computed constant. A path arg would make `.a == &concat("", .b)`
+	// a path-vs-path comparison, re-opening exactly the hole the
+	// literal-only predicate closes (the key-shape authorization
+	// pattern relies on WHEN being unable to compare two paths). To
+	// gate on a computed-from-the-envelope value, EMIT it in an
+	// earlier scope and compare it here as a path-vs-literal.
+	if p.curTokenIs(token.AMP_IDENT) {
+		if matchtype == "=~" || matchtype == "!~" {
+			p.errors = append(p.errors, "WHEN regex comparisons (=~, !~) take a regex literal, not a function call")
+			return nil
+		}
+		call, ok := p.parseFunctionCall()
+		if !ok {
+			return nil
+		}
+		fc := call.(ast.FunctionCall)
+		if path, found := firstPathArg(fc); found {
+			p.errors = append(p.errors, fmt.Sprintf("WHEN function arguments must be literals, but &%s references path %q — EMIT the computed value in an earlier scope and compare it here instead", fc.Name, "."+path))
+			return nil
+		}
+		if p.strict && !funcs.Has(fc.Name) {
+			// Lenient parsing accepts unknown names (a rule authored
+			// for a newer chassis must not fail to load on an older
+			// one); at runtime an unknown name evaluates to no-match.
+			// Strict mode surfaces the silent-false at authoring time.
+			p.errors = append(p.errors, fmt.Sprintf("unknown function &%s in WHEN (would evaluate to no-match at runtime)", fc.Name))
+		}
+		leaf := resonator.Condition{
+			Branch:    branch,
+			MatchType: matchtype,
+			MatchCall: &fc,
+		}
+		return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
+	}
+
 	if !p.curTokenIs(token.TRUE) && !p.curTokenIs(token.FALSE) && !p.curTokenIs(token.FLOAT) && !p.curTokenIs(token.INT) && !p.curTokenIs(token.STRING) && !p.curTokenIs(token.NULL) && !p.curTokenIs(token.REGEX) {
-		p.wrongTypeParseError("bool, int, float, string, null, or regex")
+		p.wrongTypeParseError("bool, int, float, string, null, regex, or &function(...)")
 		return nil
 	}
 
@@ -832,6 +870,23 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 		MatchType:  matchtype,
 	}
 	return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
+}
+
+// firstPathArg walks a FunctionCall's args (recursively, through
+// nested calls) and returns the first PathRef it finds. Used by the
+// WHEN parser to enforce literal-only arguments.
+func firstPathArg(fc ast.FunctionCall) (string, bool) {
+	for _, a := range fc.Args {
+		switch n := a.(type) {
+		case ast.PathRef:
+			return n.Path, true
+		case ast.FunctionCall:
+			if path, found := firstPathArg(n); found {
+				return path, true
+			}
+		}
+	}
+	return "", false
 }
 
 func (p *Parser) isWhenPrimaryStart(t token.TokenType) bool {

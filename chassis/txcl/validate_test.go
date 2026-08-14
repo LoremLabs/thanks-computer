@@ -37,6 +37,15 @@ func TestValidateFlagsLenientlyAcceptedMistakes(t *testing.T) {
 			input:     "WHEN .x =~ /^abc",
 			wantMatch: "unterminated regex",
 		},
+		{
+			// An unregistered function in WHEN evaluates to no-match at
+			// runtime (silently), so strict mode flags the typo where a
+			// human can see it. Lenient parse must still accept it — a
+			// rule authored for a newer chassis must load on an older.
+			name:      "unknown function in WHEN",
+			input:     `WHEN .x == &nope(1)`,
+			wantMatch: "unknown function &nope",
+		},
 	}
 
 	for _, tc := range cases {
@@ -78,6 +87,10 @@ func TestValidateAcceptsWellFormed(t *testing.T) {
 		`SET .a = 5, .b = ["x", "y"]`,
 		`WHEN .a =~ /^testing/ EXEC "hello-world"`,
 		`EMIT .a = 1, .b = "x", .c = [true, 2]`,
+		`WHEN .h == &add(1, &mul(2, 3)) EXEC "hello-world"`,
+		// The documented &tz usage from docs/advanced/protocols/cron.md —
+		// shipped broken pre-Stage-2, pinned working here.
+		"WHEN @cron.hour == &tz(\"Asia/Kolkata\", \"hour\", 9)\n  && @cron.minute == &tz(\"Asia/Kolkata\", \"minute\", 9)\nEXEC \"https://ops.example.com/morning-sweep\"",
 		"SELECT @web.req.url.query.question.0\n    AS .question\n    DEFAULT \"What is react used for?\"\n\nEXEC \"mcp+https://x\" WITH timeout = \"60s\", debug = true",
 		"", // empty draft is valid
 	}

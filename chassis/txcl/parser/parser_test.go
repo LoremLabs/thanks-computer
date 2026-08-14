@@ -299,7 +299,7 @@ SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"
 			`WHEN .a == !`,
 			&resonator.Resonator{},
 			1,
-			[]string{`Expecting bool, int, float, string, null, or regex, received !`},
+			[]string{`Expecting bool, int, float, string, null, regex, or &function(...), received !`},
 		},
 		{
 			`WHEN .a == null`,
@@ -987,4 +987,113 @@ func TestParserWhenBooleanExpressions(t *testing.T) {
 			test.Equals(t, tc.res, res)
 		})
 	}
+}
+
+func TestParserWhenFunctionCall(t *testing.T) {
+	parse := func(input string) (*resonator.Resonator, []string) {
+		l := lexer.New(input)
+		p := parser.New(l)
+		return p.ParseEvent(), p.Errors()
+	}
+	callLeaf := func(fc ast.FunctionCall, matchType string) resonator.Condition {
+		return resonator.Condition{
+			Branch:    &resonator.Branch{Path: ".h"},
+			MatchType: resonator.MatchType(matchType),
+			MatchCall: &fc,
+		}
+	}
+
+	t.Run("literal-args call on RHS", func(t *testing.T) {
+		res, errs := parse(`WHEN .h == &tz("UTC", "hour", 9)`)
+		test.Equals(t, []string{}, errs)
+		want := &resonator.Resonator{When: &resonator.When{Expr: &resonator.WhenExpr{
+			Leaf: callLeaf(ast.FunctionCall{
+				Name: "tz",
+				Args: []ast.Value{
+					ast.Literal{V: "UTC"},
+					ast.Literal{V: "hour"},
+					ast.Literal{V: int64(9)},
+				},
+			}, "eq"),
+			HasLeaf: true,
+		}}}
+		test.Equals(t, want, res)
+	})
+
+	t.Run("nested literal-args calls", func(t *testing.T) {
+		res, errs := parse(`WHEN .h > &add(1, &mul(2, 3))`)
+		test.Equals(t, []string{}, errs)
+		want := &resonator.Resonator{When: &resonator.When{Expr: &resonator.WhenExpr{
+			Leaf: callLeaf(ast.FunctionCall{
+				Name: "add",
+				Args: []ast.Value{
+					ast.Literal{V: int64(1)},
+					ast.FunctionCall{
+						Name: "mul",
+						Args: []ast.Value{ast.Literal{V: int64(2)}, ast.Literal{V: int64(3)}},
+					},
+				},
+			}, "gt"),
+			HasLeaf: true,
+		}}}
+		test.Equals(t, want, res)
+	})
+
+	t.Run("call leaf composes with boolean operators", func(t *testing.T) {
+		res, errs := parse(`WHEN .a == "x" && .h == &add(1, 2)`)
+		test.Equals(t, []string{}, errs)
+		want := &resonator.Resonator{When: &resonator.When{Expr: &resonator.WhenExpr{
+			And: []resonator.WhenExpr{
+				{Leaf: resonator.Condition{
+					Branch:     &resonator.Branch{Path: ".a"},
+					MatchType:  resonator.MatchType("eq"),
+					MatchValue: "x",
+				}, HasLeaf: true},
+				{Leaf: callLeaf(ast.FunctionCall{
+					Name: "add",
+					Args: []ast.Value{ast.Literal{V: int64(1)}, ast.Literal{V: int64(2)}},
+				}, "eq"), HasLeaf: true},
+			},
+		}}}
+		test.Equals(t, want, res)
+	})
+
+	t.Run("path arg is rejected", func(t *testing.T) {
+		_, errs := parse(`WHEN .h == &add(.y, 1)`)
+		test.Equals(t, 1, len(errs))
+		test.Assert(t, strings.Contains(errs[0], "must be literals"),
+			"error should explain the literal-args rule, got %q", errs[0])
+		test.Assert(t, strings.Contains(errs[0], "EMIT"),
+			"error should point at the EMIT idiom, got %q", errs[0])
+	})
+
+	t.Run("sugar path arg is rejected", func(t *testing.T) {
+		_, errs := parse(`WHEN .h == &add(@y, 1)`)
+		test.Equals(t, 1, len(errs))
+	})
+
+	t.Run("path arg nested inside a call is rejected", func(t *testing.T) {
+		_, errs := parse(`WHEN .h == &add(1, &mul(.y, 2))`)
+		test.Equals(t, 1, len(errs))
+	})
+
+	t.Run("regex comparison rejects a call RHS", func(t *testing.T) {
+		_, errs := parse(`WHEN .h =~ &concat("a", "b")`)
+		test.Equals(t, 1, len(errs))
+		test.Assert(t, strings.Contains(errs[0], "regex literal"),
+			"error should require a regex literal, got %q", errs[0])
+	})
+
+	t.Run("unterminated call is a parse error", func(t *testing.T) {
+		_, errs := parse(`WHEN .h == &add(1,`)
+		test.Assert(t, len(errs) > 0, "expected parse error for unterminated call")
+	})
+
+	t.Run("unknown function name parses leniently", func(t *testing.T) {
+		// A rule authored against a newer chassis must not fail to load
+		// on an older one; the unknown name evaluates to no-match at
+		// runtime and strict mode (Validate) flags it at authoring time.
+		_, errs := parse(`WHEN .h == &from_the_future(1)`)
+		test.Equals(t, []string{}, errs)
+	})
 }

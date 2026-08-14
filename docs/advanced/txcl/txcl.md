@@ -204,7 +204,7 @@ SET @web.res.body = b64"not found\n"
 
 ## Functions
 
-Anywhere a literal or `@path` value is accepted as the right hand side of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`. (Not in `WHEN` — predicates compare a path against a literal only; see [WHEN — filter](#when--filter).)
+Anywhere a literal or `@path` value is accepted as the right hand side of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`. In `WHEN`, a function call is allowed on the right-hand side only when **every argument is a literal** — see [WHEN — filter](#when--filter) for why.
 
 ```txcl
 SET .id  = &uuid()
@@ -357,7 +357,18 @@ WHEN .src == "cron", .x == 1  # AND: all must match
 
 Comma-separated conditions are conjunctive (every condition must match).
 
-The **left side is always a path; the right side is always a literal** — a string, number, bool, null, or regex. Function calls and `@`-paths don't parse on either side of a comparison. To gate on a computed value, `EMIT` it in an earlier scope and compare against a literal (`EMIT`, not `SET` — SET only shapes its own op's input view and is discarded at scope advance; EMIT merges into the envelope the next scope sees):
+The **left side is always a path**. The right side is a literal — a string, number, bool, null, or regex — or a function call whose arguments are **all literals** (nested calls included):
+
+```txcl
+WHEN @cron.hour   == &tz("Asia/Kolkata", "hour", 9)
+  && @cron.minute == &tz("Asia/Kolkata", "minute", 9)   # 09:00 IST, in one rule
+```
+
+A literal-args call is envelope-independent — a computed *constant* for that evaluation — so the predicate still compares one path against one known value. That's the line, and it's deliberate: a path argument (`&concat("", .owner)`) would turn the comparison into path-vs-path, which `WHEN` must not express — the key-shape authorization pattern (construct the lookup key from the authenticated identity instead of writing `sender == owner` checks) relies on it being impossible. Path args are a parse error.
+
+Two more `WHEN`-specific rules: `=~` / `!~` take a regex literal only, and a call that **fails** (divide by zero, unknown zone, unregistered name) makes the condition **false** — never an error, even under `!=`. WHEN is a total filter; one bad rule must not halt every request through its scope. The cost is a silent no-match, which is why `txco lint` flags unknown function names in WHEN at authoring time.
+
+To gate on a value computed **from the envelope**, `EMIT` it in an earlier scope and compare against a literal (`EMIT`, not `SET` — SET only shapes its own op's input view and is discarded at scope advance; EMIT merges into the envelope the next scope sees):
 
 ```txcl
 # scope 100: compute
