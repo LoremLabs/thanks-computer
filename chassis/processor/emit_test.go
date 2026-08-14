@@ -261,6 +261,66 @@ func TestDecorateInput_ResolveError(t *testing.T) {
 	}
 }
 
+// TestDecorateInput_ArithmeticNumberIntegrity pins the envelope
+// contract for the arithmetic functions: the result lands as a bare
+// JSON NUMBER (not a string), even when an operand arrived as a
+// numeric string — the Stripe `t=` timestamp shape, where the value
+// comes out of &get(&split(...)) as text.
+func TestDecorateInput_ArithmeticNumberIntegrity(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	overrides := []resonator.BranchValue{
+		{Path: "._age", Value: ast.FunctionCall{
+			Name: "sub",
+			Args: []ast.Value{ast.PathRef{Path: "now"}, ast.PathRef{Path: "t"}},
+		}},
+	}
+	in := `{"now":1700000300,"t":"1700000000"}`
+
+	got, err := pu.DecorateInput(in, overrides)
+	if err != nil {
+		t.Fatalf("DecorateInput: %v", err)
+	}
+	if !gjson.Valid(got) {
+		t.Fatalf("envelope is not valid JSON: %s", got)
+	}
+	r := gjson.Get(got, "_age")
+	if r.Type != gjson.Number {
+		t.Errorf("_age is %s (raw=%q), want a JSON number; body %s", r.Type, r.Raw, got)
+	}
+	if r.Int() != 300 {
+		t.Errorf("_age = %v, want 300; body %s", r.Value(), got)
+	}
+}
+
+// TestDecorateInput_ArithmeticNonFiniteHalts pins the corruption
+// guard end-to-end: a computation that would produce +Inf halts the
+// rule instead of reaching the envelope, where sjson would serialize
+// it as a bare `+Inf` token — invalid JSON that poisons every
+// downstream gjson read.
+func TestDecorateInput_ArithmeticNonFiniteHalts(t *testing.T) {
+	pu, _ := newTestUnit(t)
+
+	overrides := []resonator.BranchValue{
+		{Path: ".boom", Value: ast.FunctionCall{
+			Name: "mul",
+			Args: []ast.Value{ast.Literal{V: 1e308}, ast.Literal{V: 1e308}},
+		}},
+	}
+	in := `{"keep":"yes"}`
+
+	got, err := pu.DecorateInput(in, overrides)
+	if err == nil {
+		t.Fatalf("expected error for non-finite result, got nil; result %s", got)
+	}
+	if !gjson.Valid(got) {
+		t.Fatalf("envelope corrupted by halted arithmetic: %s", got)
+	}
+	if gjson.Get(got, "boom").Exists() {
+		t.Errorf("non-finite value reached the envelope: %s", got)
+	}
+}
+
 // uuidV7Pattern matches the standard 8-4-4-4-12 hex layout with the
 // v7 version nibble (7) and the variant bits (8, 9, a, or b). The
 // processor smoke tests below assert results match this shape — a

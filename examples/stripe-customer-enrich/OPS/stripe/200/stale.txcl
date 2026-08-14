@@ -1,0 +1,18 @@
+# OPS/stripe/200 — reject replayed webhooks (tolerance window).
+#
+# Stripe's guidance: reject a webhook whose `t` is more than ~5
+# minutes old even when the signature verifies — an intercepted
+# payload replays with a VALID v1, so integrity alone isn't enough.
+# Scope 100 EMITted ._verify.age = &sub(&now("unix"), ._verify.t)
+# (EMIT so it survives the scope advance — SET is op-scoped);
+# this rule fires only on a verified-but-stale delivery. The
+# invalid-signature case is reject.txcl's — the two WHENs are
+# mutually exclusive, so their EMITs never race in the same-scope
+# merge.
+#
+# @ is sugar for ._txc.
+WHEN @computed.sig_valid == true, ._verify.age > 300
+  EMIT @web.res.status = 401,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"401 stale stripe timestamp\n",
+       @halt = true

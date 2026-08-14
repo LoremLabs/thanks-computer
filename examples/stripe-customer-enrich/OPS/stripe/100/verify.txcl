@@ -11,21 +11,32 @@
 # The secret never appears in this rule or in the trace — only the
 # boolean result does.
 #
+# ._verify.age is the replay/tolerance input: seconds between now and
+# the header's `t`. The header value arrives as a string; &sub coerces
+# numeric strings, so no explicit conversion step is needed. It's an
+# EMIT (not a SET) because the stale gate lives at scope 200
+# (stale.txcl) — SET PRE only shapes THIS op's input view and is
+# discarded at scope advance; EMIT overlays the op output, which is
+# what merges into the envelope the next scope sees. Within one SET,
+# later values can reference earlier ones — ._verify.t is written
+# first, then read by .signed (and by the EMIT, which resolves
+# against the decorated input).
+#
 # Note: this parse assumes Stripe's `t=…,v1=…` ordering and a single
 # v1. Real Stripe may send several v1 values during key rotation; a
-# production rule would scan them. (And the replay/tolerance window —
-# rejecting an old `t` — needs arithmetic txcl doesn't have yet, so
-# it's omitted here. See the README.)
+# production rule would scan them.
 #
 # @ is sugar for ._txc.
 # Scratch lives under a _-prefixed key so the default web projection
 # (which drops _-prefixed top-level keys) keeps it out of the response.
 WHEN @web.req.headers.Stripe-Signature.0 != ""
-SET ._verify.v1 = &get(&split(&get(&split(@web.req.headers.Stripe-Signature.0, ","), "1"), "="), "1"),
-    ._verify.signed = &concat(&get(&split(&get(&split(@web.req.headers.Stripe-Signature.0, ","), "0"), "="), "1"), ".", &b64decode(@web.req.body))
+SET ._verify.t = &get(&split(&get(&split(@web.req.headers.Stripe-Signature.0, ","), "0"), "="), "1"),
+    ._verify.v1 = &get(&split(&get(&split(@web.req.headers.Stripe-Signature.0, ","), "1"), "="), "1"),
+    ._verify.signed = &concat(._verify.t, ".", &b64decode(@web.req.body))
 WITH secrets.key.secret = "STRIPE_WEBHOOK_SECRET",
      input_path = "_verify.signed",
      expected_path = "_verify.v1",
      algorithm = "sha256",
      encoding = "hex"
   EXEC "txco://hmac-verify"
+  EMIT ._verify.age = &sub(&now("unix"), ._verify.t)

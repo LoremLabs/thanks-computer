@@ -33,7 +33,8 @@ func TestRegistryHas(t *testing.T) {
 		"b64encode", "b64decode", "urlencode", "urldecode", "json", "to_json",
 		"get", "set", "has",
 		"object", "array",
-		"concat", "len", "split", "join", "substr", "sha256",
+		"concat", "len", "split", "join", "substr", "repeat", "pad", "sha256",
+		"add", "sub", "mul", "div", "mod",
 		"try_json", "try_b64decode", "try_urldecode", "try_get", "try_substr",
 	}
 	for _, name := range want {
@@ -839,6 +840,183 @@ func TestSha256(t *testing.T) {
 	want := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 	if v != want {
 		t.Errorf("got %q, want %q", v, want)
+	}
+}
+
+// --- arithmetic --------------------------------------------------
+
+func TestArith(t *testing.T) {
+	// want is TYPED (int64 vs float64) on purpose — the interface
+	// comparison is the tripwire for a function returning int, or
+	// returning float64 where the int64 contract applies.
+	cases := []struct {
+		name string
+		fn   string
+		args []any
+		want any
+	}{
+		{"add-ints", "add", []any{int64(2), int64(3)}, int64(5)},
+		{"add-negative", "add", []any{int64(2), int64(-5)}, int64(-3)},
+		{"add-float-result", "add", []any{2.25, 1.5}, 3.75},
+		{"add-fractions-to-whole", "add", []any{2.5, 1.5}, 4.0}, // non-integral operands → float64, even when the sum is whole
+		{"sub-window", "sub", []any{int64(1700000300), int64(1700000000)}, int64(300)},
+		{"sub-negative-result", "sub", []any{int64(1), int64(2)}, int64(-1)},
+		{"mul-ints", "mul", []any{int64(3), int64(4)}, int64(12)},
+		{"mul-float", "mul", []any{2.5, int64(2)}, 5.0},
+		{"div-even", "div", []any{int64(6), int64(3)}, int64(2)},
+		{"div-fractional", "div", []any{int64(7), int64(2)}, 3.5},
+		{"div-negative", "div", []any{int64(-7), int64(2)}, -3.5},
+		{"mod-basic", "mod", []any{int64(10), int64(3)}, int64(1)},
+		{"mod-cron-bucket", "mod", []any{int64(61), int64(10)}, int64(1)},
+		{"mod-sign-of-dividend", "mod", []any{int64(-7), int64(3)}, int64(-1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := Call(tc.fn, tc.args)
+			if err != nil {
+				t.Fatalf("&%s(%v): %v", tc.fn, tc.args, err)
+			}
+			if v != tc.want {
+				t.Errorf("&%s(%v) = %v (%T), want %v (%T)", tc.fn, tc.args, v, v, tc.want, tc.want)
+			}
+		})
+	}
+}
+
+func TestArith_AcceptsFloatIntegers(t *testing.T) {
+	// Envelope numbers arrive as float64 (runtime/env.go returns
+	// gjson's Value()). Integral float64 operands must behave
+	// exactly like their int64 spellings — including the int64
+	// return shape.
+	cases := []struct {
+		fn   string
+		args []any
+		want any
+	}{
+		{"add", []any{float64(2), float64(3)}, int64(5)},
+		{"sub", []any{float64(10), float64(4)}, int64(6)},
+		{"mul", []any{float64(3), float64(4)}, int64(12)},
+		{"div", []any{float64(6), float64(3)}, int64(2)},
+		{"mod", []any{float64(10), float64(3)}, int64(1)},
+	}
+	for _, tc := range cases {
+		v, err := Call(tc.fn, tc.args)
+		if err != nil {
+			t.Fatalf("&%s(%v): %v", tc.fn, tc.args, err)
+		}
+		if v != tc.want {
+			t.Errorf("&%s(%v) = %v (%T), want %v (%T)", tc.fn, tc.args, v, v, tc.want, tc.want)
+		}
+	}
+}
+
+func TestArith_CoercesNumericStrings(t *testing.T) {
+	// The consistency argument: WHEN already coerces numeric strings
+	// (gjson parses String operands in comparisons), so arithmetic
+	// must accept the value WHEN accepts. The Stripe timestamp out of
+	// &get(&split(...)) is a string — the motivating case.
+	cases := []struct {
+		fn   string
+		args []any
+		want any
+	}{
+		{"sub", []any{"1700000300", int64(1700000000)}, int64(300)},
+		{"add", []any{"300", "1"}, int64(301)},
+		{"add", []any{"-1.5", int64(2)}, 0.5},
+		{"mul", []any{"1e5", int64(2)}, int64(200000)},
+	}
+	for _, tc := range cases {
+		v, err := Call(tc.fn, tc.args)
+		if err != nil {
+			t.Fatalf("&%s(%v): %v", tc.fn, tc.args, err)
+		}
+		if v != tc.want {
+			t.Errorf("&%s(%v) = %v (%T), want %v (%T)", tc.fn, tc.args, v, v, tc.want, tc.want)
+		}
+	}
+}
+
+func TestArith_Errors(t *testing.T) {
+	// The halt table from the design: nil (inventing a value out of
+	// absence), bool (not a number, whatever gjson coerces it to),
+	// non-numeric / non-finite / whitespace strings, and bad arity.
+	cases := []struct {
+		name string
+		fn   string
+		args []any
+	}{
+		{"nil-operand", "add", []any{nil, int64(1)}},
+		{"bool-operand", "add", []any{true, int64(1)}},
+		{"non-numeric-string", "add", []any{"abc", int64(1)}},
+		{"empty-string", "add", []any{"", int64(1)}},
+		{"whitespace-string", "add", []any{" 5 ", int64(1)}},
+		{"nan-string", "sub", []any{"NaN", int64(1)}},
+		{"inf-string", "mul", []any{"+Infinity", int64(2)}},
+		{"array-operand", "add", []any{[]any{int64(1)}, int64(1)}},
+		{"too-few-args", "add", []any{int64(1)}},
+		{"too-many-args", "add", []any{int64(1), int64(2), int64(3)}},
+		{"zero-args", "mul", []any{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if v, err := Call(tc.fn, tc.args); err == nil {
+				t.Errorf("&%s(%v) expected error, got %v", tc.fn, tc.args, v)
+			}
+		})
+	}
+}
+
+func TestDiv_ByZero(t *testing.T) {
+	for _, denom := range []any{int64(0), float64(0), "0"} {
+		if v, err := Call("div", []any{int64(1), denom}); err == nil {
+			t.Errorf("&div(1, %v) expected error, got %v", denom, v)
+		}
+	}
+}
+
+func TestMod_ByZero(t *testing.T) {
+	if _, err := Call("mod", []any{int64(1), int64(0)}); err == nil {
+		t.Fatal("expected error for modulo by zero")
+	}
+}
+
+func TestMod_RejectsFractional(t *testing.T) {
+	if _, err := Call("mod", []any{10.5, int64(3)}); err == nil {
+		t.Fatal("expected error for fractional mod operand")
+	}
+	if _, err := Call("mod", []any{int64(10), 2.5}); err == nil {
+		t.Fatal("expected error for fractional mod divisor")
+	}
+}
+
+func TestArith_NonFiniteResultHalts(t *testing.T) {
+	// The envelope-corruption hazard: sjson writes NaN/+Inf as bare
+	// tokens (invalid JSON), so a non-finite result must halt at the
+	// function instead of reaching the envelope.
+	if v, err := Call("mul", []any{1e308, 1e308}); err == nil {
+		t.Errorf("&mul overflow to +Inf expected error, got %v", v)
+	}
+	if v, err := Call("add", []any{1e308, 1e308}); err == nil {
+		t.Errorf("&add overflow to +Inf expected error, got %v", v)
+	}
+}
+
+func TestArith_BeyondExactIntStaysFloat(t *testing.T) {
+	// 2^52 * 4 = 2^54 is integral but beyond float64's exact-integer
+	// range (2^53) — the result stays float64 rather than pretending
+	// to int64 exactness.
+	v, err := Call("mul", []any{float64(1 << 52), int64(4)})
+	if err != nil {
+		t.Fatalf("mul: %v", err)
+	}
+	if _, ok := v.(float64); !ok {
+		t.Errorf("got %T, want float64 beyond the 2^53 exact range", v)
+	}
+}
+
+func TestMod_ExceedsExactRangeHalts(t *testing.T) {
+	if _, err := Call("mod", []any{float64(1 << 54), int64(10)}); err == nil {
+		t.Fatal("expected error for mod operand beyond ±2^53")
 	}
 }
 

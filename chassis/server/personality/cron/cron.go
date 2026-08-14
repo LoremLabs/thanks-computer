@@ -246,8 +246,10 @@ func (cc *CronController) scheduleTick(ctx context.Context, now time.Time, tick 
 
 // stampCronClock sets the wall-clock cron fields from t (already in the
 // target location): hour/minute/dom/dow/month/year + the precomputed minute
-// mod buckets (txcl has no arithmetic, so mod5/10/15/30 are stamped here —
-// mechanism only). UTC vs local is entirely the caller's choice of t's zone.
+// mod buckets. mod5/10/15/30 predate txcl's &mod and are kept so the common
+// cadences stay one-rule WHEN gates (&mod needs an EMIT in an earlier scope,
+// since predicates compare against literals) — mechanism only. UTC vs local
+// is entirely the caller's choice of t's zone.
 func stampCronClock(payload string, t time.Time) string {
 	min := t.Minute()
 	payload, _ = sjson.Set(payload, "_txc.cron.minute", min)

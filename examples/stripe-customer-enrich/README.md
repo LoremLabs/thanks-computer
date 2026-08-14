@@ -29,8 +29,9 @@ send-webhook.sh ──POST /webhooks/stripe──▶ chassis (stack: stripe)
                                                  rebuild "t.body" from the raw body +
                                                  hmac-verify vs STRIPE_WEBHOOK_SECRET
                                                  → _txc.computed.sig_valid
-                                            200  reject.txcl
+                                            200  reject.txcl / stale.txcl
                                                  WHEN not valid → 401 + halt
+                                                 WHEN valid but t older than 300s → 401 + halt
                                             300  fetch-customer.txcl
                                                  GET customer with STRIPE_API_KEY (Bearer)
                                                  ──▶ stripe-mock ──▶ {customer:{…}}
@@ -77,19 +78,18 @@ txco trace last                                             # see the steps — 
 
 ## Simplifications (vs. real Stripe)
 
-This example keeps the spotlight on the secret store, so it trims two
-things a production verifier would add:
+This example keeps the spotlight on the secret store, so it trims one
+thing a production verifier would add:
 
-- **No replay/tolerance window.** Real Stripe rejects a webhook whose
-  `t` is more than ~5 minutes old. That check is `now − t < 300`, which
-  needs arithmetic txcl doesn't have yet — so it's omitted. Signature
-  *integrity* is fully verified; replay-hardening is the follow-up.
 - **Single `v1`, fixed order.** The header parse assumes `t=…,v1=…` in
   that order with one `v1`. Real Stripe can send several `v1` values
   during key rotation; a production rule would scan them.
 
-Everything else — the `t.<raw body>` construction, HMAC-SHA256, and the
-constant-time compare — is the real scheme.
+The replay/tolerance window IS implemented: scope 100 computes
+`._verify.age = &sub(&now("unix"), ._verify.t)` and `stale.txcl` 401s
+any webhook whose `t` is older than 300 seconds — Stripe's ~5-minute
+tolerance. Everything else — the `t.<raw body>` construction,
+HMAC-SHA256, and the constant-time compare — is the real scheme.
 
 ## Adapting for production
 

@@ -7,8 +7,11 @@
 # year, tick, and mod5/mod10/mod15/mod30). No `_cron` stack → no ticks
 # (off by default).
 #
-# txcl has no arithmetic/time funcs, so the SCHEDULE is a visible WHEN
-# comparing those stamped fields — the decision lives here, not in Go.
+# The SCHEDULE is a visible WHEN comparing those stamped fields — the
+# decision lives here, not in Go. The mod5/10/15/30 buckets come
+# precomputed so the common cadences stay one-rule gates; for any
+# other cadence, &mod exists (EMIT the bucket in one scope, WHEN it
+# in a later one — predicates compare against literals only).
 # This example wakes once every 10 minutes (minute % 10 == 1, i.e.
 # :01, :11, :21, :31, :41, :51). Gate on @src == "cron" so the rule
 # only fires for the tick, never another entry into this stack.

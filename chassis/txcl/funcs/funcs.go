@@ -2,9 +2,9 @@
 // the `&name(args...)` runtime calls that complement `txco://` ops.
 // Functions are side-effect-free (no Unit access, no I/O, no bus
 // dispatch, no suspend); they exist to give rule authors inline
-// computation for things like base64 decoding, UUID generation, or
-// path access without paying the bus-and-trace overhead of a full
-// op invocation.
+// computation for things like base64 decoding, UUID generation,
+// path access, or arithmetic (`&sub(&now("unix"), .t)`) without
+// paying the bus-and-trace overhead of a full op invocation.
 //
 // New entries are added with discipline — see
 // internal docs/todo-txcl-expressions.md §4 ("Discipline about what goes

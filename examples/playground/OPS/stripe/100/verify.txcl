@@ -13,9 +13,10 @@
 #
 # Note: this parse assumes Stripe's `t=…,v1=…` ordering and a single
 # v1. Real Stripe may send several v1 values during key rotation; a
-# production rule would scan them. (And the replay/tolerance window —
-# rejecting an old `t` — needs arithmetic txcl doesn't have yet, so
-# it's omitted here. See the README.)
+# production rule would scan them. The replay/tolerance window —
+# rejecting an old `t` via &sub(&now("unix"), .t) — is left out of
+# this playground copy for brevity; examples/stripe-customer-enrich
+# implements it (scope 100 computes the age, stale.txcl gates it).
 #
 # @ is sugar for ._txc.
 # Scratch lives under a _-prefixed key so the default web projection

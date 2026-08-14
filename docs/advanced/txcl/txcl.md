@@ -204,7 +204,7 @@ SET @web.res.body = b64"not found\n"
 
 ## Functions
 
-Anywhere a literal or `@path` value is accepted as the right hand side of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`:
+Anywhere a literal or `@path` value is accepted as the right hand side of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`. (Not in `WHEN` — predicates compare a path against a literal only; see [WHEN — filter](#when--filter).)
 
 ```txcl
 SET .id  = &uuid()
@@ -305,6 +305,20 @@ The path argument is a string literal (or any value that evaluates to a string),
 | `&pad(s, width, fill)`   | string, int, string → string     | pad `s` to `abs(width)` bytes with `fill`; **positive `width` = left-pad** (`&pad("42",5,"0")` → `"00042"`), **negative = right-pad** (`&pad("hi",-5," ")` → `"hi   "`); `width == 0` halts; never truncates (already-wide `s` passes through); byte-measured |
 | `&sha256(s)`             | string → string                  | lowercase hex digest                                                |
 
+#### Arithmetic
+
+All five take exactly two operands — nest calls to fold more (`&add(&add(.a, .b), .c)`). Operands coerce by representation, not semantics: **numeric strings convert** (`"300"`, `"-1.5"`, `"1e5"` — the same coercion `WHEN .t > 100` already applies), while `null`, booleans, and non-numeric strings **halt**. A result that is a whole number within ±2^53 lands as a JSON integer; otherwise as a float. A non-finite result halts — `NaN`/`Inf` would serialize as invalid JSON and corrupt the envelope.
+
+| Function     | Signature               | Notes                                                                                                             |
+| ------------ | ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `&add(a, b)` | number, number → number | halts on `null` / bool / non-numeric-string operands (all five do)                                                 |
+| `&sub(a, b)` | number, number → number | the age/window idiom: `EMIT ._age = &sub(&now("unix"), .t)`, then `WHEN ._age < 300` in a later scope              |
+| `&mul(a, b)` | number, number → number | halts on overflow to a non-finite value                                                                            |
+| `&div(a, b)` | number, number → number | halts on division by zero; `&div(6, 3)` → `2`, `&div(7, 2)` → `3.5` — no truncating division; pair with `&mod`     |
+| `&mod(a, b)` | int, int → int          | Go semantics (result takes the dividend's sign); halts on zero divisor or fractional operands                      |
+
+Precision ceiling: envelope numbers travel as float64, so integers beyond ±2^53 (~9.0 × 10¹⁵) have already lost exactness before any function runs — results out there stay floats rather than pretending to integer precision. Unix timestamps (seconds or millis) are comfortably inside the range.
+
 #### Safe variants (`&try_*`)
 
 | Strict          | Safe                | Failure mode that becomes null                                      |
@@ -342,6 +356,18 @@ WHEN .src == "cron", .x == 1  # AND: all must match
 ```
 
 Comma-separated conditions are conjunctive (every condition must match).
+
+The **left side is always a path; the right side is always a literal** — a string, number, bool, null, or regex. Function calls and `@`-paths don't parse on either side of a comparison. To gate on a computed value, `EMIT` it in an earlier scope and compare against a literal (`EMIT`, not `SET` — SET only shapes its own op's input view and is discarded at scope advance; EMIT merges into the envelope the next scope sees):
+
+```txcl
+# scope 100: compute
+EMIT ._age = &sub(&now("unix"), ._verify.t)
+
+# scope 200: gate
+WHEN ._age < 300
+```
+
+This is deliberate, not a gap. A predicate that can't compare two paths keeps access control **key-shaped** — you construct a lookup key from the authenticated identity instead of writing `sender == owner` checks — and a predicate that can't call functions stays total: it evaluates to true or false, never halts mid-filter.
 
 ## SET — set fields
 

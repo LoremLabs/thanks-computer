@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +62,13 @@ func init() {
 	register("repeat", repeatFn)
 	register("pad", padFn)
 	register("sha256", sha256Fn)
+
+	// arithmetic
+	register("add", addFn)
+	register("sub", subFn)
+	register("mul", mulFn)
+	register("div", divFn)
+	register("mod", modFn)
 }
 
 // --- generators / time -----------------------------------------
@@ -578,6 +587,126 @@ func sha256Fn(args []any) (any, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
+// --- arithmetic ------------------------------------------------
+
+// addFn returns a + b. All five arithmetic functions share one
+// shape: exactly two operands (nest calls to fold more —
+// &add(&add(a,b),c)), numeric-string coercion via toNum, and an
+// int64 result when both operands and the result are integral,
+// float64 otherwise (see numResult). The canonical use is
+// EMIT-then-compare: EMIT a computed value in one scope (EMIT merges
+// forward; SET only decorates its own op's input), gate on it with a
+// literal WHEN in a later scope — predicates stay literal-only by
+// design.
+func addFn(args []any) (any, error) {
+	a, b, integral, err := arith2("&add", args)
+	if err != nil {
+		return nil, err
+	}
+	return numResult("&add", a+b, integral)
+}
+
+// subFn returns a - b. The motivating case is age / window checks:
+// EMIT ._age = &sub(&now("unix"), .t) in one scope, WHEN ._age < 300
+// in a later one.
+func subFn(args []any) (any, error) {
+	a, b, integral, err := arith2("&sub", args)
+	if err != nil {
+		return nil, err
+	}
+	return numResult("&sub", a-b, integral)
+}
+
+// mulFn returns a * b.
+func mulFn(args []any) (any, error) {
+	a, b, integral, err := arith2("&mul", args)
+	if err != nil {
+		return nil, err
+	}
+	return numResult("&mul", a*b, integral)
+}
+
+// divFn returns a / b. Division by zero halts with its own message
+// (clearer than the non-finite result guard it would otherwise trip).
+// A division that comes out even on integral operands returns int64
+// (&div(6,3) → 2); anything else is the exact float64 (&div(7,2) →
+// 3.5). There is no truncating integer division — pair &div with
+// &mod when you need quotient-and-remainder semantics.
+func divFn(args []any) (any, error) {
+	a, b, integral, err := arith2("&div", args)
+	if err != nil {
+		return nil, err
+	}
+	if b == 0 {
+		return nil, fmt.Errorf("&div: division by zero")
+	}
+	return numResult("&div", a/b, integral)
+}
+
+// modFn returns a % b with Go semantics (the result takes the sign
+// of the dividend). Operands must be integral — the use case is
+// bucket math on counters and clock fields, and float math.Mod
+// semantics are a surprise nobody asked for. Always returns int64.
+func modFn(args []any) (any, error) {
+	a, b, integral, err := arith2("&mod", args)
+	if err != nil {
+		return nil, err
+	}
+	if !integral {
+		return nil, fmt.Errorf("&mod: operands must be integers (got %v and %v)", a, b)
+	}
+	if b == 0 {
+		return nil, fmt.Errorf("&mod: modulo by zero")
+	}
+	if math.Abs(a) > maxExactInt || math.Abs(b) > maxExactInt {
+		return nil, fmt.Errorf("&mod: operands exceed the exact-integer range (±2^53)")
+	}
+	return int64(a) % int64(b), nil
+}
+
+// arith2 validates the shared two-operand call shape and coerces
+// both operands. integral is true only when BOTH operands were
+// integral-valued — it feeds the int64-vs-float64 decision in
+// numResult.
+func arith2(name string, args []any) (a, b float64, integral bool, err error) {
+	if len(args) != 2 {
+		return 0, 0, false, fmt.Errorf("%s: expected 2 arguments, got %d", name, len(args))
+	}
+	a, aInt, err := toNum(name, args[0])
+	if err != nil {
+		return 0, 0, false, err
+	}
+	b, bInt, err := toNum(name, args[1])
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return a, b, aInt && bInt, nil
+}
+
+// maxExactInt is 2^53 — the largest magnitude at which float64
+// represents every integer exactly. Envelope numbers arrive as
+// float64 (runtime/env.go returns gjson's Value()), so integers
+// above this have already lost precision before any function sees
+// them; results out there stay float64 rather than pretending to
+// int64 exactness.
+const maxExactInt = float64(1 << 53)
+
+// numResult shapes an arithmetic result for the envelope. Non-finite
+// halts: sjson serializes float64 via strconv.FormatFloat, which
+// writes NaN/+Inf as bare tokens — invalid JSON that silently
+// corrupts the envelope for every downstream read. Otherwise int64
+// when the computation stayed integral (matching &len/&now/&tz),
+// float64 when it didn't; both serialize as a bare JSON number.
+func numResult(name string, f float64, integral bool) (any, error) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil, fmt.Errorf("%s: result is not a finite number", name)
+	}
+	if integral && f == math.Trunc(f) && math.Abs(f) <= maxExactInt {
+		return int64(f), nil
+	}
+	return f, nil
+}
+
 // --- helpers ---------------------------------------------------
 
 // arg1String validates the common 1-string-arg call shape used by
@@ -597,6 +726,12 @@ func arg1String(name string, args []any) (string, error) {
 // toInt coerces a numeric arg to int. JSON-marshaled numbers come
 // back as float64 from json.Unmarshal; the parser produces int64
 // for integer literals; both work as input. Anything else halts.
+//
+// Deliberately stricter than toNum: toInt's callers (&substr, &pad,
+// &repeat, &tz) take STRUCTURAL arguments — an index, a width, a
+// count — where a string is a rule bug worth halting on. Arithmetic
+// operands come from payloads, where numbers routinely arrive as
+// text; that's toNum's territory.
 func toInt(name string, v any) (int, error) {
 	switch n := v.(type) {
 	case int:
@@ -613,6 +748,47 @@ func toInt(name string, v any) (int, error) {
 	default:
 		return 0, fmt.Errorf("%s: must be a number, got %T", name, v)
 	}
+}
+
+// toNum coerces an arithmetic operand to float64, reporting whether
+// the value was integral. Unlike toInt it accepts numeric STRINGS —
+// the line is "convert representations, don't invent semantics":
+// WHEN already coerces numeric strings (gjson's Result.Int parses
+// String operands), so `&sub(.t, 1)` must accept the same value
+// `WHEN .t > 100` accepts, or the language disagrees with itself on
+// one value. nil halts (computing on an implied zero invents a value
+// out of absence), bool halts (a boolean is not a number, whatever
+// gjson coerces it to), and non-numeric strings halt. Whitespace is
+// not trimmed (" 5 " halts) — relaxable later if it bites.
+func toNum(name string, v any) (float64, bool, error) {
+	var f float64
+	switch n := v.(type) {
+	case int:
+		f = float64(n)
+	case int64:
+		f = float64(n)
+	case float64:
+		f = n
+	case string:
+		parsed, err := strconv.ParseFloat(n, 64)
+		if err != nil {
+			return 0, false, fmt.Errorf("%s: string %q is not numeric", name, n)
+		}
+		// ParseFloat accepts "NaN" / "Inf" / "+Infinity" (any case).
+		// Reject them at the operand so a payload carrying one fails
+		// with a message naming the input, not the computed result.
+		if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return 0, false, fmt.Errorf("%s: string %q is not a finite number", name, n)
+		}
+		f = parsed
+	case nil:
+		return 0, false, fmt.Errorf("%s: operand is null (missing path?)", name)
+	case bool:
+		return 0, false, fmt.Errorf("%s: operand is a boolean, not a number", name)
+	default:
+		return 0, false, fmt.Errorf("%s: operand must be a number, got %T", name, v)
+	}
+	return f, f == math.Trunc(f), nil
 }
 
 // objAsJSON normalizes an obj argument (for &get / &set / &has) to
