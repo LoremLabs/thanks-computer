@@ -667,7 +667,15 @@ function createStore() {
         }
     }
 
-    function selectOp(op: Op | null) {
+    // HistoryOpts: user-initiated navigations default to pushing a
+    // history entry (browser Back/Forward walk the views). Callers
+    // that canonicalize rather than navigate — the auto-select-first-
+    // stack effect in App.svelte is the important one — pass
+    // { history: 'replace' } so Back never lands on an entry that
+    // immediately re-pushes itself.
+    type HistoryOpts = { history?: 'push' | 'replace' }
+
+    function selectOp(op: Op | null, opts?: HistoryOpts) {
         state.selectedId = op ? opId(op) : ''
         // Note: selectedStack stays empty when picking an op leaf —
         // App.svelte derives the "focused stack for header context"
@@ -680,10 +688,10 @@ function createStore() {
         state.showTraces = ''
         state.showSecrets = ''
         state.showInspect = false
-        writeHash(currentSelection())
+        writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
-    function selectStack(stack: string | null) {
+    function selectStack(stack: string | null, opts?: HistoryOpts) {
         // Pin first: a search result (or any not-yet-loaded stack) must
         // enter the visible set and load its ops before it can be shown.
         // No-op when already visible.
@@ -694,12 +702,12 @@ function createStore() {
         state.showTraces = ''
         state.showSecrets = ''
         state.showInspect = false
-        writeHash(currentSelection())
+        writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
     // Open the versions-list page for `stack`. The selected stack
     // stays the same so navigating "back" lands sensibly.
-    function showVersions(stack: string) {
+    function showVersions(stack: string, opts?: HistoryOpts) {
         if (!stack) return
         state.selectedStack = stack
         state.selectedId = ''
@@ -709,28 +717,28 @@ function createStore() {
         state.showInspect = false
         // Lazy-fetch history.
         if (!state.versionsByStack[stack]) refreshVersions(stack)
-        writeHash(currentSelection())
+        writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
     // Open the traces stream. Pass an rid for the per-trace detail
     // view, or call with no argument for the list page. Clears the
     // stack/op selection so the sidebar nav reflects "we're on
     // traces, not on a stack".
-    function showTraces(rid?: string) {
+    function showTraces(rid?: string, opts?: HistoryOpts) {
         state.selectedId = ''
         state.selectedStack = ''
         state.showVersionsList = ''
         state.showSecrets = ''
         state.showInspect = false
         state.showTraces = rid && rid !== '' ? rid : '__list__'
-        writeHash(currentSelection())
+        writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
     // Open the secrets view. Pass a name for the per-secret detail
     // view, or call with no argument for the list page. Mirrors
     // showTraces: clears the stack/op/traces selection so the sidebar
     // nav reflects "we're on secrets".
-    function showSecrets(name?: string) {
+    function showSecrets(name?: string, opts?: HistoryOpts) {
         state.selectedId = ''
         state.selectedStack = ''
         state.showVersionsList = ''
@@ -738,20 +746,20 @@ function createStore() {
         state.showInspect = false
         state.showSecrets = name && name !== '' ? name : '__list__'
         if (!state.secretsLoaded) refreshSecrets()
-        writeHash(currentSelection())
+        writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
     // Open the inspect panel — ask a stack to explain its current
     // state. Mirrors showSecrets/showTraces but boolean: the panel
     // owns its own form state and there are no inner routes.
-    function showInspect() {
+    function showInspect(opts?: HistoryOpts) {
         state.selectedId = ''
         state.selectedStack = ''
         state.showVersionsList = ''
         state.showTraces = ''
         state.showSecrets = ''
         state.showInspect = true
-        writeHash(currentSelection())
+        writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
     // refreshSecrets loads secret metadata for the current tenant.
@@ -1295,7 +1303,9 @@ function createStore() {
         }
         // The deleted op was the one being viewed — drop the user onto the
         // parent stack's canvas (remaining ops) rather than an empty panel.
-        selectStack(stack)
+        // Replace, not push: the current history entry is the deleted op's
+        // route, and Back should never land on a resource that's gone.
+        selectStack(stack, { history: 'replace' })
         try {
             const v = await validateVersion(state.currentTenant, stack, targetN)
             state.lastValidation[`${stack}:${targetN}`] = v
@@ -1677,7 +1687,21 @@ function readHash(): Selection {
     return { op: '', stack: '', version: null, page: '' }
 }
 
-function writeHash(sel: Selection) {
+// writeHash serializes a Selection into the URL hash. `mode` decides
+// the History semantics:
+//   - 'push' (user-initiated navigation) appends a history entry, so
+//     the browser Back/Forward buttons walk the in-app views. The
+//     existing `hashchange` listener in App.svelte re-derives state
+//     via syncFromHash on Back/Forward; pushState itself fires no
+//     hashchange, which is fine — push callers mutate state BEFORE
+//     writing, so the UI is already current.
+//   - 'replace' (the default) rewrites the current entry in place.
+//     Corrective/derived writes MUST stay replace: the auto-select-
+//     first-stack effect (a push there ping-pongs Back into a trap),
+//     setStackVersion's async post-fetch canonicalization (fired from
+//     syncFromHash during Back itself), the `#login?t=` token scrub
+//     (must not leave a re-firable entry), and setTenant's reset.
+function writeHash(sel: Selection, mode: 'push' | 'replace' = 'replace') {
     if (typeof window === 'undefined') return
     let next = ''
     if (sel.page === 'login') {
@@ -1712,8 +1736,16 @@ function writeHash(sel: Selection) {
     } else if (sel.stack) {
         next = sel.version ? `#stack/${sel.stack}/v${sel.version}` : `#stack/${sel.stack}`
     }
+    // The hash-changed guard is load-bearing for 'push': it's what
+    // keeps re-selecting the current stack/op from stacking duplicate
+    // history entries.
     if (window.location.hash !== next) {
-        history.replaceState(null, '', next || window.location.pathname)
+        const url = next || window.location.pathname
+        if (mode === 'push') {
+            history.pushState(null, '', url)
+        } else {
+            history.replaceState(null, '', url)
+        }
     }
 }
 

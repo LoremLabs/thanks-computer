@@ -115,7 +115,11 @@
             !store.state.selectedId &&
             firstStack
         ) {
-            store.selectStack(firstStack)
+            // Replace, never push: this effect fires on boot AND after a
+            // Back that lands on an empty-selection entry. A push here
+            // would stack a fresh entry on top of the one the user just
+            // navigated to — Back would ping-pong and never escape.
+            store.selectStack(firstStack, { history: 'replace' })
         }
     })
 
