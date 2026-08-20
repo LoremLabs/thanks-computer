@@ -250,9 +250,9 @@
             <h2 class="font-mono text-base font-semibold text-neutral-900">traces</h2>
             <p class="text-xs text-neutral-500">
                 {#if mode === 'live'}
-                    live stream from the body-on-bus tail (no history).
+                    live stream.
                 {:else}
-                    archive of recent requests; click a row to inspect steps.
+                    recent requests.
                 {/if}
             </p>
         </div>
