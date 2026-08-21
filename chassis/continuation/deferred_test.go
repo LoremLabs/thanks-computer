@@ -62,7 +62,7 @@ func TestDeferredOpLifecycle(t *testing.T) {
 	}
 
 	// First terminal wins.
-	recorded, err := r.RecordDeferredTerminal(ctx, runID, opc, "completed", []byte(`{"summary":"ok"}`))
+	recorded, err := r.RecordDeferredTerminal(ctx, runID, opc, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"ok"}`))
 	if err != nil {
 		t.Fatalf("RecordDeferredTerminal: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestDeferredOpLifecycle(t *testing.T) {
 	}
 
 	// Duplicate/late callback is a no-op.
-	recorded, err = r.RecordDeferredTerminal(ctx, runID, opc, "completed", []byte(`{"summary":"DIFFERENT"}`))
+	recorded, err = r.RecordDeferredTerminal(ctx, runID, opc, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"DIFFERENT"}`))
 	if err != nil {
 		t.Fatalf("RecordDeferredTerminal (dup): %v", err)
 	}
@@ -109,7 +109,7 @@ func TestDeferredOpFailedTerminal(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateDeferredOp: %v", err)
 	}
-	recorded, err := r.RecordDeferredTerminal(ctx, runID, opc, "failed", []byte(`{"error":"boom"}`))
+	recorded, err := r.RecordDeferredTerminal(ctx, runID, opc, "failed", continuation.TerminalMeta{}, []byte(`{"error":"boom"}`))
 	if err != nil || !recorded {
 		t.Fatalf("RecordDeferredTerminal failed: recorded=%v err=%v", recorded, err)
 	}
@@ -175,7 +175,7 @@ func TestRecordDeferredTerminalBadStatus(t *testing.T) {
 	ctx := context.Background()
 	r := newRuns(t)
 	runID, _, _ := r.CreateRun(ctx, "tnt", "web", "", "web/50", "rid-3", time.Time{})
-	if _, err := r.RecordDeferredTerminal(ctx, runID, "opc_z", "weird", []byte(`{}`)); err == nil {
+	if _, err := r.RecordDeferredTerminal(ctx, runID, "opc_z", "weird", continuation.TerminalMeta{}, []byte(`{}`)); err == nil {
 		t.Fatal("RecordDeferredTerminal with bad status: err = nil, want error")
 	}
 }

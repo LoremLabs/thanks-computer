@@ -58,6 +58,36 @@ chassis promote it to a continuation. Quick answers stay quick; slow
 ones become durable — the rule doesn't have to know in advance which
 it will get.
 
+Continuable is **op-level metadata, not a scheme gate** — it works on
+any EXEC target. The headline case is `ai://chat`:
+
+```txcl
+WITH mode = "continuable", continue_after = "2s", provider = "openrouter", prompt = "…"
+EXEC "ai://chat"
+```
+
+A fast model reply behaves exactly like a sync op (billing stamps and
+all); a slow one promotes, and the resumed flow runs the rest of the
+pipeline with no inlet clock. `mode = "async"` stays HTTP-shaped
+deliberately: async *is* the worker-callback contract (202 ack +
+`callback_url` + single-use token), which only an external worker that
+speaks it can honor. On transports where the timer can't plausibly win
+(a sub-millisecond `txco://` op), continuable is pointless but legal —
+the op just always completes synchronously. One transport-specific
+caveat: a `compute://` error under continuable records a failed
+terminal and the flow continues (best-effort continuation semantics)
+rather than taking the sync path's loud fatal halt.
+
+**Non-web inlets.** The 202/wait-page story is the web inlet's. On an
+LMTP-driven stack, a promotion closes the mail session with whatever
+verdict is already on the envelope; if no verdict was emitted yet, the
+chassis synthesizes a **250 accept** — a durable suspend *is*
+acceptance (the run is persisted and will complete), so bouncing or
+tempfailing a message the flow is still processing would be wrong. A
+pre-emitted verdict (broadcast code or per-recipient array) always
+wins, so emit it in a scope before the suspending op when you want
+something other than 250.
+
 ## Why it's safe to wait
 
 - **Durable.** Suspended state is files on disk, not memory. The

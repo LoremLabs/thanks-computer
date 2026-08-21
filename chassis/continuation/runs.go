@@ -140,6 +140,27 @@ type OpTerminal struct {
 	OutputKey  string    `json:"output_key,omitempty"`
 	ErrorKey   string    `json:"error_key,omitempty"`
 	RecordedAt time.Time `json:"recorded_at"`
+	// Transport is the dispatch transport that actually produced this
+	// terminal's payload (the string Exec stamps: "https", "ai", "txco", …).
+	// Resume keys its output-sanitization trust decision on it. Empty for
+	// terminals written by the worker-callback endpoint AND for docs written
+	// before this field existed — both deserialize to "", which the trust
+	// check treats as author-controlled (fail closed, sanitized).
+	Transport string `json:"transport,omitempty"`
+	// FuelUsed is the fuel the detached op charged to its own budget while
+	// running outside the request (continuable promotion). Resume folds it
+	// into the merged envelope's `_txc.fuel_used` so detached work bills
+	// exactly like sync work. 0 for worker callbacks and legacy docs.
+	FuelUsed int64 `json:"fuel_used,omitempty"`
+}
+
+// TerminalMeta carries the chassis-recorded provenance of a terminal:
+// which transport produced the payload and any detached fuel it charged.
+// The worker-callback endpoint passes the zero value — worker-posted bytes
+// must never carry a trusted transport label.
+type TerminalMeta struct {
+	Transport string
+	FuelUsed  int64
 }
 
 // ---- key builders (logical, "/"-separated; store sanitizes segments) ------
@@ -403,8 +424,11 @@ func (r *Runs) RecordAccepted(ctx context.Context, runID, stage string, ordinal 
 // op-terminal doc. The first terminal (success OR failure) wins; a
 // duplicate/late callback gets ErrExists on op-terminal ⇒ recorded=false
 // and is a harmless no-op. status must be "completed" or "failed".
-func (r *Runs) RecordTerminal(ctx context.Context, runID, stage string, ordinal int, op, status string, payload []byte) (recorded bool, err error) {
-	term := OpTerminal{Status: status, RecordedAt: time.Now().UTC()}
+// meta stamps the chassis-known provenance (see TerminalMeta); callers
+// recording worker-posted bytes pass the zero value.
+func (r *Runs) RecordTerminal(ctx context.Context, runID, stage string, ordinal int, op, status string, meta TerminalMeta, payload []byte) (recorded bool, err error) {
+	term := OpTerminal{Status: status, RecordedAt: time.Now().UTC(),
+		Transport: meta.Transport, FuelUsed: meta.FuelUsed}
 	switch status {
 	case "completed":
 		k := opOutputKey(runID, stage, ordinal, op)

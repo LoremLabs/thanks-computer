@@ -87,6 +87,25 @@ func transportAuthorControlled(transport string) bool {
 	}
 }
 
+// trustedWritableTxcPaths extends the author-writable set for output that a
+// TRUSTED transport produced but that reaches the envelope via a stored
+// continuation terminal (Resume's merge) rather than the live sync merge.
+// The sync path merges trusted output raw; the resume path instead projects
+// through this widened allowlist so the unforgeable core — `_txc.tenant`,
+// `_txc.fuel_used`, `_txc.ttl`, `_txc._seen`, `_txc.rid`, `_txc.src`,
+// `_txc.route.*`, `_txc.runtime.*` — can never be replayed out of the store,
+// even by bytes a trusted handler once wrote (defense in depth: the store
+// outlives the request that validated it).
+//
+// Same growth policy as authorWritableTxcPaths: only subtrees a shipped
+// trusted handler provably writes, added with a test. Currently: `_txc.chat.*`
+// (ai://chat billing/observability stamps) and `_txc.computed.*` (txco://
+// hmac-sign/-verify, basic-auth-encode results).
+var trustedWritableTxcPaths = []string{
+	"chat",     // ai://chat: provider/model/tokens/latency/retries/routing
+	"computed", // txco:// auth helpers: sig, sig_valid, basic_auth, …
+}
+
 // sanitizeAuthorOutput projects an author-controlled producer's output down to
 // what it is allowed to write: every non-`_txc` key verbatim, plus only the
 // allowlisted `_txc.*` subtrees. Reserved `_txc.*` fields are dropped; if
@@ -99,6 +118,27 @@ func transportAuthorControlled(transport string) bool {
 // the null-merge vector: `{"_txc":{"tenant":null}}` simply isn't in the
 // allowlist, so it can't reach MergeJSON to null the real value.
 func sanitizeAuthorOutput(raw string) string {
+	return projectTxcAllowed(raw, authorWritableTxcPaths, nil)
+}
+
+// sanitizeTrustedOutput is the resume-merge projection for terminals a
+// trusted transport produced: author-writable paths plus the trusted set.
+func sanitizeTrustedOutput(raw string) string {
+	return projectTxcAllowed(raw, authorWritableTxcPaths, trustedWritableTxcPaths)
+}
+
+// sanitizeTerminalOutput picks the projection for a stored continuation
+// terminal by the transport that produced it (OpTerminal.Transport). An empty
+// transport — worker-callback terminals and pre-transport-field docs — is
+// author-controlled per transportAuthorControlled's fail-closed default.
+func sanitizeTerminalOutput(transport, raw string) string {
+	if transportAuthorControlled(transport) {
+		return sanitizeAuthorOutput(raw)
+	}
+	return sanitizeTrustedOutput(raw)
+}
+
+func projectTxcAllowed(raw string, allowlists ...[]string) string {
 	if raw == "" {
 		return raw
 	}
@@ -109,11 +149,13 @@ func sanitizeAuthorOutput(raw string) string {
 	if err != nil {
 		return raw
 	}
-	for _, p := range authorWritableTxcPaths {
-		// allowlist keys contain no dots, so no gjson/sjson escaping is needed.
-		if v := gjson.Get(raw, "_txc."+p); v.Exists() {
-			if set, serr := sjson.SetRaw(out, "_txc."+p, v.Raw); serr == nil {
-				out = set
+	for _, list := range allowlists {
+		for _, p := range list {
+			// allowlist keys contain no dots, so no gjson/sjson escaping is needed.
+			if v := gjson.Get(raw, "_txc."+p); v.Exists() {
+				if set, serr := sjson.SetRaw(out, "_txc."+p, v.Raw); serr == nil {
+					out = set
+				}
 			}
 		}
 	}

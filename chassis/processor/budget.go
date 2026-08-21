@@ -175,6 +175,17 @@ func budgetFromCtx(ctx context.Context) *budgetState {
 	return nil
 }
 
+// fuelUsedFromCtx returns the live fuel counter from the ctx's budget
+// state, or 0 when accounting isn't initialized. Used by the continuable
+// path to measure the fuel a detached op drew on its own budget
+// (fuel-at-finish − fuel-at-start).
+func fuelUsedFromCtx(ctx context.Context) int64 {
+	if s := budgetFromCtx(ctx); s != nil {
+		return s.fuel.Load()
+	}
+	return 0
+}
+
 // addFuel bumps the request's fuel counter by `cost`. Returns a
 // *FuelExhaustedError if the new total exceeds MaxFuelPerRequest > 0.
 // `stage` is the current stage, threaded onto the error so operators see

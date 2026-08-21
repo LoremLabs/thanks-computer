@@ -98,7 +98,12 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 		return
 	}
 
-	recorded, err := runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, termStatus, payload)
+	// Zero TerminalMeta, always: these bytes came over the wire from a
+	// worker. Leaving Transport empty is what keeps them classified as
+	// author-controlled (sanitized) at every resume merge — a worker must
+	// never be able to acquire a trusted transport label.
+	recorded, err := runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, termStatus,
+		continuation.TerminalMeta{}, payload)
 	if err != nil {
 		web.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record failed"})
 		return
@@ -198,7 +203,10 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 // exactly one resume runs regardless of ordering.
 func (web *WebController) handleDeferredComplete(w http.ResponseWriter, ctx context.Context, opc string, lk continuation.OpContinuationLookup, status string, payload []byte) {
 	runs := web.pu.Runs
-	recorded, err := runs.RecordDeferredTerminal(ctx, lk.RunID, opc, status, payload)
+	// Zero TerminalMeta: worker-posted bytes never carry a trusted
+	// transport label (see the same-stage callback above).
+	recorded, err := runs.RecordDeferredTerminal(ctx, lk.RunID, opc, status,
+		continuation.TerminalMeta{}, payload)
 	if err != nil {
 		web.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record failed"})
 		return

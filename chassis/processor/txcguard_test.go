@@ -115,10 +115,10 @@ func TestExecSurfacesTrustByTransport(t *testing.T) {
 			Stack: "t", Scope: 0, Name: "n",
 			Resonator: &resonator.Resonator{Exec: c.exec},
 		}
-		_, authorControlled, _ := pu.Exec(context.Background(), op)
-		if authorControlled != c.wantAuthorControlled {
-			t.Errorf("Exec(%q) authorControlled = %v, want %v",
-				c.exec, authorControlled, c.wantAuthorControlled)
+		_, transport, _ := pu.Exec(context.Background(), op)
+		if got := transportAuthorControlled(transport); got != c.wantAuthorControlled {
+			t.Errorf("Exec(%q) transport = %q → authorControlled = %v, want %v",
+				c.exec, transport, got, c.wantAuthorControlled)
 		}
 	}
 }

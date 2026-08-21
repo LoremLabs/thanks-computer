@@ -603,8 +603,8 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `method` | http(s) | HTTP verb override (default POST) |
 | `secrets.headers.<h>.secret` / `.format` | http(s), builtins | Splice a stored secret into the request; `format = "Bearer {}"` templates it ([runbook](../runbook-secret-store.md)) |
 | `secrets.body.<path>.secret` | http(s) | Same, into the JSON body |
-| `mode = "async"` | http(s), mcp+ | Worker acks 202 now, calls back later ([continuations](../../continuations.md)) |
-| `mode = "continuable"` | http(s) | Answer synchronously if quick; promote to a continuation at the deadline |
+| `mode = "async"` | http(s), mcp+ | Worker acks 202 now, calls back later ([continuations](../../continuations.md)). HTTP-shaped by design — async *is* the worker-callback contract |
+| `mode = "continuable"` | any EXEC | Answer synchronously if quick; promote to a continuation at the deadline. Op-level metadata, not a scheme gate — `ai://chat`, `mcp+`, `txco://`, anything |
 | `continue_after` | continuable | The promotion deadline (default `--continue-after-default`, 5s) |
 | `redact` / `omit` | any | Scrub paths from [trace](../trace.md) artifacts (runtime data untouched) |
 | `debug = true` | any | Surface extra op debug detail to the trace |

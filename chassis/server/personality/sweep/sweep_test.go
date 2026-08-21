@@ -62,7 +62,7 @@ func TestSweepFailsStaleResumer(t *testing.T) {
 	if err := r.SuspendStage(ctx, id, stage, "{}", "", []continuation.OpManifestEntry{{Ordinal: 0, Op: "x", Async: true}}); err != nil {
 		t.Fatalf("SuspendStage: %v", err)
 	}
-	if _, err := r.RecordTerminal(ctx, id, stage, 0, "x", "completed", []byte("{}")); err != nil {
+	if _, err := r.RecordTerminal(ctx, id, stage, 0, "x", "completed", continuation.TerminalMeta{}, []byte("{}")); err != nil {
 		t.Fatalf("RecordTerminal: %v", err)
 	}
 	mustState(t, r, id, continuation.StateResumable)

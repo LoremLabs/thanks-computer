@@ -15,12 +15,14 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -181,7 +183,7 @@ func (pu *Unit) dispatchDeferred(ctx context.Context, raw, stage string, ops []o
 		}
 
 		if isLocalAsyncOp(op) {
-			pu.dispatchLocalAsyncDeferred(ctx, op, runID, opc, name)
+			pu.dispatchLocalAsyncDeferred(ctx, op, raw, runID, opc, name)
 			continue
 		}
 
@@ -212,7 +214,8 @@ func (pu *Unit) dispatchDeferred(ctx context.Context, raw, stage string, ops []o
 					StartedAt: aStart, FinishedAt: time.Now(),
 					Status: "error", Error: aerr.Error(),
 				})
-				_, _ = pu.Runs.RecordDeferredTerminal(ctx, runID, opc, "failed", failPayload(aerr.Error()))
+				_, _ = pu.Runs.RecordDeferredTerminal(ctx, runID, opc, "failed",
+					continuation.TerminalMeta{}, failPayload(aerr.Error()))
 				return
 			}
 			ack, _ := json.Marshal(map[string]string{"status": "accepted", "job_id": jobID})
@@ -313,14 +316,23 @@ func (pu *Unit) resolveDeferredJoins(ctx context.Context, di deferredIdent, curS
 			ob, _ = pu.Runs.Get(ctx, term.OutputKey)
 		}
 		if s := string(ob); s != "" && s != "{}" {
-			// Deferred op output is untrusted: strip reserved _txc.* before merge.
-			s = sanitizeAuthorOutput(s)
+			// Stored deferred output is projected by the trust of the
+			// transport that produced it (persisted on the terminal doc);
+			// worker-callback and legacy terminals carry "" ⇒ full strip.
+			s = sanitizeTerminalOutput(term.Transport, s)
 			if m, merr := pu.MergeJSON(merged, s); merr == nil {
 				merged = m
 			} else {
 				pu.Logger.Warn("deferred join merge error",
 					zap.String("run", di.runID), zap.String("op", pj.Op), zap.Error(merr))
 			}
+		}
+		if term.FuelUsed > 0 {
+			// In-request join: the request budget is live — charge the
+			// detached op's drawn fuel there (MarkJoined won above, so this
+			// happens exactly once per opc). Err ignored; next Run-entry
+			// catches overshoot.
+			_ = addFuel(ctx, term.FuelUsed, curStack+"/"+strconv.Itoa(curScope))
 		}
 	}
 
@@ -374,8 +386,11 @@ func (pu *Unit) suspendForDeferredJoins(ctx context.Context, di deferredIdent, j
 
 	// Under resume there is no client waiting (it got its 202 at the original
 	// join suspend); emitting here would be misread by the resume capture
-	// channel as a final result. Mirror suspendBarrierScope's silence.
-	if _, resuming := resumeRunFrom(ctx); !resuming {
+	// channel as a final result. Mirror suspendBarrierScope's silence, but
+	// bill the resume segment this suspend just ended.
+	if _, resuming := resumeRunFrom(ctx); resuming {
+		pu.emitResumeSegmentUsage(ctx, merged, di.runID)
+	} else {
 		pu.emitContinuation202(ctx, merged, di.rcid, resCh)
 	}
 
@@ -454,17 +469,31 @@ func (pu *Unit) DriveDeferredResume(runID, stage string) {
 }
 
 // dispatchLocalAsyncDeferred runs a local-async (mcp+http) deferred op
-// fire-and-forget: records a 'pending' step on the dispatching trace, then a
-// detached goroutine runs the op, records the deferred terminal, and — if the
-// run has by then suspended at the join waiting for this op — drives resume.
-// Mirrors dispatchLocalAsync but writes the terminal at the opc-keyed
-// deferred location and resolves the join stage dynamically.
-func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.Operation, runID, opc, name string) {
+// fire-and-forget: materializes any WITH `secrets.*` against the live
+// request ctx, records a 'pending' step on the dispatching trace, then a
+// detached goroutine (detachedOpContext — tenant/source/rid + fresh
+// envelope-seeded budget) runs the op, records the deferred terminal with
+// its transport + drawn fuel, and — if the run has by then suspended at the
+// join waiting for this op — drives resume. Mirrors dispatchLocalAsync but
+// writes the terminal at the opc-keyed deferred location and resolves the
+// join stage dynamically.
+func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.Operation, raw, runID, opc, name string) {
 	timeout, over := pu.opMetaTimeout(op)
 	if over {
 		_, _ = pu.Runs.RecordDeferredTerminal(reqCtx, runID, opc, "failed",
-			failPayload("op timeout exceeds op-timeout-max"))
+			continuation.TerminalMeta{}, failPayload("op timeout exceeds op-timeout-max"))
 		return
+	}
+
+	if secrets.HasRefs(op.Meta) {
+		if merr := pu.materializeOpSecrets(reqCtx, &op); merr != nil {
+			pu.Logger.Error("local-async deferred: secret materialization failed",
+				zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
+				zap.String("op_name", op.Name), zap.Error(merr))
+			_, _ = pu.Runs.RecordDeferredTerminal(reqCtx, runID, opc, "failed",
+				continuation.TerminalMeta{}, failPayload(merr.Error()))
+			return
+		}
 	}
 
 	aStart := time.Now()
@@ -476,13 +505,19 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 		StartedAt: aStart, FinishedAt: time.Now(), Status: "pending",
 	})
 
+	workCtx, fuelStart, cancel := pu.detachedOpContext(reqCtx, raw, timeout)
 	go func() {
-		workCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		// Trust bit discarded: stored then merged at the sanitizing
-		// resume/deferred sites (async/worker output is always untrusted).
-		out, _, eerr := pu.Exec(workCtx, op)
+		// The transport rides the terminal so the join merge applies the
+		// same trust decision the sync path would (mcp+http output is
+		// author-controlled and still gets sanitized there).
+		out, transport, eerr := pu.Exec(workCtx, op)
+		op.Secrets.Zero()
+		drawnFuel := fuelUsedFromCtx(workCtx) - fuelStart
+		if drawnFuel < 0 {
+			drawnFuel = 0
+		}
 		status := "completed"
 		var payload string
 		if eerr != nil {
@@ -503,7 +538,10 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 				}
 			}
 		}
-		if _, terr := pu.Runs.RecordDeferredTerminal(workCtx, runID, opc, status, []byte(payload)); terr != nil {
+		// finCtx for the record/resume tail: workCtx may be at its deadline.
+		finCtx := context.Background()
+		if _, terr := pu.Runs.RecordDeferredTerminal(finCtx, runID, opc, status,
+			continuation.TerminalMeta{Transport: transport, FuelUsed: drawnFuel}, []byte(payload)); terr != nil {
 			pu.Logger.Error("local-async deferred: RecordDeferredTerminal failed",
 				zap.String("run", runID), zap.String("opc", opc), zap.Error(terr))
 			return
@@ -512,7 +550,7 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 		// Drive resume only if the run has suspended at the join for this op;
 		// otherwise it's still in-request and the in-request join reads the
 		// terminal directly.
-		stage, exists, serr := pu.Runs.ReadDeferredSuspendedAt(workCtx, runID, opc)
+		stage, exists, serr := pu.Runs.ReadDeferredSuspendedAt(finCtx, runID, opc)
 		if serr != nil || !exists {
 			return
 		}
@@ -538,6 +576,9 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 
 	entries := append([]continuation.OpManifestEntry(nil), ss.Manifest...)
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Ordinal < entries[j].Ordinal })
+	// Fuel the detached deferred op(s) charged to their own budget —
+	// folded into the merged envelope below (mirrors Resume).
+	var detachedFuel int64
 	for _, e := range entries {
 		term, terr := pu.Runs.ReadDeferredTerminal(ctx, runID, e.OpContinuationID)
 		if terr != nil {
@@ -572,8 +613,10 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 			Status: "completed",
 		})
 		if s := string(ob); s != "" && s != "{}" {
-			// Deferred resume output is untrusted: strip reserved _txc.* before merge.
-			s = sanitizeAuthorOutput(s)
+			// Stored deferred output is projected by the trust of the
+			// transport that produced it (persisted on the terminal doc);
+			// worker-callback and legacy terminals carry "" ⇒ full strip.
+			s = sanitizeTerminalOutput(term.Transport, s)
 			if m, merr := pu.MergeJSON(merged, s); merr == nil {
 				merged = m
 			} else {
@@ -581,7 +624,14 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 					zap.String("run", runID), zap.String("op", e.Op), zap.Error(merr))
 			}
 		}
+		detachedFuel += term.FuelUsed
 		_, _ = pu.Runs.MarkJoined(ctx, runID, e.OpContinuationID)
+	}
+	if detachedFuel > 0 {
+		// Runtime-owned write (the projection above strips fuel_used from
+		// op output): the re-run's loadBudget reads it from the envelope.
+		merged, _ = sjson.Set(merged, "_txc.fuel_used",
+			FuelUsedFromEnvelope(merged)+detachedFuel)
 	}
 
 	// rcid for a re-suspend's (silent) 202 plumbing; SECURITY: tenant comes
@@ -590,7 +640,11 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 	if rc, rcErr := pu.Runs.ReadRunCreated(ctx, runID); rcErr == nil {
 		rcid = rc.RunContinuationID
 	}
-	rctx := withResumeRun(ctx, runID, rcid)
+	rctx := withResumeRun(ctx, resumeIdent{
+		runID: runID, rcid: rcid,
+		segStage: stage, segFuel: FuelUsedFromEnvelope(ss.ScopeEnvelope),
+		segBytes: len(ss.ScopeEnvelope), segStart: start,
+	})
 	rctx = withDeferredRun(rctx, runID, rcid)
 	rctx = WithTenant(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.tenant").String())
 

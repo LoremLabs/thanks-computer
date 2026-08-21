@@ -74,7 +74,7 @@ func TestDeferredJoinSuspendResume(t *testing.T) {
 
 	// Worker completes. Record the deferred terminal (opc-keyed) and drive
 	// resume exactly as the callback handler does.
-	rec, err := pu.Runs.RecordDeferredTerminal(ctx, lk.RunID, opc, "completed", []byte(`{"summary":"S"}`))
+	rec, err := pu.Runs.RecordDeferredTerminal(ctx, lk.RunID, opc, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"S"}`))
 	if err != nil || !rec {
 		t.Fatalf("RecordDeferredTerminal rec=%v err=%v", rec, err)
 	}
@@ -121,7 +121,7 @@ func TestDeferredJoinInRequestMerge(t *testing.T) {
 		opc := gjson.GetBytes(body, "_txc.op_continuation_id").String()
 		runID := gjson.GetBytes(body, "_txc.run_id").String()
 		_, _ = pu.Runs.RecordDeferredTerminal(context.Background(), runID, opc,
-			"completed", []byte(`{"summary":"INLINE"}`))
+			"completed", continuation.TerminalMeta{}, []byte(`{"summary":"INLINE"}`))
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"job_id":"j"}`))
 	}))

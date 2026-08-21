@@ -113,19 +113,19 @@ func TestRunsDerivedStateLifecycle(t *testing.T) {
 	}
 
 	// One op terminal → still waiting.
-	if rec, err := r.RecordTerminal(ctx, runID, "website/100", 1, "sidecar", "completed", []byte(`{"ok":true}`)); err != nil || !rec {
+	if rec, err := r.RecordTerminal(ctx, runID, "website/100", 1, "sidecar", "completed", continuation.TerminalMeta{}, []byte(`{"ok":true}`)); err != nil || !rec {
 		t.Fatalf("RecordTerminal sidecar rec=%v err=%v", rec, err)
 	}
 	if st, _ := r.StageState(ctx, runID, "website/100", manifest); st != continuation.StateWaiting {
 		t.Fatalf("state=%q, want waiting (one op outstanding)", st)
 	}
 	// Duplicate terminal → recorded=false, no error (idempotent).
-	if rec, err := r.RecordTerminal(ctx, runID, "website/100", 1, "sidecar", "completed", []byte(`{"ok":false}`)); err != nil || rec {
+	if rec, err := r.RecordTerminal(ctx, runID, "website/100", 1, "sidecar", "completed", continuation.TerminalMeta{}, []byte(`{"ok":false}`)); err != nil || rec {
 		t.Fatalf("duplicate RecordTerminal rec=%v err=%v, want false,nil", rec, err)
 	}
 
 	// Last op terminal → resumable.
-	if _, err := r.RecordTerminal(ctx, runID, "website/100", 0, "research", "completed", []byte(`{"sum":"x"}`)); err != nil {
+	if _, err := r.RecordTerminal(ctx, runID, "website/100", 0, "research", "completed", continuation.TerminalMeta{}, []byte(`{"sum":"x"}`)); err != nil {
 		t.Fatalf("RecordTerminal research: %v", err)
 	}
 	if st, _ := r.StageState(ctx, runID, "website/100", manifest); st != continuation.StateResumable {

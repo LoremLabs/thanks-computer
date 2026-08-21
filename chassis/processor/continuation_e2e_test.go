@@ -131,11 +131,11 @@ func TestContinuationSuspendResumeEndToEnd(t *testing.T) {
 		t.Fatalf("pre-callback state=%q want waiting", st)
 	}
 
-	rec, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", []byte(`{"summary":"S"}`))
+	rec, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"S"}`))
 	if err != nil || !rec {
 		t.Fatalf("RecordTerminal rec=%v err=%v", rec, err)
 	}
-	if rec2, _ := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", []byte(`{"summary":"X"}`)); rec2 {
+	if rec2, _ := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"X"}`)); rec2 {
 		t.Fatal("duplicate RecordTerminal must not re-record")
 	}
 
@@ -204,7 +204,7 @@ func TestContinuationResumeAdvancesPastBarrierTenantScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveOpContinuation: %v", err)
 	}
-	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", []byte(`{"summary":"S"}`)); err != nil {
+	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"S"}`)); err != nil {
 		t.Fatalf("RecordTerminal: %v", err)
 	}
 	if won, _ := pu.Runs.ClaimResume(ctx, lk.RunID, lk.Stage); !won {
@@ -289,7 +289,7 @@ func TestContinuationResumeUsesOpstackSnapshot(t *testing.T) {
 		t.Fatalf("wipe live ops: %v", err)
 	}
 
-	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", []byte(`{"summary":"S"}`)); err != nil {
+	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"S"}`)); err != nil {
 		t.Fatalf("RecordTerminal: %v", err)
 	}
 	if won, _ := pu.Runs.ClaimResume(ctx, lk.RunID, lk.Stage); !won {
@@ -361,7 +361,7 @@ func TestContinuationResumeIgnoresWorkerTenant(t *testing.T) {
 	}
 	// Hostile worker output: tries to flip the run into "intruder".
 	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op,
-		"completed", []byte(`{"_txc":{"tenant":"intruder"},"summary":"S"}`)); err != nil {
+		"completed", continuation.TerminalMeta{}, []byte(`{"_txc":{"tenant":"intruder"},"summary":"S"}`)); err != nil {
 		t.Fatalf("RecordTerminal: %v", err)
 	}
 	if won, _ := pu.Runs.ClaimResume(ctx, lk.RunID, lk.Stage); !won {
@@ -480,7 +480,7 @@ func TestContinuationResumeIsTraced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveOpContinuation: %v", err)
 	}
-	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", []byte(`{"summary":"S"}`)); err != nil {
+	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "completed", continuation.TerminalMeta{}, []byte(`{"summary":"S"}`)); err != nil {
 		t.Fatalf("RecordTerminal: %v", err)
 	}
 	if won, _ := pu.Runs.ClaimResume(ctx, lk.RunID, lk.Stage); !won {
@@ -532,7 +532,7 @@ func TestContinuationFailedOpFailsStage(t *testing.T) {
 		t.Fatalf("ResolveOpContinuation: %v", err)
 	}
 
-	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "failed", []byte(`{"error":{"message":"model timeout"}}`)); err != nil {
+	if _, err := pu.Runs.RecordTerminal(ctx, lk.RunID, lk.Stage, lk.Ordinal, lk.Op, "failed", continuation.TerminalMeta{}, []byte(`{"error":{"message":"model timeout"}}`)); err != nil {
 		t.Fatalf("RecordTerminal failed: %v", err)
 	}
 	if won, _ := pu.Runs.ClaimResume(ctx, lk.RunID, lk.Stage); !won {

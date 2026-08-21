@@ -178,12 +178,26 @@ var ctxKeySource = ctxKeyType{name: "source-scope"}
 // this run (a later async barrier on the SAME run = new stage docs, not a
 // new run) and skips the client 202 (no client is waiting — it already
 // got its 202 on the original request).
-type resumeIdent struct{ runID, rcid string }
+//
+// The seg* fields describe the resume SEGMENT this ctx is executing — the
+// stage it resumed from, the fuel meter and envelope size at segment start,
+// and the wall-clock start. The silent re-suspend branches read them to
+// bill the segment's fuel delta (emitResumeSegmentUsage): a segment that
+// ends by suspending again would otherwise reach the envelope meter but
+// never a usage line, because the final resume's delta subtracts only the
+// LAST suspend's baseline.
+type resumeIdent struct {
+	runID, rcid string
+	segStage    string
+	segFuel     int64
+	segBytes    int
+	segStart    time.Time
+}
 
 var ctxKeyResumeRun = ctxKeyType{name: "resume-run"}
 
-func withResumeRun(ctx context.Context, runID, rcid string) context.Context {
-	return context.WithValue(ctx, ctxKeyResumeRun, resumeIdent{runID: runID, rcid: rcid})
+func withResumeRun(ctx context.Context, ri resumeIdent) context.Context {
+	return context.WithValue(ctx, ctxKeyResumeRun, ri)
 }
 
 func resumeRunFrom(ctx context.Context) (resumeIdent, bool) {
@@ -802,43 +816,12 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// every exit path from this goroutine — success, error,
 			// timeout, panic. See internal docs/todo-secret-store.md §4.1.
 			if secrets.HasRefs(op.Meta) {
-				if pu.Secrets == nil {
-					pu.Logger.Error("op declares `secrets` but the secret store is not configured (--secret-master-key unset)",
-						zap.String("stack", op.Stack), zap.Int("scope", op.Scope), zap.String("op_name", op.Name))
+				if merr := pu.materializeOpSecrets(ctx, &op); merr != nil {
+					pu.Logger.Error("secret materialization failed",
+						zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
+						zap.String("op_name", op.Name), zap.Error(merr))
 					wg.Done()
 					return
-				}
-				refs, perr := secrets.ParseRefs(op.Meta)
-				if perr != nil {
-					pu.Logger.Error("invalid `secrets` declaration",
-						zap.String("stack", op.Stack), zap.Int("scope", op.Scope), zap.String("op_name", op.Name),
-						zap.String("err", perr.Error()))
-					wg.Done()
-					return
-				}
-				tenantSlug := tenantScope(ctx)
-				for _, name := range secrets.DistinctNames(refs) {
-					cleartext, _, merr := pu.Secrets.MaterializeForOpSlug(ctx, tenantSlug, op.Stack, name)
-					if merr != nil {
-						pu.Logger.Error("secret materialization failed",
-							zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
-							zap.String("op_name", op.Name), zap.String("secret_name", name),
-							zap.String("err", merr.Error()))
-						wg.Done()
-						return
-					}
-					op.Secrets.Set(name, cleartext)
-					// Per-reference counter (cache hits + misses).
-					// Operationally useful for spotting a runaway op
-					// that re-materializes the same secret thousands
-					// of times per second, and for per-tenant audit/
-					// quota signals. NEVER includes the cleartext.
-					pu.Mc.RecordSecretMaterialize(ctx, tenantSlug, name)
-					// Fuel charge for the materialization. Err ignored;
-					// next Run-entry catches overshoot (same pattern as
-					// Exec). Audit happens before fuel so the audit
-					// invariant holds even if fuel exhausts mid-loop.
-					_ = addFuel(ctx, fuelCostSecretMaterialize, op.Stack+"/"+strconv.Itoa(op.Scope))
 				}
 				// Wipe cleartext on every exit path. Cache cleanup
 				// (installed at Run head) zeros the cache's own copies;
@@ -849,7 +832,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// exec function
 			if op.Resonator != nil {
 				var output event.Payload
-				var authorControlled bool
+				var transport string
 				var err error
 				// A rule with no EXEC clause is semantically identical
 				// to `EXEC "txco://noop"` — both produce `{}` and let
@@ -858,7 +841,8 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 				// _txc.mocks pattern-match interception symmetric:
 				// pattern-mocking an op shouldn't require the rule
 				// author to add a dummy EXEC.
-				output, authorControlled, err = pu.Exec(ctx, op)
+				output, transport, err = pu.Exec(ctx, op)
+				authorControlled := transportAuthorControlled(transport)
 				if err != nil {
 					pu.Logger.Debug("outerr", zap.String("err", err.Error()))
 				} else {
@@ -1586,49 +1570,62 @@ func isLocalAsyncOp(op operation.Operation) bool {
 		strings.HasPrefix(ex, "mcp+https://")
 }
 
-// isContinuableOp reports whether op is `WITH mode = "continuable"` on an
-// HTTP(S) or MCP+HTTP(S) URL. Separate from isAsyncOp because the dispatch
-// timing differs: continuable starts SYNC and only promotes to a
-// continuation if the upstream takes longer than continue_after. The
-// chassis bridges the worker contract locally for upstreams that don't
-// know about it — `EXEC "https://slow.example/api" WITH mode = "continuable"`
-// works against any plain HTTP service.
+// isContinuableOp reports whether op is `WITH mode = "continuable"`.
+// Execution semantics are op-level METADATA, not scheme allowlists: the
+// suspend/promote/resume machinery dispatches through the generic Exec, so
+// any transport may take the promotion path — `https://` against a slow
+// plain HTTP service, `ai://chat` against a slow model, `mcp+http(s)://`,
+// even schemes where the timer never plausibly wins (a sub-ms `txco://`
+// op just always completes sync; no special-casing). Separate from
+// isAsyncOp because the dispatch timing differs: continuable starts SYNC
+// and only promotes to a continuation if the upstream takes longer than
+// continue_after — while mode="async" IS the HTTP worker-callback contract
+// and deliberately stays scheme-gated.
 func isContinuableOp(op operation.Operation) bool {
 	if op.Resonator == nil {
 		return false
 	}
-	if gjson.Get(op.Meta, "mode").String() != "continuable" {
-		return false
-	}
-	ex := op.Resonator.Exec
-	return strings.HasPrefix(ex, "http://") ||
-		strings.HasPrefix(ex, "https://") ||
-		strings.HasPrefix(ex, "mcp+http://") ||
-		strings.HasPrefix(ex, "mcp+https://")
+	return gjson.Get(op.Meta, "mode").String() == "continuable"
 }
 
 // dispatchLocalAsync runs a local-async op fire-and-forget:
 //
+//   - Materializes any WITH `secrets.*` BEFORE detaching, against the
+//     live request ctx (tenant pin + request secret cache); the detached
+//     goroutine owns the bag's lifetime from there.
 //   - Records a 'pending' step on the suspending request's trace
 //     (synchronous; same shape as remote async's dispatch ack)
 //     so the original trace shows the barrier op even though the
 //     work hasn't finished.
-//   - Spawns a detached goroutine with a fresh background context
-//     so the request's ctx ending after the 202 emit doesn't kill
-//     the in-flight op. The per-op timeout (WITH timeout = "60s")
-//     is still honored via WithTimeout on the fresh ctx.
-//   - On completion the goroutine writes the terminal and, if the
-//     stage is now fully resumable, claims and Resume's it —
-//     symmetric with the remote-worker callback handler's flow.
-func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operation, runID, stage string, ordinal int, name string) {
+//   - Spawns a detached goroutine under detachedOpContext — detached
+//     from the request's CANCELLATION (the 202 emit ending the request
+//     can't kill the in-flight op) but carrying its VALUES: tenant and
+//     source pins (per-tenant MCP session cache, secret resolution),
+//     rid, and a fresh envelope-seeded fuel budget so detached work
+//     meters like sync work. The per-op timeout still bounds the work.
+//   - On completion the goroutine writes the terminal (transport +
+//     drawn fuel) and, if the stage is now fully resumable, claims and
+//     Resume's it — symmetric with the remote-worker callback handler.
+func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operation, raw, runID, stage string, ordinal int, name string) {
 	// Honor op-timeout-max even though the work runs detached.
 	timeout, over := pu.opMetaTimeout(op)
 	if over {
 		pu.Logger.Error("op timeout exceeds op-timeout-max; failing op",
 			zap.String("stage", stage), zap.String("op", name))
 		_, _ = pu.Runs.RecordTerminal(reqCtx, runID, stage, ordinal, name, "failed",
-			failPayload("op timeout exceeds op-timeout-max"))
+			continuation.TerminalMeta{}, failPayload("op timeout exceeds op-timeout-max"))
 		return
+	}
+
+	if secrets.HasRefs(op.Meta) {
+		if merr := pu.materializeOpSecrets(reqCtx, &op); merr != nil {
+			pu.Logger.Error("local-async: secret materialization failed",
+				zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
+				zap.String("op_name", op.Name), zap.Error(merr))
+			_, _ = pu.Runs.RecordTerminal(reqCtx, runID, stage, ordinal, name, "failed",
+				continuation.TerminalMeta{}, failPayload(merr.Error()))
+			return
+		}
 	}
 
 	// 'pending' step on the original (suspending) trace so the
@@ -1644,11 +1641,10 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		Status: "pending",
 	})
 
-	// Detach. Fresh ctx (background) so the request ctx ending
-	// after the 202 emit doesn't kill the in-flight op. The
-	// per-op timeout still bounds the work.
+	// Detach under the value-preserving ctx (built now, while the request
+	// values are certainly live).
+	workCtx, fuelStart, cancel := pu.detachedOpContext(reqCtx, raw, timeout)
 	go func() {
-		workCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
 		// Spawn a resume trace — symmetric with continuation.go's
@@ -1656,6 +1652,11 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		// and any subsequent Resume scopes all emit step events
 		// to this trace, so admin-ui shows them under one rid
 		// distinct from the suspending request's rid.
+		//
+		// finCtx runs the record/resume sequence: workCtx bounds the op
+		// and may be at (or past) its deadline by the time the terminal
+		// lands — a slow upstream must not starve the resume pipeline.
+		finCtx := context.Background()
 		var tracer trace.RequestTracer
 		var runTenant string // the run's tenant slug, for resume-trace attribution
 		if pu.Sink != nil {
@@ -1668,7 +1669,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			// Linkage event — admin-ui uses these to cross-navigate
 			// from the original (suspending) request to the resume
 			// trace and back.
-			if rc, rcErr := pu.Runs.ReadRunCreated(workCtx, runID); rcErr == nil {
+			if rc, rcErr := pu.Runs.ReadRunCreated(finCtx, runID); rcErr == nil {
 				runTenant = rc.TenantID
 				tracer.Event(trace.TimelineEvent{
 					Ts:    time.Now(),
@@ -1683,12 +1684,18 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 				})
 			}
 			workCtx = trace.WithContext(workCtx, tracer)
+			finCtx = trace.WithContext(finCtx, tracer)
 		}
 
-		// Trust bit discarded: this output is stored (RecordTerminal) and
-		// merged later at the resume/deferred sites, which sanitize
-		// unconditionally (async/worker output is always untrusted).
-		out, _, eerr := pu.Exec(workCtx, op)
+		// The transport is persisted on the terminal so the resume merge
+		// applies the same trust decision the sync path would (mcp+http is
+		// author-controlled, so this output still gets sanitized there).
+		out, transport, eerr := pu.Exec(workCtx, op)
+		op.Secrets.Zero()
+		drawnFuel := fuelUsedFromCtx(workCtx) - fuelStart
+		if drawnFuel < 0 {
+			drawnFuel = 0
+		}
 		status := "completed"
 		var payload string
 		if eerr != nil {
@@ -1709,7 +1716,8 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 				}
 			}
 		}
-		if _, terr := pu.Runs.RecordTerminal(workCtx, runID, stage, ordinal, name, status, []byte(payload)); terr != nil {
+		if _, terr := pu.Runs.RecordTerminal(finCtx, runID, stage, ordinal, name, status,
+			continuation.TerminalMeta{Transport: transport, FuelUsed: drawnFuel}, []byte(payload)); terr != nil {
 			pu.Logger.Error("local-async: RecordTerminal failed",
 				zap.String("run", runID), zap.String("stage", stage),
 				zap.String("op", name), zap.Error(terr))
@@ -1723,14 +1731,14 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		// drive resume when this completion makes the stage
 		// resumable. Symmetric with continuation.go's callback
 		// handler.
-		ss, sserr := pu.Runs.ReadStageSuspended(workCtx, runID, stage)
+		ss, sserr := pu.Runs.ReadStageSuspended(finCtx, runID, stage)
 		if sserr != nil {
 			if tracer != nil {
 				tracer.End("error", "local-async: ReadStageSuspended failed: "+sserr.Error(), nil)
 			}
 			return
 		}
-		state, _ := pu.Runs.StageState(workCtx, runID, stage, ss.Manifest)
+		state, _ := pu.Runs.StageState(finCtx, runID, stage, ss.Manifest)
 		if state != continuation.StateResumable {
 			// Sibling ops still pending — partial completion. The
 			// other op's callback will drive resume.
@@ -1739,14 +1747,14 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			}
 			return
 		}
-		won, _ := pu.Runs.ClaimResume(workCtx, runID, stage)
+		won, _ := pu.Runs.ClaimResume(finCtx, runID, stage)
 		if !won {
 			if tracer != nil {
 				tracer.End("ok", "", nil)
 			}
 			return
 		}
-		rerr := pu.Resume(workCtx, runID, stage)
+		rerr := pu.Resume(finCtx, runID, stage)
 		if rerr != nil {
 			pu.Logger.Error("local-async: Resume failed",
 				zap.String("run", runID), zap.String("stage", stage), zap.Error(rerr))
@@ -1758,7 +1766,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			if rerr != nil {
 				rStatus = "error"
 				rReason = "local-async: Resume failed: " + rerr.Error()
-			} else if res, ok, _ := pu.Runs.ReadResult(workCtx, runID); ok {
+			} else if res, ok, _ := pu.Runs.ReadResult(finCtx, runID); ok {
 				final = res
 			}
 			// Attribute the resume trace to the run's stored tenant slug (what
@@ -1767,6 +1775,42 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 			tracer.End(rStatus, rReason, final)
 		}
 	}()
+}
+
+// materializeOpSecrets resolves every WITH `secrets.*` reference on op into
+// op.Secrets (per-op SecretBag). Shared by the sync dispatch loop and the
+// continuable path — both materialize BEFORE Exec against a ctx that carries
+// the tenant pin (and, when live, the request secret cache + budget). The
+// CALLER owns the bag's lifetime: Zero after the op's in-flight work
+// completes — for a continuable promotion that is the detached goroutine,
+// never the suspending request frame (a mid-flight wipe corrupts per-retry
+// credential reads, e.g. openrouter's per-attempt Authorization build).
+func (pu *Unit) materializeOpSecrets(ctx context.Context, op *operation.Operation) error {
+	if pu.Secrets == nil {
+		return errors.New("op declares `secrets` but the secret store is not configured (--secret-master-key unset)")
+	}
+	refs, perr := secrets.ParseRefs(op.Meta)
+	if perr != nil {
+		return fmt.Errorf("invalid `secrets` declaration: %w", perr)
+	}
+	tenantSlug := tenantScope(ctx)
+	for _, name := range secrets.DistinctNames(refs) {
+		cleartext, _, merr := pu.Secrets.MaterializeForOpSlug(ctx, tenantSlug, op.Stack, name)
+		if merr != nil {
+			return fmt.Errorf("secret %q: %w", name, merr)
+		}
+		op.Secrets.Set(name, cleartext)
+		// Per-reference counter (cache hits + misses). Operationally
+		// useful for spotting a runaway op that re-materializes the same
+		// secret thousands of times per second, and for per-tenant audit/
+		// quota signals. NEVER includes the cleartext.
+		pu.Mc.RecordSecretMaterialize(ctx, tenantSlug, name)
+		// Fuel charge for the materialization. Err ignored; next Run-entry
+		// catches overshoot (same pattern as Exec). Audit happens before
+		// fuel so the audit invariant holds even if fuel exhausts mid-loop.
+		_ = addFuel(ctx, fuelCostSecretMaterialize, op.Stack+"/"+strconv.Itoa(op.Scope))
+	}
+	return nil
 }
 
 func (pu *Unit) scopeHasAsync(ops []operation.Operation) bool {
@@ -1971,7 +2015,7 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 		// op, writes its terminal, and triggers Resume when the
 		// stage is fully complete.
 		if async && isLocalAsyncOp(op) {
-			pu.dispatchLocalAsync(ctx, op, runID, cstage, ordinal, name)
+			pu.dispatchLocalAsync(ctx, op, raw, runID, cstage, ordinal, name)
 			continue
 		}
 
@@ -1983,19 +2027,21 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 				pu.Logger.Error("op timeout exceeds op-timeout-max; failing op",
 					zap.String("stage", cstage), zap.String("op", name))
 				_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "failed",
-					failPayload("op timeout exceeds op-timeout-max"))
+					continuation.TerminalMeta{}, failPayload("op timeout exceeds op-timeout-max"))
 				return
 			}
 			octx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 
 			if !async {
-				// Trust bit discarded: stored then merged at the sanitizing
-				// resume/deferred sites (async/worker output is always untrusted).
-				out, _, eerr := pu.Exec(octx, op)
+				// The transport rides the terminal so the resume merge makes
+				// the same trust decision the sync path would — a trusted
+				// txco://ai:// sibling in a barrier scope keeps its reserved
+				// stamps; worker/mock/http output is still sanitized there.
+				out, transport, eerr := pu.Exec(octx, op)
 				if eerr != nil {
 					_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "failed",
-						failPayload(eerr.Error()))
+						continuation.TerminalMeta{Transport: transport}, failPayload(eerr.Error()))
 					return
 				}
 				payload := out.Raw
@@ -2006,12 +2052,13 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 					out, oerr := pu.OverlayResponse(op.Input, payload, op.Resonator.Emit.Overrides)
 					if oerr != nil {
 						_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "failed",
-							failPayload(oerr.Error()))
+							continuation.TerminalMeta{Transport: transport}, failPayload(oerr.Error()))
 						return
 					}
 					payload = out
 				}
-				_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "completed", []byte(payload))
+				_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "completed",
+					continuation.TerminalMeta{Transport: transport}, []byte(payload))
 				return
 			}
 
@@ -2039,7 +2086,7 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 					Status: "error", Error: aerr.Error(),
 				})
 				_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "failed",
-					failPayload(aerr.Error()))
+					continuation.TerminalMeta{}, failPayload(aerr.Error()))
 				return
 			}
 			_ = pu.Runs.RecordAccepted(ctx, runID, cstage, ordinal, name, jobID)
@@ -2063,8 +2110,12 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 
 	// Under resume there is no client waiting (it already got its 202 on
 	// the original request); emitting here would be misread by Resume's
-	// capture channel as a final result. Re-suspend is silent.
+	// capture channel as a final result. Re-suspend is silent — except for
+	// billing: this ends the resume segment, so its fuel delta is emitted
+	// here (the run's eventual final resume only bills from THIS suspend
+	// forward).
 	if resuming {
+		pu.emitResumeSegmentUsage(ctx, raw, runID)
 		return nil
 	}
 
@@ -2124,6 +2175,26 @@ func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh
 		})
 	}
 
+	// A durable suspend IS acceptance: by the time this response is emitted
+	// the run is persisted and will complete regardless of what the mail
+	// session says. So when the originating inlet is LMTP (the PINNED
+	// source, never the rewritable envelope field) and no verdict was
+	// pre-emitted, synthesize 250 — the default-deny 550 would permanently
+	// bounce a message the chassis is still processing, and a 4xx would be
+	// worse (the sender retries and the flow runs twice). A pre-emitted
+	// verdict (code or per-recipient array) always wins.
+	if sourceScope(ctx) == "lmtp" &&
+		!gjson.Get(out, "_txc.lmtp.res.code").Exists() &&
+		!gjson.Get(out, "_txc.lmtp.res.recipients").Exists() {
+		pu.Logger.Info("continuation promoted on lmtp with no verdict; synthesizing 250 accept",
+			zap.String("rcid", rcid))
+		vals := []jsonx.PathVal{{Path: "_txc.lmtp.res.code", Val: 250}}
+		if !gjson.Get(out, "_txc.lmtp.res.msg").Exists() {
+			vals = append(vals, jsonx.PathVal{Path: "_txc.lmtp.res.msg", Val: "accepted; processing continues"})
+		}
+		out = jsonx.SetMany(out, vals)
+	}
+
 	select {
 	case resCh <- event.Payload{Raw: out, Type: event.JSON}:
 	case <-ctx.Done():
@@ -2169,10 +2240,21 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 
 	entries := append([]continuation.OpManifestEntry(nil), ss.Manifest...)
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Ordinal < entries[j].Ordinal })
+	// Fuel the detached op(s) charged to their own budget while running
+	// outside the request (continuable promotion) — folded into the merged
+	// envelope below so the resumed segment bills it. 0 for worker terminals.
+	var detachedFuel int64
 	for _, e := range entries {
 		term, terr := pu.Runs.ReadOpTerminal(ctx, runID, stage, e.Ordinal, e.Op)
 		if terr != nil {
 			return terr
+		}
+		// Show the transport that actually produced the terminal when it was
+		// recorded (chassis-dispatched ops); worker callbacks and legacy docs
+		// carry "" and keep the historical "async" label.
+		stepTransport := term.Transport
+		if stepTransport == "" {
+			stepTransport = "async"
 		}
 		if term.Status == "failed" {
 			var eb []byte
@@ -2180,7 +2262,7 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 				eb, _ = pu.Runs.Get(ctx, term.ErrorKey)
 			}
 			trace.FromContext(ctx).Step(trace.StepInfo{
-				Stack: rStack, Scope: rScope, Name: e.Op, Transport: "async",
+				Stack: rStack, Scope: rScope, Name: e.Op, Transport: stepTransport,
 				Output: eb, StartedAt: ss.SuspendedAt, FinishedAt: term.RecordedAt,
 				Status: "error", Error: "op failed",
 			})
@@ -2198,15 +2280,22 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 			}
 		}
 		trace.FromContext(ctx).Step(trace.StepInfo{
-			Stack: rStack, Scope: rScope, Name: e.Op, Transport: "async",
+			Stack: rStack, Scope: rScope, Name: e.Op, Transport: stepTransport,
 			Output: ob, StartedAt: ss.SuspendedAt, FinishedAt: term.RecordedAt,
 			Status: "completed",
 		})
+		detachedFuel += term.FuelUsed
 		if s := string(ob); s != "" && s != "{}" {
-			// Async worker output is untrusted: strip reserved _txc.* control
-			// fields so a hostile/buggy worker cannot forge tenant/computed/
-			// budget on resume.
-			s = sanitizeAuthorOutput(s)
+			// Stored terminal output is projected by the trust of the
+			// transport that produced it (persisted on the terminal doc).
+			// Worker-callback and legacy terminals carry no transport ⇒
+			// author-controlled ⇒ full strip, so a hostile/buggy worker
+			// cannot forge tenant/computed/budget on resume. A trusted
+			// chassis transport (ai://, txco://) keeps its reserved stamps
+			// (`_txc.chat.*`, `_txc.computed.*`) — but even trusted bytes
+			// are projected: the unforgeable core (tenant/fuel/ttl/rid/src)
+			// can never be replayed out of the store.
+			s = sanitizeTerminalOutput(term.Transport, s)
 			if m, merr := pu.MergeJSON(merged, s); merr == nil {
 				merged = m
 			} else {
@@ -2214,6 +2303,14 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 					zap.String("run", runID), zap.String("op", e.Op), zap.Error(merr))
 			}
 		}
+	}
+	if detachedFuel > 0 {
+		// Runtime-owned write (op output can never set this — the projection
+		// above strips it): the detached op's fuel joins the envelope meter,
+		// so the recursed Run's loadBudget and the resume billing delta
+		// (emitResumeUsage) both see it.
+		merged, _ = sjson.Set(merged, "_txc.fuel_used",
+			FuelUsedFromEnvelope(merged)+detachedFuel)
 	}
 
 	// Reconstruct ops/nextOps exactly as Run's prelude does, against the
@@ -2235,7 +2332,11 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 	// stacks. The tenant must come only from chassis-origin data, never
 	// from worker-supplied output — same invariant Run enforces by
 	// pinning once from the original `raw`.
-	rctx := withResumeRun(ctx, runID, "")
+	rctx := withResumeRun(ctx, resumeIdent{
+		runID:    runID,
+		segStage: stage, segFuel: FuelUsedFromEnvelope(ss.ScopeEnvelope),
+		segBytes: len(ss.ScopeEnvelope), segStart: start,
+	})
 	rctx = WithTenant(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.tenant").String())
 
 	// Resume against the opstack frozen at suspend, not the live one. The
@@ -2323,6 +2424,46 @@ func (pu *Unit) emitResumeUsage(ss continuation.StageSuspended, finalRaw []byte,
 		Status:     "ok",
 		BytesIn:    len(ss.ScopeEnvelope),
 		BytesOut:   len(finalRaw),
+		Fuel:       delta,
+		Billable:   true,
+	})
+}
+
+// emitResumeSegmentUsage bills a resume segment that ended by RE-SUSPENDING
+// rather than completing: delta = fuel(envelope being suspended now) −
+// fuel(segment-start envelope, carried on the resume ident). Called from the
+// silent re-suspend branches (same-scope barrier, continuable promotion,
+// deferred join) — without it, a middle segment of a multi-suspend run
+// reaches the envelope meter but never a usage line, because the final
+// resume's delta subtracts only the LAST suspend's baseline. No-op when
+// usage is disabled or ctx carries no resume segment (a first suspend bills
+// through the original request's convergence line instead). Same RID as the
+// segment's resume trace, so billing and trace stay 1:1.
+func (pu *Unit) emitResumeSegmentUsage(ctx context.Context, suspendEnvelope, runID string) {
+	if pu.Usage == nil {
+		return
+	}
+	ri, ok := resumeRunFrom(ctx)
+	if !ok || ri.segStage == "" {
+		return
+	}
+	delta := FuelUsedFromEnvelope(suspendEnvelope) - ri.segFuel
+	if delta < 0 {
+		delta = 0
+	}
+	stack := gjson.Get(suspendEnvelope, "_txc.stack").String()
+	if stack == "" {
+		stack = ri.segStage
+	}
+	pu.Usage.WriteEvent(usage.UsageEvent{
+		RID:        continuation.ResumeTraceRID(runID, ri.segStage),
+		Tenant:     TenantFromEnvelope(suspendEnvelope),
+		Src:        "continuation",
+		Stack:      stack,
+		DurationMS: time.Since(ri.segStart).Milliseconds(),
+		Status:     "ok",
+		BytesIn:    ri.segBytes,
+		BytesOut:   len(suspendEnvelope),
 		Fuel:       delta,
 		Billable:   true,
 	})
@@ -2454,14 +2595,16 @@ func injectRuntimeIdentity(body, stack, name string, scope int) string {
 
 // Exec Execute an operation at this step
 // Exec dispatches an operation to its transport and returns the produced
-// payload. The bool return — authorControlled — reports whether the output came
-// from an author-controlled producer (remote HTTP, sandboxed compute, an MCP
-// tool, or a rule-author mock) as opposed to a trusted built-in core handler,
-// the chassis-owned ai:// namespace, or a synthesized control output. Callers
-// that merge this output into the envelope MUST sanitizeAuthorOutput it when
-// authorControlled is true, so an untrusted producer cannot forge reserved
-// `_txc.*` control fields (tenant, computed auth, budget, …).
-func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload, bool, error) {
+// payload plus the transport string the dispatch switch actually took
+// ("txco", "https", "ai", "mock", …). Callers derive the trust decision via
+// transportAuthorControlled(transport) and MUST sanitizeAuthorOutput the
+// output before merging it into the envelope when that reports true, so an
+// untrusted producer (remote HTTP, sandboxed compute, an MCP tool, or a
+// rule-author mock) cannot forge reserved `_txc.*` control fields (tenant,
+// computed auth, budget, …). Callers that STORE the output (continuation
+// terminals) persist the transport with it so the later resume merge can
+// make the same decision.
+func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload, string, error) {
 
 	execStart := time.Now()
 
@@ -2662,7 +2805,7 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 		Error:      stepErr,
 	})
 
-	return payload, transportAuthorControlled(transport), err
+	return payload, transport, err
 }
 
 // computeLogWriter routes a sandboxed compute's diagnostic output (console.*,

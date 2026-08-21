@@ -20,8 +20,9 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 )
 
-// TestIsContinuableOpClassification — gate function unit. Matches
-// http(s)://, mcp+http(s)://, with `mode = "continuable"`; rejects others.
+// TestIsContinuableOpClassification — gate function unit. Continuable is
+// op-level METADATA: any transport with `mode = "continuable"` qualifies
+// (the scheme allowlist was removed); only the mode value gates.
 func TestIsContinuableOpClassification(t *testing.T) {
 	cases := []struct {
 		exec string
@@ -32,9 +33,11 @@ func TestIsContinuableOpClassification(t *testing.T) {
 		{"http://example.com/api", `{"mode":"continuable"}`, true},
 		{"mcp+http://example.com/x#tool", `{"mode":"continuable"}`, true},
 		{"mcp+https://example.com/x#tool", `{"mode":"continuable"}`, true},
+		{"ai://chat", `{"mode":"continuable"}`, true},   // metadata, not scheme
+		{"txco://noop", `{"mode":"continuable"}`, true}, // pointless but legal
+		{"compute://sha256/abc", `{"mode":"continuable"}`, true},
 		{"https://example.com/api", `{"mode":"async"}`, false}, // wrong mode
 		{"https://example.com/api", `{}`, false},               // no mode
-		{"txco://noop", `{"mode":"continuable"}`, false},       // unsupported scheme
 	}
 	for _, tc := range cases {
 		op := operation.Operation{

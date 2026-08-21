@@ -44,6 +44,10 @@ func (pu *Unit) execEmbed(ctx context.Context, op operation.Operation) (event.Pa
 	if err := pu.materializeEmbedSecrets(ctx, &op, backend); err != nil {
 		return embedErrorPayload(op, backend.Name(), routingDecision, err), nil
 	}
+	// This frame owns the handler-materialized cleartext: for ops with no
+	// WITH `secrets` there is no processor-level wipe (the Run-loop defer
+	// installs only when HasRefs). Zero once the provider call has returned.
+	defer op.Secrets.Zero()
 
 	req := embed.Request{
 		Texts:      withCfg.texts,

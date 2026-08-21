@@ -478,10 +478,18 @@ func (pu *Unit) opContinueAfter(op operation.Operation) time.Duration {
 // op — bounds the upstream work both PRE- and POST-promotion. Same author-
 // facing `WITH timeout` knob as sync / async; default comes from
 // continuable-timeout-default (independent from async-runtime-default so the
-// two paths can be tuned separately). Deliberately NOT capped by
-// op-timeout-max — continuable IS a long-running path once promoted.
+// two paths can be tuned separately), except `ai://*` ops default to
+// ai-default-timeout — the same scheme-aware default the sync dispatch loop
+// applies, so an LLM call is bounded identically whether or not it promotes.
+// Deliberately NOT capped by op-timeout-max — continuable IS a long-running
+// path once promoted.
 func (pu *Unit) opContinuableTimeout(op operation.Operation) time.Duration {
 	budget, _ := time.ParseDuration(pu.Conf.ContinuableTimeoutDefault) // validated at startup
+	if op.Resonator != nil && strings.HasPrefix(op.Resonator.Exec, "ai://") {
+		if aiTimeout, err := time.ParseDuration(pu.Conf.AIDefaultTimeout); err == nil {
+			budget = aiTimeout
+		}
+	}
 	if val := gjson.Get(op.Meta, "timeout"); val.Exists() {
 		switch val.Type {
 		case gjson.Number:

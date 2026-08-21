@@ -147,9 +147,12 @@ func (r *Runs) CreateDeferredOp(ctx context.Context, runID string, sp DeferredOp
 // RecordDeferredTerminal records a deferred op's result at its opc-keyed
 // location. First terminal (success OR failure) wins; a duplicate/late
 // callback gets ErrExists on the terminal doc ⇒ recorded=false, a harmless
-// no-op. Mirrors RecordTerminal. status must be "completed" or "failed".
-func (r *Runs) RecordDeferredTerminal(ctx context.Context, runID, opc, status string, payload []byte) (recorded bool, err error) {
-	term := OpTerminal{Status: status, RecordedAt: time.Now().UTC()}
+// no-op. Mirrors RecordTerminal (including the TerminalMeta provenance
+// stamp — zero value for worker-posted bytes). status must be "completed"
+// or "failed".
+func (r *Runs) RecordDeferredTerminal(ctx context.Context, runID, opc, status string, meta TerminalMeta, payload []byte) (recorded bool, err error) {
+	term := OpTerminal{Status: status, RecordedAt: time.Now().UTC(),
+		Transport: meta.Transport, FuelUsed: meta.FuelUsed}
 	switch status {
 	case "completed":
 		k := deferredOutputKey(runID, opc)

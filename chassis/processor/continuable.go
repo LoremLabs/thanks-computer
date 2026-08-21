@@ -12,6 +12,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -49,6 +50,15 @@ func (pu *Unit) runScopeContinuable(
 	}
 	op.Input = in
 
+	// The deferred-join peel only applies to mode="async" (deferred
+	// dispatch); a join floor on a continuable op would be silently
+	// ignored — reject loudly instead, before the timing checks (mode
+	// compatibility is the more fundamental authoring error).
+	if j, ok := opJoinAtScope(op); ok {
+		return pu.failContinuableInline(ctx, resCh,
+			fmt.Errorf("join_at_scope (= %d) requires mode = \"async\"; it is not honored with mode = \"continuable\"", j))
+	}
+
 	continueAfter := pu.opContinueAfter(op)
 	timeout := pu.opContinuableTimeout(op)
 	if continueAfter <= 0 {
@@ -61,20 +71,42 @@ func (pu *Unit) runScopeContinuable(
 				continueAfter, timeout))
 	}
 
+	// Materialize WITH `secrets.*` BEFORE spawning the op goroutine, against
+	// the request ctx (tenant pin + request secret cache + request budget —
+	// this is synchronous pre-promotion work, so its fuel charges the
+	// request like any sync op's would). The bag's lifetime then belongs to
+	// whoever sees the op actually finish: the sync-win branch, the detached
+	// goroutine, or the client-disconnect drain below. Never a defer in THIS
+	// frame — the promotion path returns while the op is still in flight,
+	// and a mid-flight wipe corrupts per-retry credential reads.
+	if secrets.HasRefs(op.Meta) {
+		if merr := pu.materializeOpSecrets(ctx, &op); merr != nil {
+			pu.Logger.Error("continuable: secret materialization failed",
+				zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
+				zap.String("op_name", op.Name), zap.Error(merr))
+			return pu.failContinuableInline(ctx, resCh, merr)
+		}
+	}
+
 	// Fire upstream in a goroutine with its OWN ctx so we can detach
-	// independently from the request ctx. Buffered 1 so the goroutine
-	// never blocks if we've moved on (promotion path drains later).
-	workCtx, workCancel := context.WithTimeout(context.Background(), timeout)
+	// independently from the request ctx — detached from the request's
+	// CANCELLATION, but still carrying the request VALUES the op
+	// legitimately needs (tenant/source pins, rid, a live fuel budget).
+	// Buffered 1 so the goroutine never blocks if we've moved on
+	// (promotion path drains later).
+	workCtx, fuelStart, workCancel := pu.detachedOpContext(ctx, raw, timeout)
 	done := make(chan continuableResult, 1)
 	aStart := time.Now()
 	go func() {
-		out, authorControlled, eerr := pu.Exec(workCtx, op)
+		out, transport, eerr := pu.Exec(workCtx, op)
 		// Untrusted producer output is sanitized here so BOTH the sync-merge
 		// path (below) and any async-promotion reuse see only allowed _txc.*.
-		if eerr == nil && authorControlled && out.Type == event.JSON {
+		// Trusted transports (ai://, txco://) pass through — their reserved
+		// stamps (_txc.chat.*, _txc.computed.*) are the point.
+		if eerr == nil && transportAuthorControlled(transport) && out.Type == event.JSON {
 			out.Raw = sanitizeAuthorOutput(out.Raw)
 		}
-		done <- continuableResult{payload: out, err: eerr}
+		done <- continuableResult{payload: out, transport: transport, err: eerr}
 	}()
 
 	timer := time.NewTimer(continueAfter)
@@ -84,26 +116,76 @@ func (pu *Unit) runScopeContinuable(
 	case r := <-done:
 		// SYNC PATH — completed before continue_after. Cancel the work
 		// ctx (no-op since the call already returned, but releases the
-		// timeout goroutine) and integrate the response.
+		// timeout goroutine), wipe the bag (Exec has returned; nothing
+		// reads secrets past this point), transfer the fuel the op drew
+		// on its detached budget onto the request's meter, and integrate
+		// the response.
 		workCancel()
+		op.Secrets.Zero()
+		if drawn := fuelUsedFromCtx(workCtx) - fuelStart; drawn > 0 {
+			// Err ignored: next Run-entry catches overshoot (same pattern
+			// as Exec's charge site).
+			_ = addFuel(ctx, drawn, stage)
+		}
 		return pu.completeContinuableSync(ctx, raw, stage, meta, op, name, ops, nextOps, r, aStart, resCh)
 	case <-timer.C:
 		// PROMOTION PATH — suspend durably, emit 202, detach goroutine.
-		return pu.promoteContinuable(ctx, raw, stage, op, name, done, workCtx, workCancel, aStart, resCh)
+		return pu.promoteContinuable(ctx, raw, stage, op, name, done, workCtx, workCancel, fuelStart, aStart, resCh)
 	case <-ctx.Done():
 		// Client disconnected before promotion would have fired. Kill the
 		// upstream too — the response was speculative-sync, no continuation
-		// exists yet, no one's listening.
+		// exists yet, no one's listening. The bag is wiped only after the
+		// op goroutine actually returns (a cancel is a signal, not a join).
 		workCancel()
+		go func() {
+			<-done
+			op.Secrets.Zero()
+		}()
 		return ctx.Err()
 	}
 }
 
+// detachedOpContext builds the context a continuable op's goroutine runs
+// under: a fresh Background-rooted ctx (so the request ending cannot cancel
+// the detached work) carrying explicit copies of the request values the op
+// legitimately needs —
+//
+//   - the tenant pin (per-tenant secret resolution in ai:// and friends),
+//   - the source pin (privileged ops gate on the originating inlet),
+//   - the rid (op logging attribution),
+//   - a FRESH fuel/TTL budget hydrated from the envelope, so detached work
+//     meters exactly like sync work (returned fuelStart is the hydrated
+//     baseline; drawn fuel = fuelUsedFromCtx(workCtx) − fuelStart).
+//
+// The request tracer is deliberately NOT carried: the promotion records its
+// own pending step on the origin trace, and the detached completion lands
+// on the resume trace (finishContinuableDetached attaches it). Copying
+// values explicitly — rather than context.WithoutCancel — keeps the origin
+// trace and the request-scoped secret cache from leaking past the request.
+func (pu *Unit) detachedOpContext(ctx context.Context, raw string, timeout time.Duration) (context.Context, int64, context.CancelFunc) {
+	dctx := context.Background()
+	if t := tenantScope(ctx); t != "" {
+		dctx = WithTenant(dctx, t)
+	}
+	if s := sourceScope(ctx); s != "" {
+		dctx = WithSource(dctx, s)
+	}
+	if rid, ok := ctx.Value(config.CtxKeyRid).(string); ok && rid != "" {
+		dctx = context.WithValue(dctx, config.CtxKeyRid, rid)
+	}
+	dctx, fuelStart, _ := loadBudget(dctx, raw, pu.Conf)
+	dctx, cancel := context.WithTimeout(dctx, timeout)
+	return dctx, fuelStart, cancel
+}
+
 // continuableResult is the inner channel payload — keeps the select
-// readable.
+// readable. transport is what Exec's dispatch switch actually took; it is
+// persisted on the terminal so the resume merge can key its trust decision
+// on it.
 type continuableResult struct {
-	payload event.Payload
-	err     error
+	payload   event.Payload
+	transport string
+	err       error
 }
 
 // failContinuableInline emits an error payload to the client without
@@ -209,6 +291,7 @@ func (pu *Unit) promoteContinuable(
 	done chan continuableResult,
 	workCtx context.Context,
 	workCancel context.CancelFunc,
+	fuelStart int64,
 	aStart time.Time,
 	resCh chan event.Payload,
 ) error {
@@ -216,33 +299,50 @@ func (pu *Unit) promoteContinuable(
 	tenant, _ := ctx.Value(ctxKeyTenant).(string)
 	cstage := stage
 
-	// 1. Mint a run + rcid; freeze the opstack snapshot so a later
-	//    `txco apply` can't change what this in-flight run resolves
-	//    against (same protocol as suspendBarrierScope).
-	var snapData []byte
-	var snapHash string
-	var snapN int
-	if d, h, n, serr := pu.snapshotOpstack(ctx, tenant); serr != nil {
-		pu.Logger.Warn("continuable: opstack snapshot failed; run will resume against live opstack",
-			zap.String("tenant", tenant), zap.String("stack", stack), zap.Error(serr))
-	} else if n > 0 {
-		snapData, snapHash, snapN = d, h, n
-	}
-	originRID, _ := ctx.Value(config.CtxKeyRid).(string)
-	runID, rcid, err := pu.Runs.CreateRun(ctx, tenant, stack, snapHash, cstage, originRID, time.Time{})
-	if err != nil {
-		workCancel()
-		return err
-	}
-	if snapN > 0 {
-		if werr := pu.Runs.WriteOpstackSnapshot(ctx, runID, snapData); werr != nil {
-			pu.Logger.Warn("continuable: opstack snapshot write failed",
-				zap.String("run", runID), zap.Error(werr))
+	// 1. Resolve the run identity. A continuable promoting inside a RESUMED
+	//    pipeline (or after a deferred dispatch on this request) reuses the
+	//    existing run — same protocol as suspendBarrierScope — rather than
+	//    minting a second run; only a fresh request creates one and freezes
+	//    the opstack snapshot (so a later `txco apply` can't change what
+	//    this in-flight run resolves against).
+	var runID, rcid string
+	resuming := false
+	// Snapshot hash recorded on the run/stage docs (debug/trace only —
+	// resume loads the snapshot doc by runID, not by hash). Set on first
+	// suspend; "" when reusing an existing run's identity.
+	snapHash := ""
+	if ri, ok := resumeRunFrom(ctx); ok {
+		runID, rcid, resuming = ri.runID, ri.rcid, true
+	} else if di, ok := deferredRunFrom(ctx); ok {
+		// Run + snapshot already exist from the deferred dispatch. NOT
+		// resuming: the client is still attached and this is its first 202.
+		runID, rcid = di.runID, di.rcid
+	} else {
+		var snapData []byte
+		var snapN int
+		if d, h, n, serr := pu.snapshotOpstack(ctx, tenant); serr != nil {
+			pu.Logger.Warn("continuable: opstack snapshot failed; run will resume against live opstack",
+				zap.String("tenant", tenant), zap.String("stack", stack), zap.Error(serr))
+		} else if n > 0 {
+			snapData, snapHash, snapN = d, h, n
 		}
+		originRID, _ := ctx.Value(config.CtxKeyRid).(string)
+		var err error
+		runID, rcid, err = pu.Runs.CreateRun(ctx, tenant, stack, snapHash, cstage, originRID, time.Time{})
+		if err != nil {
+			workCancel()
+			return err
+		}
+		if snapN > 0 {
+			if werr := pu.Runs.WriteOpstackSnapshot(ctx, runID, snapData); werr != nil {
+				pu.Logger.Warn("continuable: opstack snapshot write failed",
+					zap.String("run", runID), zap.Error(werr))
+			}
+		}
+		_ = pu.Runs.AppendEvent(ctx, runID, "run.created", map[string]any{
+			"stack": stack, "stage": cstage, "tenant": tenant, "promoted_from": "continuable",
+		})
 	}
-	_ = pu.Runs.AppendEvent(ctx, runID, "run.created", map[string]any{
-		"stack": stack, "stage": cstage, "tenant": tenant, "promoted_from": "continuable",
-	})
 
 	// 2. Suspend the stage with a one-op manifest (solo scope; ordinal 0).
 	//    `Async: true` so StageState treats it like an async op pending a
@@ -292,19 +392,29 @@ func (pu *Unit) promoteContinuable(
 	// 4. Detach the upstream goroutine. When it returns (or workCtx
 	//    times out), record the terminal and drive Resume — symmetric
 	//    with dispatchLocalAsync's tail.
-	go pu.finishContinuableDetached(workCtx, workCancel, done, runID, cstage, name, op)
+	go pu.finishContinuableDetached(workCtx, workCancel, done, runID, cstage, name, op, fuelStart)
 
 	// 5. Emit the 202 (or 303 for browser Accept) to the client. From
 	//    here the lifecycle is identical to mode=async: client polls
 	//    /?_txc.continuation=<rcid>, gets the wait page if HTML, gets
 	//    JSON status otherwise, eventually gets the resumed result.
-	pu.emitContinuation202(ctx, raw, rcid, resCh)
+	//    Under resume there is no client waiting (it got its 202 on the
+	//    original request); emitting here would be misread by Resume's
+	//    capture channel as a final result — mirror suspendBarrierScope's
+	//    silence, but bill the resume segment this suspend just ended.
+	if resuming {
+		pu.emitResumeSegmentUsage(ctx, raw, runID)
+	} else {
+		pu.emitContinuation202(ctx, raw, rcid, resCh)
+	}
 	return nil
 }
 
 // finishContinuableDetached runs in the detached goroutine after a
-// promotion: drains the in-flight EXEC result, records its terminal, and
-// claims+Resume's the suspended stage. Spawns a resume trace with
+// promotion: drains the in-flight EXEC result, wipes the op's secret bag
+// (this goroutine owns its lifetime — the suspending request frame returned
+// long ago), records its terminal with the producing transport + detached
+// fuel, and claims+Resume's the suspended stage. Spawns a resume trace with
 // origin_rid linkage (admin-ui cross-navigation) — exact same shape as
 // dispatchLocalAsync.
 func (pu *Unit) finishContinuableDetached(
@@ -313,15 +423,39 @@ func (pu *Unit) finishContinuableDetached(
 	done chan continuableResult,
 	runID, stage, name string,
 	op operation.Operation,
+	fuelStart int64,
 ) {
 	defer workCancel()
 
 	var r continuableResult
 	select {
 	case r = <-done:
+		// Exec has returned — safe to wipe the bag now.
+		op.Secrets.Zero()
 	case <-workCtx.Done():
 		r = continuableResult{err: workCtx.Err()}
+		// The op goroutine may still be unwinding from the cancel; wipe
+		// only after it actually returns (a cancel is a signal, not a join).
+		go func() {
+			<-done
+			op.Secrets.Zero()
+		}()
 	}
+
+	// Fuel the op drew on its detached budget — persisted on the terminal
+	// so Resume folds it into the envelope meter (billing parity with sync).
+	drawnFuel := fuelUsedFromCtx(workCtx) - fuelStart
+	if drawnFuel < 0 {
+		drawnFuel = 0
+	}
+
+	// The record/resume sequence runs on its OWN context: workCtx bounds the
+	// upstream op and may already be exhausted (the timeout branch above) or
+	// nearly so — a slow upstream must not starve the resume pipeline, which
+	// runs every remaining scope of the run. Background like the worker-
+	// callback and deferred resume paths; the resumed ops' own timeouts
+	// bound the work.
+	finCtx := context.Background()
 
 	var tracer trace.RequestTracer
 	var runTenant string // the run's tenant slug, for resume-trace attribution
@@ -332,7 +466,7 @@ func (pu *Unit) finishContinuableDetached(
 			Stack:     stage,
 			StartedAt: time.Now(),
 		})
-		if rc, rcErr := pu.Runs.ReadRunCreated(workCtx, runID); rcErr == nil {
+		if rc, rcErr := pu.Runs.ReadRunCreated(finCtx, runID); rcErr == nil {
 			runTenant = rc.TenantID
 			tracer.Event(trace.TimelineEvent{
 				Ts:    time.Now(),
@@ -346,7 +480,7 @@ func (pu *Unit) finishContinuableDetached(
 				},
 			})
 		}
-		workCtx = trace.WithContext(workCtx, tracer)
+		finCtx = trace.WithContext(finCtx, tracer)
 	}
 
 	status := "completed"
@@ -370,7 +504,8 @@ func (pu *Unit) finishContinuableDetached(
 		}
 	}
 
-	if _, terr := pu.Runs.RecordTerminal(workCtx, runID, stage, 0, name, status, []byte(payload)); terr != nil {
+	if _, terr := pu.Runs.RecordTerminal(finCtx, runID, stage, 0, name, status,
+		continuation.TerminalMeta{Transport: r.transport, FuelUsed: drawnFuel}, []byte(payload)); terr != nil {
 		pu.Logger.Error("continuable: RecordTerminal failed",
 			zap.String("run", runID), zap.String("stage", stage),
 			zap.String("op", name), zap.Error(terr))
@@ -380,14 +515,14 @@ func (pu *Unit) finishContinuableDetached(
 		return
 	}
 
-	ss, sserr := pu.Runs.ReadStageSuspended(workCtx, runID, stage)
+	ss, sserr := pu.Runs.ReadStageSuspended(finCtx, runID, stage)
 	if sserr != nil {
 		if tracer != nil {
 			tracer.End("error", "continuable: ReadStageSuspended failed: "+sserr.Error(), nil)
 		}
 		return
 	}
-	state, _ := pu.Runs.StageState(workCtx, runID, stage, ss.Manifest)
+	state, _ := pu.Runs.StageState(finCtx, runID, stage, ss.Manifest)
 	if state != continuation.StateResumable {
 		// Solo-scope means this terminal SHOULD always make the stage
 		// resumable; if it doesn't, the run is in an unexpected state.
@@ -399,14 +534,14 @@ func (pu *Unit) finishContinuableDetached(
 		}
 		return
 	}
-	won, _ := pu.Runs.ClaimResume(workCtx, runID, stage)
+	won, _ := pu.Runs.ClaimResume(finCtx, runID, stage)
 	if !won {
 		if tracer != nil {
 			tracer.End("ok", "", nil)
 		}
 		return
 	}
-	rerr := pu.Resume(workCtx, runID, stage)
+	rerr := pu.Resume(finCtx, runID, stage)
 	if rerr != nil {
 		pu.Logger.Error("continuable: Resume failed",
 			zap.String("run", runID), zap.String("stage", stage), zap.Error(rerr))
@@ -418,7 +553,7 @@ func (pu *Unit) finishContinuableDetached(
 		if rerr != nil {
 			rStatus = "error"
 			rReason = "continuable: Resume failed: " + rerr.Error()
-		} else if res, ok, _ := pu.Runs.ReadResult(workCtx, runID); ok {
+		} else if res, ok, _ := pu.Runs.ReadResult(finCtx, runID); ok {
 			final = res
 		}
 		// Attribute the resume trace to the run's stored tenant slug (what

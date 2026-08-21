@@ -115,6 +115,10 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 	if err := pu.materializeChatSecrets(ctx, &op, backend); err != nil {
 		return chatErrorPayload(op, backend.Name(), "", routingDecision, err), nil
 	}
+	// This frame owns the handler-materialized cleartext: for ops with no
+	// WITH `secrets` there is no processor-level wipe (the Run-loop defer
+	// installs only when HasRefs). Zero once the provider call has returned.
+	defer op.Secrets.Zero()
 
 	// Render prompt templates over op.Input. WITH `messages = [...]` opts
 	// out of templating entirely — the message bodies are passed verbatim
@@ -310,8 +314,9 @@ func buildMessages(w chatWith) []chat.Message {
 //
 // Mirrors the existing materialize loop's bookkeeping: per-name fuel
 // charge (100 fuel), audit counter increment. Cleanup of cleartext is
-// already deferred by the existing loop's `defer op.Secrets.Zero()` at
-// processor.go:680 — runs on every Run exit path, including this one.
+// owned by ExecAI's own `defer op.Secrets.Zero()` — the Run-loop defer
+// installs only when the op declares WITH `secrets`, so a bag populated
+// solely here would otherwise never be wiped.
 func (pu *Unit) materializeChatSecrets(ctx context.Context, op *operation.Operation, backend chat.Backend) error {
 	required := backend.RequiredSecrets()
 	if len(required) == 0 {
