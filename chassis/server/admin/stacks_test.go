@@ -958,13 +958,16 @@ func TestPatchUpdatesManifestHash(t *testing.T) {
 func TestValidateStackName(t *testing.T) {
 	const realTenant = "tnt_default"
 
-	// boot/* is rejected for any non-system tenant.
+	// boot/* and _sys/* are rejected for any non-system tenant.
 	reservedForTenant := []string{
 		"boot",
 		"boot/web",
 		"boot/anything/deep",
 		"BOOT/web", // SQLite LIKE is case-insensitive
 		"Boot/Web", // mixed case
+		"_sys",     // system bundle namespace
+		"_sys/boot",
+		"_SYS/boot", // case-insensitive like boot/*
 	}
 	for _, n := range reservedForTenant {
 		if err := validateStackName(n, realTenant); err == nil {
@@ -993,6 +996,9 @@ func TestValidateStackName(t *testing.T) {
 		"booted",         // only exact `boot` / `boot/` prefix is reserved
 		"reboot/x",
 		"tenant-a/web",
+		"_llm",    // tenant inlet stacks stay legal — only `_sys` is reserved
+		"_cron",   // (see validateStackName: NOT all `_`-prefixed names)
+		"_sysops", // only exact `_sys` / `_sys/` prefix is reserved
 	}
 	for _, n := range ok {
 		if err := validateStackName(n, realTenant); err != nil {

@@ -18,4 +18,4 @@
 #
 # @ is sugar for ._txc. ; swap EMIT for EXEC "op://…" to do real work.
 WHEN @src == "cron" && @cron.mod10 == 1
-  EMIT @cron.heartbeat = true
+  EMIT .cron.heartbeat = true

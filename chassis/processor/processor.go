@@ -907,7 +907,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					// emitter (no EXEC needed; we synthesized "{}"
 					// above).
 					if op.Resonator.Emit != nil {
-						out, oerr := pu.OverlayResponse(op.EnvelopeView(), op.Output, op.Resonator.Emit.Overrides)
+						out, oerr := pu.OverlayResponseFor(ctx, op.EnvelopeView(), op.Output, op.Resonator.Emit.Overrides)
 						if oerr != nil {
 							pu.Logger.Debug("emit overlay", zap.String("err", oerr.Error()))
 							op.Output = string(failPayload(oerr.Error()))
@@ -1707,7 +1707,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 				payload = "{}"
 			}
 			if op.Resonator.Emit != nil {
-				out, oerr := pu.OverlayResponse(op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
+				out, oerr := pu.OverlayResponseFor(workCtx, op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 				if oerr != nil {
 					status = "failed"
 					payload = string(failPayload(oerr.Error()))
@@ -2049,7 +2049,7 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 					payload = "{}"
 				}
 				if op.Resonator != nil && op.Resonator.Emit != nil {
-					out, oerr := pu.OverlayResponse(op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
+					out, oerr := pu.OverlayResponseFor(octx, op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 					if oerr != nil {
 						_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "failed",
 							continuation.TerminalMeta{Transport: transport}, failPayload(oerr.Error()))
@@ -2794,7 +2794,7 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 		if payload.Type == event.Null || base == "" {
 			base = "{}"
 		}
-		if ov, oerr := pu.OverlayResponse(op.EnvelopeView(), base, op.Resonator.Emit.Overrides); oerr == nil {
+		if ov, oerr := pu.OverlayResponseFor(ctx, op.EnvelopeView(), base, op.Resonator.Emit.Overrides); oerr == nil {
 			tracedOutput = ov
 		}
 	}
@@ -3332,7 +3332,28 @@ func (pu *Unit) DecorateInput(input string, overrides []resonator.BranchValue) (
 // errors (path unwritable) keep the existing log-and-continue
 // behavior because the path syntax is a programming bug rather
 // than a value-computation failure.
+//
+// This exported form applies AUTHOR provenance (fail-closed): reserved
+// `_txc.*` writes outside the author allowlist are dropped. Pipeline call
+// sites use OverlayResponseFor, which derives the provenance from the run's
+// pinned tenant so system-authored boot rules keep their route-proposal
+// capability.
 func (pu *Unit) OverlayResponse(env, output string, overrides []resonator.BranchValue) (string, error) {
+	return pu.overlayResponse(env, output, overrides, false)
+}
+
+// OverlayResponseFor is OverlayResponse with the writer's provenance derived
+// from ctx: a run pinned to the `_sys` tenant (the boot pipeline — see
+// systemMayWriteTxc for why the pin is unforgeable) is SYSTEM-authored and
+// may additionally EMIT `_txc.route.*`. Callers on detached paths must pass
+// the tenant-preserving work ctx (detachedOpContext), not a bare Background
+// ctx — getting it wrong fails closed (drops to author provenance).
+func (pu *Unit) OverlayResponseFor(ctx context.Context, env, output string, overrides []resonator.BranchValue) (string, error) {
+	return pu.overlayResponse(env, output, overrides,
+		tenantScope(ctx) == tenants.SystemTenantSlug)
+}
+
+func (pu *Unit) overlayResponse(env, output string, overrides []resonator.BranchValue, systemAuthored bool) (string, error) {
 	if output == "" {
 		output = "{}"
 	}
@@ -3380,8 +3401,18 @@ func (pu *Unit) OverlayResponse(env, output string, overrides []resonator.Branch
 			}
 			continue
 		}
-		// Reserved control fields (tenant, src, rid, route.*, cron.*,
-		// computed.*, chat.*, fuel_used, _seen, …) are not author-writable.
+		// SYSTEM-authored rules (boot pipeline, `_sys` pin) may propose
+		// routes — the operator-hook contract. See systemMayWriteTxc.
+		if systemAuthored && systemMayWriteTxc(branch) {
+			altered, err := sjson.Set(output, branch, val)
+			if err == nil {
+				output = altered
+			}
+			continue
+		}
+		// Reserved control fields (tenant, src, rid, route.* [system-
+		// authored excepted, above], cron.*, computed.*, chat.*, fuel_used,
+		// _seen, …) are not author-writable.
 		// `branch` is the post-@-expansion path (the lexer maps @tenant ->
 		// _txc.tenant), so an aliased EMIT is caught here too. Silently
 		// dropped — same posture as the previous fuel/_seen drop.

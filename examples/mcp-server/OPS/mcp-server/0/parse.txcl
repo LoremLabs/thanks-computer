@@ -2,15 +2,18 @@
 #
 # The web inlet stamps `@web.req.body` as base64. This rule decodes
 # it, parses the JSON-RPC envelope, and stores the parsed structure
-# at `@rpc` so subsequent rules can read `@rpc.method`,
-# `@rpc.params.name`, etc. as ordinary envelope paths.
+# at `.rpc` so subsequent rules can read `.rpc.method`,
+# `.rpc.params.name`, etc. as ordinary envelope paths.
 #
-# `@` is sugar for `_txc.` — both source (`@web.req.body`) and
-# destination (`@rpc`) live under the chassis-internal namespace,
-# which the web outlet strips on the way out so this plumbing
-# never leaks into the JSON-RPC response.
+# `@` is sugar for `_txc.` — the SOURCE (`@web.req.body`) is a
+# chassis-stamped request fact. The DESTINATION is a bare author
+# path (`.rpc`): `_txc.*` is the chassis control plane and rules
+# may only EMIT into its small allowlist (web.res, halt, …), so
+# author scratch lives in the ordinary envelope namespace. It never
+# reaches the wire anyway — respond.txcl writes an explicit
+# `@web.res.body`, which bypasses envelope projection entirely.
 #
-# EMIT (not SET) because we need @rpc to PERSIST across scopes —
+# EMIT (not SET) because we need .rpc to PERSIST across scopes —
 # SET PRE only shapes this op's own input view and is discarded if
 # there's no EXEC. See feedback_set_is_op_scoped in memory.
 #
@@ -24,4 +27,4 @@
 # so decoding it would fail; method-guard.txcl (same scope) handles
 # non-POST methods with a 405 instead.
 WHEN @src == "http" && @web.req.method == "POST"
-  EMIT @rpc = &json(&b64decode(@web.req.body))
+  EMIT .rpc = &json(&b64decode(@web.req.body))

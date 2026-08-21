@@ -1,9 +1,9 @@
 # mcp-server scope 200 — serialize the JSON-RPC response.
 #
-# Scope 100 built the complete response object at `@mcp.res`. This
+# Scope 100 built the complete response object at `.mcp.res`. This
 # rule turns it into the EXACT HTTP body bytes:
 #
-#   &to_json(@mcp.res)   → the JSON-RPC string
+#   &to_json(.mcp.res)   → the JSON-RPC string
 #   &b64encode(...)      → base64 (what _txc.web.res.body expects;
 #                          the web outlet base64-decodes it)
 #
@@ -21,8 +21,8 @@
 # This is the right pattern for ANY strict-client protocol server,
 # not just MCP — control your output bytes, don't lean on the
 # debug-mode-sensitive projection.
-WHEN @mcp.res != null
-  EMIT @web.res.body = &b64encode(&to_json(@mcp.res)),
+WHEN .mcp.res != null
+  EMIT @web.res.body = &b64encode(&to_json(.mcp.res)),
        @web.res.status = 200,
        @web.res.headers.content-type.0 = "application/json",
        @halt = true

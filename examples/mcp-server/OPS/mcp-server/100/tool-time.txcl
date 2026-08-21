@@ -8,11 +8,11 @@
 # This shape (one rule per tool, building the response in nested
 # expressions) is what the design doc means by "the rule author
 # thinks about the tool, not the protocol." The completed response
-# object lands at `@mcp.res`; scope 200 serializes it.
-WHEN @rpc.method == "tools/call" && @rpc.params.name == "time"
-  EMIT @mcp.res = &object(
+# object lands at `.mcp.res`; scope 200 serializes it.
+WHEN .rpc.method == "tools/call" && .rpc.params.name == "time"
+  EMIT .mcp.res = &object(
     "jsonrpc", "2.0",
-    "id", &get(@rpc, "id"),
+    "id", &get(.rpc, "id"),
     "result", &object(
       "content", &array(
         &object(

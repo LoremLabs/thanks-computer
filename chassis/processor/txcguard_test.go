@@ -8,6 +8,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
+	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
 )
 
@@ -238,6 +239,63 @@ func TestEmitTelemetryMetricsWritable(t *testing.T) {
 	}
 	if gjson.Get(got, "_txc.tenant").Exists() {
 		t.Errorf("EMIT forged _txc.tenant alongside telemetry: %s", got)
+	}
+}
+
+// TestEmitRouteSystemAuthoredOnly — the lockdown-regression fix for the
+// _sys/boot operator-hook pattern: a SYSTEM-authored rule (a run pinned to
+// the `_sys` tenant) may EMIT `_txc.route.*` proposals, while author
+// provenance still drops them, reserved siblings still drop even for
+// system, and lookalike paths stay reserved.
+func TestEmitRouteSystemAuthoredOnly(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	sysCtx := WithTenant(context.Background(), tenants.SystemTenantSlug)
+
+	overrides := []resonator.BranchValue{
+		{Path: "._txc.route.tenant", Value: ast.Literal{V: "default"}},
+		{Path: "._txc.route.stack", Value: ast.Literal{V: "mcp-server"}},
+		{Path: "._txc.route.to", Value: ast.Literal{V: "mcp-server/0"}},
+		{Path: "._txc.tenant", Value: ast.Literal{V: "intruder"}}, // reserved sibling
+		{Path: "._txc.routes", Value: ast.Literal{V: "lookalike"}},
+	}
+
+	got, err := pu.OverlayResponseFor(sysCtx, `{}`, `{}`, overrides)
+	if err != nil {
+		t.Fatalf("OverlayResponseFor: %v", err)
+	}
+	if g := gjson.Get(got, "_txc.route.to").String(); g != "mcp-server/0" {
+		t.Errorf("system EMIT _txc.route.to not written: %s", got)
+	}
+	if g := gjson.Get(got, "_txc.route.tenant").String(); g != "default" {
+		t.Errorf("system EMIT _txc.route.tenant not written: %s", got)
+	}
+	if gjson.Get(got, "_txc.tenant").Exists() {
+		t.Errorf("reserved _txc.tenant forged alongside system route EMIT: %s", got)
+	}
+	if gjson.Get(got, "_txc.routes").Exists() {
+		t.Errorf("lookalike _txc.routes written for system: %s", got)
+	}
+
+	// Author provenance — the exported default AND a concrete-tenant pin —
+	// still drops route.* (fail-closed).
+	for name, run := range map[string]func() (string, error){
+		"exported default": func() (string, error) {
+			return pu.OverlayResponse(`{}`, `{}`, overrides)
+		},
+		"concrete tenant pin": func() (string, error) {
+			return pu.OverlayResponseFor(WithTenant(context.Background(), "acme"), `{}`, `{}`, overrides)
+		},
+		"unpinned ctx": func() (string, error) {
+			return pu.OverlayResponseFor(context.Background(), `{}`, `{}`, overrides)
+		},
+	} {
+		out, oerr := run()
+		if oerr != nil {
+			t.Fatalf("%s: %v", name, oerr)
+		}
+		if gjson.Get(out, "_txc.route").Exists() {
+			t.Errorf("%s: route proposal survived author provenance: %s", name, out)
+		}
 	}
 }
 

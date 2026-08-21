@@ -4,13 +4,13 @@
 # mints a stateless session id (here just a fresh UUID v7 — the
 # demo doesn't validate sids; production would HMAC-sign them).
 #
-# The entire JSON-RPC response object is built at `@mcp.res` via
+# The entire JSON-RPC response object is built at `.mcp.res` via
 # &object / &array; scope 200's respond rule serializes it into the
 # HTTP body. We also stamp the session-id response header here.
-WHEN @rpc.method == "initialize"
-  EMIT @mcp.res = &object(
+WHEN .rpc.method == "initialize"
+  EMIT .mcp.res = &object(
     "jsonrpc", "2.0",
-    "id", &get(@rpc, "id"),
+    "id", &get(.rpc, "id"),
     "result", &object(
       "protocolVersion", "2025-06-18",
       "capabilities", &object("tools", &object("listChanged", false)),

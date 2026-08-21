@@ -17,7 +17,7 @@ MCP client ──HTTP POST /─► chassis
                           │
                           ▼
                     scope 0:  parse body
-                    @rpc = &json(&b64decode(@web.req.body))
+                    .rpc = &json(&b64decode(@web.req.body))
                           │
                           ▼
                     scope 100: dispatch by method
@@ -40,9 +40,9 @@ MCP client ◄──HTTP 200, JSON-RPC body ── chassis
 Rule files, ordered by scope:
 
 - **`OPS/mcp-server/0/parse.txcl`** — base64-decode `@web.req.body`,
-  parse the JSON-RPC envelope, stash the result at `@rpc` so every
-  later rule can address `@rpc.method`, `@rpc.params.name`,
-  `@rpc.params.arguments.text` etc. as ordinary envelope paths.
+  parse the JSON-RPC envelope, stash the result at `.rpc` so every
+  later rule can address `.rpc.method`, `.rpc.params.name`,
+  `.rpc.params.arguments.text` etc. as ordinary envelope paths.
 - **`OPS/mcp-server/100/initialize.txcl`** — JSON-RPC `initialize`.
   Returns server info + capabilities + a session-id header
   (the demo mints a fresh `&uuid()` per init; production would
@@ -179,7 +179,7 @@ generally useful across protocol patterns."
 
 1. Create `OPS/mcp-server/100/tool-<name>.txcl` modeled on
    `tool-echo.txcl`. The WHEN is
-   `@rpc.method == "tools/call" && @rpc.params.name == "<name>"`.
+   `.rpc.method == "tools/call" && .rpc.params.name == "<name>"`.
 2. Add the tool's metadata (name, description, inputSchema) to
    `OPS/mcp-server/100/tools-list.txcl` so `tools/list` advertises
    it.

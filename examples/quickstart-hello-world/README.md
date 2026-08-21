@@ -140,7 +140,7 @@ See `OPS/hello-world/_cron/100/heartbeat.txcl`:
 
 ```
 WHEN @src == "cron" && @cron.mod10 == 1
-  EMIT @cron.heartbeat = true
+  EMIT .cron.heartbeat = true
 ```
 
 That wakes once every 10 minutes (`:01, :11, :21, …`). Trace it with a short

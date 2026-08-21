@@ -337,26 +337,31 @@ func (c *Controller) codeManifestHash(ctx context.Context, tenantID, name string
 // into the 400 response body's `detail.reason`.
 // validateStackName guards the stack namespace the data plane treats
 // specially. `boot/*` (and bare `boot`) is the chassis-wide unrouted
-// fallback: a request matching no ingress route dispatches to the
-// untenanted stage `boot/%/0` (chassis/server.defaultEntryStage), whose
-// op lookup is deliberately NOT tenant-filtered
-// (processor.lookupOpsExact with an empty tenant scope). If a tenant
-// could own a `boot/<x>` stack, its scope-0 rules would be swept into
-// that fallback via `stack LIKE 'boot/%'` and execute for traffic that
-// isn't theirs — a cross-tenant escalation. The comparison is
+// fallback: a request matching no ingress route dispatches to the stage
+// `boot/%/0` (chassis/server.defaultEntryStage) pinned to the `_sys`
+// system tenant, so only `_sys`-owned ops may live there (the op lookup
+// is tenant-filtered — processor.tenantPredicate — since migration
+// 0007/system tenant). If a tenant could own a `boot/<x>` stack, its
+// scope-0 rules would sit in the fallback namespace and invite
+// confusion (and, pre-tenant-filtering, executed for traffic that
+// wasn't theirs — a cross-tenant escalation). The comparison is
 // case-insensitive because SQLite's LIKE is ASCII-case-insensitive, so
 // `BOOT/x` would still match the `boot/%` pattern. `%` is rejected
 // outright: it is the LIKE wildcard and has no legitimate use in a
 // stack name (a name containing it would itself behave as a wildcard in
 // the op lookup).
 //
-// boot/* is owned exclusively by the reserved system tenant: a request
-// that matches no ingress route runs pinned to `_sys` against the
-// `boot/%` namespace, so only `_sys`-owned ops may live there.
+// `_sys` (and `_sys/*`) is reserved the same way: it is the system
+// bundle's namespace, and letting a tenant squat the name invites a
+// future trust decision keyed on the string. Deliberately NOT all
+// `_`-prefixed names — tenants legitimately own inlet stacks like
+// `_llm`, `_cron`, `_room`, `_scheduled`, `_inspect`.
+//
 // actingTenantID is the tenant the caller is operating as
-// (auth.FromContext .TenantID); boot/* is permitted iff that is the
-// system tenant. Every other tenant is rejected, which is what keeps a
-// tenant from injecting rules into the chassis-wide fallback.
+// (auth.FromContext .TenantID); the reserved names are permitted iff
+// that is the system tenant. Every other tenant is rejected, which is
+// what keeps a tenant from injecting rules into the chassis-wide
+// fallback.
 //
 // Returns nil on success, or an error whose message goes verbatim into
 // the 400 response body's `detail.reason`.
@@ -365,6 +370,11 @@ func validateStackName(name, actingTenantID string) error {
 	if lower == "boot" || strings.HasPrefix(lower, "boot/") {
 		if actingTenantID != tenants.SystemTenantID {
 			return fmt.Errorf("stack name %q is reserved: boot/* is owned by the system tenant (the chassis ingress-fallback namespace)", name)
+		}
+	}
+	if lower == "_sys" || strings.HasPrefix(lower, "_sys/") {
+		if actingTenantID != tenants.SystemTenantID {
+			return fmt.Errorf("stack name %q is reserved: _sys/* is the system bundle namespace", name)
 		}
 	}
 	// Charset/segment rule (also bans '%', '.'/'..', whitespace,

@@ -235,7 +235,7 @@ func (pu *Unit) completeContinuableSync(
 		payload = "{}"
 	}
 	if op.Resonator != nil && op.Resonator.Emit != nil {
-		out, oerr := pu.OverlayResponse(op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
+		out, oerr := pu.OverlayResponseFor(ctx, op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 		if oerr != nil {
 			trace.FromContext(ctx).Step(trace.StepInfo{
 				Stack: op.Stack, Scope: op.Scope, Name: name,
@@ -494,7 +494,9 @@ func (pu *Unit) finishContinuableDetached(
 			payload = "{}"
 		}
 		if op.Resonator != nil && op.Resonator.Emit != nil {
-			out, oerr := pu.OverlayResponse(op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
+			// workCtx, not finCtx: the detached work ctx carries the tenant
+			// pin OverlayResponseFor keys system provenance on.
+			out, oerr := pu.OverlayResponseFor(workCtx, op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 			if oerr != nil {
 				status = "failed"
 				payload = string(failPayload(oerr.Error()))

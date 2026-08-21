@@ -88,7 +88,7 @@ inbound-support-mailbox/
 
 Each `.txcl` resonator holds a single `WHEN` rule. The classify arms are
 laddered across scopes (100/110/120) and the lower-priority ones are
-guarded on `@ticket.category == ""`, so "first matching wins" is
+guarded on `.ticket.category == ""`, so "first matching wins" is
 expressed by scope order — a later scope sees earlier scopes' `EMIT`s,
 whereas sibling rules at one scope cannot. The `150` default fires only
 when none of the arms matched.
@@ -97,7 +97,7 @@ There's no `_sys/` here — `txco dev` scaffolds it on first run.
 
 ## Try changing it
 
-- **Add a category.** Drop a new single-rule file beside the others (e.g. `130/feature-request.txcl`) with `WHEN @ticket.category == "" && @lmtp.msg.subject =~ /…/ EMIT @ticket.category = "…"`. Pick a scope between the last arm (120) and the default (150) to set its priority. Hot-reload picks it up.
+- **Add a category.** Drop a new single-rule file beside the others (e.g. `130/feature-request.txcl`) with `WHEN .ticket.category == "" && @lmtp.msg.subject =~ /…/ EMIT .ticket.category = "…"`. Pick a scope between the last arm (120) and the default (150) to set its priority. Hot-reload picks it up.
 - **Tempfail on an outage.** Have `200/post_ticket.txcl` return `_txc.lmtp.res.code = 451` on a downstream error so Postfix queues + retries (rather than the chassis's default-deny 550 bouncing the sender).
 - **Switch to Strategy A or B routing.** Uncomment the relevant block in `ingress.yaml` (see the inline comments) or set `--lmtp-default-hosts=chassis.example` on the chassis command line for Strategy A. See [`docs/lmtp.md`](../../docs/lmtp.md#resolution-order-per-rcpt-to) for the full routing model.
 - **Per-recipient mix.** Send a message to two recipients and accept one / reject the other. One `WHEN` per file, and `EMIT` (not `SET`) so the verdict persists — e.g. add `0/reject-bcc.txcl` next to `0/accept.txcl`:

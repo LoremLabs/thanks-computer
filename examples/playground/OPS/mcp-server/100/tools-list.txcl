@@ -6,10 +6,10 @@
 # &array. Schemas are JSON Schema objects — the MCP client uses
 # them to render forms and to validate arguments before calling
 # tools/call.
-WHEN @rpc.method == "tools/list"
-  EMIT @mcp.res = &object(
+WHEN .rpc.method == "tools/list"
+  EMIT .mcp.res = &object(
     "jsonrpc", "2.0",
-    "id", &get(@rpc, "id"),
+    "id", &get(.rpc, "id"),
     "result", &object(
       "tools", &array(
         &object(

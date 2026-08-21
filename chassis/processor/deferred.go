@@ -529,7 +529,7 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 				payload = "{}"
 			}
 			if op.Resonator != nil && op.Resonator.Emit != nil {
-				o, oerr := pu.OverlayResponse(op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
+				o, oerr := pu.OverlayResponseFor(workCtx, op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 				if oerr != nil {
 					status = "failed"
 					payload = string(failPayload(oerr.Error()))

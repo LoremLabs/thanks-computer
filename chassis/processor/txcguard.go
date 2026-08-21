@@ -61,6 +61,30 @@ func authorMayWriteTxc(path string) bool {
 	return false
 }
 
+// systemMayWriteTxc reports whether a SYSTEM-authored rule — one executing in
+// a run pinned to the `_sys` tenant, i.e. the boot pipeline — may EMIT the
+// given envelope path in ADDITION to the author-writable set. This is the
+// boot operator-hook contract: a `_sys/boot` hook proposes a route
+// (`EMIT @route.tenant/@route.stack/@route.to`, e.g. the shipped
+// examples' path-gated auto-routes), boot/100's txco://route promotes the
+// proposal, and maybeRetenant — gated on the same chassis-pinned `_sys`
+// tenant — performs the actual one-way re-tenant.
+//
+// Tenant-authored rules can never reach this branch: the pin is stamped at
+// ingress from chassis data (StampEnvelope overwrites any client value), it
+// only ever changes one-way _sys→tenant, tenants cannot create `_`-prefixed
+// slugs (tenants.ReservedSlug), and OpsForStage filters every lookup by the
+// pin — a `_sys`-pinned run executes only `tnt_sys`-owned rows.
+//
+// Same matching shape as authorMayWriteTxc so lookalikes (`_txc.routes`,
+// `_txc.route_x`) stay reserved. Deliberately NOT merged into
+// authorWritableTxcPaths: that list is shared with the output sanitizer,
+// SET POST, and the delete guards, which all stay closed to `route.*`.
+func systemMayWriteTxc(path string) bool {
+	sub := strings.TrimPrefix(path, "_txc.")
+	return sub == "route" || strings.HasPrefix(sub, "route.")
+}
+
 // transportAuthorControlled reports whether output produced by the given
 // dispatch transport (the string Exec stamps on every step) is
 // author-controlled and therefore must be sanitized of reserved `_txc.*`
