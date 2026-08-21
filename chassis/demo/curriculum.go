@@ -385,14 +385,14 @@ func Get() Curriculum {
 				Steps: []Step{
 					{
 						Title:  "ask an MCP server",
-						Prose:  "The chassis as an MCP CLIENT. `mcp+https://host/path#tool-name` triggers the MCP-over-HTTP session lifecycle (`initialize` → `notifications/initialized` → `tools/call`) on every EXEC; the URL fragment carries the tool name and is never sent over the wire. We point at DeepWiki — a free, no-auth, public MCP server that answers AI questions about any GitHub repo. The two SELECTs at scope 50 pull `.repoName` and `.question` from `?repoName=…` / `?question=…` query params, with sensible defaults. The MCP call at scope 100 uses `mode = \"continuable\"`: AI inference is slow, so the chassis returns `202` + continuation after the default 5-second `continue_after`, the browser lands on the wait page, and the goroutine treats DeepWiki's eventual answer as the completion. The raw envelope (after merge) carries the markdown reply in `.text` — see it in the merged-result panel.",
+						Prose:  "The chassis as an MCP CLIENT. `mcp+https://host/path#tool-name` triggers the MCP-over-HTTP session lifecycle (`initialize` → `notifications/initialized` → `tools/call`) on every EXEC; the URL fragment carries the tool name and is never sent over the wire. We point at DeepWiki — a free, no-auth, public MCP server that answers AI questions about any GitHub repo. The two SELECTs at scope 50 resolve `.repoName` and `.question` from `?repoName=…` / `?question=…` query params (falling back to their DEFAULTs) — selected values persist into the merged envelope, which is how they reach the MCP call at scope 100. The MCP call at scope 100 uses `mode = \"continuable\"`: AI inference is slow, so the chassis returns `202` + continuation after the default 5-second `continue_after`, the browser lands on the wait page, and the goroutine treats DeepWiki's eventual answer as the completion. The raw envelope (after merge) carries the markdown reply in `.text` — see it in the merged-result panel.",
 						Ops:    []OpFile{opRepoSelect, opQuestionSelect, opMcpQuery},
 						Method: "GET",
 						Path:   "/",
 					},
 					{
 						Title:  "render the answer as HTML",
-						Prose:  "Add `txco://web-render` at scope 200 — a built-in chassis op that shapes a stored field into the HTTP response. With `content_type = \"text/markdown\"` it runs DeepWiki's markdown reply through the chassis's built-in markdown→HTML converter, so the iframe shows the rendered page (headings, code blocks, lists) instead of raw markdown. Try editing the path to `/?repoName=tldraw/tldraw&question=How%20do%20I%20draw%20a%20line%3F` — the two SELECTs at scope 50 pick it up and the demo re-runs against the new question.",
+						Prose:  "Add `txco://web-render` at scope 200 — a built-in chassis op that shapes a stored field into the HTTP response. With `content_type = \"text/markdown\"` it runs DeepWiki's markdown reply through the chassis's built-in markdown→HTML converter, so the iframe shows the rendered page (headings, code blocks, lists) instead of raw markdown. Try editing the path to `/?repoName=tldraw/tldraw&question=How%20do%20I%20draw%20a%20line%3F` — the two SELECTs at scope 50 resolve the new values and the demo re-runs against the new question.",
 						Ops:    []OpFile{opRepoSelect, opQuestionSelect, opMcpQuery, opMcpRender},
 						Method: "GET",
 						Path:   "/",

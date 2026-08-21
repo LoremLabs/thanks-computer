@@ -82,6 +82,10 @@ func TestValidateSuppressesCascade(t *testing.T) {
 func TestValidateAcceptsWellFormed(t *testing.T) {
 	cases := []string{
 		`WHEN * SELECT @x AS .y`,
+		`SELECT *`,
+		`WHEN * SELECT * EXEC "hello-world"`,
+		`SELECT .a, .b AS .c DEFAULT 1 EXEC "hello-world"`,
+		`SELECT .a DEFAULT "x"`,
 		"# a comment\nSELECT @web.req.url.query.q.0 AS .q DEFAULT \"fallback\"",
 		`WHEN ._txc.src == "cron" SELECT @a AS .x, @b AS .y DEFAULT 42 PRIORITY 2`,
 		`SET .a = 5, .b = ["x", "y"]`,

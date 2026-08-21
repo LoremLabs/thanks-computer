@@ -31,7 +31,7 @@ timeline.jsonl     line-per-event log (request.start, step.start, step.end, requ
 steps/
   0000-boot/       one folder per fired op, zero-padded scope so the directory sorts in scope order
     op.json        the rule's stored definition (txcl, exec, etc.)
-    in.json        envelope handed to the handler
+    in.json        envelope handed to the handler (post-SELECT: for a rule that selects, this is the projected view — what the op actually received)
     out.json       handler's raw response
     meta.json      timing, sizes, status, transport
 ```
@@ -69,7 +69,7 @@ EXEC "op://CHECKOUT"
 | `redact = "a.b, c.d"` | Replaces each path's value with the string `"[REDACTED]"`. Field stays; value is masked. |
 | `omit = "x.y"`        | Deletes the path entirely. Field vanishes from the trace JSON.                           |
 
-- The rule's own WHEN / SELECT / EXEC still see the full envelope. Only what hits durable storage is affected.
+- Runtime behavior is unaffected — redaction changes only what hits durable storage. (What the EXEC receives is a separate mechanism: the rule's own `SELECT` projection.)
 - Paths are exact gjson dot-paths.
 - A path listed in both `redact` and `omit` is resolved by **omit wins** (the more aggressive choice).
 - Hints are **scoped per `(tenant, stack)`**: a `redact` declared in `acme/support` does NOT bleed into `acme/billing` even though both are tenant `acme`. If a request enters `acme/support` and an EXEC jumps to `acme/billing`, both stacks' hints apply to the trace from that point on (union semantic).
@@ -85,7 +85,7 @@ In sync mode (`--trace-async=false`) redaction runs on the request goroutine jus
 
 ### What's NOT redacted
 
-- **Runtime data** is never touched. The rule's matchers, the op's input, the merged response all see real values.
+- **Runtime data** is never touched. The rule's matchers, the op's (possibly SELECT-projected) input, the merged response all carry real, unmasked values.
 - **Timeline events** (`timeline.jsonl`) are not currently filtered. Avoid stamping sensitive fields directly into timeline event payloads.
 - **Operational logs** are not affected.
 - **The DLQ** preserves the original envelope by design (forensics).

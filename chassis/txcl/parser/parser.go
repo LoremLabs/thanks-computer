@@ -564,16 +564,37 @@ func (p *Parser) parseExecPhrase() *resonator.Phrase {
 	return phrase
 }
 
-// parseSelectPhrase parses one or more SELECT assignments of the form
+// parseSelectPhrase parses the SELECT clause:
 //
-//	SELECT <src-path> AS <dst-path> [DEFAULT <literal>]
-//	      [, <src-path> AS <dst-path> [DEFAULT <literal>]]*
+//	SELECT *
+//	SELECT <src-path> [AS <dst-path>] [DEFAULT <literal>]
+//	      [, <src-path> [AS <dst-path>] [DEFAULT <literal>]]*
 //
-// Source / destination paths use the same `.foo` / `@foo` sugar as
-// WHEN and SET; both lex to BRANCH tokens. DEFAULT's RHS is any
-// literal accepted by parseLiteralValue (scalar or array).
+// `SELECT *` is the explicit "everything" spelling — it parses to a
+// Select with Star set and zero assignments (projection no-op) and
+// must be the sole item. A source with no `AS` is an identity
+// assignment (`<src> AS <src>`). Source / destination paths use the
+// same `.foo` / `@foo` sugar as WHEN and SET; both lex to BRANCH
+// tokens. DEFAULT's RHS is any literal accepted by parseLiteralValue
+// (scalar or array).
 func (p *Parser) parseSelectPhrase() *resonator.Phrase {
 	assignments := make([]resonator.SelectAssignment, 0)
+
+	// `SELECT *` — explicit everything. Must be the sole item; the
+	// lexer emits ASTERISK here (the STAR carve-out is WHEN-only).
+	if p.peekTokenIs(token.ASTERISK) {
+		p.nextToken() // onto *
+		if p.peekTokenIs(token.COMMA) {
+			p.errors = append(p.errors,
+				"SELECT * cannot be combined with a branch list")
+			return nil
+		}
+		p.SeenSelect(true)
+		return &resonator.Phrase{
+			Type:   resonator.SELECT,
+			Select: &resonator.Select{Star: true},
+		}
+	}
 
 	for {
 		// Advance to the next source path. First iteration moves past
@@ -581,24 +602,25 @@ func (p *Parser) parseSelectPhrase() *resonator.Phrase {
 		// comma consumed at the tail of the previous one.
 		p.nextToken()
 		if !p.curTokenIs(token.BRANCH) {
-			p.errors = append(p.errors, "SELECT expected a source path (e.g. `.foo` or `@web.req.…`)")
+			p.errors = append(p.errors, "SELECT expected `*` or a source path (e.g. `.foo` or `@web.req.…`)")
 			return nil
 		}
 		asn := resonator.SelectAssignment{From: p.curToken.Literal}
 
-		if !p.peekTokenIs(token.AS) {
-			p.errors = append(p.errors,
-				"SELECT expected `AS <dest>` after the source path")
-			return nil
+		if p.peekTokenIs(token.AS) {
+			p.nextToken() // onto AS
+			if !p.peekTokenIs(token.BRANCH) {
+				p.errors = append(p.errors,
+					"SELECT expected a destination path after `AS`")
+				return nil
+			}
+			p.nextToken() // onto destination BRANCH
+			asn.To = p.curToken.Literal
+		} else {
+			// Identity shorthand: `SELECT .a` == `SELECT .a AS .a`.
+			// `@x` sugar already lexed to `._txc.x`, so it composes.
+			asn.To = asn.From
 		}
-		p.nextToken() // onto AS
-		if !p.peekTokenIs(token.BRANCH) {
-			p.errors = append(p.errors,
-				"SELECT expected a destination path after `AS`")
-			return nil
-		}
-		p.nextToken() // onto destination BRANCH
-		asn.To = p.curToken.Literal
 
 		// Optional DEFAULT <literal>.
 		if p.peekTokenIs(token.DEFAULT) {

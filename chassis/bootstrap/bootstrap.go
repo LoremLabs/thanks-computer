@@ -35,15 +35,18 @@ func Eval(input string, resonators []*resonator.Resonator, hashSeed string) (*re
 	var best *resonator.Resonator = nil
 
 	/*
-	 * Order: WHEN, HAVING, PRE-SET, SELECT, POST-SET, WITH, PRIORITY, EXEC
+	 * Eval models the MERGED (persisted) envelope view: WHEN match,
+	 * PRIORITY selection, then SELECT's copy-into-output. It does NOT
+	 * model the dispatched wire view — the processor projects op.Input
+	 * down to the SELECT assignments (plus envelope identity) before
+	 * dispatch, and resolves WITH against the full pre-projection
+	 * input BEFORE the SELECT block runs (see ResonatingOps). The
+	 * transformed envelope returned here is unchanged by that
+	 * projection, which is what keeps this table-driven executable
+	 * spec valid.
 	 *
-	 * Only process HAVING if WHEN matches
-	 * ..only process PRE-SET if HAVING matches
-	 *
-	 * PRE-SET, SELECT, POST-SET control output event
-	 * WITH is control meta-data
-	 * PRIORITY orders the resonators
-	 * EXEC is the location to execute the resonator runs
+	 * PRIORITY orders the resonators; EXEC is the dispatch target
+	 * (unused here).
 	 */
 
 	// short circuit, no resonators

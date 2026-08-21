@@ -101,10 +101,12 @@ SELECT @web.req.url.query.repoName.0
     DEFAULT "facebook/react"
 ```
 
-`SELECT` copies the value at the source path into the destination
-path. When the source resolves empty / missing, `DEFAULT`'s literal
-is substituted. One rule expresses "use the query param if present,
-else fall back."
+`SELECT` projects the rule's input down to its assignments — and,
+because the selected values also persist into the merged scope
+envelope, a no-`EXEC` rule like this one works as a plain envelope
+write: read the source path, put it at the destination. When the
+source resolves empty / missing, `DEFAULT`'s literal is substituted.
+One rule expresses "use the query param if present, else fall back."
 
 A few things to know about the path syntax:
 
@@ -119,8 +121,9 @@ A few things to know about the path syntax:
   string → `default` kicks in.
 
 `question.txcl` mirrors this for `.question`. The two scope-50
-rules write different paths so they're safe to run in parallel
-within the same scope; no ordering needed.
+rules each contribute only their own destination to the merged
+envelope (persistence is additive), so they're safe to run in
+parallel within the same scope; no ordering needed.
 
 For a JSON POST, none of this matters: the body is base64-encoded
 into `_txc.web.req.body` by the inlet, and the chassis decodes it
@@ -154,7 +157,9 @@ between them). With async on, the chassis:
      responds in SSE; the chassis transparently unwraps.
    - POST `notifications/initialized`.
    - POST `tools/call` with `params.name = "ask_question"` and
-     `params.arguments` = your envelope (minus `_txc.*`).
+     `params.arguments` = your envelope minus `_txc.*` (for a rule
+     with a `SELECT`, that's the projected view — just the selected
+     fields).
    - Read the JSON-RPC reply; project the text content block
      into `{"text": "..."}` on the envelope.
 3. When the goroutine finishes, it writes the result to the
@@ -222,23 +227,28 @@ tool's output shape.
 
 ## Generalizing: `SELECT`
 
-`SELECT … AS … DEFAULT …` is the path→path copy primitive that
-closes the "txcl SET RHS is literal-only" gap:
+`SELECT` governs what an operation *receives*: with one or more
+assignments, the dispatched input becomes only the assigned
+destinations (plus `_ts` and the runtime identity stamp) — the way
+to keep envelope internals out of an external service:
 
 ```txcl
-SELECT .text AS @computed.answer
+SELECT ._in.q AS .q
+EXEC "https://parser.example.com/parse"
 ```
 
-Useful any time you need to move an envelope value somewhere
-the surrounding rule's `SET`s can't reach. Multiple assignments
-work in one statement:
+Multiple assignments work in one statement, `AS` is optional
+(`SELECT .a` selects `.a` as itself), and `DEFAULT` fills gaps:
 
 ```txcl
-SELECT .a AS .x, .b AS .y DEFAULT "fallback"
+SELECT .a, .b AS .y DEFAULT "fallback"
 ```
 
-No `EXEC` is required — `SELECT` is an envelope mutation that
-commits on its own.
+Selected values also persist into the merged scope envelope, so no
+`EXEC` is required — a bare `SELECT` (like the scope-50 rules above)
+works as an envelope write that commits on its own. For a pure
+runtime-computed path→path copy, reach for `txco://copy` instead
+(`WITH from/to/fallback` — see `docs/advanced/builtins.md`).
 
 ## Adding bearer-token auth (for non-public servers)
 

@@ -91,13 +91,19 @@ type SelectAssignment struct {
 	HasDefault bool      `json:"has_default,omitempty"`
 }
 
-// Select copies envelope values from path → path with optional literal
-// fallback. Assignments run before the rule's EXEC (so the EXEC sees
-// the copied values on its input view) and are also overlaid onto the
-// rule's response so the writes persist even when the rule has no
-// EXEC. Distinct from SET (literal RHS only, op-scoped, requires EXEC
-// to commit) and EMIT (literal RHS only, post-EXEC overlay).
+// Select projects the rule's dispatched input. With one or more
+// assignments, the input the EXEC receives becomes ONLY the assigned
+// destinations plus standard envelope identity (`_ts`, and the
+// `_txc.op`/`_txc.step` runtime stamp for handler transports).
+// Assignments are also overlaid onto the rule's response via a
+// synthetic EMIT, so the writes persist into the merged scope
+// envelope (additive) even when the rule has no EXEC. Star is the
+// explicit "everything" spelling (`SELECT *`): it parses to zero
+// assignments and the projection is a no-op. Distinct from SET
+// (literal RHS only, op-scoped, requires EXEC to commit) and EMIT
+// (literal RHS only, post-EXEC overlay).
 type Select struct {
+	Star        bool               `json:"star,omitempty"`
 	Assignments []SelectAssignment `json:"assignments,omitempty"`
 }
 

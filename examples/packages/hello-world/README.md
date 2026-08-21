@@ -21,7 +21,7 @@ WHEN @src == "http"
 ```
 
 It fires on any web request (`@src == "http"`) and sets `.say`. The web inlet returns
-the envelope as JSON — its default projection, every key except `_`-prefixed internals —
+the envelope as JSON — the default response view, every key except `_`-prefixed internals —
 so the response is `{"say":"hello world"}`. No render rule, no external services.
 
 ## Try it

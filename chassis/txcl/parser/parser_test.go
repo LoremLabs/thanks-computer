@@ -401,13 +401,89 @@ SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"
 			`SELECT`,
 			&resonator.Resonator{},
 			1,
-			[]string{`SELECT expected a source path (e.g. ` + "`.foo`" + ` or ` + "`@web.req.…`)"},
+			[]string{`SELECT expected ` + "`*`" + ` or a source path (e.g. ` + "`.foo`" + ` or ` + "`@web.req.…`)"},
 		},
 		{
+			// Identity shorthand: no AS means `<src> AS <src>`.
 			`SELECT @x`,
+			&resonator.Resonator{
+				Select: &resonator.Select{Assignments: []resonator.SelectAssignment{
+					{From: "._txc.x", To: "._txc.x"},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			// Identity shorthand with DEFAULT — the migration-friendly
+			// "use it if present, else fall back" one-liner.
+			`SELECT .a DEFAULT "x"`,
+			&resonator.Resonator{
+				Select: &resonator.Select{Assignments: []resonator.SelectAssignment{
+					{From: ".a", To: ".a", Default: ast.Literal{V: "x"}, HasDefault: true},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			// Mixed list: bare identity + AS + DEFAULT.
+			`SELECT .a, .b AS .c DEFAULT 1`,
+			&resonator.Resonator{
+				Select: &resonator.Select{Assignments: []resonator.SelectAssignment{
+					{From: ".a", To: ".a"},
+					{From: ".b", To: ".c", Default: ast.Literal{V: int64(1)}, HasDefault: true},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			// Explicit everything — projection no-op spelling.
+			`SELECT *`,
+			&resonator.Resonator{
+				Select: &resonator.Select{Star: true},
+			},
+			0,
+			[]string{},
+		},
+		{
+			`WHEN * SELECT * EXEC "hello-world"`,
+			&resonator.Resonator{
+				When:   starWhen(),
+				Select: &resonator.Select{Star: true},
+				Exec:   "hello-world",
+			},
+			0,
+			[]string{},
+		},
+		{
+			// Star must be the sole item.
+			`SELECT *, .a`,
 			&resonator.Resonator{},
 			1,
-			[]string{"SELECT expected `AS <dest>` after the source path"},
+			[]string{"SELECT * cannot be combined with a branch list"},
+		},
+		{
+			// SET after SELECT (any form) is SET POST, not SET PRE.
+			`SELECT * SET .a = 1`,
+			&resonator.Resonator{
+				Select:  &resonator.Select{Star: true},
+				SetPost: &resonator.Set{Overrides: []resonator.BranchValue{{Path: ".a", Value: ast.Literal{V: int64(1)}}}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			`SELECT .a SET .b = 1`,
+			&resonator.Resonator{
+				Select: &resonator.Select{Assignments: []resonator.SelectAssignment{
+					{From: ".a", To: ".a"},
+				}},
+				SetPost: &resonator.Set{Overrides: []resonator.BranchValue{{Path: ".b", Value: ast.Literal{V: int64(1)}}}},
+			},
+			0,
+			[]string{},
 		},
 		{
 			`SELECT @x AS`,

@@ -57,8 +57,8 @@
                 <span class="text-neutral-500">jump to another op by scope path (e.g. <code class="text-neutral-700">&quot;hello-world/0&quot;</code>) [default = go to next step sequentially]</span>
                 <code class="text-sky-700">EXEC &quot;op://NAME&quot;</code>
                 <span class="text-neutral-500">jump to a named operation (resolved at <code class="text-neutral-700">txco apply</code> time)</span>
-                <code class="text-sky-700">SELECT &lt;src&gt; AS &lt;dst&gt; [DEFAULT &lt;lit&gt;]</code>
-                <span class="text-neutral-500">copy a value from one envelope path to another. When <code class="text-neutral-700">&lt;src&gt;</code> resolves empty/missing, <code class="text-neutral-700">DEFAULT</code>'s literal is substituted. Multiple assignments: <code class="text-neutral-700">SELECT .a AS .x, .b AS .y</code>. No EXEC required — SELECT commits on its own.</span>
+                <code class="text-sky-700">SELECT * | &lt;src&gt; [AS &lt;dst&gt;] [DEFAULT &lt;lit&gt;]</code>
+                <span class="text-neutral-500">project the op's input: with assignments, the EXEC receives <em>only</em> the selected destinations (plus <code class="text-neutral-700">_ts</code>/identity) — the way to keep envelope internals out of an external call. <code class="text-neutral-700">AS</code> renames (optional), <code class="text-neutral-700">DEFAULT</code>'s literal substitutes when <code class="text-neutral-700">&lt;src&gt;</code> resolves empty/missing, <code class="text-neutral-700">SELECT *</code> = explicit everything. Multiple assignments: <code class="text-neutral-700">SELECT .a, .b AS .y</code>. Selected values also persist into the merged scope, so no EXEC is required — a bare SELECT commits on its own.</span>
                 <code class="text-sky-700">SET &lt;path&gt; = &lt;value&gt;</code>
                 <span class="text-neutral-500">inject a field on the op's input (before EXEC) or response (after EXEC). The value may be a literal (scalars, arrays <code class="text-neutral-700">[1, 2, &quot;x&quot;]</code>, <code class="text-neutral-700">b64&quot;&hellip;&quot;</code>), a path ref (<code class="text-neutral-700">@web.req.body</code>), or a function call (<code class="text-neutral-700">&amp;uuid()</code>). Op-scoped: SET shapes this op's own input view and is discarded at scope advance — use <code class="text-neutral-700">EMIT</code> for values later scopes must see.</span>
                 <code class="text-sky-700">WITH &lt;key&gt; = &lt;value&gt;</code>
@@ -126,7 +126,7 @@
                 <code class="text-purple-700">txco://sendmail &nbsp;·&nbsp; relay</code>
                 <span class="text-neutral-500">outbound email from the <code class="text-neutral-700">_sendmail</code> contract / forward an inbound message verbatim</span>
                 <code class="text-purple-700">txco://copy</code>
-                <span class="text-neutral-500">path-to-path copy with runtime-computed paths (what <code class="text-neutral-700">SET</code>/<code class="text-neutral-700">SELECT</code> can't address statically)</span>
+                <span class="text-neutral-500">path-to-path copy with runtime-computed paths (what <code class="text-neutral-700">SET</code>'s literal RHS can't address) — the copy primitive; <code class="text-neutral-700">SELECT</code> is input projection</span>
                 <code class="text-purple-700">txco://noop</code>
                 <span class="text-neutral-500">placeholder EXEC; returns an empty object. Most rules want <code class="text-neutral-700">EMIT</code> instead (commits overlays without dispatching).</span>
                 <code class="text-purple-700">txco://detect-tenant &nbsp;·&nbsp; route &nbsp;·&nbsp; continuation-result</code>
@@ -147,7 +147,7 @@
 <span class="text-sky-300">EXEC</span> <span class="text-emerald-200">&quot;op://WORLD&quot;</span>          <span class="text-neutral-400"># declared in txco.yaml; resolved at apply</span></code></pre>
                     </li>
                     <li>
-                        <div class="mb-0.5 text-[11px] text-neutral-500">copy a query param onto the envelope with a default — no EXEC needed</div>
+                        <div class="mb-0.5 text-[11px] text-neutral-500">select a query param onto the envelope with a default — no EXEC needed, the selected value persists</div>
 <pre class="overflow-auto rounded bg-neutral-900 p-2 text-[11px] leading-snug text-neutral-100"><code><span class="text-sky-300">SELECT</span> <span class="text-emerald-300">@web.req.url.query.repoName.0</span>
     <span class="text-sky-300">AS</span> <span class="text-emerald-300">.repoName</span>
     <span class="text-sky-300">DEFAULT</span> <span class="text-emerald-200">&quot;facebook/react&quot;</span></code></pre>

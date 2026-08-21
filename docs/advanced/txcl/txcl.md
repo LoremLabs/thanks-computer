@@ -9,7 +9,7 @@ Every clause is optional. When present, clauses appear in this order:
 ```
 [WHEN     <condition> | * ]                          # fire only when this matches
 [SET      <path> = <value> [, …] ]                   # set fields before dispatch
-[SELECT   * | <branch> [AS <path>] [DEFAULT <v>] … ] # project the output
+[SELECT   * | <branch> [AS <path>] [DEFAULT <v>] … ] # project the op's input
 [WITH     <key> = <value> [, …] ]                    # per-call chassis directives
 [PRIORITY <int> ]                                    # tie-breaker among matches
 [EXEC     "op:// | http(s):// | txco:// | ai://chat | mcp+https://" ]                 # dispatch to an operation
@@ -394,11 +394,24 @@ A value may be a string, int, float, bool, or a function call (`&uuid()`, `&json
 ## SELECT — projection
 
 ```txcl
-SELECT *                  # whole envelope (same as omitting SELECT)
-SELECT .body, .headers    # narrow the output to just these branches
+SELECT *                                   # whole envelope (same as omitting SELECT)
+SELECT .body, .headers                     # the op receives ONLY these branches
+SELECT .body AS .payload                   # rename on the way in
+SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"   # rename + fallback
 ```
 
-If you don't write a `SELECT` clause, the whole input passes through. `SELECT *` is just an explicit way to spell "everything." Use a branch list when you want to drop fields before dispatch.
+`SELECT` governs `input → op`: what the operation *receives*. If you don't write a `SELECT` clause, the whole input passes through. `SELECT *` is just an explicit way to spell "everything." With one or more branches, the dispatched input becomes **only the assigned destinations**, plus the standard envelope identity — `_ts`, and `_txc.op`/`_txc.step` for handler transports (`txco://`, `http(s)://`, `compute://`). Everything else — including the rest of `_txc.*` — is dropped before dispatch, which is how you keep internal envelope state out of an external service.
+
+The pieces compose per branch:
+
+- `SELECT .a` is shorthand for `SELECT .a AS .a`.
+- `AS <dest>` renames: the op sees the value at `<dest>`.
+- `DEFAULT <literal>` substitutes when the source path is **missing or the empty string**. Without a `DEFAULT`, a missing source still writes the destination as `""` — a selected key always has at-least-empty presence.
+- `SELECT *` must stand alone (no mixing with a branch list).
+
+Selected values also **persist**: each assignment is overlaid onto the rule's response (like a synthetic `EMIT`, with your own `EMIT` winning on conflict), so a `SELECT` with no `EXEC` works as a plain envelope write that merges into the scope — the "use the query param if present, else fall back" one-liner. Persistence is additive; the projection narrows only what the op receives, never what the scope keeps.
+
+Two interactions worth knowing: `WITH` values resolve against the **full** pre-projection input, so a chassis directive may reference paths the projection drops; and `ai://chat` prompt templates render over the op's input, so a `{{@path}}` of an unselected path renders empty — select what the prompt needs.
 
 ## WITH — per-call modifiers
 
@@ -421,7 +434,7 @@ WITH redact = "user.email, user.ssn"           # mask these paths with "[REDACTE
 WITH omit   = "_txc.lmtp.msg.attachments"      # delete these paths entirely
 ```
 
-Two reserved WITH keys scrub **trace logs** only — runtime data is untouched, so the resonator's own WHEN/SELECT/EXEC still see the full envelope. Both take a comma-separated list of gjson dot-paths (exact match, no wildcards):
+Two reserved WITH keys scrub **trace logs** only — runtime data is untouched: the resonator's own WHEN and SELECT still read the full envelope (though what the EXEC *receives* is the SELECT-projected view when the rule selects). Both take a comma-separated list of gjson dot-paths (exact match, no wildcards):
 
 - `redact` masks each value with `"[REDACTED]"` (the field stays — use when "something was here" matters, e.g. credentials).
 - `omit` deletes the path entirely (use for bulky data like attachments or raw bodies).
@@ -452,7 +465,7 @@ Five schemes are supported:
 | Scheme | Dispatch path |
 | --- | --- |
 | `op://NAME` | A sandboxed WebAssembly [nano-op](../../authoring/nano-ops.md) compiled from your JS/TS, run in-process on the chassis — no service to deploy. |
-| `http://` / `https://` | POSTs the envelope as JSON to the URL; the response body merges back in (`https` adds TLS). |
+| `http://` / `https://` | POSTs the envelope as JSON to the URL — the SELECT-projected view when the rule selects; the response body merges back in (`https` adds TLS). |
 | `txco://NAME` | In-process chassis [builtin](../builtins.md) via `ExecCore`; the name after `txco://` is looked up in the registry (`noop`, `static`, `sendmail`, …). |
 | `ai://chat` | A chat model via the chassis's AI registry — see [ai](../../ai.md). |
 | `mcp+http://` / `mcp+https://` | Calls a tool on an external [MCP](../protocols/mcp.md) server (egress). |
@@ -491,7 +504,7 @@ EXEC "https://hook.example.com/processed"
 EMIT .meta.processed_at = &now("rfc3339")
 ```
 
-`SET` shapes the request before dispatch; `EMIT` adds to the response after.
+`SET` decorates and `SELECT` projects the request before dispatch; `EMIT` adds to the response after.
 
 ### Cron heartbeat
 
@@ -602,7 +615,7 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `timeout` | any EXEC | Per-call wall clock (ms or `"2h"`); capped by `--op-timeout-max` |
 | `method` | http(s) | HTTP verb override (default POST) |
 | `secrets.headers.<h>.secret` / `.format` | http(s), builtins | Splice a stored secret into the request; `format = "Bearer {}"` templates it ([runbook](../runbook-secret-store.md)) |
-| `secrets.body.<path>.secret` | http(s) | Same, into the JSON body |
+| `secrets.body.<path>.secret` | http(s) | Same, into the JSON body (the projected body when the rule SELECTs) |
 | `mode = "async"` | http(s), mcp+ | Worker acks 202 now, calls back later ([continuations](../../continuations.md)). HTTP-shaped by design — async *is* the worker-callback contract |
 | `mode = "continuable"` | any EXEC | Answer synchronously if quick; promote to a continuation at the deadline. Op-level metadata, not a scheme gate — `ai://chat`, `mcp+`, `txco://`, anything |
 | `continue_after` | continuable | The promotion deadline (default `--continue-after-default`, 5s) |
@@ -612,14 +625,24 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 
 ## `SET` vs `SET PRE`
 
-`SET` writes fields onto the event *before dispatch and they persist
-downstream*. `SET PRE` decorates **only this op's input** — the value
-never merges forward. Use it for scratch values a prompt template or
-handler needs once:
+"SET PRE" and "SET POST" name **positions**, not keywords — `PRE` never
+appears in the syntax. A `SET` written **before** any `SELECT` (or in a
+rule with no `SELECT` at all) is the PRE form: it decorates **only this
+op's input** — the value never merges forward. A `SET` written **after**
+the `SELECT` is the POST form: it overlays the merged envelope after the
+scope completes (set-if-absent). Use the PRE form for scratch values a
+prompt template or handler needs once:
 
 ```txcl
-SET PRE @body_text = .ticket.description
+SET @body_text = .ticket.description
 WITH prompt = "Summarize: {{@body_text}}"
 EXEC "ai://chat"
 ```
+
+Ordering with the other input-shaping clauses: pre-`SELECT` `SET`
+decoration runs first, `WITH` values resolve next (against that
+decorated, still-full input), and `SELECT` projection runs last, just
+before dispatch. So a `SET` value is visible to `WITH` and usable as a
+`SELECT` source, but it reaches the dispatched input only if the rule
+selects it (or has no `SELECT` at all).
 

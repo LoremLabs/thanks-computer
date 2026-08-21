@@ -29,6 +29,17 @@ type Operation struct {
 	Meta      string `json:"meta,omitempty"`
 	OpID      string `json:"opId,omitempty"` // unique ID for this Operation
 
+	// FullInput is the pre-projection envelope view, set by the
+	// processor's SELECT block only when a SELECT projected Input
+	// down to its assignments. In-memory only (json:"-"): stored
+	// continuation records persist Input (the dispatched view), and
+	// resumed ops recompute the projection through ResonatingOps, so
+	// FullInput never needs to survive suspension. Read via
+	// EnvelopeView() by chassis-internal consumers (mock selection,
+	// EMIT/TTL resolution, mcp debug) that must see the whole
+	// envelope regardless of projection.
+	FullInput string `json:"-"`
+
 	// Secrets holds materialized secret cleartext for this op
 	// instance. The field is tagged `json:"-"` AND its type's
 	// MarshalJSON / MarshalText / GobEncode all panic, so cleartext
@@ -61,10 +72,23 @@ func New() *Operation {
 func (op *Operation) Copy() *Operation {
 
 	// NB: careful of the Resonator
-	var o = &Operation{Input: op.Input, Output: op.Output, Service: op.Service, Slot: op.Slot, Stack: op.Stack, Scope: op.Scope, Name: op.Name, Txcl: op.Txcl, MockRes: op.MockRes, MockReq: op.MockReq, Resonator: op.Resonator, Meta: op.Meta, Secrets: op.Secrets}
+	var o = &Operation{Input: op.Input, Output: op.Output, Service: op.Service, Slot: op.Slot, Stack: op.Stack, Scope: op.Scope, Name: op.Name, Txcl: op.Txcl, MockRes: op.MockRes, MockReq: op.MockReq, Resonator: op.Resonator, Meta: op.Meta, FullInput: op.FullInput, Secrets: op.Secrets}
 	o.OpID = hxid.NewTimeSort().String()
 
 	return o
+}
+
+// EnvelopeView returns the full pre-projection envelope when a SELECT
+// projected op.Input, else op.Input. Chassis-internal reads of
+// envelope control state (`_txc.mocks`, `_txc.ttl`, `_txc._debug`,
+// EMIT value resolution) go through this so a SELECT-narrowed wire
+// view doesn't disable them; transports dispatch op.Input directly —
+// the projection IS the wire contract.
+func (op *Operation) EnvelopeView() string {
+	if op.FullInput != "" {
+		return op.FullInput
+	}
+	return op.Input
 }
 
 func PathToOperation(path string) (*Operation, error) {

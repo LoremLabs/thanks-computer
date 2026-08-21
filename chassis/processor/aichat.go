@@ -51,7 +51,10 @@ const (
 //     store with optional env-var fallback (AIChatEnvFallback config),
 //     reusing the existing chassis pattern: SecretBag, RecordSecretMaterialize,
 //     fuelCostSecretMaterialize fuel charge.
-//  5. Renders {{@path}} prompt templates over op.Input.
+//  5. Renders {{@path}} prompt templates over op.Input. NOTE: on a rule
+//     with SELECT assignments, op.Input is the PROJECTED view, so a
+//     {{@path}} of an unselected path renders empty — select what the
+//     prompt needs.
 //  6. Calls backend.Run exactly once (no tool loop in v1).
 //  7. Validates the response against WITH schema if present (binary
 //     ok / failed; no repair semantics).

@@ -99,7 +99,7 @@ order:
 | ---------- | --------------------------------------------------------------- |
 | `WHEN`     | The resonance condition (omitted or `*` = always fire)          |
 | `SET`      | Set fields on the event *before* dispatch                       |
-| `SELECT`   | Project what the operation receives (pass a tree).              |
+| `SELECT`   | Project what the operation receives — only the selected branches |
 | `WITH`     | Per-call directives — `timeout`, `secrets.*`, `redact`, …       |
 | `PRIORITY` | Tie-breaker among matches at the same step                      |
 | `EXEC`     | Dispatch target — `op://`, `http(s)://`, `txco://`, `mcp+https://` |
@@ -136,8 +136,9 @@ and `hi` is returned in the answer.
 
 :::note
 `_`-prefixed fields are dropped from the **response**, but they're still visible
-to **downstream operations** in the same flow. To keep a value out of a later op's
-input too, project with `SELECT`.
+to **downstream operations** in the same flow. `SELECT` narrows what **its own
+operation** receives — an op that shouldn't see internal state selects just the
+branches it needs; ops without a `SELECT` still get the whole envelope.
 :::
 
 ## That's most of it

@@ -17,8 +17,10 @@ OPS/support/0100_TRIAGE/
 ```
 
 `mock-request.json` is never consulted at runtime — it documents the
-expected input and feeds `txco op test`. `mock-response.json` is the
-live fixture.
+expected input and feeds `txco op test`. For a rule with a `SELECT`
+clause, write the fixture in the **projected** shape (the selected
+destinations plus `_ts`/`_txc` identity) — that is what the op actually
+receives. `mock-response.json` is the live fixture.
 
 ## Two ways a mock fires
 

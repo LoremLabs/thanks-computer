@@ -43,6 +43,20 @@ func TestEvalTable(t *testing.T) {
 			`SELECT path-copy (number)`,
 		},
 		{
+			[]string{`WHEN * SELECT * PRIORITY 1`},
+			0,
+			`{"num":6.13,"strs":["a","b"]}`,
+			`{"num":6.13,"strs":["a","b"]}`,
+			`SELECT * — explicit everything; transformed envelope untouched`,
+		},
+		{
+			[]string{`WHEN * SELECT .missing DEFAULT "x" PRIORITY 1`},
+			0,
+			`{"num":6.13}`,
+			`{"missing":"x","num":6.13}`,
+			`identity shorthand + DEFAULT — the migration one-liner`,
+		},
+		{
 			[]string{`WHEN * SELECT .num AS .alias WITH fallback = true PRIORITY 1"`, `WHEN * PRIORITY 2"`},
 			1,
 			`{"num":6.13,"strs":["a","b"]}`,

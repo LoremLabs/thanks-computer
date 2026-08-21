@@ -907,7 +907,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					// emitter (no EXEC needed; we synthesized "{}"
 					// above).
 					if op.Resonator.Emit != nil {
-						out, oerr := pu.OverlayResponse(op.Input, op.Output, op.Resonator.Emit.Overrides)
+						out, oerr := pu.OverlayResponse(op.EnvelopeView(), op.Output, op.Resonator.Emit.Overrides)
 						if oerr != nil {
 							pu.Logger.Debug("emit overlay", zap.String("err", oerr.Error()))
 							op.Output = string(failPayload(oerr.Error()))
@@ -1707,7 +1707,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 				payload = "{}"
 			}
 			if op.Resonator.Emit != nil {
-				out, oerr := pu.OverlayResponse(op.Input, payload, op.Resonator.Emit.Overrides)
+				out, oerr := pu.OverlayResponse(op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 				if oerr != nil {
 					status = "failed"
 					payload = string(failPayload(oerr.Error()))
@@ -2049,7 +2049,7 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 					payload = "{}"
 				}
 				if op.Resonator != nil && op.Resonator.Emit != nil {
-					out, oerr := pu.OverlayResponse(op.Input, payload, op.Resonator.Emit.Overrides)
+					out, oerr := pu.OverlayResponse(op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 					if oerr != nil {
 						_, _ = pu.Runs.RecordTerminal(ctx, runID, cstage, ordinal, name, "failed",
 							continuation.TerminalMeta{Transport: transport}, failPayload(oerr.Error()))
@@ -2521,6 +2521,12 @@ func (pu *Unit) ExecCore(ctx context.Context, op operation.Operation) (event.Pay
 // transport. Stage jumps stay inside the chassis's routing machinery and
 // don't dispatch; unsupported schemes error out before reaching a
 // handler. Both skip envelope injection.
+// dispatchesToHandler reports whether opName is a handler transport that
+// gets the runtime identity stamp (_txc.op/_txc.step) on its input.
+// ai:// and mcp+http(s):// are deliberately excluded — stamping would leak
+// identity into the ai template env, and mcp argument extraction strips
+// _txc anyway. SELECT projection applies to ALL transports regardless;
+// only the identity stamp is scheme-gated.
 func dispatchesToHandler(opName string) bool {
 	switch {
 	case strings.HasPrefix(opName, "txco://"):
@@ -2542,7 +2548,9 @@ func dispatchesToHandler(opName string) bool {
 // wins). Accepts a single string OR an array of strings for ergonomics.
 // Returns false if `_txc.mocks` is absent, malformed, or empty.
 func (pu *Unit) shouldMockByPattern(op operation.Operation) bool {
-	raw := gjson.Get(op.Input, "_txc.mocks")
+	// EnvelopeView, not Input: `_txc.mocks` is chassis control state
+	// and must keep working when a SELECT projected the wire view.
+	raw := gjson.Get(op.EnvelopeView(), "_txc.mocks")
 	if !raw.Exists() {
 		return false
 	}
@@ -2786,7 +2794,7 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 		if payload.Type == event.Null || base == "" {
 			base = "{}"
 		}
-		if ov, oerr := pu.OverlayResponse(op.Input, base, op.Resonator.Emit.Overrides); oerr == nil {
+		if ov, oerr := pu.OverlayResponse(op.EnvelopeView(), base, op.Resonator.Emit.Overrides); oerr == nil {
 			tracedOutput = ov
 		}
 	}
@@ -3015,10 +3023,13 @@ func (pu *Unit) StageParse(stage string) (stack string, scope int, err error) {
 // If any matching op has Priority > 0, only the highest-priority op is returned;
 // otherwise all matching ops are returned (parallel execution at this stage).
 //
-// Clause evaluation order on a single rule: WHEN, PRE-SET, SELECT, POST-SET,
-// WITH, PRIORITY, EXEC. PRE-SET, SELECT, and POST-SET control the event payload
-// passed to dispatch; WITH carries per-call metadata; PRIORITY tie-breaks
-// matching rules; EXEC is the dispatch target.
+// Clause evaluation order on a single rule: WHEN match, PRIORITY filter,
+// PRE-SET (set-if-absent input decoration), WITH (resolved against the FULL
+// pre-projection input — chassis directives may reference anything), then
+// SELECT (copy + input projection), then dispatch. POST-SET is NOT applied
+// here — it overlays the merged envelope after the scope completes
+// (advanceAfterScope). WITH carries per-call metadata; PRIORITY picks the
+// highest-priority rule set; EXEC is the dispatch target.
 func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed string) ([]operation.Operation, error) {
 
 	highestPriority := int64(0)
@@ -3085,7 +3096,11 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 
 			ops[0] = ops[shuffle%uint32(len(ops))]
 		}
-		ops = ops[:0]
+		// Exactly one op survives a positive-priority scope (the
+		// hashSeed pick above, or the first highest-priority match).
+		// Was `ops[:0]` — a typo that silently dropped EVERY op in
+		// any scope carrying a PRIORITY > 0 rule.
+		ops = ops[:1]
 	}
 
 	// decorate matching ops
@@ -3156,20 +3171,34 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 			op.Meta = meta
 		}
 
-		// SELECT (path-copy with optional DEFAULT).
-		// For each `<src> AS <dst> [DEFAULT <lit>]` assignment:
-		//   1. Read From off the envelope view (op.Input). When the
-		//      source path is missing or resolves to "", substitute
-		//      Default if one was supplied.
-		//   2. Pre-overlay: write the value into op.Input so the
-		//      rule's EXEC sees it on its input view.
+		// SELECT (input projection with optional DEFAULT).
+		// For each `<src> [AS <dst>] [DEFAULT <lit>]` assignment:
+		//   1. Read From off the full envelope view (op.Input). When
+		//      the source path is missing or resolves to "",
+		//      substitute Default if one was supplied. (No DEFAULT →
+		//      the destination is written as "" — a selected key has
+		//      a stable at-least-empty presence on the wire.)
+		//   2. Copy: write the value into op.Input (so chained
+		//      assignments can read earlier destinations) AND into a
+		//      fresh `projected` doc built from "{}".
 		//   3. Post-overlay: synthesize an EMIT entry so the writes
 		//      persist into the merged scope response even when the
 		//      rule has no EXEC (or noop'd it). User-authored EMIT
 		//      entries layer ON TOP of SELECT's synthetic ones so an
 		//      explicit EMIT can override a SELECT'd path.
-		if op.Resonator.Select != nil {
+		//   4. Project: swap op.Input for `projected` (plus `_ts`
+		//      carried forward — it is stamped only at inlets), and
+		//      stash the full view on op.FullInput for
+		//      chassis-internal readers (op.EnvelopeView()). The
+		//      dispatched input is therefore ONLY the assigned
+		//      destinations plus envelope identity; the runtime
+		//      `_txc.op`/`_txc.step` stamp composes later in Exec.
+		// `SELECT *` (Star, zero assignments) skips the whole block:
+		// explicit everything, projection no-op, byte-identical
+		// dispatch.
+		if op.Resonator.Select != nil && len(op.Resonator.Select.Assignments) > 0 {
 			synthetic := make([]resonator.BranchValue, 0, len(op.Resonator.Select.Assignments))
+			projected := "{}"
 			for _, asn := range op.Resonator.Select.Assignments {
 				srcPath := normalizeSelectPath(asn.From)
 				dstPath := normalizeSelectPath(asn.To)
@@ -3203,9 +3232,15 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 					if altered, err := sjson.SetRaw(op.Input, dstPath, rawVal); err == nil {
 						op.Input = altered
 					}
+					if altered, err := sjson.SetRaw(projected, dstPath, rawVal); err == nil {
+						projected = altered
+					}
 				} else {
 					if altered, err := sjson.Set(op.Input, dstPath, goVal); err == nil {
 						op.Input = altered
+					}
+					if altered, err := sjson.Set(projected, dstPath, goVal); err == nil {
+						projected = altered
 					}
 				}
 				synthetic = append(synthetic, resonator.BranchValue{
@@ -3224,6 +3259,15 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 					op.Resonator.Emit.Overrides...,
 				)
 			}
+			// Carry `_ts` forward — inlets stamp it once; nothing
+			// downstream re-creates it on the dispatched view.
+			if ts := gjson.Get(op.Input, "_ts"); ts.Exists() {
+				if altered, err := sjson.SetRaw(projected, "_ts", ts.Raw); err == nil {
+					projected = altered
+				}
+			}
+			op.FullInput = op.Input
+			op.Input = projected
 		}
 
 		ops[j] = op

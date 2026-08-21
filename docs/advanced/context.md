@@ -5,7 +5,7 @@ In [Thanks, Computer](https://www.thanks.computer) operations are glued together
 > Read JSON. Write JSON. Merge JSON.
 
 We coordinate across operations via the context, a serialized state of the event flow at a point in time.
-Because every [operation](../resonators.md) of the same step runs in parallel, they all receive the same input as JSON.
+Because every [operation](../resonators.md) of the same step runs in parallel, they all start from the same step input as JSON (an operation's own `SELECT` clause can then narrow what it receives).
 
 When operations finish, they emit JSON as their "answer", which gets merged into the context. Because of this, each operation
 needs to be careful about the namespace it uses, as **two operations running at the same step could clobber each other's responses if they write to the same part of the context tree**. You'll find yourself creating merge operations that merge together previous steps responses, occasionally, and that's totally ok--it's the trade-off we're making.
@@ -13,7 +13,7 @@ needs to be careful about the namespace it uses, as **two operations running at 
 
 ## Private Context
 
-By convention, anything starting with a `_` is considered private and won't be returned in the final result under normal production paths. Subsequent operations will be able to see the entire context, even those branches that start with a `_`, so if you want to prevent this, be sure to use the `SELECT` [txcl](./txcl/txcl.md) in your operation's resonator to restrict its input.
+By convention, anything starting with a `_` is considered private and won't be returned in the final result under normal production paths. Subsequent operations will be able to see the entire context, even those branches that start with a `_`. An operation that shouldn't receive internal branches restricts **its own** input with the `SELECT` [txcl](./txcl/txcl.md) clause — with `SELECT`, the operation is dispatched only the branches it selected (plus `_ts` and the runtime identity stamp).
 
 ## System Context
 
@@ -73,5 +73,5 @@ Operations may set these in their response JSON which will effect the flow.
 Everything else under `_txc.*` is chassis-owned — writes to reserved
 fields (`tenant`, `fuel_used`, `computed.*`, …) are rejected. 
 
-Payload fields (no `_txc.` prefix) are always available; fields starting with `_` are dropped from the final answer by convention.
+Payload fields (no `_txc.` prefix) are always available on the context (a rule's own `SELECT` narrows only what its op is dispatched, never the context itself); fields starting with `_` are dropped from the final answer by convention.
 

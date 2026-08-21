@@ -401,7 +401,7 @@ EXEC "op://CLASSIFY"
 - `omit` deletes the path from the trace JSON entirely — best for big payloads (`_txc.lmtp.msg.raw`, `_txc.lmtp.msg.attachments`).
 - `redact` replaces the value with `"[REDACTED]"` — best for header values where "something was here" is a useful signal.
 
-The rule still SELECTs / EXECs against the full envelope; only what hits disk is masked. Scope is per-`(tenant, stack)` and hints take effect at the next dbcache reload. See [`advanced/txcl/txcl.md` § WITH](../txcl/txcl.md#with--per-call-modifiers) for the full semantic.
+Runtime behavior is unaffected — only what hits disk is masked (the rule's `SELECT`, if any, separately projects what its EXEC receives). Scope is per-`(tenant, stack)` and hints take effect at the next dbcache reload. See [`advanced/txcl/txcl.md` § WITH](../txcl/txcl.md#with--per-call-modifiers) for the full semantic.
 
 ## See also
 

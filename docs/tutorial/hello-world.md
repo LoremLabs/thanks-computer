@@ -73,7 +73,7 @@ WHEN @src == "http"
 ```
 
 Fire on any web request (`@src == "http"`) and set `.say`. The web inlet returns the
-envelope as JSON (its default projection — every key except `_`-prefixed internals), so
+envelope as JSON (the default response view — every key except `_`-prefixed internals), so
 the response is `{"say":"hello world"}`. No external services to wire — it deploys as-is.
 
 ## 4. Deploy to the cloud

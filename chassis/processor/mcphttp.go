@@ -50,7 +50,7 @@ func mcpDebugEnabled(op operation.Operation) bool {
 	if gjson.Get(op.Meta, "debug").Bool() {
 		return true
 	}
-	if gjson.Get(op.Input, "_txc._debug").Bool() {
+	if gjson.Get(op.EnvelopeView(), "_txc._debug").Bool() {
 		return true
 	}
 	return false

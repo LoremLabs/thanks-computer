@@ -26,14 +26,16 @@ Set it before your first call — see [Set the API key](#set-the-api-key) below.
 ## Prompts read the document
 
 `{{@path}}` markers in `prompt` and `system` are filled from the
-envelope — `{{@web.req.body}}`, `{{@lmtp.msg.subject}}` —
+op's input — `{{@web.req.body}}`, `{{@lmtp.msg.subject}}` —
 JSON-escaped automatically so values splice into the prompt without
-breaking it. Missing paths render empty rather than failing. For a
-computed scratch value, use `SET PRE` (sets a field on *this op's input
-only*, without propagating downstream):
+breaking it. Missing paths render empty rather than failing. On a rule
+with a `SELECT` clause, the input is the projected view, so select the
+paths the prompt references. For a computed scratch value, use a plain
+`SET` (before any `SELECT`, a `SET` decorates *this op's input only*,
+without propagating downstream):
 
 ```txcl
-SET PRE @summary_input = .order.notes
+SET @summary_input = .order.notes
 WITH prompt = "Summarize: {{@summary_input}}"
 EXEC "ai://chat"
 ```
