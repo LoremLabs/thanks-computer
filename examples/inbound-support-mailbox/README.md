@@ -20,11 +20,10 @@ Prerequisites: Node 18+ (uses `node:http` — no `npm install`). `swaks` availab
 cp -r examples/inbound-support-mailbox ~/my-mail-workspace
 cd ~/my-mail-workspace
 
-# LMTP is opt-in: add it to --personalities. The listener binds the
-# default :2424 — no extra flag needed.
-txco dev \
-    --personalities=cron,tcp,web,admin,lmtp \
-    --ingress-config=./ingress.yaml
+# LMTP is opt-in: --lmtp starts the mail head on :2424, points outbound
+# relay at a local sink (localhost:1025 — run MailHog/Mailpit if this
+# workspace sends mail), and auto-loads ./ingress.yaml.
+txco dev --lmtp
 ```
 
 `txco dev` brings up the chassis + the `tickets` service and watches both for changes.

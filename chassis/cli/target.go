@@ -111,7 +111,14 @@ type operationConfig struct {
 }
 
 type targetConfig struct {
-	Chassis    string                     `yaml:"chassis" json:"chassis"`
+	Chassis string `yaml:"chassis" json:"chassis"`
+	// Profile binds WHO acts on this target, completing the picture the
+	// chassis URL starts (WHERE). Read by the auth layer's workspace
+	// resolution (cli/auth/workspace.go): profile-following commands run
+	// inside this workspace resolve the DEFAULT target's profile ahead of
+	// the machine-global active profile — flag/TXCO_PROFILE still win.
+	// Committed, greppable provenance instead of ambient global state.
+	Profile    string                     `yaml:"profile" json:"profile,omitempty"`
 	User       string                     `yaml:"user" json:"user,omitempty"`
 	Pass       string                     `yaml:"pass" json:"pass,omitempty"`
 	Mock       string                     `yaml:"mock" json:"mock,omitempty"` // "allow" | "deny"; default "allow"

@@ -59,7 +59,7 @@ Flags:
 	// URL → the endpoint (each only when not already set explicitly).
 	applyTargetSelector(*targetSel, &endpoint, &profileFlag)
 
-	resolvedProfile, err := ResolveProfile(profileFlag)
+	resolvedProfile, profileSource, err := ResolveProfileSource(profileFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "auth whoami: %v\n", err)
 		return 1
@@ -87,11 +87,15 @@ Flags:
 	// a `whoami` that succeeds against one profile/URL looks like it
 	// contradicts an `apply --profile X` that 401s against another —
 	// the two are simply talking to different chassis.
+	// Provenance matters as much as the name: `profile: onepony (active
+	// profile)` inside a dev workspace is the wrong-chassis foot-gun
+	// announcing itself, and `(… txco.yaml target "dev")` is the
+	// workspace binding doing its job.
 	profileDisplay := resolvedProfile
 	if profileDisplay == "" {
 		profileDisplay = "(none — unsigned)"
 	}
-	fmt.Fprintf(stdout, "profile: %s\n", profileDisplay)
+	fmt.Fprintf(stdout, "profile: %s (%s)\n", profileDisplay, profileSource)
 	fmt.Fprintf(stdout, "chassis: %s\n", target.Addr)
 	fmt.Fprintf(stdout, "source: %s\n", resp.Source)
 	if resp.ActorID != "" {

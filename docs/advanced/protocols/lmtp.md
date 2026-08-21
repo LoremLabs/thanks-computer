@@ -20,7 +20,10 @@ The chassis is a **destination MTA**, not a public-internet mail exchanger (MX):
 | `--lmtp-hostname` | `os.Hostname()` | Greeting hostname. |
 | `--lmtp-default-hosts` | _(empty)_ | Comma list. Enables [Strategy A](#strategy-a--operator-hosts-mail-for-many-tenants): rcpts `tenant.stack@<this host>` parse to `<tenant>/<stack>`. |
 
-**Enabled by `--personalities`** — the personality string is the only gate. Once `lmtp` is in the list, the head binds `:2424` by default. 
+**Enabled by `--personalities`** — the personality string is the only gate. Once `lmtp` is in the list, the head binds `:2424` by default.
+
+**Local development:** `txco dev --lmtp` — starts the head on `:2424`, points the outbound relay at a local sink (`localhost:1025`, TLS off — MailHog/Mailpit), and auto-loads `./ingress.yaml` from the workspace when present. Each default is set-if-missing, so `TXCO_MAIL_RELAY_ADDR=… txco dev --lmtp` overrides.
+
 
 ```sh
 # Co-located with SMTP (eg - Postfix) on the same host (recommended).

@@ -124,22 +124,49 @@ func WriteActiveProfile(name string) error {
 	return nil
 }
 
-// ResolveProfile walks the precedence chain (flag → env → active
-// file → default) and returns the profile name to use. Empty flag
-// + empty env means "let the persisted state decide"; an explicit
-// flag short-circuits everything.
+// ResolveProfile walks the precedence chain (flag → env → workspace →
+// active file → default) and returns the profile name to use. An
+// explicit flag short-circuits everything; TXCO_PROFILE beats the
+// workspace (scripts/CI need a hard override); the workspace binding
+// (an enclosing txco.yaml whose default target declares `profile:` —
+// see workspace.go) beats the machine-global active profile, so
+// standing inside a dev workspace targets the dev chassis even while a
+// production profile is globally active.
 //
 // The TXCO_PRIVATE_KEY_PATH escape hatch is NOT handled here —
 // it's resolved at a higher layer in target.go::loadSigner. This
 // function is purely about the profile-name pick.
 func ResolveProfile(flag string) (string, error) {
+	name, _, err := ResolveProfileSource(flag)
+	return name, err
+}
+
+// ResolveProfileSource is ResolveProfile plus provenance: WHERE the
+// pick came from, for display (whoami, error hints). Sources:
+// "--profile", "TXCO_PROFILE", "<txco.yaml path> target <t>",
+// "active profile", "default".
+func ResolveProfileSource(flag string) (name, source string, err error) {
 	if flag != "" {
-		return flag, nil
+		return flag, "--profile", nil
 	}
 	if env := os.Getenv("TXCO_PROFILE"); env != "" {
-		return env, nil
+		return env, "TXCO_PROFILE", nil
 	}
-	return ReadActiveProfile()
+	wsName, wsSource, wsErr := WorkspaceProfile()
+	if wsErr != nil {
+		return "", "", wsErr
+	}
+	if wsName != "" {
+		return wsName, wsSource, nil
+	}
+	name, err = ReadActiveProfile()
+	if err != nil {
+		return "", "", err
+	}
+	if name == DefaultProfile {
+		return name, "default", nil
+	}
+	return name, "active profile", nil
 }
 
 // ProfileChassisURL returns the chassis_url recorded in the resolved
