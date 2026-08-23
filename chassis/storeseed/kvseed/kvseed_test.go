@@ -127,3 +127,23 @@ func TestFlags(t *testing.T) {
 		t.Errorf("Kind()=%q, want %q", k, storeseed.KindKV)
 	}
 }
+
+// TestReconcileRefusesReservedNamespace — a KV/_txc.blob.jsonl pack must not
+// delete-missing the chassis' blob name index.
+func TestReconcileRefusesReservedNamespace(t *testing.T) {
+	ctx := context.Background()
+	kv := newKV(t)
+	m := kvseed.New(kv, false)
+	// Pretend the index holds a row.
+	if err := kv.Set(ctx, "acme", "_txc.blob", "n:faqs:x", []byte(`{"sha256":"a"}`), 0); err != nil {
+		t.Fatal(err)
+	}
+	err := m.Reconcile(ctx, storeseed.Scope{Tenant: "acme", Stack: "s", Version: 1},
+		[]storeseed.RawPack{pack("_txc.blob", `{"key":"k","value":1}`)})
+	if err == nil {
+		t.Fatal("reserved namespace pack reconciled, want refusal")
+	}
+	if _, found, _ := kv.Get(ctx, "acme", "_txc.blob", "n:faqs:x"); !found {
+		t.Fatal("index row was wiped by a refused pack")
+	}
+}

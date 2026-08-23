@@ -67,3 +67,34 @@ func TestNewRawPackAndLines(t *testing.T) {
 		t.Error("NewRawPack(FILES/x.html) ok=true, want false (not a pack)")
 	}
 }
+
+func TestBlobPackPaths(t *testing.T) {
+	if KindForPath("BLOBS/faqs/house-01.doc") != KindBlob || !IsBlobPath("BLOBS/x") {
+		t.Fatal("BLOBS/ not classified as the blob kind")
+	}
+	if IsBlobPath("blobs/x") || IsBlobPath("BLOBSX/x") || IsBlobPath("BLOBS") {
+		t.Fatal("lookalike classified as blob")
+	}
+	cases := map[string]string{
+		"BLOBS/faqs/house-01.doc": "faqs/house-01.doc", // nesting IS the hierarchy
+		"BLOBS/a/b/c.bin":         "a/b/c.bin",
+		"BLOBS/top.txt":           "top.txt",
+		"BLOBS/":                  "", // bare tree
+	}
+	for p, want := range cases {
+		if got := PackName(p); got != want {
+			t.Errorf("PackName(%q) = %q, want %q", p, got, want)
+		}
+	}
+	// The other kinds are unchanged by the blob branch.
+	if PackName("VECTORS/nested/x.jsonl") != "" || PackName("KV/config.jsonl") != "config" {
+		t.Error("single-file kinds regressed")
+	}
+	p, ok := NewRawPack("BLOBS/faqs/house-01.doc", nil)
+	if !ok || p.Kind != KindBlob || p.Name != "faqs/house-01.doc" || p.Bytes != nil {
+		t.Fatalf("NewRawPack blob row: ok=%v %+v", ok, p)
+	}
+	if e := EmptyTree(KindBlob); e.Kind != KindBlob || e.Path != "" {
+		t.Fatalf("EmptyTree = %+v", e)
+	}
+}

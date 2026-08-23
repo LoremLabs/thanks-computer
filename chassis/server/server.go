@@ -24,6 +24,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/bgservice"
+	"github.com/loremlabs/thanks-computer/chassis/blob"
 	_ "github.com/loremlabs/thanks-computer/chassis/chat/openai"     // registers the "openai" ai://chat backend
 	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter" // registers the "openrouter" ai://chat backend
 	"github.com/loremlabs/thanks-computer/chassis/compute"
@@ -74,6 +75,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed/blobseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/kvseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/vecseed"
 	"github.com/loremlabs/thanks-computer/chassis/telemetry"
@@ -1379,6 +1381,37 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			return kvList(ctx, kvHandle, in)
 		}))
 
+	// Runtime blob store (txco://blob/{put,get,stat,list,delete}): a mutable,
+	// permissioned NAME layer over the filecas CAS — stacks' /var/lib, where
+	// FILES/ is /usr/share. Bytes ride the same filecas as FILES/ + DATASETS/
+	// (shared R2 on the fleet); the name index lives in the reserved
+	// `_txc.blob` KV namespaces, so it is exactly as shared as the KV store.
+	// Registered unconditionally — without a filecas the ops answer
+	// blob.error txco_blob_disabled rather than "op not found", so a stack
+	// can branch. See chassis/server/blob.go + chassis/blob + docs/advanced/blobs.md.
+	blobIndex := blob.NewKVIndex(kvHandle)
+	blobD := blobDeps{fcas: fcas, ix: blobIndex, maxBytes: int64(conf.BlobMaxBytes)}
+	pu.Handle([]byte("txco://blob/put"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return blobPut(ctx, blobD, in)
+		}))
+	pu.Handle([]byte("txco://blob/get"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return blobGet(ctx, blobD, in)
+		}))
+	pu.Handle([]byte("txco://blob/stat"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return blobStat(ctx, blobD, in)
+		}))
+	pu.Handle([]byte("txco://blob/list"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return blobList(ctx, blobD, in)
+		}))
+	pu.Handle([]byte("txco://blob/delete"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return blobDelete(ctx, blobD, in)
+		}))
+
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
 	// delete}). The backend is selected by --vector-store (default "sqlite",
 	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
@@ -1430,6 +1463,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// (reconcile once on the origin); boltdb (default) = per-node.
 	kvShared := conf.KVStore == "redis"
 	storeSeedMaterializers = append(storeSeedMaterializers, kvseed.New(kvHandle, kvShared))
+	// BLOBS/ store-seed materializer: seeds name → sha pointers into the blob
+	// index (in KV, hence kvShared) for bytes the CLI already streamed into
+	// the filecas. Nil-fcas nodes register it too and error at reconcile.
+	storeSeedMaterializers = append(storeSeedMaterializers, blobseed.New(blobIndex, fcas, kvShared))
 
 	// Computed-secret core ops. These consume cleartext from
 	// op.Secrets (plumbed onto ctx by processor.ExecCore) and emit
@@ -1503,6 +1540,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// content-addressed. Nil-safe (gated on a configured store).
 	adminCtrl.SetFileCAS(fcas)
 	adminCtrl.SetDatasetCache(dsCache)
+	// Blob name index for the stack-blobs inspect endpoint (drift check +
+	// `txco data pull`). Same index the runtime ops write.
+	adminCtrl.SetBlobIndex(blobIndex)
 	// Wire the declarative store-seed reconciler so activation materialises
 	// VECTORS/ (+ later KV/) packs into the runtime stores. Built from whatever
 	// seedable stores opened above; nil-safe when none did.

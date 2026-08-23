@@ -1,0 +1,9 @@
+# Any other blob error (bad name, missing, too large) answers 400 with
+# the structured code so the probe — and a human — can see what broke.
+WHEN .blob.error.code != "" && .blob.error.code != "txco_blob_denied"
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error", .blob.error.code,
+         "message", .blob.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

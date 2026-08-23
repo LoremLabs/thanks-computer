@@ -26,6 +26,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
+	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
@@ -140,6 +141,10 @@ type putFilesResponse struct {
 
 type activateRequest struct {
 	VersionNumber int64 `json:"version_number"`
+	// Force: reconcile EVERY store-seed pack (not just the changed ones) and
+	// let the tree win over runtime drift (storeseed.Scope.Force). Sent by
+	// `txco data apply --force`; ignored by code-only applies.
+	Force bool `json:"force,omitempty"`
 }
 
 type activateResponse struct {
@@ -294,7 +299,7 @@ func (c *Controller) codeManifestHash(ctx context.Context, tenantID, name string
 		  FROM stack_files sf
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
-		   AND sf.path NOT LIKE 'VECTORS/%' AND sf.path NOT LIKE 'KV/%'`),
+		   AND sf.path NOT LIKE 'VECTORS/%' AND sf.path NOT LIKE 'KV/%' AND sf.path NOT LIKE 'BLOBS/%'`),
 		tenantID, name)
 	if err != nil {
 		return "", err
@@ -420,7 +425,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "DATASETS":
+		case "FILES", "VECTORS", "KV", "DATASETS", "BLOBS":
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -435,6 +440,23 @@ func validateStackFilePath(p string) error {
 		return nil
 	}
 
+	// BLOBS/** is the runtime blob store's seed tree: one file per blob, the
+	// tree IS the hierarchy ("BLOBS/faqs/house-01.doc" seeds the blob name
+	// "faqs/house-01.doc"). Nesting is the point, so the blob NAME rules
+	// apply (charset, no '_'-segment, length), not the single-segment pack
+	// rule below. Bytes arrive fingerprint-only via the blob endpoint and
+	// are pointed at by the name index on activation (chassis/storeseed/blobseed).
+	if storeseed.IsBlobPath(p) {
+		name := storeseed.PackName(p)
+		if name == "" {
+			return fmt.Errorf("%s/ needs a file path beneath it", storeseed.DirBlobs)
+		}
+		if err := blob.ValidName(name); err != nil {
+			return fmt.Errorf("%s/: %w", storeseed.DirBlobs, err)
+		}
+		return nil
+	}
+
 	// VECTORS/** and KV/** are declarative store-seed packs (NDJSON),
 	// reconciled into the vector / KV stores on activation rather than served
 	// or materialised into ops (see chassis/storeseed). Their bytes are
@@ -442,9 +464,16 @@ func validateStackFilePath(p string) error {
 	// .jsonl extension — "VECTORS/<collection>.jsonl", "KV/<namespace>.jsonl" —
 	// so the collection/namespace each pack owns is unambiguous (no nesting).
 	if storeseed.KindForPath(p) != "" {
-		if storeseed.PackName(p) == "" {
+		name := storeseed.PackName(p)
+		if name == "" {
 			return fmt.Errorf("store-seed packs must be a single %q file directly under %s/ or %s/ (got %q)",
 				storeseed.PackExt, storeseed.DirVectors, storeseed.DirKV, p)
+		}
+		// A '_'-prefixed collection/namespace is chassis-reserved (the
+		// txco://blob name index lives in the KV namespace "_txc.blob"); a
+		// pack targeting one would delete-missing an index it never wrote.
+		if strings.HasPrefix(name, "_") {
+			return fmt.Errorf("store-seed pack name %q is reserved (names starting with '_' belong to the chassis)", name)
 		}
 		return nil
 	}
@@ -1373,7 +1402,10 @@ func (m contentMode) wantsBytes(path string) bool {
 	case contentAll:
 		return true
 	case contentOps:
-		return !strings.HasPrefix(path, "FILES/")
+		// BLOBS/ rows are arbitrary-size artifacts like dataset artifacts —
+		// never resolved for the ops view (that would be one CAS GET per
+		// seeded blob on every stack listing).
+		return !strings.HasPrefix(path, "FILES/") && !storeseed.IsBlobPath(path)
 	default:
 		return false
 	}
@@ -1400,11 +1432,13 @@ func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, mode
 			f.ContentHash = sha256Hex(content)
 		}
 		if mode.wantsBytes(f.Path) {
-			// Dataset ARTIFACTS are never inlined into a JSON response — they
-			// can run to gigabytes. They travel as fingerprint rows (Encoding
-			// "cas"); `txco pull` streams their bytes through the blob GET
-			// endpoint instead. Manifests (small yaml) resolve normally below.
-			if dataset.IsArtifactPath(f.Path) && content == "" && f.ContentHash != "" && f.ContentHash != emptyHash {
+			// Dataset ARTIFACTS and BLOBS/ rows are never inlined into a JSON
+			// response — they can run to gigabytes. They travel as fingerprint
+			// rows (Encoding "cas"); `txco pull` streams their bytes through
+			// the blob GET endpoint instead. Manifests (small yaml) resolve
+			// normally below.
+			if (dataset.IsArtifactPath(f.Path) || storeseed.IsBlobPath(f.Path)) &&
+				content == "" && f.ContentHash != "" && f.ContentHash != emptyHash {
 				f.Encoding = "cas"
 				out = append(out, f)
 				continue
@@ -1770,10 +1804,10 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 	switch req.Manage {
 	case "code":
 		delQuery = `DELETE FROM stack_files WHERE version_id = ?
-			   AND NOT (path LIKE 'VECTORS/%' OR path LIKE 'KV/%')`
+			   AND NOT (path LIKE 'VECTORS/%' OR path LIKE 'KV/%' OR path LIKE 'BLOBS/%')`
 	case "data":
 		delQuery = `DELETE FROM stack_files WHERE version_id = ?
-			   AND (path LIKE 'VECTORS/%' OR path LIKE 'KV/%')`
+			   AND (path LIKE 'VECTORS/%' OR path LIKE 'KV/%' OR path LIKE 'BLOBS/%')`
 	}
 	if _, err := tx.ExecContext(r.Context(), c.rb(delQuery), versionID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "clear_files", map[string]any{"err": err.Error()})
@@ -2586,7 +2620,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		ssCtx := context.WithoutCancel(r.Context())
-		go c.ReconcileStorePacks(ssCtx, ac.TenantID, name, req.VersionNumber, priorVersion, true)
+		go c.ReconcileStorePacks(ssCtx, ac.TenantID, name, req.VersionNumber, priorVersion, true, req.Force)
 	}
 
 	resp := activateResponse{VersionNumber: req.VersionNumber}

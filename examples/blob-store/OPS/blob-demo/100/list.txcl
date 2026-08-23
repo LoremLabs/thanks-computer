@@ -1,0 +1,6 @@
+# GET /blobs/list?prefix=… — the tenant's names, sorted, windowed.
+# Rows carry their `permissions` (metadata only; reads stay gated).
+WHEN @src == "http" && @web.req.url.path == "/blobs/list"
+  EXEC "txco://blob/list"
+    WITH prefix = @web.req.url.query.prefix.0,
+         into = "_list"

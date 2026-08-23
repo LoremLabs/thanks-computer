@@ -35,8 +35,10 @@ Each key is stored under **`<tenant>/<namespace>/<key>`**:
 - **tenant** — the request's resolved tenant. You can't reach another tenant's keys.
 - **namespace** — defaults to the **stack** serving the request, so one stack's
   keys never collide with another's. Pass `namespace = "shared"` (any name) to
-  share keys across a tenant's stacks.
-- **key** — yours; no `.` or `/` (use a namespace to group).
+  share keys across a tenant's stacks. Names starting with `_txc` are reserved
+  for the chassis' own indexes (the blob name index lives in `_txc.blob`) and
+  are refused by every `kv/*` op and by `KV/` seed packs.
+- **key** — yours; no `/` (use a namespace to group).
 
 So `kv/incr key="hits"` from stack `web` of tenant `acme` touches `acme/web/hits`.
 

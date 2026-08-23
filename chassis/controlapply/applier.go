@@ -552,7 +552,7 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 	// packs but skips SHARED stores (pgvector), which the control plane seeded
 	// once. ev.BaseVersion is the prior active version → change-driven reconcile
 	// skips unchanged packs. Best-effort: ReconcileStorePacks logs, never fails.
-	c.admin.ReconcileStorePacks(ctx, art.TenantID, art.Stack, art.Version, ev.BaseVersion, false)
+	c.admin.ReconcileStorePacks(ctx, art.TenantID, art.Stack, art.Version, ev.BaseVersion, false, false)
 
 	// Warm this node's dataset cache (DATASETS/ artifacts) so the first
 	// query doesn't eat a cold multi-GB CAS fetch inside a request. Same

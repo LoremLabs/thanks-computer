@@ -1,0 +1,91 @@
+{
+  "note": "Runtime blob store: the BLOBS/ seed tree is streamed over the blob plane by txco dev and named on activation; /blobs/upload retains a document under a derived name with an internal permission, which the guest lane structurally cannot read. Binds localhost \u2192 blob-demo (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "blob-demo"
+    }
+  ],
+  "checks": [
+    {
+      "name": "seeded names are listed",
+      "method": "GET",
+      "path": "/blobs/list?prefix=faqs/",
+      "status": 200,
+      "contains": "faqs/house-01.txt"
+    },
+    {
+      "name": "guest lane reads a seeded (open) name",
+      "method": "GET",
+      "path": "/blobs/get?name=faqs/house-01.txt",
+      "status": 200,
+      "contains": "pool door code is 7311"
+    },
+    {
+      "name": "upload retains a document under a derived name",
+      "method": "POST",
+      "path": "/blobs/upload",
+      "status": 200,
+      "contains": "\"existed\":false",
+      "body": "{\"filename\":\"Menu (v2).txt\",\"content_b64\":\"Um9vZnRvcCBwb29sIGNvZGUgaXMgNzMxMSDigJQgZG8gbm90IHNoYXJlIHdpdGggZ3Vlc3RzLg==\"}"
+    },
+    {
+      "name": "guest lane cannot read the internal document",
+      "method": "GET",
+      "path": "/blobs/get?name=docs/42993b685e9ffdd54b754d17ef41abc8df8a450b8573cd05bfe95bee5822b122",
+      "status": 403,
+      "contains": "txco_blob_denied"
+    },
+    {
+      "name": "internal lane can",
+      "method": "GET",
+      "path": "/blobs/internal/get?name=docs/42993b685e9ffdd54b754d17ef41abc8df8a450b8573cd05bfe95bee5822b122",
+      "status": 200,
+      "contains": "7311"
+    },
+    {
+      "name": "re-upload of identical bytes reports existed",
+      "method": "POST",
+      "path": "/blobs/upload",
+      "status": 200,
+      "contains": "\"existed\":true",
+      "body": "{\"filename\":\"Menu (v2).txt\",\"content_b64\":\"Um9vZnRvcCBwb29sIGNvZGUgaXMgNzMxMSDigJQgZG8gbm90IHNoYXJlIHdpdGggZ3Vlc3RzLg==\"}"
+    },
+    {
+      "name": "stat sees it",
+      "method": "GET",
+      "path": "/blobs/stat?name=docs/42993b685e9ffdd54b754d17ef41abc8df8a450b8573cd05bfe95bee5822b122",
+      "status": 200,
+      "contains": "\"exists\":true"
+    },
+    {
+      "name": "delete unlinks the name",
+      "method": "POST",
+      "path": "/blobs/delete?name=docs/42993b685e9ffdd54b754d17ef41abc8df8a450b8573cd05bfe95bee5822b122",
+      "status": 200,
+      "contains": "\"deleted\":true"
+    },
+    {
+      "name": "stat misses after delete",
+      "method": "GET",
+      "path": "/blobs/stat?name=docs/42993b685e9ffdd54b754d17ef41abc8df8a450b8573cd05bfe95bee5822b122",
+      "status": 200,
+      "contains": "\"exists\":false"
+    },
+    {
+      "name": "runtime edit of a seeded name repoints it (drift)",
+      "method": "POST",
+      "path": "/blobs/edit?name=faqs/bookings.txt",
+      "status": 200,
+      "contains": "\"replaced\":true",
+      "body": "Bookings now open to walk-ins."
+    },
+    {
+      "name": "\u2026and the guest lane reads the edited content",
+      "method": "GET",
+      "path": "/blobs/get?name=faqs/bookings.txt",
+      "status": 200,
+      "contains": "walk-ins"
+    }
+  ]
+}

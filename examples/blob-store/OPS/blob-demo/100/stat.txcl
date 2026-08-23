@@ -1,0 +1,7 @@
+# GET /blobs/stat?name=… — metadata without moving bytes; a miss is a
+# result ({exists:false}), not an error.
+WHEN @src == "http" && @web.req.url.path == "/blobs/stat"
+  EXEC "txco://blob/stat"
+    WITH name = @web.req.url.query.name.0,
+         audience = "internal",
+         into = "_stat"

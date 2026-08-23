@@ -1163,10 +1163,12 @@ func (pu *Unit) advanceAfterScope(
 			if p == "" {
 				continue
 			}
-			// Authors may delete only what they may write (see above): a
-			// reserved _txc.* target is refused, including the @-aliased form
-			// (@tenant -> _txc.tenant via normalizeEnvelopePath).
-			if !authorMayWriteTxc(p) {
+			// Authors may delete what they may write (see above) plus the
+			// delete-only inbound facts (authorDeletableTxcPaths, e.g. a
+			// consumed @web.req.body); any other reserved _txc.* target is
+			// refused, including the @-aliased form (@tenant -> _txc.tenant
+			// via normalizeEnvelopePath).
+			if !authorMayDeleteTxc(p) {
 				pu.Logger.Debug("delete: refused reserved target",
 					zap.String("path", p))
 				continue

@@ -90,6 +90,11 @@ type PutFilesResponse struct {
 
 type activateReq struct {
 	VersionNumber int64 `json:"version_number"`
+	// Force is `txco data apply --force`: the tree wins over runtime drift —
+	// the chassis reconciles every store-seed pack (not just the changed
+	// ones) and blobseed re-asserts/drops seeded names it would otherwise
+	// leave to a runtime edit.
+	Force bool `json:"force,omitempty"`
 }
 
 type ActivateResponse struct {
@@ -504,7 +509,12 @@ func (c *Client) DiffVersions(ctx context.Context, name string, v1, v2 int64) (*
 
 // Activate: POST /stacks/{name}/activate
 func (c *Client) Activate(ctx context.Context, name string, versionNumber int64) (*ActivateResponse, error) {
-	body, err := json.Marshal(activateReq{VersionNumber: versionNumber})
+	return c.ActivateWith(ctx, name, versionNumber, false)
+}
+
+// ActivateWith is Activate with the data-apply `force` flag (see activateReq).
+func (c *Client) ActivateWith(ctx context.Context, name string, versionNumber int64, force bool) (*ActivateResponse, error) {
+	body, err := json.Marshal(activateReq{VersionNumber: versionNumber, Force: force})
 	if err != nil {
 		return nil, err
 	}

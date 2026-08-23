@@ -61,6 +61,13 @@ func (m *Materializer) Reconcile(ctx context.Context, scope storeseed.Scope, pac
 }
 
 func (m *Materializer) reconcileOne(ctx context.Context, scope storeseed.Scope, p storeseed.RawPack) error {
+	// A chassis-reserved namespace (the blob name index lives in one) is never
+	// a pack target: delete-missing would wipe an index a pack never wrote.
+	// The draft PUT already refuses such a pack path; this is the belt for
+	// rows that reach a data-plane node without passing that validation.
+	if kvstore.IsReservedNamespace(p.Name) {
+		return fmt.Errorf("namespace %q is reserved for the chassis", p.Name)
+	}
 	items, err := parsePack(p)
 	if err != nil {
 		return err

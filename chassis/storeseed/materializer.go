@@ -14,6 +14,12 @@ type Scope struct {
 	Tenant  string
 	Stack   string
 	Version int64
+	// Force is the `txco data apply --force` signal: the tree WINS over
+	// runtime drift — a materializer re-asserts every seeded item and drops
+	// the ones the tree no longer ships, even where it would otherwise leave
+	// a runtime edit alone (blobseed). The caller also reconciles every pack,
+	// not just the changed ones.
+	Force bool
 }
 
 // Materializer reconciles the store-seed packs of one Kind into its backing
@@ -98,6 +104,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, scope Scope, packs []RawPack
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// LocalKinds returns the kinds whose materializer reconciles PER-NODE
+// (Shared() == false), sorted. The activation origin uses it to warn when a
+// fleet node seeds into a node-local store — the seed would be invisible to
+// every other node.
+func (r *Reconciler) LocalKinds() []string {
+	if r == nil {
+		return nil
+	}
+	var out []string
+	for k, m := range r.byKind {
+		if !m.Shared() {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Kinds returns the pack kinds this Reconciler can materialise (sorted),

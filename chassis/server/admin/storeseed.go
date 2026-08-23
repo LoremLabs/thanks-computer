@@ -19,8 +19,9 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 )
 
-// ReconcileStorePacks loads the version's CHANGED VECTORS/ + KV/ packs and
-// reconciles them into the runtime stores. It is invoked AFTER the activation tx
+// ReconcileStorePacks loads the version's CHANGED VECTORS/ + KV/ + BLOBS/
+// packs and reconciles them into the runtime stores (force: every pack, and
+// the tree wins over runtime drift — see storeseed.Scope.Force). It is invoked AFTER the activation tx
 // commits, from both the control-plane admin handler (origin=true) and the
 // data-plane applier (origin=false, in package controlapply — hence exported).
 //
@@ -40,18 +41,25 @@ import (
 // Best-effort by contract: it logs and swallows every error so a slow or failing
 // store never stalls or rolls back a deploy — the pack bytes are durable in the
 // CAS, so a missed reconcile is retried on the next apply/reload.
-func (c *Controller) ReconcileStorePacks(ctx context.Context, tenantID, stack string, version, priorVersion int64, origin bool) {
+func (c *Controller) ReconcileStorePacks(ctx context.Context, tenantID, stack string, version, priorVersion int64, origin, force bool) {
 	if c.storeReconciler == nil {
 		return
 	}
 	storeKey := c.storeTenantKey(ctx, tenantID)
 	var filter map[string]struct{} // nil ⇒ reconcile every pack
+	blobTouched := false
+	if force {
+		priorVersion = 0 // `--force`: the tree wins — reconcile every pack, changed or not
+	}
 	if changed, canDiff := c.changedPackPaths(ctx, tenantID, stack, version, priorVersion); canDiff {
 		// Union the content-changed packs with any whose store target is missing
 		// (re-key migration, fresh/wiped node) so self-healing beats the skip.
 		filter = map[string]struct{}{}
 		for p := range changed {
 			filter[p] = struct{}{}
+			if storeseed.IsBlobPath(p) {
+				blobTouched = true
+			}
 		}
 		for p := range c.missingVectorPacks(ctx, tenantID, storeKey, stack, version) {
 			filter[p] = struct{}{}
@@ -67,10 +75,27 @@ func (c *Controller) ReconcileStorePacks(ctx context.Context, tenantID, stack st
 			zap.Int64("version", version), zap.String("err", err.Error()))
 		return
 	}
+	if blobTouched && !hasPackKind(packs, storeseed.KindBlob) {
+		// The BLOBS/ tree changed by going away entirely: hand the blob
+		// materializer the empty-tree marker so its delete-missing pass still
+		// runs (a removed single-file pack just stops being managed; a blob
+		// tree's names are individually owned and must be unlinked).
+		packs = append(packs, storeseed.EmptyTree(storeseed.KindBlob))
+	}
 	if len(packs) == 0 {
 		return
 	}
-	scope := storeseed.Scope{Tenant: storeKey, Stack: stack, Version: version}
+	if origin && c.fleetEnabled() {
+		// A per-node store on the activation ORIGIN of a fleet seeds only this
+		// node: every other node sees nothing (boltdb KV on a fleet is not a
+		// supported topology for seeded blobs / KV). Loud, not fatal.
+		if local := kindsPresent(packs, c.storeReconciler.LocalKinds()); len(local) > 0 {
+			c.pu.Logger.Warn("store-seed: fleet origin is seeding a NODE-LOCAL store; other nodes will not see it (use a shared backend, e.g. --kvstore redis)",
+				zap.String("tenant", tenantID), zap.String("stack", stack),
+				zap.Strings("kinds", local))
+		}
+	}
+	scope := storeseed.Scope{Tenant: storeKey, Stack: stack, Version: version, Force: force}
 	if err := c.storeReconciler.Reconcile(ctx, scope, packs, origin); err != nil {
 		c.pu.Logger.Warn("store-seed: reconcile failed (activation unaffected; retried next apply)",
 			zap.String("tenant", tenantID), zap.String("stack", stack),
@@ -174,6 +199,20 @@ func (c *Controller) loadStorePacks(
 		if hash == "" {
 			hash = sha256Hex(content)
 		}
+		// A BLOBS/ row IS the blob: its bytes are never loaded here — the name
+		// index only needs the hash (the CLI streamed the bytes to the CAS
+		// before the draft could reference them; blobseed verifies residency
+		// with a reader probe). Loading would pull every seeded document into
+		// admin memory on each reconcile.
+		if storeseed.IsBlobPath(path) {
+			pk, ok := storeseed.NewRawPack(path, nil)
+			if !ok {
+				return nil, fmt.Errorf("store-seed: malformed blob path %q", path)
+			}
+			pk.Hash = hash
+			packs = append(packs, pk)
+			continue
+		}
 		// Data-plane nodes carry the pack as a fingerprint with a blanked
 		// content column (mirrors loadVersionFiles' FILES/ resolution): fetch
 		// the bytes from the shared CAS. An empty hash means a genuinely-empty
@@ -194,6 +233,7 @@ func (c *Controller) loadStorePacks(
 			// slipped-through malformed pack path as a hard error, not a silent skip.
 			return nil, fmt.Errorf("store-seed: malformed pack path %q", path)
 		}
+		pk.Hash = hash
 		packs = append(packs, pk)
 	}
 	if err := rows.Err(); err != nil {
@@ -203,11 +243,18 @@ func (c *Controller) loadStorePacks(
 }
 
 // changedPackPaths returns the set of pack paths whose content-hash differs
-// between `version` and `priorVersion` (new or modified packs). canDiff is false
-// when no diff is possible (priorVersion <= 0, or a query failed) — the caller
-// then reconciles every pack. This is a cheap stack_files hash comparison; it
-// never touches the CAS, so the common "code deploy, nothing changed" path costs
-// two small queries and no store I/O.
+// between `version` and `priorVersion` — new, modified, AND removed packs (a
+// removed path is simply absent from the version, so loading it yields
+// nothing; it matters for the BLOBS/ tree, whose materializer must run its
+// delete-missing pass). canDiff is false when no diff is possible
+// (priorVersion <= 0, or a query failed) — the caller then reconciles every
+// pack. This is a cheap stack_files hash comparison; it never touches the CAS,
+// so the common "code deploy, nothing changed" path costs two small queries
+// and no store I/O.
+//
+// The BLOBS/ tree is ONE logical pack: any change to any of its rows fans
+// out to every current BLOBS/ row, because the blob materializer computes
+// delete-missing from the full desired set.
 func (c *Controller) changedPackPaths(
 	ctx context.Context, tenantID, stack string, version, priorVersion int64,
 ) (map[string]struct{}, bool) {
@@ -228,7 +275,46 @@ func (c *Controller) changedPackPaths(
 			changed[path] = struct{}{}
 		}
 	}
+	for path := range prev {
+		if _, still := cur[path]; !still {
+			changed[path] = struct{}{}
+		}
+	}
+	blobTouched := false
+	for p := range changed {
+		if storeseed.IsBlobPath(p) {
+			blobTouched = true
+			break
+		}
+	}
+	if blobTouched {
+		for p := range cur {
+			if storeseed.IsBlobPath(p) {
+				changed[p] = struct{}{}
+			}
+		}
+	}
 	return changed, true
+}
+
+func hasPackKind(packs []storeseed.RawPack, kind string) bool {
+	for _, p := range packs {
+		if p.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// kindsPresent returns the subset of kinds that at least one pack carries.
+func kindsPresent(packs []storeseed.RawPack, kinds []string) []string {
+	var out []string
+	for _, k := range kinds {
+		if hasPackKind(packs, k) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // packHashes returns path→content_hash for the version's store-seed packs.
@@ -241,7 +327,7 @@ func (c *Controller) packHashes(
 		  JOIN stack_versions sv ON sf.version_id = sv.version_id
 		  JOIN stacks s          ON sv.stack_id = s.stack_id
 		 WHERE s.tenant_id = ? AND s.name = ? AND sv.version_number = ?
-		   AND (sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%')`),
+		   AND (sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'BLOBS/%')`),
 		tenantID, stack, version)
 	if err != nil {
 		return nil, err

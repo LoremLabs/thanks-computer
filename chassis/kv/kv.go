@@ -37,6 +37,28 @@ import (
 // segMax bounds each key segment (tenant / namespace / userkey).
 const segMax = 256
 
+// ReservedNamespacePrefix marks KV namespaces the chassis owns for its own
+// indexes (e.g. the txco://blob name index lives in "_txc.blob"). Author-
+// facing writers — the txco://kv/* ops, KV/ seed packs — refuse them so a
+// stack can neither read a chassis index as plain KV nor have a pack's
+// delete-missing pass wipe it. Same reservation idiom as the `_txc.*`
+// envelope namespace and the `_sys` tenant slug.
+const ReservedNamespacePrefix = "_txc"
+
+// IsReservedNamespace reports whether ns is chassis-reserved: exactly the
+// prefix, or the prefix followed by "." (so "_txc", "_txc.blob" are reserved
+// while an author's "_txcfoo" is not).
+func IsReservedNamespace(ns string) bool {
+	return ns == ReservedNamespacePrefix || strings.HasPrefix(ns, ReservedNamespacePrefix+".")
+}
+
+// Pair is one live (non-expired) entry of a namespace listing: the bare user
+// key and its JSON value.
+type Pair struct {
+	Key   string
+	Value json.RawMessage
+}
+
 // casAttempts bounds the compare-and-swap retry loop (Incr, CAS) under contention.
 const casAttempts = 5
 
@@ -175,10 +197,11 @@ func (k *KV) Delete(ctx context.Context, tenant, ns, key string) error {
 	return nil
 }
 
-// listKeysAll returns all live (non-expired) user keys under (tenant, ns), order
-// unspecified — the shared read behind ListKeys and ListKeysPage. The composed
-// <tenant>/<ns>/ prefix is stripped so callers get bare user keys.
-func (k *KV) listKeysAll(ctx context.Context, tenant, ns string) ([]string, error) {
+// listAll returns all live (non-expired) entries under (tenant, ns), order
+// unspecified — the shared read behind ListKeys, ListKeysPage and ListPairs.
+// The composed <tenant>/<ns>/ prefix is stripped so callers get bare user keys;
+// values are unwrapped to the caller's JSON.
+func (k *KV) listAll(ctx context.Context, tenant, ns string) ([]Pair, error) {
 	if k == nil || k.s == nil {
 		return nil, errors.New("kv: store not configured")
 	}
@@ -196,7 +219,7 @@ func (k *KV) listKeysAll(ctx context.Context, tenant, ns string) ([]string, erro
 		}
 		return nil, err
 	}
-	var keys []string
+	var out []Pair
 	for _, p := range pairs {
 		// Backends differ on whether List returns full or directory-relative
 		// keys; TrimPrefix yields the bare user key either way. A residual '/'
@@ -206,10 +229,26 @@ func (k *KV) listKeysAll(ctx context.Context, tenant, ns string) ([]string, erro
 			continue
 		}
 		var w wrapper
-		if json.Unmarshal(p.Value, &w) == nil && k.expired(w) {
+		if json.Unmarshal(p.Value, &w) != nil {
+			continue // not ours / corrupt — invisible to listings, like Get
+		}
+		if k.expired(w) {
 			continue
 		}
-		keys = append(keys, key)
+		out = append(out, Pair{Key: key, Value: w.V})
+	}
+	return out, nil
+}
+
+// listKeysAll is listAll projected to bare keys.
+func (k *KV) listKeysAll(ctx context.Context, tenant, ns string) ([]string, error) {
+	pairs, err := k.listAll(ctx, tenant, ns)
+	if err != nil || pairs == nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		keys = append(keys, p.Key)
 	}
 	return keys, nil
 }
@@ -220,6 +259,15 @@ func (k *KV) listKeysAll(ctx context.Context, tenant, ns string) ([]string, erro
 // (parity with Get); order is unspecified; an empty namespace yields nil.
 func (k *KV) ListKeys(ctx context.Context, tenant, ns string) ([]string, error) {
 	return k.listKeysAll(ctx, tenant, ns)
+}
+
+// ListPairs returns every live entry under (tenant, ns) with its value — the
+// read behind a chassis-owned index (the blob name index) that needs the rows,
+// not just the keys. Both backends already fetch values on List, so this costs
+// no extra round trip over ListKeys. Order is unspecified; an empty namespace
+// yields nil.
+func (k *KV) ListPairs(ctx context.Context, tenant, ns string) ([]Pair, error) {
+	return k.listAll(ctx, tenant, ns)
 }
 
 // ListKeysPage returns a stable, windowed page of the user keys under

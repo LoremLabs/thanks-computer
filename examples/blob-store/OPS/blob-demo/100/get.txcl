@@ -1,0 +1,11 @@
+# GET /blobs/get?name=… — the GUEST lane. `audience = "guest"` is this
+# op's declared context: it holds blob:guest:read and nothing else, so a
+# name that requires blob:internal:read answers blob.error txco_blob_denied
+# (scope 200 turns that into a 403) — context mixing is impossible by
+# construction, not by prompt.
+WHEN @src == "http" && @web.req.url.path == "/blobs/get"
+  EXEC "txco://blob/get"
+    WITH name = @web.req.url.query.name.0,
+         audience = "guest",
+         encoding = "utf8",
+         into = "_get"

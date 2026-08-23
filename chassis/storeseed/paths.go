@@ -1,49 +1,33 @@
-// Package storeseed implements the declarative store-seed channel: reserved
-// stack subtrees (VECTORS/, KV/) that `txco apply` reconciles into the runtime
-// stores (the vector store, the KV store), so a stack's known data set travels
-// WITH the deploy and the tree is the desired state (sync = re-apply).
-//
-// This file (paths.go) is the leaf layer: just the reserved-path vocabulary,
-// with no dependency on the stores. It is imported by the CLI (to collect the
-// packs into the bundle), the admin producer (to CAS-back the pack bytes like
-// FILES/), and the control-event applier (to keep pack bytes out of the
-// in-memory runtime DB). The materializer registry that actually reconciles
-// packs into stores lives alongside in this package (storeseed.go).
 package storeseed
 
 import "strings"
 
-// Reserved top-level pack directories (siblings to OPS/ and FILES/). Each holds
-// NDJSON packs: VECTORS/<collection>.jsonl, KV/<namespace>.jsonl.
+// Reserved store-seed trees under OPS/<stack>/. Each maps to a pack kind
+// owned by one Materializer (vecseed, kvseed, blobseed).
 const (
 	DirVectors = "VECTORS"
 	DirKV      = "KV"
+	DirBlobs   = "BLOBS"
 
-	// Pack store kinds — the Materializer.Kind() each pack dir routes to.
 	KindVector = "vector"
 	KindKV     = "kv"
+	KindBlob   = "blob"
 
-	// PackExt is the required extension for a pack file. We pin it so the
-	// pack channel stays unambiguous (a stray FILES-style asset under
-	// VECTORS/ is a deploy error, not silently reconciled).
 	PackExt = ".jsonl"
 )
 
-// packDirs maps a reserved pack directory prefix ("VECTORS/") to its store kind.
 var packDirs = map[string]string{
 	DirVectors + "/": KindVector,
 	DirKV + "/":      KindKV,
+	DirBlobs + "/":   KindBlob,
 }
 
-// IsPackPath reports whether a stack_files path is a store-seed pack — i.e. it
-// lives under one of the reserved pack directories. Used by the producer /
-// applier to give packs the same CAS-backed, out-of-runtime-DB treatment as
-// FILES/ static assets (large pre-computed vectors must never inline into a
-// control event or a data-plane node's in-memory DB).
+// IsPackPath reports whether p lives in a store-seed tree.
 func IsPackPath(p string) bool { return KindForPath(p) != "" }
 
-// KindForPath returns the store kind ("vector" | "kv") a pack path routes to,
-// or "" when the path is not under a reserved pack directory.
+// KindForPath returns the pack kind for p ("" when p is not a pack path).
+// Prefix match, exact-case — the SQL classification downstream is LIKE
+// 'VECTORS/%' etc., and Postgres LIKE is case-sensitive.
 func KindForPath(p string) string {
 	for prefix, kind := range packDirs {
 		if strings.HasPrefix(p, prefix) {
@@ -53,17 +37,33 @@ func KindForPath(p string) string {
 	return ""
 }
 
-// PackName returns the collection/namespace name a pack path seeds:
-// "VECTORS/books.jsonl" → "books". It returns "" when the path is not a pack,
-// is nested below the pack dir (no slashes allowed in the name), or lacks the
-// .jsonl extension — the same shape validateStackFilePath enforces at upload.
+// IsBlobPath reports whether p is a BLOBS/ pack row (one blob per file).
+func IsBlobPath(p string) bool { return KindForPath(p) == KindBlob }
+
+// PackName returns the name the pack owns, or "" when p is not a well-formed
+// pack path. VECTORS/ and KV/ packs are a single "<name>.jsonl" segment (the
+// collection / namespace is unambiguous; no nesting). A BLOBS/ row is the
+// opposite shape: the tree IS the hierarchy, so the name is everything after
+// "BLOBS/" — "BLOBS/faqs/house-01.doc" owns the blob name "faqs/house-01.doc".
+// Whether that is a VALID blob name is the blob package's call
+// (blob.ValidName), enforced at the write boundary and by the collector.
 func PackName(p string) string {
-	if KindForPath(p) == "" {
+	kind := KindForPath(p)
+	if kind == "" {
 		return ""
 	}
-	rest := p[strings.Index(p, "/")+1:] // after "VECTORS/" / "KV/"
+	rest := p[strings.Index(p, "/")+1:] // after "VECTORS/" / "KV/" / "BLOBS/"
+	if kind == KindBlob {
+		return rest // "" for a bare "BLOBS/" — caller rejects
+	}
 	if rest == "" || strings.Contains(rest, "/") || !strings.HasSuffix(rest, PackExt) {
 		return ""
 	}
 	return strings.TrimSuffix(rest, PackExt)
 }
+
+// EmptyTree is the marker pack a Reconciler passes to a kind whose tree was
+// removed entirely between versions (Path == ""), so the materializer still
+// runs its delete-missing pass. Only the blob kind consumes it today; the
+// single-file kinds keep "pack removed = stop managing".
+func EmptyTree(kind string) RawPack { return RawPack{Kind: kind} }

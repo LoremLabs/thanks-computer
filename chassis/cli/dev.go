@@ -539,9 +539,9 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		}
 		files = append(files, assets...)
 		// `dev` is a full local mirror (manage="all"): deploy + reconcile the
-		// store-seed packs too, so a developer's local VECTORS/+KV/ are live
-		// against the dev chassis without a separate `txco data apply`.
-		packs, perr := collectStorePacks(filepath.Join(dir, "OPS", stack))
+		// store-seed packs too, so a developer's local VECTORS/+KV/+BLOBS/ are
+		// live against the dev chassis without a separate `txco data apply`.
+		packs, blobUploads, perr := collectStorePacks(filepath.Join(dir, "OPS", stack))
 		if perr != nil {
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
@@ -599,6 +599,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		// empty draft. Mirrors runApply (apply.go:134).
 		if len(dsUploads) > 0 {
 			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: %w", stack, err)
+			}
+		}
+		if len(blobUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, blobUploads, nil, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: %w", stack, err)
 			}
 		}
@@ -856,7 +861,7 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 		}
 		files = append(files, assets...)
 		// Full local mirror — include store-seed packs (see the watch loop above).
-		packs, perr := collectStorePacks(stackDir)
+		packs, blobUploads, perr := collectStorePacks(stackDir)
 		if perr != nil {
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
@@ -868,6 +873,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 		files = append(files, dsFiles...)
 		if len(dsUploads) > 0 {
 			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: %w", stack, err)
+			}
+		}
+		if len(blobUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, blobUploads, nil, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: %w", stack, err)
 			}
 		}
@@ -912,7 +922,7 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
 	}
 	// Asset half: stat-only walk of the same trees the collectors read.
-	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, dataset.Dir} {
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirBlobs, dataset.Dir} {
 		treeDir := filepath.Join(stackDir, top)
 		info, err := os.Stat(treeDir)
 		if err != nil || !info.IsDir() {

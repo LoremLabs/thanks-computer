@@ -1,0 +1,5 @@
+WHEN ._put.sha256 != null
+  EMIT @web.res.body = &b64encode(&to_json(._put)),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

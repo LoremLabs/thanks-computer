@@ -309,3 +309,59 @@ func TestCAS(t *testing.T) {
 		t.Fatal("value-mode CAS on an absent key must not swap")
 	}
 }
+
+func TestListPairs(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 0, 0)
+	k.now = func() time.Time { return time.Unix(1_000_000, 0) }
+
+	// Empty namespace → nil, no error.
+	pairs, err := k.ListPairs(ctx, "t1", "idx")
+	if err != nil || pairs != nil {
+		t.Fatalf("empty ns: pairs=%v err=%v", pairs, err)
+	}
+	if err := k.Set(ctx, "t1", "idx", "b", json.RawMessage(`{"n":2}`), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Set(ctx, "t1", "idx", "a", json.RawMessage(`{"n":1}`), 0); err != nil {
+		t.Fatal(err)
+	}
+	// An expired entry is invisible (parity with Get / ListKeys).
+	if err := k.Set(ctx, "t1", "idx", "gone", json.RawMessage(`{"n":0}`), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	k.now = func() time.Time { return time.Unix(1_000_010, 0) }
+
+	pairs, err = k.ListPairs(ctx, "t1", "idx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, p := range pairs {
+		got[p.Key] = string(p.Value)
+	}
+	want := map[string]string{"a": `{"n":1}`, "b": `{"n":2}`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListPairs = %v, want %v", got, want)
+	}
+	// Other tenant / namespace: isolated.
+	if pairs, _ := k.ListPairs(ctx, "t2", "idx"); pairs != nil {
+		t.Fatalf("tenant leak: %v", pairs)
+	}
+}
+
+func TestIsReservedNamespace(t *testing.T) {
+	for ns, want := range map[string]bool{
+		"_txc":      true,
+		"_txc.blob": true,
+		"_txc.":     true,
+		"_txcfoo":   false,
+		"txc":       false,
+		"blob":      false,
+		"":          false,
+	} {
+		if got := IsReservedNamespace(ns); got != want {
+			t.Errorf("IsReservedNamespace(%q) = %v, want %v", ns, got, want)
+		}
+	}
+}

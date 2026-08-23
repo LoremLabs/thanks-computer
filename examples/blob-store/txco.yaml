@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — the blob store is a chassis built-in
+# (txco://blob/*); the workspace ships only operations + the BLOBS/ seed tree.

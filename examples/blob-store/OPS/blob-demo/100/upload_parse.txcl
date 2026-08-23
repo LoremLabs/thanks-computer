@@ -1,0 +1,5 @@
+# POST /blobs/upload — step 1: the body is JSON {"filename": …,
+# "content_b64": …}. The web inlet stamps the raw body base64 at
+# @web.req.body; decode + parse it into a private key for scope 110.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/blobs/upload"
+  EMIT ._up = &try_json(&b64decode(@web.req.body))

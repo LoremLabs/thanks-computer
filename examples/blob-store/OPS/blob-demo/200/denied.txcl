@@ -1,0 +1,9 @@
+# A permission denial is a 403 with the structured code — the guest lane
+# asked for an internal name.
+WHEN .blob.error.code == "txco_blob_denied"
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error", .blob.error.code,
+         "message", .blob.error.message))),
+       @web.res.status = 403,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

@@ -1,0 +1,20 @@
+# POST /blobs/upload — step 2: retain the document under a DERIVED name.
+#
+# `under` + `filename` address the blob as docs/<sha256(NFC(filename))>:
+# any real filename works, and the same title always derives the same
+# name — so uploading an edited "Menu (v2).txt" REPLACES (the name
+# repoints; the old bytes stay as history). `permissions` marks the
+# document internal; the guest lane (/blobs/get) can never read it.
+#
+# The EMIT @delete drops the consumed upload body from the envelope —
+# the inbound body is delete-only (never writable), and carrying 30 MiB
+# through the rest of the flow is pure cost.
+WHEN ._up.filename != ""
+  EXEC "txco://blob/put"
+    WITH under = "docs",
+         filename = ._up.filename,
+         from = "._up.content_b64",
+         permissions = &array("blob:internal:read"),
+         grants = &array("blob:internal:read"),
+         into = "_put"
+  EMIT @delete = &array("@web.req.body", "_up")

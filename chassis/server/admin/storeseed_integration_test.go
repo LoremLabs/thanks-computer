@@ -56,7 +56,7 @@ func TestReconcileStorePacksFromVersion(t *testing.T) {
 		"100/x.txcl": "NOOP", // a normal op — reconcile must ignore it
 	})
 
-	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0 /*prior*/, true)
+	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0 /*prior*/, true, false)
 
 	coll, found, err := vs.DescribeCollection(ctx, "acme", "books")
 	if err != nil || !found {
@@ -70,7 +70,7 @@ func TestReconcileStorePacksFromVersion(t *testing.T) {
 	}
 
 	// Idempotent re-apply of the same version (prior=0 ⇒ reconcile all).
-	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0, true)
+	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0, true, false)
 	if ids, _ := vs.ListIDs(ctx, "acme", "books"); len(ids) != 2 {
 		t.Fatalf("re-apply: %v want 2", ids)
 	}
@@ -84,7 +84,7 @@ func TestReconcileStorePacksFromVersion(t *testing.T) {
 	seedVersion(t, c, 2, map[string]string{
 		"VECTORS/books.jsonl": `{"id":"pooh","vector":[1,0,0],"metadata":{"pd":true},"model":"m"}`,
 	})
-	c.ReconcileStorePacks(ctx, "acme", "recs", 2, 1, true)
+	c.ReconcileStorePacks(ctx, "acme", "recs", 2, 1, true, false)
 	ids, _ := vs.ListIDs(ctx, "acme", "books")
 	if len(ids) != 1 || ids[0] != "pooh" {
 		t.Fatalf("after v2: %v want [pooh]", ids)
@@ -104,7 +104,7 @@ func TestReconcileStorePacksFromVersion(t *testing.T) {
 	if _, err := vs.Delete(ctx, "acme", "books", []string{"pooh"}); err != nil {
 		t.Fatalf("out-of-band delete: %v", err)
 	}
-	c.ReconcileStorePacks(ctx, "acme", "recs", 3, 2 /*prior=v2, unchanged*/, true)
+	c.ReconcileStorePacks(ctx, "acme", "recs", 3, 2 /*prior=v2, unchanged*/, true, false)
 	if ids, _ := vs.ListIDs(ctx, "acme", "books"); len(ids) != 0 {
 		t.Fatalf("change-driven should have skipped the unchanged pack; got %v (re-added → not skipped)", ids)
 	}
@@ -135,7 +135,7 @@ func TestReconcileStorePacksResolvesCAS(t *testing.T) {
 		t.Fatalf("seed pack row: %v", err)
 	}
 
-	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0 /*prior; first activation*/, false)
+	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0 /*prior; first activation*/, false, false)
 
 	if ids, _ := vs.ListIDs(ctx, "acme", "books"); len(ids) != 1 || ids[0] != "a" {
 		t.Fatalf("CAS-resolved reconcile: %v want [a]", ids)
@@ -169,7 +169,7 @@ func TestReconcileStorePacksKeysBySlug(t *testing.T) {
 	})
 
 	// Reconcile is called with the tenant_ID (the control-plane identifier).
-	c.ReconcileStorePacks(ctx, "tnt_x", "recs", 1, 0 /*prior*/, true)
+	c.ReconcileStorePacks(ctx, "tnt_x", "recs", 1, 0 /*prior*/, true, false)
 
 	if _, found, _ := vs.DescribeCollection(ctx, "myco", "books"); !found {
 		t.Fatal("collection not under slug 'myco' (the runtime key) — keyed by id instead?")
@@ -203,7 +203,7 @@ func TestReconcileStorePacksSelfHealsMissingCollection(t *testing.T) {
 		})
 	}
 
-	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0, true) // first activation → seeds
+	c.ReconcileStorePacks(ctx, "acme", "recs", 1, 0, true, false) // first activation → seeds
 	if _, found, _ := vs.DescribeCollection(ctx, "acme", "books"); !found {
 		t.Fatal("v1 did not seed the collection")
 	}
@@ -213,7 +213,7 @@ func TestReconcileStorePacksSelfHealsMissingCollection(t *testing.T) {
 	if _, err := vs.DropCollection(ctx, "acme", "books"); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
-	c.ReconcileStorePacks(ctx, "acme", "recs", 2, 1 /*prior, unchanged pack*/, true)
+	c.ReconcileStorePacks(ctx, "acme", "recs", 2, 1 /*prior, unchanged pack*/, true, false)
 	if _, found, _ := vs.DescribeCollection(ctx, "acme", "books"); !found {
 		t.Fatal("self-heal failed: unchanged pack + missing collection was not re-seeded")
 	}

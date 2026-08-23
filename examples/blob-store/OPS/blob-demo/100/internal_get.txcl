@@ -1,0 +1,8 @@
+# GET /blobs/internal/get?name=… — the INTERNAL lane reads the same store
+# with a broader declared context.
+WHEN @src == "http" && @web.req.url.path == "/blobs/internal/get"
+  EXEC "txco://blob/get"
+    WITH name = @web.req.url.query.name.0,
+         audience = "internal",
+         encoding = "utf8",
+         into = "_get"

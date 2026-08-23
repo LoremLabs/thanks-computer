@@ -1,0 +1,12 @@
+# POST /blobs/edit?name=… — repoint a name at the raw request body (the
+# inlet stamps it base64 at @web.req.body, which is exactly blob/put's
+# default encoding). Editing a SEEDED name this way is drift: the next
+# `txco data apply` refuses to overwrite it until you `txco data pull`
+# (or --force). The internal lane edits; the guest lane never can.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/blobs/edit"
+  EXEC "txco://blob/put"
+    WITH name = @web.req.url.query.name.0,
+         from = "@web.req.body",
+         audience = "internal",
+         into = "_put"
+  EMIT @delete = &array("@web.req.body")

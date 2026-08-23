@@ -29,6 +29,7 @@
 | `txco://basic-auth-encode` | Encode `user:pass` to a basic-auth header value. |
 | `txco://copy` | Path-to-path copy inside the envelope (what `SET` can't do with computed paths). |
 | `txco://kv/get` · `kv/set` · `kv/delete` · `kv/incr` · `kv/cas` | Read + write durable state across requests — counters, flags, locks, caches (`boltdb` local / `redis` shared). See [kv](./kv.md). |
+| `txco://blob/put` · `blob/get` · `blob/stat` · `blob/list` · `blob/delete` | Runtime-writable BYTES under mutable, permissioned names over the content-addressed store — uploads, documents, artifacts; seeded with a stack via `BLOBS/`. See [blobs](./blobs.md). |
 | `txco://detect-tenant` | Boot-pipeline: hostname/listener → tenant resolution. Used by the scaffolded `_sys/boot` rules; you rarely call it directly. |
 | `txco://route` | Boot-pipeline: promote a routing proposal (`@route.*`) into `@goto` + `@tenant`. Companion to `detect-tenant`. |
 | `txco://continuation-result` | Poll handler behind `?_txc.continuation=<id>` ([continuations](../continuations.md)). Wired by the chassis; not called from rules. |

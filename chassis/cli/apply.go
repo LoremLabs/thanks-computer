@@ -958,22 +958,30 @@ func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 	return collectTreeAssets(stackDir, "FILES")
 }
 
-// collectStorePacks walks <stackDir>/{VECTORS,KV}/** and returns the
-// declarative store-seed packs as StackFiles ("VECTORS/<rel>", "KV/<rel>").
-// This is the DATA half of a stack, deployed only by `txco data apply` —
-// `txco apply` (code) never collects these, so a code-only checkout that lacks
-// the packs deploys fine and the live data is carried forward untouched. See
+// collectStorePacks walks <stackDir>/{VECTORS,KV,BLOBS}/** and returns the
+// declarative store-seed packs as StackFiles ("VECTORS/<rel>", "KV/<rel>",
+// "BLOBS/<rel>") plus the BLOBS/ bytes that must be streamed to the CAS
+// (ensureBlobsResident) BEFORE the draft references them — the NDJSON packs
+// ride the draft body inline; blob files are fingerprint-only rows. This is
+// the DATA half of a stack, deployed only by `txco data apply` — `txco apply`
+// (code) never collects these, so a code-only checkout that lacks the packs
+// deploys fine and the live data is carried forward untouched. See
 // chassis/storeseed.
-func collectStorePacks(stackDir string) ([]client.StackFile, error) {
+func collectStorePacks(stackDir string) ([]client.StackFile, []casUpload, error) {
 	var out []client.StackFile
 	for _, top := range []string{storeseed.DirVectors, storeseed.DirKV} {
 		assets, err := collectTreeAssets(stackDir, top)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = append(out, assets...)
 	}
-	return out, nil
+	blobRows, uploads, err := collectBlobFiles(stackDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	out = append(out, blobRows...)
+	return out, uploads, nil
 }
 
 // collectTreeAssets walks <stackDir>/<topDir>/** and returns one StackFile per

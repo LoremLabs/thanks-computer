@@ -53,7 +53,22 @@ const (
 	// LLM-wrapping op pays ~10K. Anchors to the §2 calibration in the
 	// fuel doc (1 unit ≈ 100 µs of typical chassis work).
 	fuelCostComputePerMs int64 = 10
+	// FuelCostBlobPerMiB charges txco://blob/put and blob/get per MiB of
+	// bytes moved (rounded up), on top of the flat dispatch fuel every
+	// EXEC pays. A 1 MiB artifact pays 100 ≈ 10 ms of chassis work —
+	// decode + hash + CAS write at the §2 calibration. Exported because
+	// the handlers live in package server and charge via AddFuel.
+	FuelCostBlobPerMiB int64 = 100
 )
+
+// AddFuel is the exported charge point for core op handlers that do
+// metered work outside the processor package (txco://blob/* per-MiB
+// bytes). `stage` labels the charge for the exhaustion error — handlers
+// pass the envelope's `_txc.op` stamp. Handlers charge and continue, like
+// Exec's flat dispatch charge: the next scope entry reports the overshoot.
+func AddFuel(ctx context.Context, cost int64, stage string) error {
+	return addFuel(ctx, cost, stage)
+}
 
 // ctxKeyBudget carries the per-request budget state. Idempotent across recursive
 // Run calls within the same request — loadBudget returns the existing pointer.

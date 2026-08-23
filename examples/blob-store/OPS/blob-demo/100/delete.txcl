@@ -1,0 +1,7 @@
+# POST /blobs/delete?name=… — unlinks the NAME; the bytes stay in the
+# content store (addressable by sha with blob:cas:read).
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/blobs/delete"
+  EXEC "txco://blob/delete"
+    WITH name = @web.req.url.query.name.0,
+         audience = "internal",
+         into = "_del"

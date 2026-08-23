@@ -321,3 +321,20 @@ func TestFuelUsedFromEnvelopeMissing(t *testing.T) {
 	}
 }
 
+
+// TestAddFuelExported — the exported charge point used by txco://blob/*
+// (package server) lands on the same counter as the internal addFuel.
+func TestAddFuelExported(t *testing.T) {
+	pu := withBudget(t, 0, 0, 0)
+	ctx, _, _ := loadBudget(context.Background(), `{}`, pu.Conf)
+	if err := AddFuel(ctx, 3*FuelCostBlobPerMiB, "pony/0375/retain"); err != nil {
+		t.Fatalf("AddFuel: %v", err)
+	}
+	if got := budgetFromCtx(ctx).fuel.Load(); got != 3*FuelCostBlobPerMiB {
+		t.Errorf("fuel = %d, want %d", got, 3*FuelCostBlobPerMiB)
+	}
+	// No budget on the context (pre-Run caller) → silently allowed.
+	if err := AddFuel(context.Background(), 1, "x"); err != nil {
+		t.Errorf("AddFuel without budget: %v", err)
+	}
+}

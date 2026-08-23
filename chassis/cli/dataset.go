@@ -6,7 +6,8 @@ package cli
 // draft body; artifacts can run to gigabytes, so they are hashed here by
 // STREAMING (never read into memory) and enter the draft as fingerprint-only
 // rows (Encoding "cas") after ensureDatasetBlobs streams any missing bytes to
-// the chassis blob endpoint.
+// the chassis blob endpoint. The same streaming discipline serves BLOBS/
+// seed files (blobs.go) through ensureBlobsResident.
 
 import (
 	"context"
@@ -22,10 +23,11 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 )
 
-// datasetUpload is a local dataset artifact that must be present in the
-// chassis CAS before the draft referencing it can activate.
-type datasetUpload struct {
-	Path      string // stack-relative, e.g. "DATASETS/books.sqlite"
+// casUpload is a local file whose bytes must be present in the chassis CAS
+// before the draft referencing it (as a fingerprint-only row) can activate:
+// a DATASETS/ artifact or a BLOBS/ seed file.
+type casUpload struct {
+	Path      string // stack-relative, e.g. "DATASETS/books.sqlite", "BLOBS/faqs/a.md"
 	LocalPath string // absolute path on disk
 	Hash      string // sha256 hex over the raw bytes (streamed)
 	Size      int64
@@ -37,7 +39,7 @@ type datasetUpload struct {
 // Pairing (<name>.sqlite ↔ <name>.yaml) and query preparation are enforced by
 // the chassis at activation; here we only fail fast on files that the server
 // would reject at the write boundary (nesting, foreign extensions).
-func collectDatasetFiles(stackDir string) ([]client.StackFile, []datasetUpload, error) {
+func collectDatasetFiles(stackDir string) ([]client.StackFile, []casUpload, error) {
 	dir := filepath.Join(stackDir, dataset.Dir)
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
@@ -48,7 +50,7 @@ func collectDatasetFiles(stackDir string) ([]client.StackFile, []datasetUpload, 
 		return nil, nil, err
 	}
 	var files []client.StackFile
-	var uploads []datasetUpload
+	var uploads []casUpload
 	for _, e := range entries {
 		name := e.Name()
 		if strings.HasPrefix(name, ".") {
@@ -71,7 +73,7 @@ func collectDatasetFiles(stackDir string) ([]client.StackFile, []datasetUpload, 
 				ContentHash: hash,
 				Encoding:    "cas",
 			})
-			uploads = append(uploads, datasetUpload{Path: rel, LocalPath: p, Hash: hash, Size: size})
+			uploads = append(uploads, casUpload{Path: rel, LocalPath: p, Hash: hash, Size: size})
 		case dataset.IsManifestPath(rel):
 			content, rerr := os.ReadFile(filepath.Join(dir, name))
 			if rerr != nil {
@@ -93,8 +95,9 @@ func collectDatasetFiles(stackDir string) ([]client.StackFile, []datasetUpload, 
 
 // downloadBlobToFile streams a CAS blob to dest via temp+rename, verifying
 // the sha256 on the way down — a corrupt or truncated transfer never
-// replaces the destination. The pull path uses it for dataset artifacts,
-// whose bytes ride the blob plane rather than the JSON version detail.
+// replaces the destination. The pull path uses it for dataset artifacts and
+// BLOBS/ seed files, whose bytes ride the blob plane rather than the JSON
+// version detail.
 func downloadBlobToFile(ctx context.Context, c *client.Client, hash, dest string) error {
 	rc, _, err := c.GetBlob(ctx, hash)
 	if err != nil {
@@ -141,11 +144,25 @@ func hashFileStreaming(p string) (string, int64, error) {
 }
 
 // ensureDatasetBlobs makes every collected artifact resident in the chassis
-// CAS before the draft that references it is uploaded: HEAD per hash, then a
-// streamed PUT for the misses. Mirrors uploadComputes — activation verifies
-// presence and refuses the version when a blob is missing, so failing here
-// aborts the stack's deploy rather than leaving a doomed draft.
-func ensureDatasetBlobs(ctx context.Context, c *client.Client, uploads []datasetUpload, progress, stderr io.Writer) error {
+// CAS before the draft that references it is uploaded. Only new/changed
+// artifacts are uploaded, so the (potentially slow) full integrity scan runs
+// once per artifact version, client-side where the file was just built —
+// corruption is caught before the bytes ship, not at activation.
+func ensureDatasetBlobs(ctx context.Context, c *client.Client, uploads []casUpload, progress, stderr io.Writer) error {
+	return ensureBlobsResident(ctx, c, uploads, func(u casUpload) error {
+		return spin(progress, fmt.Sprintf("checking %s", u.Path), func() error {
+			return dataset.IntegrityCheck(u.LocalPath)
+		})
+	}, progress, stderr)
+}
+
+// ensureBlobsResident makes every upload's bytes resident in the chassis CAS
+// before the draft that references them is sent: HEAD per hash, then an
+// optional precheck and a streamed PUT for the misses. Mirrors uploadComputes
+// — activation verifies presence and refuses the version when a blob is
+// missing, so failing here aborts the stack's deploy rather than leaving a
+// doomed draft. Shared by DATASETS/ artifacts and BLOBS/ seed files.
+func ensureBlobsResident(ctx context.Context, c *client.Client, uploads []casUpload, precheck func(casUpload) error, progress, stderr io.Writer) error {
 	for _, u := range uploads {
 		ok, err := c.HasBlob(ctx, u.Hash)
 		if err != nil {
@@ -154,15 +171,10 @@ func ensureDatasetBlobs(ctx context.Context, c *client.Client, uploads []dataset
 		if ok {
 			continue
 		}
-		// Only new/changed artifacts reach here, so the (potentially slow)
-		// full integrity scan runs once per artifact version, client-side
-		// where the file was just built — corruption is caught before the
-		// bytes ship, not at activation.
-		err = spin(progress, fmt.Sprintf("checking %s", u.Path), func() error {
-			return dataset.IntegrityCheck(u.LocalPath)
-		})
-		if err != nil {
-			return fmt.Errorf("%s: %w", u.Path, err)
+		if precheck != nil {
+			if err := precheck(u); err != nil {
+				return fmt.Errorf("%s: %w", u.Path, err)
+			}
 		}
 		err = spin(progress, fmt.Sprintf("uploading %s (%s bytes)", u.Path, humanBytes(u.Size)), func() error {
 			f, oerr := os.Open(u.LocalPath)
@@ -178,4 +190,3 @@ func ensureDatasetBlobs(ctx context.Context, c *client.Client, uploads []dataset
 	}
 	return nil
 }
-

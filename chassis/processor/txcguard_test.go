@@ -360,3 +360,32 @@ func TestEmitTTLLowerOnly(t *testing.T) {
 		t.Errorf("EMIT @ttl=100 must be clamped to <=5; got %d (raw=%s)", g, got2)
 	}
 }
+
+// TestAuthorMayDeleteTxc — the `_txc.delete` guard admits the delete-only
+// inbound facts (a consumed @web.req.body) on top of the write allowlist,
+// and nothing else. The same paths stay NON-writable (TestAuthorMayWriteTxc
+// pins `_txc.web.req.body` false) — deleting a stamped fact can't forge one.
+func TestAuthorMayDeleteTxc(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"_txc.web.req.body", true}, // delete-only
+		{"_txc.web.res.body", true}, // writable ⇒ deletable
+		{"data.blob", true},         // author's own data
+		{"_txc.web.req", false},     // the parent subtree stays reserved
+		{"_txc.web.req.headers", false},
+		{"_txc.web.req.bodyx", false}, // lookalike sibling
+		{"_txc.tenant", false},
+		{"_txc.fuel_used", false},
+		{"_txc", false},
+	}
+	for _, c := range cases {
+		if got := authorMayDeleteTxc(c.path); got != c.want {
+			t.Errorf("authorMayDeleteTxc(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+	if authorMayWriteTxc("_txc.web.req.body") {
+		t.Fatal("_txc.web.req.body must stay non-writable (delete-only)")
+	}
+}

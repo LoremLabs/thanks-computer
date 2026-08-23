@@ -33,8 +33,7 @@ func runData(args []string, stdout, stderr io.Writer) int {
 	case "apply", "push":
 		return runDataApply(args[1:], stdout, stderr)
 	case "pull":
-		fmt.Fprintln(stderr, "data pull: not yet implemented (materialise store → local packs)")
-		return 1
+		return runDataPull(args[1:], stdout, stderr)
 	case "ls", "list":
 		return runVectorLs(args[1:], stdout, stderr)
 	case "show", "describe":
@@ -58,12 +57,11 @@ func printDataUsage(w io.Writer) {
 	fmt.Fprint(w, `
 Usage: txco data <subcommand> ...
 
-Deploy + inspect declarative store-seed packs (VECTORS/, KV/). Data is opt-in:
+Deploy + inspect declarative store-seed packs (VECTORS/, KV/, BLOBS/). Data is opt-in:
 `+"`txco apply`"+` deploys code only; data moves through these verbs.
 
 Subcommands:
-  apply [<dir>]            Deploy the local VECTORS/+KV/ packs (code carried forward, then reconciled)
-  pull [<dir>]             Materialise the live store into local packs (coming soon)
+  apply [<dir>]            Deploy the local VECTORS/+KV/+BLOBS/ packs 
   ls                       List the tenant's vector collections (model/dims/count)
   show <collection>        Show a collection's pin + item IDs
   diff <collection> <pack> Compare a local VECTORS/*.jsonl pack to the live store
@@ -343,15 +341,21 @@ func runDataApply(args []string, stdout, stderr io.Writer) int {
 	f := registerVectorFlags(fs)
 	timeout := fs.Duration("timeout", 5*time.Minute, "per-request timeout (raise for large packs)")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
+	force := fs.Bool("force", false, "push over runtime drift: the tree wins (every seeded blob re-asserted, removed ones dropped)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
 Usage: txco data apply [flags] [<dir>]
 
-Deploy the local VECTORS/+KV/ store-seed packs for every stack under <dir>/OPS/.
-Each stack's code is carried forward from its active version; only the data is
-replaced, then reconciled into the runtime stores. The stack must already have
-an active version (deploy code first with `+"`txco apply`"+`).
+Deploy the local VECTORS/+KV/+BLOBS/ store-seed packs for every stack under
+<dir>/OPS/. Each stack's code is carried forward from its active version; only
+the data is replaced, then reconciled into the runtime stores (BLOBS/ files are
+streamed to the content store first and become named blobs). The stack must
+already have an active version (deploy code first with `+"`txco apply`"+`).
+
+Like a git push, a stack whose seeded blobs were edited at runtime since the
+tree last shipped them is refused: run `+"`txco data pull`"+` to bring the live
+content into BLOBS/ first, or --force to overwrite it with the tree.
 
 <dir> defaults to ".".
 
@@ -397,7 +401,7 @@ Flags:
 	rc := 0
 
 	for _, stack := range sortedKeys(groupOpsByStack(ops)) {
-		packs, perr := collectStorePacks(filepath.Join(dir, "OPS", filepath.FromSlash(stack)))
+		packs, blobUploads, perr := collectStorePacks(filepath.Join(dir, "OPS", filepath.FromSlash(stack)))
 		if perr != nil {
 			fmt.Fprintf(stderr, "data apply: %s: collect packs: %v\n", stack, perr)
 			rc = 1
@@ -419,6 +423,38 @@ Flags:
 			continue
 		}
 
+		// Drift check (the git non-fast-forward rule): a seeded blob the runtime
+		// repointed since the tree last shipped it is refused unless --force.
+		if hasBlobRows(packs) && !*force {
+			live, lerr := c.ListStackBlobs(ctx, stack)
+			if lerr != nil {
+				fmt.Fprintf(stderr, "data apply: %s: list seeded blobs: %v\n", stack, lerr)
+				rc = 1
+				continue
+			}
+			if drifted := driftedStackBlobs(live, localBlobHashes(packs)); len(drifted) > 0 {
+				results = append(results, result{Stack: stack, Packs: len(packs), Skipped: true,
+					Reason: fmt.Sprintf("%d seeded blob(s) edited at runtime — `txco data pull` first, or --force", len(drifted))})
+				if !*f.jsonOut {
+					fmt.Fprintf(stderr, "data apply: %s: refused — %d seeded blob(s) were edited at runtime and your tree doesn't have that content:\n", stack, len(drifted))
+					for _, d := range drifted {
+						fmt.Fprintf(stderr, "    %s  (live %s…, tree last shipped %s…)\n", d.Name, shortHash(d.SHA256), shortHash(d.SeededSHA))
+					}
+					fmt.Fprintf(stderr, "  run `txco data pull` to bring the live content into BLOBS/, or `txco data apply --force` to overwrite it\n")
+				}
+				rc = 1
+				continue
+			}
+		}
+		// BLOBS/ bytes must be resident in the CAS before a draft can reference
+		// them (HEAD per hash, streamed PUT for misses — the dataset discipline).
+		if len(blobUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, blobUploads, nil, stdout, stderr); err != nil {
+				fmt.Fprintf(stderr, "data apply: %s: %v\n", stack, err)
+				rc = 1
+				continue
+			}
+		}
 		version, derr := c.CreateDraft(ctx, stack, "active")
 		if derr != nil {
 			fmt.Fprintf(stderr, "data apply: %s: create draft: %v\n", stack, derr)
@@ -430,7 +466,7 @@ Flags:
 			rc = 1
 			continue
 		}
-		act, aerr := c.Activate(ctx, stack, version)
+		act, aerr := c.ActivateWith(ctx, stack, version, *force)
 		if aerr != nil {
 			fmt.Fprintf(stderr, "data apply: %s: activate v%d: %v\n", stack, version, aerr)
 			rc = 1
@@ -446,7 +482,7 @@ Flags:
 	if *f.jsonOut {
 		_ = emitJSON(stdout, stderr, results)
 	} else if len(results) == 0 {
-		fmt.Fprintln(stdout, "no data packs found (VECTORS/ or KV/) under any stack")
+		fmt.Fprintln(stdout, "no data packs found (VECTORS/, KV/ or BLOBS/) under any stack")
 	}
 	return rc
 }

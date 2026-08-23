@@ -63,3 +63,30 @@ func TestValidateStackFilePathStoreSeed(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateStackFilePathBlobs(t *testing.T) {
+	valid := []string{
+		"BLOBS/faqs/house-01.doc", // nesting IS the hierarchy
+		"BLOBS/a/b/c.bin",
+		"BLOBS/top.txt",
+		"BLOBS/paris/docs/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+	for _, p := range valid {
+		if err := validateStackFilePath(p); err != nil {
+			t.Errorf("validateStackFilePath(%q) = %v, want nil", p, err)
+		}
+	}
+	invalid := []string{
+		"BLOBS/_meta/x.txt",       // reserved '_' segment
+		"BLOBS/faqs/ho use.doc",   // outside the blob-name charset
+		"BLOBS/faqs/é.doc",        // non-ASCII
+		"blobs/x.txt",             // case-sensitive dir
+		"KV/_txc.blob.jsonl",      // a pack must not target a reserved namespace
+		"VECTORS/_internal.jsonl", // same rule, vector kind
+	}
+	for _, p := range invalid {
+		if err := validateStackFilePath(p); err == nil {
+			t.Errorf("validateStackFilePath(%q) = nil, want error", p)
+		}
+	}
+}

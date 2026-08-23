@@ -8,11 +8,16 @@ import "bytes"
 // reads the bytes inline from stack_files; a data-plane node resolves them from
 // the shared CAS by fingerprint. The materializer framework parses Bytes into
 // typed items per kind.
+//
+// A BLOBS/ row is the exception: its bytes are the blob itself and are NEVER
+// loaded — the name index only needs the hash (Hash), which the loader sets
+// from the stack_files row; Bytes stays nil.
 type RawPack struct {
-	Path  string // e.g. "VECTORS/books.jsonl"
-	Kind  string // KindVector | KindKV
-	Name  string // collection / namespace the pack owns
-	Bytes []byte // raw NDJSON
+	Path  string // e.g. "VECTORS/books.jsonl", "BLOBS/faqs/house-01.doc"
+	Kind  string // KindVector | KindKV | KindBlob
+	Name  string // collection / namespace / blob name the pack owns
+	Bytes []byte // raw NDJSON (nil for a blob row)
+	Hash  string // sha256 hex of the row's bytes (blob rows: the CAS key)
 }
 
 // NewRawPack builds a RawPack from a pack path + its resolved bytes, deriving

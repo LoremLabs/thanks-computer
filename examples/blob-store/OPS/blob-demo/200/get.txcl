@@ -1,0 +1,6 @@
+# Serve the blob's text with its own content type.
+WHEN ._get.content != null
+  EMIT @web.res.body = &b64encode(._get.content),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = ._get.content_type,
+       @halt = true

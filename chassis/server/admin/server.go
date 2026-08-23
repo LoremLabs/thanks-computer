@@ -23,6 +23,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
+	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
@@ -82,6 +83,10 @@ type Controller struct {
 	// Set by SetStoreReconciler from chassis/server/server.go. Nil-safe: when
 	// unset (no seedable store configured), packs ride as inert stack_files.
 	storeReconciler *storeseed.Reconciler
+
+	// blobIndex backs the stack-blobs inspect endpoint (`txco data apply`
+	// drift check, `txco data pull`). Set by SetBlobIndex; nil ⇒ 503.
+	blobIndex blob.Index
 
 	// dsCache materialises + opens DATASETS/ artifacts (chassis/dataset):
 	// the deep activation gate validates through it and the fleet applier
@@ -477,6 +482,11 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}/validate", c.handleValidateVersion).Methods(http.MethodPost)
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}", c.handleGetVersion).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}/cat", c.handleCatFile).Methods(http.MethodGet)
+	// Seeded blob names + drift for one stack (txco data apply / data pull).
+	// Registered here, BEFORE the bare /stacks/{name:.+} GET, whose greedy
+	// pattern would otherwise swallow ".../blobs" as part of the stack name.
+	// See chassis/server/admin/blob_endpoints.go.
+	tenantR.HandleFunc("/stacks/{name:.+}/blobs", c.handleListStackBlobs).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}/settings", c.handlePatchStackSettings).Methods(http.MethodPatch)
 	// Bulk sibling of the per-stack settings PATCH: flip mint_hostname across
 	// every stack matching a substring in one tx + one reload. POST + no {name}

@@ -61,6 +61,34 @@ func authorMayWriteTxc(path string) bool {
 	return false
 }
 
+// authorDeletableTxcPaths are reserved `_txc.*` paths an author may DELETE
+// (via `EMIT @delete`) but never write: inbound request facts the chassis
+// stamped, which an op has consumed and wants out of the envelope before it
+// is copied per step / stored in a continuation payload. `web.req.body` is
+// the raw inbound body (base64, up to --web-max-body-bytes) — after
+// txco://blob/put or a parser has eaten it, carrying 30 MiB through the
+// rest of the flow is pure cost. Deleting a stamped fact can't forge one,
+// so this list is broader than the write allowlist but still explicit.
+var authorDeletableTxcPaths = []string{
+	"web.req.body", // the inbound HTTP body, consumed by blob/put / parsers
+}
+
+// authorMayDeleteTxc is the `_txc.delete` target guard: everything an
+// author may write, plus the delete-only facts above. Same normalized-path
+// contract as authorMayWriteTxc.
+func authorMayDeleteTxc(path string) bool {
+	if authorMayWriteTxc(path) {
+		return true
+	}
+	sub := strings.TrimPrefix(path, "_txc.")
+	for _, allowed := range authorDeletableTxcPaths {
+		if sub == allowed || strings.HasPrefix(sub, allowed+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // systemMayWriteTxc reports whether a SYSTEM-authored rule — one executing in
 // a run pinned to the `_sys` tenant, i.e. the boot pipeline — may EMIT the
 // given envelope path in ADDITION to the author-writable set. This is the

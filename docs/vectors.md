@@ -98,6 +98,7 @@ OPS/<stack>/
   FILES/…             # static assets │ code
   VECTORS/books.jsonl # a collection ─┐
   KV/config.jsonl     # a namespace   │ data
+  BLOBS/faqs/a.md     # named blobs  ─┘  (see advanced/blobs.md)
 ```
 
 **Code and data deploy separately, and data is opt-in:**
@@ -140,7 +141,12 @@ pack is the same idea for key-value seed data: `{"key":"…","value":<any JSON>,
 A seeded `KV/` namespace is synced to match its pack, so it must be a namespace
 **no runtime op writes** — never a stack's default namespace (which is the stack
 name). Keep seed config in a dedicated namespace like `KV/config.jsonl`.
+Namespaces starting with `_txc` are reserved for the chassis and refused.
 :::
+
+A `BLOBS/` tree is the third data kind — one file per blob, the tree as the
+hierarchy, streamed rather than inlined. It rides the same `txco data apply`
+and is described in [Blobs](./advanced/blobs.md).
 
 ## Inspecting and tearing down
 

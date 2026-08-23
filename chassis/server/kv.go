@@ -49,6 +49,12 @@ func kvScope(ctx context.Context, in []byte) (tenant, ns string, err error) {
 	if ns == "" {
 		ns = "default"
 	}
+	// Chassis-owned namespaces (the txco://blob name index) are not plain KV:
+	// refused here so an author can neither read an index as data nor write
+	// into one. Same reservation idiom as `_txc.*` on the envelope.
+	if kvstore.IsReservedNamespace(ns) {
+		return "", "", fmt.Errorf("kv: namespace %q is reserved for the chassis", ns)
+	}
 	return tenant, ns, nil
 }
 
