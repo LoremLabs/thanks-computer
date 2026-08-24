@@ -193,7 +193,7 @@ func TestListStackBlobsEndpoint(t *testing.T) {
 	rows := []blob.NameRow{
 		{Name: "faqs/clean.txt", SHA256: hA, SeededBy: "demo", SeededSHA: hA, CreatedAt: now, UpdatedAt: now},
 		{Name: "faqs/edited.txt", SHA256: hB, SeededBy: "demo", SeededSHA: hA, CreatedAt: now, UpdatedAt: now}, // drift
-		{Name: "docs/runtime.txt", SHA256: hA, CreatedAt: now, UpdatedAt: now},                                  // runtime-only
+		{Name: "docs/runtime.txt", SHA256: hA, CreatedAt: now, UpdatedAt: now},                                 // runtime-only
 		{Name: "other/x.txt", SHA256: hA, SeededBy: "otherstack", SeededSHA: hA, CreatedAt: now, UpdatedAt: now},
 	}
 	for _, r := range rows {

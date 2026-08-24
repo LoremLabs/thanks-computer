@@ -16,6 +16,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
+	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 )
 
@@ -423,8 +424,21 @@ Flags:
 			continue
 		}
 
-		// Drift check (the git non-fast-forward rule): a seeded blob the runtime
-		// repointed since the tree last shipped it is refused unless --force.
+		// Fast-forward guard on the REF (see fastforward.go): the stack's
+		// active version must be the one this workspace last synced.
+		var expectedActive *int64
+		if !*force {
+			saved, _ := state.Load(dir, stack)
+			if m := remoteMoved(saved, rec); m != nil {
+				fmt.Fprint(stderr, refusedMovedMessage("data apply", stack, m))
+				rc = 1
+				continue
+			}
+			expectedActive = expectedActiveFor(rec)
+		}
+		// Drift check on the STORE (the same non-fast-forward rule one layer
+		// down): a seeded blob the runtime repointed since the tree last
+		// shipped it is refused unless --force.
 		if hasBlobRows(packs) && !*force {
 			live, lerr := c.ListStackBlobs(ctx, stack)
 			if lerr != nil {
@@ -466,12 +480,20 @@ Flags:
 			rc = 1
 			continue
 		}
-		act, aerr := c.ActivateWith(ctx, stack, version, *force)
+		act, aerr := c.ActivateWith(ctx, stack, version, client.ActivateOpts{ForceData: *force, ExpectedActive: expectedActive})
 		if aerr != nil {
-			fmt.Fprintf(stderr, "data apply: %s: activate v%d: %v\n", stack, version, aerr)
+			if isStackMovedErr(aerr) {
+				fmt.Fprintf(stderr, "data apply: %s: refused — the stack's active version changed while this apply ran: %v\n  `txco diff %s` / `txco pull %s --force`, or `txco data apply --force`.\n", stack, aerr, stack, stack)
+			} else {
+				fmt.Fprintf(stderr, "data apply: %s: activate v%d: %v\n", stack, version, aerr)
+			}
 			rc = 1
 			continue
 		}
+		// This workspace now knows v<act>: record it so the next apply's
+		// fast-forward guard doesn't trip on our own deploy. The code
+		// manifest is untouched (data apply carries code forward).
+		recordSyncedVersion(dir, stack, act.VersionNumber)
 		results = append(results, result{Stack: stack, Version: act.VersionNumber, Packs: len(packs)})
 		if !*f.jsonOut {
 			fmt.Fprintf(stdout, "%s v%d — %d data pack%s reconciled\n",

@@ -84,7 +84,7 @@ The CLI verbs map onto that flow:
 
 | Command | What it does |
 |---|---|
-| `txco apply [dir]` | Deploy the whole `OPS/` tree: draft + activate per changed stack; resolves `op://` refs; uploads computes |
+| `txco apply [dir]` | Deploy the whole `OPS/` tree: draft + activate per changed stack; resolves `op://` refs; uploads computes. Refuses a stack the chassis moved since this workspace last synced (see below); `--force` overwrites |
 | `txco push <stack>` | Like `apply`, one stack |
 | `txco pull <stack>` | Materialize a stack's active version (or `--version N`) into local `OPS/<stack>/` — the inverse of `push` |
 | `txco draft <stack>` | Upload a draft *without* activating (stage for review); `--activate` flips it too |
@@ -94,6 +94,28 @@ The CLI verbs map onto that flow:
 | `txco lint [dir]` | Validate the `OPS/` tree **offline** (no chassis): name collisions, mis-placed files, txcl parse, unconditional-loop warnings; `--list` prints the op graph; exit 1 on errors (CI-friendly) |
 | `txco status [dir]` | Per-stack drift summary; exit 1 on divergence (CI-friendly) |
 | `txco edit <stack> <path>` | `$EDITOR` one file of a draft, PATCH it back |
+| `txco data apply [dir]` | Deploy the `VECTORS/`, `KV/`, `BLOBS/` packs (code carried forward); same fast-forward rule, plus a refusal over runtime-edited seeded blobs — see [blobs](./blobs.md) |
+| `txco data pull [dir]` | Bring each stack's live seeded blobs into `BLOBS/` |
+
+### Fast-forward rule
+
+A workspace records the version it last synced (`.txco/<stack>.state.json`,
+written by `pull`, `apply`/`push`, `dev`, and kept current by `data apply`
+and `activate`). If the chassis's active version is no longer that one —
+a teammate deployed, someone edited in the admin UI, or the stack was
+rolled back — `apply`, `push` and `data apply` **refuse** rather than
+silently supersede their change (git's `! [rejected] non-fast-forward`):
+
+```
+apply: web: refused — chassis active is v7 but this workspace last synced v5 — someone deployed (or edited in the admin UI) since.
+  `txco diff web` shows what changed; `txco pull web --force` takes the chassis version (discards local edits); `apply --force` overwrites the chassis.
+```
+
+The chassis enforces the same rule under its lock (the activate carries the
+version the client expects; a mismatch is `409 stack_moved`), so two applies
+racing can't both win. A workspace with no baseline — a fresh checkout, CI —
+cannot detect a move and applies unconditionally; `txco pull` first to
+establish one.
 
 ## Nano-ops
 

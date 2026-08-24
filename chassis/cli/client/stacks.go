@@ -89,12 +89,20 @@ type PutFilesResponse struct {
 }
 
 type activateReq struct {
-	VersionNumber int64 `json:"version_number"`
-	// Force is `txco data apply --force`: the tree wins over runtime drift —
-	// the chassis reconciles every store-seed pack (not just the changed
-	// ones) and blobseed re-asserts/drops seeded names it would otherwise
-	// leave to a runtime edit.
-	Force bool `json:"force,omitempty"`
+	VersionNumber  int64  `json:"version_number"`
+	ForceData      bool   `json:"force_data,omitempty"`
+	ExpectedActive *int64 `json:"expected_active,omitempty"`
+}
+
+// ActivateOpts refines an activation. ExpectedActive is the version this
+// client believes is active (0 = none): the chassis refuses with 409
+// `stack_moved` if the ref moved since — git's non-fast-forward rule; nil
+// skips the check (`--force`). ForceData is `txco data apply --force`: the
+// tree wins over runtime drift (every store-seed pack reconciled, seeded
+// blobs re-asserted/dropped even where a runtime edit would otherwise stand).
+type ActivateOpts struct {
+	ExpectedActive *int64
+	ForceData      bool
 }
 
 type ActivateResponse struct {
@@ -509,12 +517,12 @@ func (c *Client) DiffVersions(ctx context.Context, name string, v1, v2 int64) (*
 
 // Activate: POST /stacks/{name}/activate
 func (c *Client) Activate(ctx context.Context, name string, versionNumber int64) (*ActivateResponse, error) {
-	return c.ActivateWith(ctx, name, versionNumber, false)
+	return c.ActivateWith(ctx, name, versionNumber, ActivateOpts{})
 }
 
-// ActivateWith is Activate with the data-apply `force` flag (see activateReq).
-func (c *Client) ActivateWith(ctx context.Context, name string, versionNumber int64, force bool) (*ActivateResponse, error) {
-	body, err := json.Marshal(activateReq{VersionNumber: versionNumber, Force: force})
+// ActivateWith is Activate with ActivateOpts (ref compare-and-swap, data force).
+func (c *Client) ActivateWith(ctx context.Context, name string, versionNumber int64, opts ActivateOpts) (*ActivateResponse, error) {
+	body, err := json.Marshal(activateReq{VersionNumber: versionNumber, ForceData: opts.ForceData, ExpectedActive: opts.ExpectedActive})
 	if err != nil {
 		return nil, err
 	}

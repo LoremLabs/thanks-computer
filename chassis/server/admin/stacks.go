@@ -141,10 +141,17 @@ type putFilesResponse struct {
 
 type activateRequest struct {
 	VersionNumber int64 `json:"version_number"`
-	// Force: reconcile EVERY store-seed pack (not just the changed ones) and
-	// let the tree win over runtime drift (storeseed.Scope.Force). Sent by
-	// `txco data apply --force`; ignored by code-only applies.
-	Force bool `json:"force,omitempty"`
+	// ForceData: reconcile EVERY store-seed pack (not just the changed ones)
+	// and let the tree win over runtime drift (storeseed.Scope.Force). Sent
+	// by `txco data apply --force`; never by a code-only apply.
+	ForceData bool `json:"force_data,omitempty"`
+	// ExpectedActive is the client's compare-and-swap on the ref: the
+	// version_number it believes is active (0 = none). When set and the
+	// stack's active version differs, the activation is refused with 409
+	// stack_moved — git's non-fast-forward rule, closing the race between
+	// a client's last look at the stack and its activate. Omitted by
+	// `--force` and by callers that mean "flip the pointer regardless".
+	ExpectedActive *int64 `json:"expected_active,omitempty"`
 }
 
 type activateResponse struct {
@@ -1993,6 +2000,7 @@ func materialiseFiles(ctx context.Context, fcas filecas.Store, files map[string]
 // via a separate hostname.bound control event instead.
 func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	tenantID, stackName string, versionNumber int64, now string, mintHosts bool,
+	expectedActive *int64,
 ) (sql.NullInt64, int64, error) {
 
 	// Lock the stacks row for the duration of the activation so concurrent
@@ -2013,6 +2021,28 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 	}
 	if err != nil {
 		return currentActiveID, 0, &materialiseError{http.StatusInternalServerError, "lookup_stack", map[string]any{"err": err.Error()}}
+	}
+
+	// Client compare-and-swap on the ref (under the row lock, so it is
+	// race-free): refuse when the active version is not the one the client
+	// last saw — someone deployed, rolled back, or edited in the admin UI
+	// in between. The CLI pre-checks this against its local state and
+	// prints the guidance; this is the belt for the window after that look.
+	if expectedActive != nil {
+		var current int64
+		if currentActiveID.Valid {
+			if err := tx.QueryRowContext(ctx,
+				c.rb(`SELECT version_number FROM stack_versions WHERE version_id = ?`),
+				currentActiveID.Int64).Scan(&current); err != nil {
+				return currentActiveID, 0, &materialiseError{http.StatusInternalServerError, "lookup_active", map[string]any{"err": err.Error()}}
+			}
+		}
+		if current != *expectedActive {
+			return currentActiveID, 0, &materialiseError{http.StatusConflict, "stack_moved", map[string]any{
+				"active": current, "expected": *expectedActive,
+				"hint": "the stack's active version changed since this client last synced (a deploy, rollback or admin-UI edit); pull or diff first, or force",
+			}}
+		}
 	}
 
 	targetVersionID, targetStatus, err := c.lookupVersion(ctx, tx, stackID, versionNumber)
@@ -2353,7 +2383,7 @@ func (c *Controller) ApplyStackVersion(ctx context.Context, tx *sql.Tx,
 	// hostname (MintHandle is random → divergent per node). The canonical
 	// host is minted once on the control plane and arrives as a separate
 	// hostname.bound event.
-	if _, _, err := c.materialiseStackVersion(ctx, tx, tenantID, stack, version, now, false); err != nil {
+	if _, _, err := c.materialiseStackVersion(ctx, tx, tenantID, stack, version, now, false, nil); err != nil {
 		return err
 	}
 	return nil
@@ -2510,7 +2540,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 	var pendingHosts []pendingHostEvent
 
 	currentActiveID, targetVersionID, merr := c.materialiseStackVersion(
-		r.Context(), tx, ac.TenantID, name, req.VersionNumber, now, true)
+		r.Context(), tx, ac.TenantID, name, req.VersionNumber, now, true, req.ExpectedActive)
 	if merr != nil {
 		var me *materialiseError
 		if errors.As(merr, &me) {
@@ -2620,7 +2650,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		ssCtx := context.WithoutCancel(r.Context())
-		go c.ReconcileStorePacks(ssCtx, ac.TenantID, name, req.VersionNumber, priorVersion, true, req.Force)
+		go c.ReconcileStorePacks(ssCtx, ac.TenantID, name, req.VersionNumber, priorVersion, true, req.ForceData)
 	}
 
 	resp := activateResponse{VersionNumber: req.VersionNumber}

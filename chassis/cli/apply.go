@@ -649,15 +649,38 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		// manifest, so it also skips an unchanged pack-bearing stack the bulk list's
 		// all-files hash couldn't. --changed (zero network) and --force (re-version)
 		// both bypass it.
+		// One authoritative look at the stack: feeds the no-op short-circuit
+		// below AND the fast-forward guard. Best-effort (a lookup error
+		// falls through to a normal push, as before).
+		var rec *client.StackRecord
+		if !opts.changed || !opts.force {
+			if r, rerr := c.GetStack(ctx, stack); rerr == nil {
+				rec = r
+			}
+		}
 		if !opts.force && !opts.changed {
-			if rec, rerr := c.GetStack(ctx, stack); rerr == nil && rec != nil &&
-				rec.ActiveVersion != nil && rec.CodeManifestHash != "" &&
+			if rec != nil && rec.ActiveVersion != nil && rec.CodeManifestHash != "" &&
 				rec.CodeManifestHash == localHash {
 				results = append(results, deployResult{
 					Stack: stack, Version: *rec.ActiveVersion,
 					Files: len(files), Activated: false, Unchanged: true,
 				})
 				continue
+			}
+		}
+		// Fast-forward guard (see fastforward.go): refuse to supersede a
+		// version this workspace never saw, unless --force.
+		var expectedActive *int64
+		if !opts.force {
+			saved, _ := state.Load(dir, stack)
+			if m := remoteMoved(saved, rec); m != nil {
+				scan.clear()
+				fmt.Fprint(stderr, refusedMovedMessage(cmd, stack, m))
+				failures = append(failures, stack)
+				continue
+			}
+			if rec != nil {
+				expectedActive = expectedActiveFor(rec)
 			}
 		}
 
@@ -760,7 +783,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		err = retryStep(ctx, stderr, fmt.Sprintf("%s activate v%d", stack, versionNumber), opts.retries, activated, func() error {
 			return spin(progress, fmt.Sprintf("activating %s v%d", stack, versionNumber), func() error {
 				var e error
-				act, e = c.Activate(ctx, stack, versionNumber)
+				act, e = c.ActivateWith(ctx, stack, versionNumber, client.ActivateOpts{ExpectedActive: expectedActive})
 				return e
 			})
 		})

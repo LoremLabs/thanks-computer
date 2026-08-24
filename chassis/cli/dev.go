@@ -562,7 +562,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		//      there's nothing to do — skip the version churn.
 		// Anything else falls through to the existing create/push/
 		// activate path.
+		var expectedActive *int64
 		st, getErr := c.GetStack(ctx, stack)
+		if getErr == nil && st != nil {
+			expectedActive = expectedActiveFor(st) // ref CAS for the activate below
+		}
 		if getErr == nil && st != nil && st.ActiveVersion != nil {
 			active := *st.ActiveVersion
 			saved, _ := state.Load(dir, stack)
@@ -633,7 +637,7 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 				versionNumber)
 			continue
 		}
-		if _, err := c.Activate(ctx, stack, versionNumber); err != nil {
+		if _, err := c.ActivateWith(ctx, stack, versionNumber, client.ActivateOpts{ExpectedActive: expectedActive}); err != nil {
 			return fmt.Errorf("%s: activate v%d: %w", stack, versionNumber, err)
 		}
 		// Persist the new pointer so a future restart will skip when

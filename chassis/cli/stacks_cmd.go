@@ -564,6 +564,13 @@ Flags:
 		fmt.Fprintf(stderr, "activate: %v\n", err)
 		return 1
 	}
+	// An explicit pointer move from this workspace: it now knows v<act>, so
+	// a following apply is a fast-forward (git: pushing over a remote ref
+	// you reset yourself). Only when a baseline already exists — activate
+	// alone never establishes local == version content.
+	if saved, _ := state.Load(dir, stack); saved != nil {
+		recordSyncedVersion(dir, stack, act.VersionNumber)
+	}
 	if *asJSON {
 		if err := writeJSON(stdout, activateResult{
 			Stack: stack, Version: act.VersionNumber, PriorVersion: act.PriorVersionNumber,

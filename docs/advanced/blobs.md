@@ -133,7 +133,10 @@ txco data apply --force  # the tree wins: re-seeds every name, drops removed one
 
 The refusal is git's non-fast-forward test: a drifted name whose live
 content your tree already holds (you pulled, or made the same edit) passes;
-a drifted name you deleted from the tree is a conflict.
+a drifted name you deleted from the tree is a conflict. The same rule
+applies one layer up, to the stack's version pointer: `data apply` (like
+`apply`) refuses when the chassis's active version is no longer the one
+this workspace last synced — see the fast-forward rule in [cli](./cli.md).
 
 Without `--force` the chassis never clobbers a runtime edit either: a
 seeded name whose tree file is unchanged keeps its runtime content, a name
