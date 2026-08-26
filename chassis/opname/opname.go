@@ -22,6 +22,24 @@ import (
 // ErrName is the sentinel for any invalid name (wrapped with detail).
 var ErrName = errors.New("invalid name")
 
+// LikeEscapeChar is the ESCAPE character callers should declare when
+// matching a name with SQL LIKE. It is not a legal name character, so it can
+// never collide with real data.
+const LikeEscapeChar = `\`
+
+// EscapeLike escapes every SQL LIKE metacharacter in s so the result matches
+// LITERALLY under `LIKE ? ESCAPE '\'`. Use it on any name (or user-supplied
+// prefix) that is spliced into a LIKE pattern — see the '_' note on seg.
+//
+// Callers that deliberately want '%' to stay a wildcard (the ops resolver's
+// `boot/%` ingress fallthrough is the only one) must escape '_' alone instead;
+// see processor.escapeLikeLiterals.
+func EscapeLike(s string) string {
+	s = strings.ReplaceAll(s, LikeEscapeChar, LikeEscapeChar+LikeEscapeChar)
+	s = strings.ReplaceAll(s, "%", LikeEscapeChar+"%")
+	return strings.ReplaceAll(s, "_", LikeEscapeChar+"_")
+}
+
 const (
 	maxOpNameLen    = 64
 	maxStackNameLen = 128
@@ -29,8 +47,17 @@ const (
 
 // seg is the per-segment charset shared by operation names and each
 // "/"-separated stack-name segment. It deliberately excludes '.', '/',
-// '%', whitespace and everything else, so '.'/'..' traversal segments,
-// SQL LIKE wildcards, and empty/whitespace names are impossible.
+// '%', whitespace and everything else, so '.'/'..' traversal segments and
+// empty/whitespace names are impossible.
+//
+// '_' IS permitted, and is load-bearing: the channel convention (`_mail`,
+// `_cron`, `_llm`, `_room`, `_inspect`, `_scheduled`) and the reserved
+// `_sys/*` namespace are built on it. But '_' is ALSO a SQL LIKE
+// single-character wildcard, so any query matching a stack name with LIKE
+// must escape it — otherwise a lookup for `_mail` also returns `email`.
+// The ops resolver does this via processor.escapeLikeLiterals; a new LIKE
+// call site over these names must do the same. Do not "fix" this by
+// banning '_' here: that would invalidate every channel stack in existence.
 var seg = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Valid reports whether name is a usable operation/rule name.

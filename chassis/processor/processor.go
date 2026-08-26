@@ -3438,8 +3438,12 @@ func (pu *Unit) overlayResponse(env, output string, overrides []resonator.Branch
 // `website/canary/100` that finds nothing tries `website/100`, then “. This
 // implements the overlay model — a sparse `website/canary` tree inherits any
 // scope it doesn't explicitly override from the parent stack. Wildcard stacks
-// (containing SQL LIKE metacharacters like `%`) skip the fallback walk; they
-// already match across stacks at one level.
+// (containing `%`, the one SQL LIKE metacharacter a pattern may carry) skip
+// the fallback walk; they already match across stacks at one level.
+//
+// The walk stops at a `_`-prefixed segment: `<stack>/_mail` is a CHANNEL, not
+// a specialization, and must not inherit its parent's HTTP rules. See
+// peelParent.
 func (pu *Unit) OpsForStage(ctx context.Context, stage string) ([]operation.Operation, error) {
 	ctx, span := pu.Mc.Tracer.Start(ctx, `opsforstage`)
 	defer span.End()
@@ -3454,7 +3458,12 @@ func (pu *Unit) OpsForStage(ctx context.Context, stage string) ([]operation.Oper
 	pu.Logger.Debug("ops-for-stage", zap.String("stage", stage), zap.String("stack", stack), zap.Int("scope", scope))
 
 	tenant := tenantScope(ctx)
-	wildcard := strings.ContainsAny(stack, "%_")
+	// `%` is the ONLY LIKE metacharacter a stack pattern may carry: `boot/%`
+	// is the real ingress-miss fallthrough (config.IngressMissAction). `_` is
+	// escaped to a literal by escapeLikeLiterals — opname permits it in every
+	// stack-name segment, so treating it as a wildcard both matched foreign
+	// stacks and pushed every `_mail`/`_cron`/`_llm` request off the ops index.
+	wildcard := strings.Contains(stack, "%")
 
 	// Hot path: resolve from the in-memory ops index — no SQL, no txcl
 	// re-parse (see opsindex.go). Only for non-wildcard patterns on the
@@ -3487,7 +3496,7 @@ func (pu *Unit) OpsForStage(ctx context.Context, stage string) ([]operation.Oper
 		if wildcard {
 			return ops, nil
 		}
-		next, ok := stackParent(prefix)
+		next, ok := peelParent(prefix)
 		if !ok {
 			return ops, nil
 		}
@@ -3525,10 +3534,11 @@ func (pu *Unit) lookupOpsExact(ctx context.Context, stack string, scope int, ten
 	ops := make([]operation.Operation, 0)
 
 	tenantPred, tenantArgs := tenantPredicate(tenant)
-	query := fmt.Sprintf(`SELECT stack, scope, name, txcl, mock_res FROM ops WHERE stack LIKE ?%s AND scope = (SELECT MIN(scope) AS scope FROM ops WHERE scope >= ? AND stack LIKE ?%s);`, tenantPred, tenantPred)
-	args := []any{stack}
+	query := fmt.Sprintf(`SELECT stack, scope, name, txcl, mock_res FROM ops WHERE stack LIKE ? ESCAPE '\'%s AND scope = (SELECT MIN(scope) AS scope FROM ops WHERE scope >= ? AND stack LIKE ? ESCAPE '\'%s);`, tenantPred, tenantPred)
+	pattern := escapeLikeLiterals(stack)
+	args := []any{pattern}
 	args = append(args, tenantArgs...)
-	args = append(args, scope, stack)
+	args = append(args, scope, pattern)
 	args = append(args, tenantArgs...)
 
 	rows, err := pu.opstackDB(ctx).QueryContext(ctx, query, args...)
@@ -3551,6 +3561,52 @@ func (pu *Unit) lookupOpsExact(ctx context.Context, stack string, scope int, ten
 		return ops, err
 	}
 	return ops, nil
+}
+
+// likeEscapeChar is the ESCAPE character every ops lookup declares. It is not
+// a legal stack-name character (opname.seg is [A-Za-z0-9_-]), so it can never
+// collide with real data.
+const likeEscapeChar = `\`
+
+// escapeLikeLiterals makes `_` match literally in a stack LIKE pattern.
+//
+// `_` is a SQL LIKE single-character wildcard, and opname.seg PERMITS it in
+// every stack-name segment — the channel convention (`_mail`, `_cron`, `_llm`,
+// `_room`, `_inspect`, `_scheduled`, nested `<stack>/_mail`) is built on it,
+// and tenants may pick names like `my_book`. Unescaped, a lookup for `_mail`
+// also returns every same-length stack ending in "mail" (`email`, `gmail`),
+// merged into the same scope — an unrelated stack's rules executing on the
+// mail path.
+//
+// `%` is deliberately NOT escaped: `boot/%` is the real ingress-miss
+// fallthrough pattern (config.IngressMissAction), the one place a caller means
+// LIKE semantics. The escape character is doubled first so it cannot be
+// smuggled in ahead of the `_` pass.
+func escapeLikeLiterals(pattern string) string {
+	pattern = strings.ReplaceAll(pattern, likeEscapeChar, likeEscapeChar+likeEscapeChar)
+	return strings.ReplaceAll(pattern, "_", likeEscapeChar+"_")
+}
+
+// peelParent is the overlay walk's step: stackParent, except it refuses to
+// peel ACROSS a `_`-prefixed segment.
+//
+// A `_`-prefixed segment marks a CHANNEL (`<stack>/_mail`, see
+// ingress.DBResolver.lookupMailDomain) or a system namespace — not a
+// specialization. `www/canary` is a sparse override of `www` and should
+// inherit it; `www/_mail` is a different ingress into the same stack and must
+// NOT fall back to `www`'s HTTP rules, or an inbound message would execute the
+// website's request handlers. Before the LIKE fix this was enforced by
+// accident, because any `_` marked the whole pattern a wildcard and wildcards
+// skip the walk; it is now enforced on purpose.
+func peelParent(stack string) (string, bool) {
+	parent, ok := stackParent(stack)
+	if !ok {
+		return "", false
+	}
+	if strings.HasPrefix(stack[len(parent)+1:], "_") {
+		return "", false
+	}
+	return parent, true
 }
 
 // stackParent peels the trailing slash-segment off a stack name. Returns the

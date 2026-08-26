@@ -110,7 +110,7 @@ func (idx *opsIndex) opsForStage(ctx context.Context, pu *Unit, tenant, stack st
 			}
 			return rows, nil
 		}
-		next, ok := stackParent(prefix)
+		next, ok := peelParent(prefix)
 		if !ok {
 			return make([]operation.Operation, 0), nil
 		}
@@ -155,8 +155,8 @@ func (idx *opsIndex) ladderFor(ctx context.Context, pu *Unit, tenant, stack stri
 // row order.
 func buildStackLadder(ctx context.Context, db *sql.DB, tenant, stack string, logger *zap.Logger) (*stackLadder, error) {
 	tenantPred, tenantArgs := tenantPredicate(tenant)
-	query := `SELECT stack, scope, name, txcl, mock_res FROM ops WHERE stack LIKE ?` + tenantPred + ` ORDER BY scope, rowid`
-	args := append([]any{stack}, tenantArgs...)
+	query := `SELECT stack, scope, name, txcl, mock_res FROM ops WHERE stack LIKE ? ESCAPE '\'` + tenantPred + ` ORDER BY scope, rowid`
+	args := append([]any{escapeLikeLiterals(stack)}, tenantArgs...)
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {

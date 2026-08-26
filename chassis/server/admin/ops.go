@@ -9,6 +9,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth"
 	"github.com/loremlabs/thanks-computer/chassis/auth/policy"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
+	"github.com/loremlabs/thanks-computer/chassis/opname"
 )
 
 // OpRecord is the wire shape for a single rule in the admin API. It maps 1:1
@@ -57,11 +58,17 @@ func (c *Controller) handleListOps(w http.ResponseWriter, r *http.Request) {
 		// mixed-case stack names depending on the engine. Stack names are
 		// ASCII ([A-Za-z0-9_-/]), where lower() behaves identically on
 		// both. Admin listing only — low QPS, the seq scan is fine.
+		//
+		// The descendants arm escapes the caller's prefix: '_' is a legal
+		// stack-name character (the `_mail`/`_cron` channels) AND a LIKE
+		// single-char wildcard, so a raw `pony/_mail` prefix would also list
+		// `pony/Xmail`'s descendants. '%' is escaped too — it is banned in
+		// stack names, so in a query param it can only be an injection.
 		rows, err = c.pu.RuntimeDB.QueryContext(r.Context(),
 			c.rb(`SELECT stack, scope, name, txcl, mock_req, mock_res FROM ops
-			 WHERE lower(stack) = lower(?) OR lower(stack) LIKE lower(?)
+			 WHERE lower(stack) = lower(?) OR lower(stack) LIKE lower(?) ESCAPE '\'
 			 ORDER BY stack, scope, name, txcl`),
-			prefix, prefix+"/%")
+			prefix, opname.EscapeLike(prefix)+"/%")
 	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "query failed", map[string]any{"err": err.Error()})
@@ -107,10 +114,12 @@ func writeJSONError(w http.ResponseWriter, status int, msg string, detail map[st
 
 // stackPrefix returns the LIKE pattern that matches `prefix` and all
 // descendants. Unused right now (handleListOps inlines it) but kept here for
-// the future `apply --prune` path.
+// the future `apply --prune` path. The result assumes `ESCAPE '\'` on the
+// query — `_` is legal in a stack name and is also a LIKE wildcard, so an
+// unescaped prefix over-matches (see opname.EscapeLike).
 //
 //nolint:unused // reserved for future prune flow
 func stackPrefix(prefix string) string {
 	prefix = strings.TrimSuffix(prefix, "/")
-	return prefix + "/%"
+	return opname.EscapeLike(prefix) + "/%"
 }
