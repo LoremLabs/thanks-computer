@@ -462,6 +462,14 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
 	}
 
+	// Apply-time lint for cross-stack `@goto` literals, which move the stage
+	// without re-pinning `_txc.stack` — so stack-scoped defaults (kv namespace,
+	// read-file and dataset roots) keep resolving against the ORIGIN stack.
+	// Warnings only, same as above.
+	for _, w := range lintCrossStackGoto(ops) {
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
+	}
+
 	// Mock policy: when the target denies mocks, drop mock_res only.
 	// mock_req is documentation/test-fixture metadata, never consulted by
 	// the chassis runtime, so it's harmless to preserve.

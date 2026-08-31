@@ -132,3 +132,60 @@ func containsSubstring(warnings []string, want string) bool {
 	}
 	return false
 }
+
+// TestLintFlagsCrossStackGoto asserts a `@goto` literal naming another stack
+// is surfaced. The rule is GUARDED — that is the point: a real dispatch always
+// sits behind a WHEN, so the loop lint's "skip guarded rules" rule would miss
+// every true positive here.
+func TestLintFlagsCrossStackGoto(t *testing.T) {
+	ops := []bundle.Op{
+		{
+			Stack:      "core",
+			Scope:      630,
+			Name:       "dispatch",
+			SourcePath: "/tmp/dispatch.txcl",
+			Txcl:       `WHEN .x == true` + "\n" + `  EMIT @goto = "kind-triage/2010"`,
+		},
+	}
+	got := lintCrossStackGoto(ops)
+	if !containsSubstring(got, "does not re-pin _txc.stack") {
+		t.Errorf("expected cross-stack goto warning, got: %v", got)
+	}
+	if !containsSubstring(got, "txco://route") {
+		t.Errorf("warning should name the fix, got: %v", got)
+	}
+}
+
+// TestLintIgnoresSameStackGoto — the common case. A jump within the same stack
+// needs no re-pin, so it must stay silent or the lint is noise. Covers both the
+// qualified and bare forms, since resolveStageRef reads a bare scope as
+// "current stack".
+func TestLintIgnoresSameStackGoto(t *testing.T) {
+	ops := []bundle.Op{
+		{
+			Stack: "core", Scope: 680, Name: "loop", SourcePath: "/tmp/a.txcl",
+			Txcl: `WHEN .x == true` + "\n" + `  EMIT @goto = "core/580"`,
+		},
+		{
+			Stack: "core", Scope: 690, Name: "bare", SourcePath: "/tmp/b.txcl",
+			Txcl: `WHEN .y == true` + "\n" + `  EMIT @goto = "580"`,
+		},
+	}
+	if got := lintCrossStackGoto(ops); len(got) != 0 {
+		t.Errorf("same-stack goto must not warn, got: %v", got)
+	}
+}
+
+// TestLintIgnoresPathValuedGoto — `@goto = ._ret` is the subroutine-return
+// idiom and its target is not knowable statically, so it must not warn.
+func TestLintIgnoresPathValuedGoto(t *testing.T) {
+	ops := []bundle.Op{
+		{
+			Stack: "kind-triage", Scope: 2011, Name: "ret", SourcePath: "/tmp/ret.txcl",
+			Txcl: `WHEN .x == true` + "\n" + `  EMIT @goto = ._ret.stage`,
+		},
+	}
+	if got := lintCrossStackGoto(ops); len(got) != 0 {
+		t.Errorf("path-valued goto must not warn, got: %v", got)
+	}
+}

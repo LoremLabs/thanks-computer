@@ -148,6 +148,63 @@ func lintStackLoops(ops []bundle.Op) []string {
 	return warnings
 }
 
+// lintCrossStackGoto warns when a rule emits a `@goto` literal naming a stack
+// other than the one the rule lives in.
+//
+// A goto moves the STAGE but not the envelope's stack identity: `_txc.stack` is
+// stamped once by the inlet (server/ingress/router.go, server.go) and nothing in
+// the processor rewrites it, while resolveGoto only rebuilds the stage string.
+// So a rule that jumps from `core` into `kind-x` runs kind-x's ops while still
+// identifying as `core` — and every stack-scoped default follows the identity,
+// not the stage: the kv namespace (server/kv.go), the read-file root
+// (server/readfile.go) and the dataset root (server/dataset.go). A `kv/set` with
+// no explicit namespace lands in the ORIGIN stack's namespace, silently.
+//
+// `txco://route` is the intended cross-stack mechanism: routeBody emits
+// `_txc.goto` and `_txc.stack` together, so the identity follows the jump. Hence
+// a warning rather than an error — a bare cross-stack goto is legal and works so
+// long as every stack-scoped read in the target is explicit, which is the sort of
+// thing that is true on the day it is written and false six months later.
+//
+// Unlike lintStackLoops this does NOT skip guarded rules: a real dispatch is
+// almost always behind a WHEN, so skipping them would skip every true positive.
+// Only literal targets are checked — a path-valued goto (`@goto = ._ret`) is the
+// subroutine-return idiom and its target is not knowable statically.
+func lintCrossStackGoto(ops []bundle.Op) []string {
+	var warnings []string
+
+	for _, op := range ops {
+		r, perr := txcl.Resonator(op.Txcl)
+		if perr != nil || r == nil || r.Emit == nil {
+			// Parse errors are reported by the upstream parse loop in
+			// apply.go; lint silently skips so we don't double-report.
+			continue
+		}
+		for _, ov := range r.Emit.Overrides {
+			if !isGotoPath(ov.Path) {
+				continue
+			}
+			lit, ok := literalString(ov.Value)
+			if !ok {
+				continue
+			}
+			target, ok := resolveStageRef(lit, op.Stack)
+			if !ok || target.Stack == op.Stack {
+				continue
+			}
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s (%s/%d/%s) emits @goto into stack %q — a cross-stack goto does "+
+					"not re-pin _txc.stack, so kv/read-file/dataset defaults inside %q still "+
+					"resolve against %q; use txco://route to re-pin, or make every "+
+					"stack-scoped read there explicit",
+				op.SourcePath, op.Stack, op.Scope, op.Name,
+				target.Stack, target.Stack, op.Stack))
+		}
+	}
+
+	return warnings
+}
+
 // ruleHalts reports whether the rule emits a terminating `@halt = true`.
 // A halt EMIT terminates the pipeline after this scope's merge, so any
 // goto/EXEC the rule also carries cannot loop.
