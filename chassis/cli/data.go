@@ -428,7 +428,7 @@ Flags:
 		// active version must be the one this workspace last synced.
 		var expectedActive *int64
 		if !*force {
-			saved, _ := state.Load(dir, stack)
+			saved, _ := state.Load(dir, stack, stateKeyFor(c))
 			if m := remoteMoved(saved, rec); m != nil {
 				fmt.Fprint(stderr, refusedMovedMessage("data apply", stack, m))
 				rc = 1
@@ -493,7 +493,7 @@ Flags:
 		// This workspace now knows v<act>: record it so the next apply's
 		// fast-forward guard doesn't trip on our own deploy. The code
 		// manifest is untouched (data apply carries code forward).
-		recordSyncedVersion(dir, stack, act.VersionNumber)
+		recordSyncedVersion(dir, stack, stateKeyFor(c), act.VersionNumber)
 		results = append(results, result{Stack: stack, Version: act.VersionNumber, Packs: len(packs)})
 		if !*f.jsonOut {
 			fmt.Fprintf(stdout, "%s v%d — %d data pack%s reconciled\n",

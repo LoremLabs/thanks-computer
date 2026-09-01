@@ -98,7 +98,7 @@ func TestRunPushRecordsLocalState(t *testing.T) {
 		t.Fatalf("exit=%d; stderr=%q", code, errb.String())
 	}
 
-	st, err := state.Load(root, "api")
+	st, err := state.Load(root, "api", state.Key(srv.URL, "default"))
 	if err != nil {
 		t.Fatalf("state.Load: %v", err)
 	}

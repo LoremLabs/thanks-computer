@@ -77,16 +77,24 @@ func expectedActiveFor(rec *client.StackRecord) *int64 {
 	return &n
 }
 
+// stateKeyFor is the per-target state key for the chassis this client
+// talks to — every state.Load/Save in the deploy paths goes through it so
+// dev and prod each keep their own baseline (the pre-keyed file made every
+// dev↔prod alternation read the other environment's number).
+func stateKeyFor(c *client.Client) string {
+	return state.Key(c.Addr(), c.TenantSlug())
+}
+
 // recordSyncedVersion bumps the workspace's synced version after a deploy
 // that did not change the code tree (data apply, activate): the workspace
 // now "knows" v<n>, so its own action never trips the fast-forward guard.
 // The code manifest is left as it was (pull's dirty check keys on it).
 // Best-effort: a state-write failure never fails the deploy.
-func recordSyncedVersion(dir, stack string, n int64) {
-	saved, _ := state.Load(dir, stack)
+func recordSyncedVersion(dir, stack, key string, n int64) {
+	saved, _ := state.Load(dir, stack, key)
 	if saved == nil {
 		saved = &state.State{}
 	}
 	saved.VersionNumber, saved.ParentVersionNumber = n, n
-	_ = state.Save(dir, stack, *saved)
+	_ = state.Save(dir, stack, key, *saved)
 }

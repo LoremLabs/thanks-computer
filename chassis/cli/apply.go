@@ -614,7 +614,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			var skipVersion int64
 			skip := false
 			if opts.changed {
-				if saved, _ := state.Load(dir, stack); saved != nil && saved.ManifestHash == localHash {
+				if saved, _ := state.Load(dir, stack, stateKeyFor(c)); saved != nil && saved.ManifestHash == localHash {
 					skip, skipVersion = true, saved.VersionNumber
 				}
 			} else if rec, ok := serverByName[stack]; ok && rec.ActiveVersion != nil && rec.ManifestHash == localHash {
@@ -680,7 +680,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		// version this workspace never saw, unless --force.
 		var expectedActive *int64
 		if !opts.force {
-			saved, _ := state.Load(dir, stack)
+			saved, _ := state.Load(dir, stack, stateKeyFor(c))
 			if m := remoteMoved(saved, rec); m != nil {
 				scan.clear()
 				fmt.Fprint(stderr, refusedMovedMessage(cmd, stack, m))
@@ -819,7 +819,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		// recomputes (localManifestHash), so the stack reads "(clean)" right
 		// after. Best-effort: the deploy already succeeded, so a state-write
 		// failure only warns — it must not fail the push.
-		if serr := state.Save(dir, stack, state.State{
+		if serr := state.Save(dir, stack, stateKeyFor(c), state.State{
 			VersionNumber:       act.VersionNumber,
 			ParentVersionNumber: act.VersionNumber,
 			ManifestHash:        localHash,

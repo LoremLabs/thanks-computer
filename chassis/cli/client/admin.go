@@ -303,6 +303,11 @@ func (c *Client) applyAuth(req *http.Request, body []byte) error {
 // that want to echo the URL they're talking to without re-resolving.
 func (c *Client) Addr() string { return c.target.Addr }
 
+// TenantSlug returns the tenant this client issues tenant-scoped requests
+// under ("" = legacy flat routes). Paired with Addr it identifies the
+// target for per-target workspace state (state.Key).
+func (c *Client) TenantSlug() string { return c.target.Tenant }
+
 // scopedURL builds the URL for an endpoint that lives under
 // /v1/tenants/{tenant}/… `suffix` is the slash-prefixed path under
 // that prefix (e.g. "/ops", "/auth/invitations").

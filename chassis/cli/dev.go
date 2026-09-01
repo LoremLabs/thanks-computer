@@ -77,6 +77,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	uiDev := fs.Bool("ui", false, "also start the admin-ui Vite dev server on "+adminUIDevPort+" (HMR; opens admin-ui/ found by walking up from the workspace)")
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
+	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
 	lmtpHead := fs.Bool("lmtp", false, "start the LMTP mail head with dev defaults: binds "+devLMTPListenAddr+", relays outbound mail to a local sink ("+devMailRelayAddr+", TLS off — MailHog/Mailpit), and auto-loads ./ingress.yaml from the workspace when present (the local stand-in for minted hostnames). Disabled by default. Override any of TXCO_LMTP_LISTEN_ADDRS/MAIL_RELAY_ADDR/MAIL_RELAY_TLS/INGRESS_CONFIG.")
 	watch := fs.Bool("watch", true, "watch sources and hot-reload: compute edits rebuild + reactivate; OPS edits push to a per-stack draft. On by default (that's what `dev` is for); pass --watch=false to disable.")
 	watchIgnore := fs.StringArray("watch-ignore", nil, "glob pattern (repeatable) whose matching directories are pruned from the watcher — CPU saver in big workspaces. A pattern with `/` matches a dir's path under OPS/ (e.g. `publications/*/FILES`); a bare name matches anywhere (e.g. `node_modules`). Per-stack FILES/ trees are pruned by default; add `dev.watch.includeFiles: true` to txco.yaml to watch them.")
@@ -250,7 +251,7 @@ Flags:
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -569,7 +570,7 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		}
 		if getErr == nil && st != nil && st.ActiveVersion != nil {
 			active := *st.ActiveVersion
-			saved, _ := state.Load(dir, stack)
+			saved, _ := state.Load(dir, stack, stateKeyFor(c))
 			if saved != nil && active > saved.VersionNumber {
 				fmt.Fprintf(stderr,
 					"[txco] %s: chassis active v%d is ahead of locally-pulled v%d — admin UI edits not pulled.\n",
@@ -587,7 +588,7 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 					stack, active, localHash[:8])
 				// Refresh the local state pointer so subsequent restarts
 				// see the active number as the parent.
-				_ = state.Save(dir, stack, state.State{
+				_ = state.Save(dir, stack, stateKeyFor(c), state.State{
 					VersionNumber:       active,
 					ParentVersionNumber: active,
 					ManifestHash:        vd.ManifestHash,
@@ -642,7 +643,7 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		}
 		// Persist the new pointer so a future restart will skip when
 		// nothing changed, and so the divergence check has a baseline.
-		if err := state.Save(dir, stack, state.State{
+		if err := state.Save(dir, stack, stateKeyFor(c), state.State{
 			VersionNumber:       versionNumber,
 			ParentVersionNumber: versionNumber,
 			ManifestHash:        localHash,
@@ -983,7 +984,7 @@ func isVersionNotDraftErr(err error) bool {
 // included. Off by default — most dev workflows use only web + cron +
 // admin, and the extra binds otherwise cause spurious "port in use"
 // failures on machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
@@ -1097,6 +1098,10 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	if lmtpHead {
 		heads = append(heads, "lmtp")
 		env = append(env, "TXCO_LMTP_LISTEN_ADDRS="+devLMTPListenAddr)
+	}
+	if scheduledHead {
+		heads = append(heads, "scheduled")
+		env = append(env, "TXCO_SCHEDULED_DB_PATH="+filepath.Join(devDir, "scheduled.db"))
 	}
 	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
 

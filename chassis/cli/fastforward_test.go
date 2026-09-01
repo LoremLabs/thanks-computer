@@ -52,17 +52,63 @@ func TestRemoteMoved(t *testing.T) {
 
 func TestRecordSyncedVersionKeepsManifest(t *testing.T) {
 	root := t.TempDir()
-	if err := state.Save(root, "demo", state.State{VersionNumber: 3, ParentVersionNumber: 3, ManifestHash: "m"}); err != nil {
+	key := state.Key("http://localhost:8081", "default")
+	if err := state.Save(root, "demo", key, state.State{VersionNumber: 3, ParentVersionNumber: 3, ManifestHash: "m"}); err != nil {
 		t.Fatal(err)
 	}
-	recordSyncedVersion(root, "demo", 9)
-	s, _ := state.Load(root, "demo")
+	recordSyncedVersion(root, "demo", key, 9)
+	s, _ := state.Load(root, "demo", key)
 	if s == nil || s.VersionNumber != 9 || s.ParentVersionNumber != 9 || s.ManifestHash != "m" {
 		t.Fatalf("state = %+v", s)
 	}
-	recordSyncedVersion(root, "fresh", 2)
-	if s, _ := state.Load(root, "fresh"); s == nil || s.VersionNumber != 2 || s.ManifestHash != "" {
+	recordSyncedVersion(root, "fresh", key, 2)
+	if s, _ := state.Load(root, "fresh", key); s == nil || s.VersionNumber != 2 || s.ManifestHash != "" {
 		t.Fatalf("fresh state = %+v", s)
+	}
+}
+
+// TestStatePerTargetIsolation is the regression test for the dev↔prod
+// baseline clash (onepony 0012 §7b trap 9): one workspace, two targets,
+// two independent baselines in one file — and a legacy flat file reads as
+// no baseline for every target instead of someone else's number.
+func TestStatePerTargetIsolation(t *testing.T) {
+	root := t.TempDir()
+	dev := state.Key("http://localhost:8081", "default")
+	prod := state.Key("https://admin.thanks.computer", "onepony")
+	if err := state.Save(root, "core", dev, state.State{VersionNumber: 70, ParentVersionNumber: 70}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(root, "core", prod, state.State{VersionNumber: 12, ParentVersionNumber: 12}); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := state.Load(root, "core", dev); s == nil || s.VersionNumber != 70 {
+		t.Fatalf("dev baseline = %+v", s)
+	}
+	if s, _ := state.Load(root, "core", prod); s == nil || s.VersionNumber != 12 {
+		t.Fatalf("prod baseline = %+v", s)
+	}
+	// The guard sees each target's own number: prod at v12 with a prod
+	// baseline of 12 is NOT a move, whatever dev's number says.
+	prodSaved, _ := state.Load(root, "core", prod)
+	v := int64(12)
+	if m := remoteMoved(prodSaved, &client.StackRecord{ActiveVersion: &v}); m != nil {
+		t.Fatalf("phantom move: %+v", m)
+	}
+	// Key canonicalisation: slash and case variants collide.
+	if state.Key("https://Admin.Thanks.Computer/", "onepony") != prod {
+		t.Fatal("key canonicalisation")
+	}
+	// Legacy flat file → no baseline for anyone.
+	legacy := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(legacy, ".txco"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, ".txco", "core.state.json"),
+		[]byte(`{"version_number":70,"parent_version_number":70,"manifest_hash":""}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := state.Load(legacy, "core", prod); s != nil {
+		t.Fatalf("legacy file must read as no baseline, got %+v", s)
 	}
 }
 
@@ -98,10 +144,10 @@ func TestApplyRefusesWhenChassisMoved(t *testing.T) {
 	t.Setenv("TXCO_HOME", t.TempDir())
 	root := t.TempDir()
 	writeStackFixture(t, root, "demo", "100", "x", `EMIT .ok = "yes"`)
-	if err := state.Save(root, "demo", state.State{VersionNumber: 5, ParentVersionNumber: 5, ManifestHash: "old"}); err != nil {
+	srv, drafts := fakeMovedAdmin(t)
+	if err := state.Save(root, "demo", state.Key(srv.URL, "default"), state.State{VersionNumber: 5, ParentVersionNumber: 5, ManifestHash: "old"}); err != nil {
 		t.Fatal(err)
 	}
-	srv, drafts := fakeMovedAdmin(t)
 	var out, errb bytes.Buffer
 	code := runApply([]string{"--target", srv.URL, "--tenant", "default", "--yes", root}, &out, &errb)
 	if code == 0 {
@@ -133,10 +179,10 @@ func TestDataApplyRefusesWhenChassisMoved(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(kvDir, "cfg.jsonl"), []byte(`{"key":"k","value":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.Save(root, "demo", state.State{VersionNumber: 5, ParentVersionNumber: 5}); err != nil {
+	srv, drafts := fakeMovedAdmin(t)
+	if err := state.Save(root, "demo", state.Key(srv.URL, "default"), state.State{VersionNumber: 5, ParentVersionNumber: 5}); err != nil {
 		t.Fatal(err)
 	}
-	srv, drafts := fakeMovedAdmin(t)
 	var out, errb bytes.Buffer
 	if code := runDataApply([]string{"--target", srv.URL, "--tenant", "default", "--yes", root}, &out, &errb); code != 1 {
 		t.Fatalf("exit=%d, want 1; stderr=%s", code, errb.String())

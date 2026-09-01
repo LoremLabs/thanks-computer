@@ -64,7 +64,7 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 		}
 
 		// Local state + cleanliness.
-		saved, _ := state.Load(dir, name)
+		saved, _ := state.Load(dir, name, stateKeyFor(c))
 		if saved != nil {
 			d.Local = fmt.Sprintf("v%d", saved.VersionNumber)
 			// Cleanliness = does local content match the manifest the push

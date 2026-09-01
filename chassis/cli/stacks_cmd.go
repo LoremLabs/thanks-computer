@@ -175,7 +175,7 @@ Flags:
 		// When state is missing or local diverges, fall back to the
 		// "any local file is dirty" behavior — protects in-flight
 		// edits the user hasn't committed back to the chassis yet.
-		saved, _ := state.Load(dir, stack)
+		saved, _ := state.Load(dir, stack, stateKeyFor(c))
 		clean, err := localStackClean(dir, stack, saved)
 		if err != nil {
 			fmt.Fprintf(stderr, "pull: check workspace %s: %v\n", stackDir, err)
@@ -235,7 +235,7 @@ Flags:
 			return 1
 		}
 	}
-	if err := state.Save(dir, stack, state.State{
+	if err := state.Save(dir, stack, stateKeyFor(c), state.State{
 		VersionNumber:       versionNumber,
 		ParentVersionNumber: versionNumber,
 		ManifestHash:        vd.ManifestHash,
@@ -568,8 +568,8 @@ Flags:
 	// a following apply is a fast-forward (git: pushing over a remote ref
 	// you reset yourself). Only when a baseline already exists — activate
 	// alone never establishes local == version content.
-	if saved, _ := state.Load(dir, stack); saved != nil {
-		recordSyncedVersion(dir, stack, act.VersionNumber)
+	if saved, _ := state.Load(dir, stack, stateKeyFor(c)); saved != nil {
+		recordSyncedVersion(dir, stack, stateKeyFor(c), act.VersionNumber)
 	}
 	if *asJSON {
 		if err := writeJSON(stdout, activateResult{
