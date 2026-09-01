@@ -493,7 +493,22 @@ Flags:
 		// This workspace now knows v<act>: record it so the next apply's
 		// fast-forward guard doesn't trip on our own deploy. The code
 		// manifest is untouched (data apply carries code forward).
+		//
+		// Recorded under BOTH roots when they differ: `data apply <dir>`
+		// roots at the PACK dir, but the invoking workspace (cwd — where
+		// txco.yaml lives and where push/apply run from) is the one whose
+		// guard would otherwise trip on the data versions this apply just
+		// minted. Observed 2026-09-01: push→v14 from the repo root, two
+		// data applies→v16 recorded only under fixtures/dev-seed/.txco/,
+		// next push from the root = phantom refusal.
 		recordSyncedVersion(dir, stack, stateKeyFor(c), act.VersionNumber)
+		if cwd, cerr := os.Getwd(); cerr == nil {
+			if ad, e1 := filepath.Abs(dir); e1 == nil {
+				if ac, e2 := filepath.Abs(cwd); e2 == nil && ad != ac {
+					recordSyncedVersion(cwd, stack, stateKeyFor(c), act.VersionNumber)
+				}
+			}
+		}
 		results = append(results, result{Stack: stack, Version: act.VersionNumber, Packs: len(packs)})
 		if !*f.jsonOut {
 			fmt.Fprintf(stdout, "%s v%d — %d data pack%s reconciled\n",
