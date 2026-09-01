@@ -128,9 +128,14 @@ export default function adapter(options: AdapterOptions = {}): Adapter {
  * fallback page) at boot/50 and falls through for extension-less paths; this op
  * serves the shell for those so deep links / reloads render the app.
  *
- * The shell is embedded as a base64 string — the canonical desugared form of a
- * web body (the web inlet base64-decodes `_txc.web.res.body`). It's regenerated
- * on every build because the shell references content-hashed asset URLs.
+ * The shell is embedded as a `b64"…"` typed-string literal — the lexer encodes
+ * it at parse time (chassis/txcl/lexer/lexer.go:206-213), so the op file carries
+ * READABLE HTML while the runtime still receives the canonical base64 body the
+ * web inlet decodes. Escapes: only `\` and `"` need escaping; real newlines are
+ * legal inside the literal. (Until 2026-08-31 this emitted the pre-encoded
+ * base64 blob — functionally identical, but opaque to review and to diffs.)
+ * It's regenerated on every build because the shell references content-hashed
+ * asset URLs.
  */
 function writeFallbackOp(
   builder: Builder,
@@ -139,7 +144,7 @@ function writeFallbackOp(
   fallbackPath: string,
   fallbackName: string,
 ): void {
-  const b64 = readFileSync(fallbackPath).toString("base64");
+  const shell = readFileSync(fallbackPath).toString("utf8");
 
   // Remove any stale generated fallback ops from previous builds (any scope), so
   // exactly the intended files remain. A leftover at a lower scope would fire
@@ -179,10 +184,10 @@ function writeFallbackOp(
       `# ${NAME} — SPA fallback (generated; do not edit by hand).
 #
 # Serves the SvelteKit shell for any extension-less path nothing else handled.
-# @web.res.body is base64-encoded ${fallbackName} (the web inlet decodes it).
+# @web.res.body is ${fallbackName} as a b64"…" literal (encoded at parse time).
 # Regenerated on every \`vite build\` — it embeds content-hashed asset URLs.
 WHEN ${extGuard}
-${emitShell(200, b64)}`,
+${emitShell(200, shell)}`,
     );
     builder.log.minor(`Wrote SPA fallback op ${opPath} (blanket 200)`);
     return;
@@ -206,9 +211,9 @@ ${emitShell(200, b64)}`,
 # static file or earlier op handled. The route set is derived from SvelteKit's own
 # route table (builder.routes[].pattern). Paired with spa-404.txcl, which 404s
 # extension-less paths matching no route.
-# @web.res.body is base64-encoded ${fallbackName}. Regenerated on every build.
+# @web.res.body is ${fallbackName} as a b64"…" literal. Regenerated on every build.
 WHEN ${extGuard} && @web.req.url.path =~ /${known}/
-${emitShell(200, b64)}`,
+${emitShell(200, shell)}`,
   );
 
   writeFileSync(
@@ -220,7 +225,7 @@ ${emitShell(200, b64)}`,
 # the body so the client renders its branded error page; only the status differs
 # from spa-fallback.txcl.
 WHEN ${extGuard} && @web.req.url.path !~ /${known}/
-${emitShell(404, b64)}`,
+${emitShell(404, shell)}`,
   );
 
   builder.log.minor(
@@ -252,12 +257,16 @@ function knownRoutesRegex(routes: Builder["routes"]): string | null {
   return parts.length ? `^(?:${parts.join("|")})$` : null;
 }
 
-/** Shared EMIT tail for the fallback ops: headers, the base64 shell, and halt. */
-function emitShell(status: number, b64: string): string {
+/** Shared EMIT tail for the fallback ops: headers, the readable shell, and halt. */
+function emitShell(status: number, shell: string): string {
+  // b64"…" typed string: the lexer base64-encodes at parse time, so the op
+  // file stays readable HTML. Only backslash and double-quote need escaping;
+  // literal newlines are legal inside the string.
+  const escaped = shell.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `  EMIT @web.res.status = ${status},
        @web.res.headers.content-type.0 = "text/html; charset=utf-8",
        @web.res.headers.cache-control.0 = "no-cache",
-       @web.res.body = "${b64}",
+       @web.res.body = b64"${escaped}",
        @halt = true
 `;
 }
