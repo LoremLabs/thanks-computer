@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,18 @@ type DNSController struct {
 	tsigKeyName string
 	tsigSecret  string
 
+	// tap is the observe lane (observe.go): answered queries in a zone
+	// whose tenant has an active `_dns` stack are dispatched into that
+	// stack AFTER the wire reply, fire-and-forget. Nil when
+	// --dns-observe-sample=0.
+	tap *observeTap
+
+	// lane is the stack-answered lane (answer.go): zones with
+	// answer_mode=stack dispatch cache-missed queries to `_dns`
+	// synchronously and put `@dns.res` on the wire. Always constructed
+	// with a pu; inert until a snapshot has an answering zone.
+	lane *answerLane
+
 	queries  metric.Int64Counter
 	rrlDrops metric.Int64Counter
 }
@@ -71,6 +84,14 @@ func NewController(ctx context.Context, pu *processor.Unit) *DNSController {
 			c.tsigKeyName = dns.Fqdn(kn)
 			c.tsigSecret = strings.TrimSpace(pu.Conf.DNSUpdateTSIGSecret)
 		}
+		c.tap = newObserveTap(pu, 0)
+		node := ""
+		if c.tap != nil {
+			node = c.tap.node
+		} else {
+			node, _ = os.Hostname()
+		}
+		c.lane = newAnswerLane(ctx, pu, node)
 	}
 	if pu != nil && pu.Mc != nil && pu.Mc.Meter != nil {
 		c.queries, _ = pu.Mc.Meter.Int64Counter("chassis.dns.queries",
@@ -102,6 +123,12 @@ func (c *DNSController) Start() {
 	// Per-source-IP response-rate-limiter (anti-amplification). 0 (the
 	// default) disables it.
 	c.rrl = throttle.New(c.pu.Conf.DNSRRLPerSec, time.Second)
+
+	// Observe-tap workers (post-reply `_dns` dispatch). Started before the
+	// listeners so the first answered query has somewhere to go.
+	if c.tap != nil {
+		c.tap.start(c.ctx)
+	}
 
 	for _, addr := range addrs {
 		bind := bindAddr(addr)
@@ -172,6 +199,12 @@ func (c *DNSController) Stop() {
 		}
 	}
 	c.wg.Wait()
+	// Listeners are down, so no handler can offer again; abandon whatever
+	// is still queued (analytics, not deliveries) and let in-flight
+	// dispatches unwind.
+	if c.tap != nil {
+		c.tap.stop()
+	}
 	c.pu.Logger.Info("dns controller stopped")
 }
 
@@ -224,6 +257,9 @@ func (c *DNSController) rebuild(db *sql.DB) {
 		return
 	}
 	c.snap.Store(snap)
+	// A reload is how a re-applied `_dns` stack or a flipped zone reaches
+	// the head; cached stack answers from before it are stale by definition.
+	c.lane.reset()
 }
 
 // ChallengeStore exposes the controller's transient ACME-challenge store
@@ -270,9 +306,17 @@ func (c *DNSController) makeHandler(isUDP bool) dns.HandlerFunc {
 		// Transient ACME DNS-01 challenge takes precedence for the
 		// `_acme-challenge.*` name only; everything else (incl. that name
 		// with no active challenge) falls through to the snapshot.
+		snap := c.snap.Load()
 		m := c.answerChallenge(req, isUDP)
+		// Stack-answered zone (answer.go): the tenant's `_dns` stack decides,
+		// synchronously, with the snapshot answer as the proposal/fallback.
+		// nil when this query isn't the lane's (not a stack zone, ANY, …).
+		stackSaw := false
 		if m == nil {
-			m = buildReply(c.snap.Load(), req, isUDP)
+			m, stackSaw = c.lane.answer(snap, w, req, isUDP)
+		}
+		if m == nil {
+			m = buildReply(snap, req, isUDP)
 		}
 		if len(req.Question) == 1 {
 			c.recordQuery(req.Question[0], m.Rcode)
@@ -280,7 +324,49 @@ func (c *DNSController) makeHandler(isUDP bool) dns.HandlerFunc {
 		if err := w.WriteMsg(m); err != nil {
 			c.pu.Logger.Debug("dns write reply failed", zap.String("err", err.Error()))
 		}
+		// Observe tap — strictly AFTER the wire write, so the reply path
+		// never waits on the opstack. A failed write still observes: the
+		// answer was decided, and the failure itself is signal. Skipped when
+		// the stack itself just answered this query (it saw it once already);
+		// cache hits and fallbacks are still tapped.
+		if !stackSaw {
+			c.observe(snap, w, req, m, isUDP)
+		}
 	}
+}
+
+// observe hands one answered query to the observe tap when (and only
+// when) the tap is on, the snapshot has any observing zone, the query is
+// a single QUERY question, and the name falls in a zone whose tenant has
+// an active `_dns` stack. Everything else returns without allocating —
+// the default deployment (no `_dns` stack anywhere) pays one bool per
+// query.
+func (c *DNSController) observe(snap *ZoneSnapshot, w dns.ResponseWriter, req, m *dns.Msg, isUDP bool) {
+	if c.tap == nil || snap == nil || !snap.observing {
+		return
+	}
+	if req.Opcode != dns.OpcodeQuery || len(req.Question) != 1 {
+		return
+	}
+	q := req.Question[0]
+	z := snap.zoneFor(strings.ToLower(dns.Fqdn(q.Name)))
+	if z == nil || !z.observe {
+		return
+	}
+	ob := observation{
+		q:         q,
+		reply:     m,
+		clientIP:  clientIP(w.RemoteAddr()),
+		transport: "tcp",
+		zone:      z,
+	}
+	if isUDP {
+		ob.transport = "udp"
+	}
+	if opt := req.IsEdns0(); opt != nil {
+		ob.ednsSize = opt.UDPSize()
+	}
+	c.tap.offer(ob)
 }
 
 // buildReply turns a query into an authoritative response from the

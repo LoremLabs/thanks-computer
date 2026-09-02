@@ -296,6 +296,42 @@ func TestDetectTenantBodyScheduledNoTenantUnchanged(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyDNS: an observed DNS query (src=dns with a trusted
+// _txc.dns.tenant stamped by the dns head from the served zone's row)
+// proposes a route into that tenant's _dns/0, even though the resolver
+// would miss.
+func TestDetectTenantBodyDNS(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"dns","dns":{"tenant":"acme","phase":"observe","q":{"name":"shop.ai.example.com.","type":"A"}}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_dns/0" {
+		t.Errorf("_txc.route.to = %q, want _dns/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.stack").String(); got != "_dns" {
+		t.Errorf("_txc.route.stack = %q, want _dns", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "dns" {
+		t.Errorf("_txc.route.ingress = %q, want dns", got)
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified must be true (chassis-stamped)")
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+}
+
+// A dns envelope with no _txc.dns.tenant must NOT take the dns branch — it
+// falls through to the resolver (here a miss → "{}").
+func TestDetectTenantBodyDNSNoTenantUnchanged(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"dns","dns":{"q":{"name":"x."}}}}`)); body != "{}" {
+		t.Errorf("dns body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyLLM: an AI-gateway request (src=llm with a trusted
 // _txc.llm.tenant stamped by the inlet after its own Host resolution)
 // proposes a route into that tenant's _llm/0, carrying the inlet's

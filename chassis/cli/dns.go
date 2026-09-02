@@ -47,6 +47,7 @@ Subcommands:
   zone create <origin>   Register a delegated zone (prints NS delegation steps)
   zone verify <origin>   Verify the zone's NS delegate to us, then activate it
   zone list              List your delegated zones
+  zone set <origin>      Change who answers a zone (--answer snapshot|stack, --fallback)
   zone delete <origin>   Revoke a delegated zone
   record add <origin>    Add an override/extra record to a zone
   record list <origin>   List a zone's override records
@@ -168,6 +169,8 @@ func runDNSZone(args []string, stdout, stderr io.Writer) int {
 		return runDNSZoneVerify(args[1:], stdout, stderr)
 	case "list", "ls":
 		return runDNSZoneList(args[1:], stdout, stderr)
+	case "set":
+		return runDNSZoneSet(args[1:], stdout, stderr)
 	case "delete", "rm", "revoke":
 		return runDNSZoneDelete(args[1:], stdout, stderr)
 	default:
@@ -181,6 +184,8 @@ func runDNSZoneCreate(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	f := registerDNSFlags(fs)
 	mode := fs.String("mode", "", "zone mode: pattern (default, synthesized) | manual (materialized-only)")
+	answer := fs.String("answer", "", "who answers queries: snapshot (default, the prebuilt zone) | stack (your _dns stack, with the snapshot answer as @dns.proposed)")
+	fallback := fs.String("fallback", "", "what a stack zone answers when the stack doesn't (deadline, error, over the dispatch limit): proposal (default, the snapshot answer) | servfail")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -199,7 +204,8 @@ func runDNSZoneCreate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dns zone create: %v\n", err)
 		return 1
 	}
-	res, err := f.client().CreateZone(context.Background(), origin, strings.TrimSpace(*mode))
+	res, err := f.client().CreateZone(context.Background(), origin, strings.TrimSpace(*mode),
+		strings.TrimSpace(*answer), strings.TrimSpace(*fallback))
 	if err != nil {
 		fmt.Fprintf(stderr, "dns zone create: %v\n", err)
 		return 1
@@ -258,15 +264,77 @@ func runDNSZoneList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ORIGIN\tMODE\tSTATUS\tNS\tTTL")
+	fmt.Fprintln(tw, "ORIGIN\tMODE\tANSWER\tSTATUS\tNS\tTTL")
 	for _, z := range zones {
 		status := "verified"
 		if z.VerifiedAt == "" {
 			status = "pending"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", z.Origin, z.Mode, status, z.MName, z.DefaultTTL)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\n", z.Origin, z.Mode, zoneAnswerLabel(z), status, z.MName, z.DefaultTTL)
 	}
 	_ = tw.Flush()
+	return 0
+}
+
+// zoneAnswerLabel renders who answers a zone: "snapshot", or
+// "stack→proposal" / "stack→servfail" (the fallback matters only for a
+// stack zone).
+func zoneAnswerLabel(z client.DNSZoneInfo) string {
+	if z.AnswerMode == "stack" {
+		fb := z.StackFallback
+		if fb == "" {
+			fb = "proposal"
+		}
+		return "stack→" + fb
+	}
+	if z.AnswerMode == "" {
+		return "snapshot"
+	}
+	return z.AnswerMode
+}
+
+// --- zone set ---------------------------------------------------------
+
+// runDNSZoneSet flips who answers an existing zone (and the stack
+// fallback) in place — `txco dns zone set ops.example.com --answer stack`.
+func runDNSZoneSet(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("dns zone set", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	f := registerDNSFlags(fs)
+	answer := fs.String("answer", "", "who answers queries: snapshot (the prebuilt zone) | stack (your _dns stack, with the snapshot answer as @dns.proposed)")
+	fallback := fs.String("fallback", "", "what a stack zone answers when the stack doesn't (deadline, error, over the dispatch limit): proposal (the snapshot answer) | servfail")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt before modifying a non-local chassis")
+	fs.Usage = func() {
+		banner.PrintLogo(stderr)
+		fmt.Fprint(stderr, "\nUsage: txco dns zone set [flags] <origin>\n\nChange who answers a zone without recreating it (keeps its DKIM key and\noverride records). The flip is live on the next reload — no restart.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	origin, ok := parsePositional(fs, args)
+	if !ok {
+		return 2
+	}
+	if origin == "" {
+		fmt.Fprintln(stderr, "dns zone set: <origin> is required (e.g. ops.example.com)")
+		return 2
+	}
+	a, fb := strings.TrimSpace(*answer), strings.TrimSpace(*fallback)
+	if a == "" && fb == "" {
+		fmt.Fprintln(stderr, "dns zone set: pass --answer snapshot|stack and/or --fallback proposal|servfail")
+		return 2
+	}
+	if err := f.confirm(*yes, stderr); err != nil {
+		fmt.Fprintf(stderr, "dns zone set: %v\n", err)
+		return 1
+	}
+	z, err := f.client().SetZone(context.Background(), origin, a, fb)
+	if err != nil {
+		fmt.Fprintf(stderr, "dns zone set: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "zone %s: answer=%s\n", z.Origin, zoneAnswerLabel(*z))
+	if z.AnswerMode == "stack" {
+		fmt.Fprintln(stdout, "queries now dispatch into your _dns stack; without one, the zone keeps serving the snapshot.")
+	}
 	return 0
 }
 

@@ -33,7 +33,9 @@ func newDNSStore(t *testing.T) (*Store, *sql.DB) {
 			verified_at TEXT,
 			dkim_selector    TEXT NOT NULL DEFAULT '',
 			dkim_private_pem TEXT NOT NULL DEFAULT '',
-			dkim_public_b64  TEXT NOT NULL DEFAULT ''
+			dkim_public_b64  TEXT NOT NULL DEFAULT '',
+			answer_mode      TEXT NOT NULL DEFAULT 'snapshot' CHECK (answer_mode IN ('snapshot','stack')),
+			stack_fallback   TEXT NOT NULL DEFAULT 'proposal' CHECK (stack_fallback IN ('proposal','servfail'))
 		);
 		CREATE UNIQUE INDEX dns_zones_active_origin_idx
 		    ON dns_zones(origin) WHERE revoked_at IS NULL;

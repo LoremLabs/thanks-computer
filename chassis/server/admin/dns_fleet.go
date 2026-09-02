@@ -607,6 +607,12 @@ func zoneToRow(z tenants.DNSZone) map[string]any {
 		"dkim_selector":    z.DKIMSelector,
 		"dkim_private_pem": z.DKIMPrivatePEM,
 		"dkim_public_b64":  z.DKIMPublicB64,
+		// Answer mode + stack fallback (0024) — NOT NULL DEFAULT, always
+		// carried so a data-plane node serves the zone the way the admin set
+		// it (and an upsert never silently resets a stack zone to snapshot).
+		// Requires the 0024 (sqlite) / 0027 (pg) migration on every node.
+		"answer_mode":    z.AnswerMode,
+		"stack_fallback": z.StackFallback,
 	}
 	if z.CreatedBy != "" {
 		row["created_by"] = z.CreatedBy

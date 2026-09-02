@@ -58,18 +58,59 @@ func seedPatternZone(t *testing.T, db *sql.DB, tenantID, origin, ts string) {
 }
 
 // seedActiveStack inserts an active stack (active_version → a
-// stack_versions row carrying activated_at) for a tenant.
+// stack_versions row carrying activated_at) for a tenant. Mirrors the
+// real activation write: `stacks.active_version` is the version row's
+// version_id (global PK), not its per-stack version_number — the second
+// seeded stack therefore points at version_id 2 while its
+// version_number is still 1. (The old helper hard-coded active_version=1
+// for every stack, which is exactly the coincidence that hid the
+// version_number join bug in loadActiveStacks.)
 func seedActiveStack(t *testing.T, db *sql.DB, tenantID, name, activatedAt string) {
 	t.Helper()
 	sid := "stk_" + name
 	if _, err := db.Exec(`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at)
-		VALUES (?, ?, ?, 1, ?)`, sid, tenantID, name, activatedAt); err != nil {
+		VALUES (?, ?, ?, NULL, ?)`, sid, tenantID, name, activatedAt); err != nil {
 		t.Fatalf("insert stack: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO stack_versions
+	res, err := db.Exec(`INSERT INTO stack_versions
 		(stack_id, version_number, status, created_by, created_at, activated_at)
-		VALUES (?, 1, 'draft', 'seed', ?, ?)`, sid, activatedAt, activatedAt); err != nil {
+		VALUES (?, 1, 'draft', 'seed', ?, ?)`, sid, activatedAt, activatedAt)
+	if err != nil {
 		t.Fatalf("insert stack_version: %v", err)
+	}
+	vid, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("stack_version id: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE stacks SET active_version = ? WHERE stack_id = ?`, vid, sid); err != nil {
+		t.Fatalf("activate stack: %v", err)
+	}
+}
+
+// TestLoadActiveStacksJoinsOnVersionID pins the join column: a stack whose
+// active version_id (42) differs from its version_number (7) must still be
+// found, and a dangling active_version must not. Regression for the
+// version_number join that made per-stack host synthesis (and the observe
+// subscription) silently miss every stack past the first few on a chassis.
+func TestLoadActiveStacksJoinsOnVersionID(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.Exec(`INSERT INTO stack_versions
+		(version_id, stack_id, version_number, status, created_by, created_at, activated_at)
+		VALUES (42, 'stk_api', 7, 'draft', 'seed', ?, ?)`, fixedTS, fixedTS); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at)
+		VALUES ('stk_api', ?, 'api', 42, ?), ('stk_gone', ?, 'gone', 999, ?)`,
+		patTenant, fixedTS, patTenant, fixedTS); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadActiveStacks(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stacks := got[patTenant]
+	if len(stacks) != 1 || stacks[0].name != "api" || stacks[0].activatedAt != fixedTS {
+		t.Fatalf("active stacks = %+v, want only api@%s", stacks, fixedTS)
 	}
 }
 

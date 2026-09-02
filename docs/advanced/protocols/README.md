@@ -66,5 +66,5 @@ in an opstack's flows into the protocol.
 | [TCP](./tcp.md) | bidirectional |
 | [MCP](./mcp.md) (agent tools) | out, in as diy |
 | [AI gateway](./llm-gateway.md) | in, then proxied out — an AI client's own requests, through a stack |
-| [DNS](./dns.md) | not a stack input. authoritative answers for delegated zones. |
+| [DNS](./dns.md) | authoritative answers for delegated zones; in, post-reply — answered queries flow into `_dns` |
 

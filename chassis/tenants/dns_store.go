@@ -238,10 +238,18 @@ type DNSZone struct {
 	Minimum    int
 	DefaultTTL int
 	Mode       string
-	CreatedAt  string
-	CreatedBy  string
-	UpdatedAt  string
-	RevokedAt  string
+	// AnswerMode (0024) says who answers a query for the zone: "snapshot"
+	// (default — the prebuilt zone snapshot) or "stack" (the tenant's `_dns`
+	// stack, with the snapshot answer pre-stamped as the proposal). Orthogonal
+	// to Mode, which says how the records are composed.
+	AnswerMode string
+	// StackFallback (0024) is what a "stack" zone answers when the stack does
+	// not: "proposal" (default — the snapshot answer) or "servfail".
+	StackFallback string
+	CreatedAt     string
+	CreatedBy     string
+	UpdatedAt     string
+	RevokedAt     string
 	// VerifiedAt gates whether the zone confers authority (0019). Empty/NULL =
 	// pending (created with --dns-require-zone-verification on, awaiting an NS
 	// check); set = verified. When the flag is off, CreateZoneTx stamps it at
@@ -386,7 +394,7 @@ func ValidDNSRecordType(t string) bool {
 }
 
 // ActiveRecordTypesAtNameTx returns the distinct active record types at
-// (zoneID, name) in tx, name-normalized like CreateRecordTx ('' → '@').
+// (zoneID, name) in tx, name-normalized like CreateRecordTx (” → '@').
 // Feeds the write-path CNAME exclusivity check (RFC 1034 §3.6.2: a CNAME
 // owner carries no other data, and at most one CNAME).
 func ActiveRecordTypesAtNameTx(ctx context.Context, tx *sql.Tx, zoneID, name string, d registry.Dialect) ([]string, error) {
@@ -432,6 +440,78 @@ func zoneSOADefaults(z *DNSZone) {
 	if z.Mode == "" {
 		z.Mode = "pattern"
 	}
+	if z.AnswerMode == "" {
+		z.AnswerMode = DNSAnswerSnapshot
+	}
+	if z.StackFallback == "" {
+		z.StackFallback = DNSFallbackProposal
+	}
+}
+
+// Zone answer modes + stack fallbacks (0024). Mirrored by the CHECK
+// constraints on dns_zones.
+const (
+	DNSAnswerSnapshot   = "snapshot"
+	DNSAnswerStack      = "stack"
+	DNSFallbackProposal = "proposal"
+	DNSFallbackServfail = "servfail"
+)
+
+// ValidDNSAnswerMode reports whether m is a known answer mode ("" counts
+// as the default).
+func ValidDNSAnswerMode(m string) bool {
+	switch strings.ToLower(strings.TrimSpace(m)) {
+	case "", DNSAnswerSnapshot, DNSAnswerStack:
+		return true
+	}
+	return false
+}
+
+// ValidDNSStackFallback reports whether f is a known stack fallback ("" counts
+// as the default).
+func ValidDNSStackFallback(f string) bool {
+	switch strings.ToLower(strings.TrimSpace(f)) {
+	case "", DNSFallbackProposal, DNSFallbackServfail:
+		return true
+	}
+	return false
+}
+
+// SetZoneAnswerTx updates a tenant's active zone's answer mode and/or stack
+// fallback (0024); an empty value leaves that field unchanged. Bumps
+// updated_at so the synthesized SOA serial advances (resolvers re-check).
+// ErrNotFound if no active zone for (tenantID, origin).
+func SetZoneAnswerTx(ctx context.Context, tx *sql.Tx, tenantID, origin, answerMode, fallback, now string, d registry.Dialect) error {
+	canon, ok := CanonicalizeHost(origin)
+	if !ok {
+		return ErrNotFound
+	}
+	answerMode = strings.ToLower(strings.TrimSpace(answerMode))
+	fallback = strings.ToLower(strings.TrimSpace(fallback))
+	if !ValidDNSAnswerMode(answerMode) {
+		return errors.New("tenants: zone answer_mode must be 'snapshot' or 'stack'")
+	}
+	if !ValidDNSStackFallback(fallback) {
+		return errors.New("tenants: zone stack_fallback must be 'proposal' or 'servfail'")
+	}
+	if answerMode == "" && fallback == "" {
+		return errors.New("tenants: nothing to set")
+	}
+	// COALESCE(NULLIF(?, ''), col) keeps the column when the arg is empty.
+	res, err := tx.ExecContext(ctx,
+		orSQLite(d).Rebind(`UPDATE dns_zones
+		     SET answer_mode    = COALESCE(NULLIF(?, ''), answer_mode),
+		         stack_fallback = COALESCE(NULLIF(?, ''), stack_fallback),
+		         updated_at     = ?
+		   WHERE tenant_id = ? AND origin = ? AND revoked_at IS NULL`),
+		answerMode, fallback, now, tenantID, canon)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // CreateZoneTx inserts a delegated zone inside the caller's tx. The
@@ -455,6 +535,14 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 	if z.Mode != "" && z.Mode != "pattern" && z.Mode != "manual" {
 		return errors.New("tenants: zone mode must be 'pattern' or 'manual'")
 	}
+	if !ValidDNSAnswerMode(z.AnswerMode) {
+		return errors.New("tenants: zone answer_mode must be 'snapshot' or 'stack'")
+	}
+	if !ValidDNSStackFallback(z.StackFallback) {
+		return errors.New("tenants: zone stack_fallback must be 'proposal' or 'servfail'")
+	}
+	z.AnswerMode = strings.ToLower(strings.TrimSpace(z.AnswerMode))
+	z.StackFallback = strings.ToLower(strings.TrimSpace(z.StackFallback))
 	zoneSOADefaults(&z)
 	// Mint a per-domain DKIM keypair once, here on the control plane, so the
 	// public key the DNS head publishes and the private key any node signs
@@ -486,11 +574,13 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 		s.rb(`INSERT INTO dns_zones
 		     (id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		      minimum, default_ttl, mode, created_at, created_by, updated_at,
-		      dkim_selector, dkim_private_pem, dkim_public_b64, verified_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		      dkim_selector, dkim_private_pem, dkim_public_b64, verified_at,
+		      answer_mode, stack_fallback)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		z.ID, z.TenantID, canon, z.MName, z.RName, z.Refresh, z.Retry, z.Expire,
 		z.Minimum, z.DefaultTTL, z.Mode, now, createdByArg, now,
-		z.DKIMSelector, z.DKIMPrivatePEM, z.DKIMPublicB64, verifiedAtArg)
+		z.DKIMSelector, z.DKIMPrivatePEM, z.DKIMPublicB64, verifiedAtArg,
+		z.AnswerMode, z.StackFallback)
 	if err != nil {
 		if s.dia().IsUniqueViolationGeneric(err) {
 			return ErrZoneExists
@@ -504,7 +594,8 @@ func (s *Store) CreateZoneTx(ctx context.Context, tx *sql.Tx, z DNSZone) error {
 func (s *Store) ListZones(ctx context.Context, tenantID string, includeRevoked bool) ([]DNSZone, error) {
 	q := `SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 	             minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
-	             updated_at, COALESCE(revoked_at, ''), COALESCE(verified_at, '')
+	             updated_at, COALESCE(revoked_at, ''), COALESCE(verified_at, ''),
+	             answer_mode, stack_fallback
 	        FROM dns_zones
 	       WHERE tenant_id = ?`
 	if !includeRevoked {
@@ -521,7 +612,8 @@ func (s *Store) ListZones(ctx context.Context, tenantID string, includeRevoked b
 		var z DNSZone
 		if err := rows.Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
 			&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
-			&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt, &z.VerifiedAt); err != nil {
+			&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt, &z.VerifiedAt,
+			&z.AnswerMode, &z.StackFallback); err != nil {
 			return nil, err
 		}
 		out = append(out, z)
@@ -539,12 +631,14 @@ func GetZoneByIDTx(ctx context.Context, tx *sql.Tx, id string, d registry.Dialec
 		orSQLite(d).Rebind(`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		        minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
 		        updated_at, COALESCE(revoked_at, ''), COALESCE(verified_at, ''),
-		        dkim_selector, dkim_private_pem, dkim_public_b64
+		        dkim_selector, dkim_private_pem, dkim_public_b64,
+		        answer_mode, stack_fallback
 		   FROM dns_zones
 		  WHERE id = ?`), id).Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
 		&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
 		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt, &z.VerifiedAt,
-		&z.DKIMSelector, &z.DKIMPrivatePEM, &z.DKIMPublicB64)
+		&z.DKIMSelector, &z.DKIMPrivatePEM, &z.DKIMPublicB64,
+		&z.AnswerMode, &z.StackFallback)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DNSZone{}, ErrNotFound
 	}
@@ -565,12 +659,14 @@ func (s *Store) LookupActiveZone(ctx context.Context, tenantID, origin string) (
 	err := s.queryRow(ctx,
 		`SELECT id, tenant_id, origin, mname, rname, refresh, retry, expire,
 		        minimum, default_ttl, mode, created_at, COALESCE(created_by, ''),
-		        updated_at, COALESCE(revoked_at, '')
+		        updated_at, COALESCE(revoked_at, ''), COALESCE(verified_at, ''),
+		        answer_mode, stack_fallback
 		   FROM dns_zones
 		  WHERE tenant_id = ? AND origin = ? AND revoked_at IS NULL`,
 		tenantID, canon).Scan(&z.ID, &z.TenantID, &z.Origin, &z.MName, &z.RName,
 		&z.Refresh, &z.Retry, &z.Expire, &z.Minimum, &z.DefaultTTL, &z.Mode,
-		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt)
+		&z.CreatedAt, &z.CreatedBy, &z.UpdatedAt, &z.RevokedAt, &z.VerifiedAt,
+		&z.AnswerMode, &z.StackFallback)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DNSZone{}, ErrNotFound
 	}

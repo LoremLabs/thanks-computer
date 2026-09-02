@@ -84,6 +84,12 @@ Two modes per zone: **pattern** (default — full synthesis below) and
 served). Record overrides (`record add/list/rm`, types
 NS/A/AAAA/MX/TXT) layer on top of synthesis in pattern mode.
 
+Orthogonal to the mode is *who answers*: by default the prebuilt zone
+does; `--answer stack` hands each query to your `_dns` stack instead
+(see [Answering queries from a stack](#answering-queries-from-a-stack)).
+`txco dns zone set <origin> --answer stack|snapshot` flips an existing
+zone in place.
+
 ## What pattern mode synthesizes
 
 For zone `ai.example.com`:
@@ -107,6 +113,142 @@ For zone `ai.example.com`:
 
 Anti-amplification response-rate-limiting and EDNS0/TCP-fallback are
 built in.
+
+## Observing queries: the `_dns` stack
+
+Every other head turns its protocol into an event your rules can act on;
+DNS does too. Give your tenant a **`_dns`** stack and each query the chassis
+answers for one of your zones is delivered into it — *after* the answer has
+left on the wire, fire-and-forget. The stack's existence is the
+subscription, exactly like `_cron` and `_scheduled`; no `_dns` stack, no
+events, no change in how the zone is served.
+
+```txcl
+# OPS/_dns/0100_COUNT/count.txcl — query counters by type + outcome
+WHEN @dns.phase == "observe"
+  EMIT @telemetry.metrics = &array(
+    &object("name",  "dns.queries",
+            "kind",  "counter",
+            "value", 1,
+            "attrs", &object("type",  @dns.q.type,
+                             "rcode", @dns.reply.rcode)))
+```
+
+That is the whole analytics feature: the counters ride the tenant
+[telemetry](../../telemetry.md) exporter you already have. Write to
+[KV](../kv.md) for rollups, log NXDOMAIN bursts, alert on a name nobody
+should be asking for — it's a stack, so it's rules.
+
+| Field | Meaning |
+|---|---|
+| `@dns.q.name` / `@dns.q.type` / `@dns.q.class` | the question — lowercased FQDN, and mnemonics (`A`, `TXT`, `IN`) |
+| `@dns.reply.rcode` | what was answered: `NOERROR`, `NXDOMAIN`, `REFUSED`… |
+| `@dns.reply.answer` / `@dns.reply.authority` | the records sent, as zone-file lines (`"shop.ai.example.com.\t60\tIN\tA\t203.0.113.10"`) |
+| `@dns.reply.authoritative` / `@dns.reply.truncated` | AA flag; TC set (UDP answer didn't fit) |
+| `@dns.client.ip` / `@dns.client.transport` / `@dns.client.edns_udpsize` | who asked, over `udp` or `tcp`; the EDNS0 buffer they advertised (absent without OPT) |
+| `@dns.zone.origin` / `@dns.zone.mode` | the served zone the name fell in; `pattern` or `manual` |
+| `@dns.phase` | `observe` — a post-reply tap (the only phase today) |
+| `@dns.tenant` / `@dns.node` | you; the chassis that answered |
+
+What you will *not* see: names outside any zone you own (the head refuses
+those and there is nobody to deliver to — which is also where scanner
+noise lives), queries the response-rate-limiter dropped, and RFC 2136
+updates. `_acme-challenge` lookups answered from the transient challenge
+store **are** observed like any other query.
+
+The tap never touches the answer. `@dns.*` is read-only from a stack, and
+a slow or failing `_dns` stack costs the query path nothing: the tap
+hands off through a bounded queue and drops (counted in
+`chassis.dns.observe`, `outcome=dropped`) rather than ever delaying a
+reply. Each observed query is an ordinary run of your `_dns` stack —
+fuel-metered like any other — so a busy zone should sample:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dns-observe-sample` | `1` | `1` observes every answered query; `N` one in N; `0` turns the tap off chassis-wide |
+| `--dns-observe-max-inflight` | `8` | concurrent `_dns` dispatches; the hand-off queue behind it holds 1024 |
+
+## Answering queries from a stack
+
+Observing is read-only. A zone can go further and let the `_dns` stack
+*decide the answer*:
+
+```sh
+txco dns zone set ai.example.com --answer stack            # flip in place
+txco dns zone create ai.example.com --answer stack         # or from the start
+```
+
+For such a zone the head first works out what it *would* have answered —
+the same synthesis and overrides as before — then hands the query to
+your `_dns` stack with that answer attached as `@dns.proposed`. Whatever
+the stack `EMIT`s under `@dns.res` goes on the wire. The
+backwards-compatible stack is one line:
+
+```txcl
+# OPS/_dns/0100_ANSWER/passthrough.txcl — answer exactly what the zone would have
+WHEN @dns.phase == "answer"
+EMIT @dns.res = @dns.proposed
+```
+
+Put your own logic in front of it and the proposal stays the default:
+
+```txcl
+# OPS/_dns/0100_ANSWER/version.txcl — a TXT served from state, not from a zone file
+WHEN @dns.phase == "answer"
+WHEN @dns.q.type == "TXT"
+WHEN @dns.q.name == "build.ai.example.com."
+EMIT @dns.res.rcode  = "NOERROR"
+EMIT @dns.res.answer = ["build.ai.example.com. 30 IN TXT \"v1.4.2\""]
+```
+
+| `@dns.res` field | Meaning |
+|---|---|
+| `rcode` | `NOERROR` (default when omitted), `NXDOMAIN`, `SERVFAIL` or `REFUSED` — nothing else |
+| `answer` / `authority` | records as zone-file lines, `"<owner> <ttl> IN <TYPE> <rdata>"` — any type `dns.NewRR` parses; a name without a trailing dot is taken as fully qualified |
+| `@dns.proposed.{rcode,answer,authority}` | the head's own answer, same encoding — echo it, edit it, or ignore it |
+| `@dns.zone.fallback` | this zone's fallback policy (below) |
+
+The head guards what it will put on the wire: every owner must fall
+inside the zone, meta types (OPT, TSIG, TKEY) are refused, at most 64
+records, TTLs capped at a week. A response that breaks any of these is
+rejected *whole* and the zone's fallback answers instead.
+
+**What answers when the stack doesn't.** A stack can be slow, broken,
+suspended, or over its dispatch budget. Each zone picks its fallback:
+
+| `--fallback` | Wire answer when there is no valid `@dns.res` |
+|---|---|
+| `proposal` (default) | what the zone would have said anyway — a bad deploy degrades to today's behavior, not to darkness |
+| `servfail` | SERVFAIL, so resolvers retry rather than cache a wrong answer — for zones whose truth lives only in the stack |
+
+Three things keep the lane bounded. An **answer cache** keyed by
+(zone, name, type) holds each stack answer for its minimum TTL (negative
+answers for the SOA minimum), so steady traffic is served from memory
+and your stack sees each distinct question once per TTL. A per-zone
+**dispatch limit** caps how many queries per second may reach the stack
+at all; the rest answer with the fallback. And a **deadline** bounds how
+long the wire waits: past it the fallback answers, but the run is not
+cancelled — its late answer warms the cache for the next asker.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dns-stack-deadline-ms` | `1500` | how long a query waits for `@dns.res` before the fallback answers; keep it under a resolver's own retry timer |
+| `--dns-stack-dispatch-per-sec` | `20` | per-zone ceiling on stack dispatches; `0` disables the limiter |
+
+What the stack never sees: names outside the zone (REFUSED), `ANY`
+(refused, anti-amplification), `_acme-challenge` lookups during
+certificate issuance, and RFC 2136 updates — those stay in the head so
+TLS never depends on tenant code. A stack-answered query is not
+re-delivered to the observe tap (the stack already saw it); cache hits
+and fallbacks are, so analytics stays complete. A zone set to
+`--answer stack` whose tenant has no active `_dns` stack keeps serving
+the prebuilt zone and logs a warning.
+
+Two caveats worth knowing up front. Stack answers cannot be DNSSEC-signed
+offline, so a stack-answered zone is incompatible with signing until
+online signing exists. And a `_dns` op that itself resolves a name in a
+stack-answered zone served by the same head re-enters as a fresh,
+rate-limited, fuel-metered query — answer from state, not from DNS.
 
 ## TLS: ACME DNS-01 against itself
 

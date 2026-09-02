@@ -25,6 +25,11 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.web.res.body", true},
 		{"_txc.web.res.headers.content-type", true},
 		{"_txc.lmtp.res.code", true},
+		{"_txc.dns.res.rcode", true},
+		{"_txc.dns.res.answer", true},
+		{"_txc.dns.proposed.answer", false}, // the head's proposal is read-only
+		{"_txc.dns.q.name", false},          // inbound facts are reserved
+		{"_txc.dns.tenant", false},          // the route hint especially
 		{"_txc.goto", true},
 		{"_txc.halt", true},
 		{"_txc.delete", true},

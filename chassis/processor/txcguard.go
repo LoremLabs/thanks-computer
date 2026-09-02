@@ -28,6 +28,7 @@ import (
 var authorWritableTxcPaths = []string{
 	"web.res",      // the rendered HTTP response (status/body/headers)
 	"lmtp.res",     // the SMTP verdict
+	"dns.res",      // the DNS answer for a stack-answered zone (rcode/answer/authority)
 	"goto",         // flow control: jump to another stage
 	"halt",         // flow control: stop the pipeline
 	"delete",       // prune envelope paths (targets are separately guarded)

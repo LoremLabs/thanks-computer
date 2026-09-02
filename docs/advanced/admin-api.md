@@ -125,7 +125,9 @@ Tenant-scoped, under `/v1/tenants/{tenant}`:
 | `GET /traces/requests.json` · `/requests/{rid}.json` · `/traces/stream` | Trace list / detail / live stream ([trace.md](./trace.md)) |
 
 Also present: `POST /v1/cli` (the admin UI's command bridge),
-`POST /v1/fleet/resync`, and `GET·PUT /v1/dns/config`.
+`POST /v1/fleet/resync`, `GET·PUT /v1/dns/config`, and the delegated-zone
+CRUD under `/v1/tenants/{t}/dns/zones` (`GET·POST`, `DELETE·PATCH /{origin}`
+— PATCH sets `answer_mode` / `stack_fallback`, see [dns.md](./protocols/dns.md)).
 
 ### Stack versions, not rule imports
 

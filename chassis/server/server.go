@@ -146,10 +146,12 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	fields := gjson.GetManyBytes(in,
 		"_txc.route.to", "_txc.continuation", "_txc.src",
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
-		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified")
+		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
+		"_txc.dns.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
+	dnsTenant := fields[9]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -225,6 +227,24 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "scheduled")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_scheduled/0")
+			return b.String()
+		}
+	}
+	// DNS observation. The dns head taps an answered query — post-reply,
+	// fire-and-forget — into the served zone's tenant, stamping the slug in
+	// `_txc.dns.tenant` (trusted: the zone's tenant_id from the snapshot,
+	// never client input). Propose a route into that tenant's `_dns/0` —
+	// the same sanctioned _sys→tenant pin as cron/room/scheduled. The
+	// head only taps zones whose tenant has an active `_dns` stack, so a
+	// 404 here is a stack deleted between snapshot and dispatch.
+	if src.String() == "dns" {
+		if dt := dnsTenant.String(); dt != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", dt)
+			b.Set("_txc.route.stack", "_dns")
+			b.Set("_txc.route.ingress", "dns")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_dns/0")
 			return b.String()
 		}
 	}

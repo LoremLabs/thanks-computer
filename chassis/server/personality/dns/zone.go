@@ -40,6 +40,34 @@ type zone struct {
 	dkimSelector string // DKIM selector for the zone's published key (0016)
 	dkimPubB64   string // base64 PKIX DER public key → <selector>._domainkey TXT
 
+	// mode is the zone's normalized serving mode: "pattern" (synthesis +
+	// overrides; the default, also for a blank column) or "manual"
+	// (materialized records only). Carried for the observe-tap envelope.
+	mode string
+
+	// tenantSlug is the tenant's routing name (tenants.slug) — what the
+	// boot pipeline re-tenants on. tenantID (the tenants.tenant_id key the
+	// zone/stack tables carry) is NOT routable; the observe tap must
+	// stamp the slug, exactly as cron does. Empty when the tenant row is
+	// missing/revoked, which also disables observe.
+	tenantSlug string
+
+	// observe is true when the zone's tenant has an active `_dns` stack —
+	// the subscription for the observe tap (observe.go), mirroring how a
+	// `_cron` stack subscribes a tenant to ticks. Decided here at build
+	// time from the same active-stacks query that feeds per-stack
+	// synthesis, so the query path decides with one bool and no DB work.
+	observe bool
+
+	// stackAnswered is true for a zone whose answer_mode is "stack" (0024)
+	// AND whose tenant has a routable `_dns` stack: queries dispatch to the
+	// stack (answer.go) with the snapshot answer as the proposal. A stack
+	// zone without a `_dns` stack serves the snapshot (there is nothing to
+	// dispatch to) and logs a warning at build. fallback is "proposal" |
+	// "servfail" — what answers when the stack does not.
+	stackAnswered bool
+	fallback      string
+
 	// rr indexes answers by lowercased owner FQDN → qtype → RRs. The
 	// synthesized SOA is included under TypeSOA at the apex so SOA
 	// queries answer from the snapshot like any other type.
@@ -59,6 +87,15 @@ type ZoneSnapshot struct {
 	// zones sorted by originFQDN length descending, so the first
 	// suffix match in zoneFor is the most specific (longest) zone.
 	zones []*zone
+
+	// observing is true when at least one zone has observe set. The
+	// handler checks this single bool before doing any tap work, so a
+	// deployment with no `_dns` stack anywhere pays nothing per query.
+	observing bool
+
+	// answering is true when at least one zone is stackAnswered — same
+	// single-bool short-circuit for the stack lane.
+	answering bool
 }
 
 // BuildSnapshot reads all active zones + records from the runtime
@@ -73,7 +110,8 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 	zrows, err := db.Query(`SELECT id, tenant_id, origin, mname, rname,
 	                               refresh, retry, expire, minimum,
 	                               default_ttl, mode, updated_at,
-	                               dkim_selector, dkim_public_b64
+	                               dkim_selector, dkim_public_b64,
+	                               answer_mode, stack_fallback
 	                          FROM dns_zones
 	                         WHERE revoked_at IS NULL AND verified_at IS NOT NULL`)
 	if err != nil {
@@ -85,13 +123,14 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 		defaultTTL                         uint32
 		mode, updatedAt                    string
 		dkimSelector, dkimPubB64           string
+		answerMode, stackFallback          string
 	}
 	var zoneRows []zoneRow
 	for zrows.Next() {
 		var z zoneRow
 		if err := zrows.Scan(&z.id, &z.tenantID, &z.origin, &z.mname, &z.rname,
 			&z.refresh, &z.retry, &z.expire, &z.minimum, &z.defaultTTL, &z.mode, &z.updatedAt,
-			&z.dkimSelector, &z.dkimPubB64); err != nil {
+			&z.dkimSelector, &z.dkimPubB64, &z.answerMode, &z.stackFallback); err != nil {
 			zrows.Close()
 			return nil, fmt.Errorf("dns: scan zone: %w", err)
 		}
@@ -110,6 +149,12 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 	if serr != nil {
 		return nil, serr
 	}
+	// tenant_id → slug, for the observe tap's route hint (drained before
+	// the per-zone record queries, same single-connection discipline).
+	slugByTenant, terr := loadTenantSlugs(db)
+	if terr != nil {
+		return nil, terr
+	}
 
 	// Effective synthesis config: the operator-set dns_settings row if
 	// present, else the boot-flag defaults passed in `cfg`. (Per-zone
@@ -126,8 +171,37 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 			defaultTTL:   zr.defaultTTL,
 			dkimSelector: zr.dkimSelector,
 			dkimPubB64:   zr.dkimPubB64,
+			mode:         "pattern",
+			tenantSlug:   slugByTenant[zr.tenantID],
+			fallback:     zr.stackFallback,
 			rr:           map[string]map[uint16][]dns.RR{},
 			names:        map[string]bool{},
+		}
+		if zr.mode == "manual" {
+			z.mode = "manual"
+		}
+		if z.fallback == "" {
+			z.fallback = "proposal"
+		}
+		// Both `_dns` lanes need a subscription (`_dns` active) AND a
+		// routable tenant (a slug); an envelope without a slug could only
+		// 404. Observe follows the subscription alone; the stack lane also
+		// needs the zone's answer_mode flipped.
+		if hasStack(stacksByTenant[zr.tenantID], observeStack) {
+			if z.tenantSlug == "" {
+				logger.Warn("dns: zone tenant has a _dns stack but no tenant slug; _dns lanes disabled for zone",
+					zap.String("origin", origin), zap.String("tenant_id", zr.tenantID))
+			} else {
+				z.observe = true
+				snap.observing = true
+				if zr.answerMode == "stack" {
+					z.stackAnswered = true
+					snap.answering = true
+				}
+			}
+		} else if zr.answerMode == "stack" {
+			logger.Warn("dns: zone answer_mode=stack but the tenant has no active _dns stack; serving the snapshot",
+				zap.String("origin", origin), zap.String("tenant_id", zr.tenantID))
 		}
 		// The apex always exists (it carries SOA + NS).
 		z.names[z.originFQDN] = true
@@ -267,16 +341,58 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 	return snap, nil
 }
 
+// loadTenantSlugs returns tenant_id → slug for every live tenant. One
+// query, fully drained before any per-zone work.
+func loadTenantSlugs(db *sql.DB) (map[string]string, error) {
+	rows, err := db.Query(`SELECT tenant_id, slug FROM tenants WHERE revoked_at IS NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("dns: query tenants: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, slug string
+		if err := rows.Scan(&id, &slug); err != nil {
+			return nil, fmt.Errorf("dns: scan tenant: %w", err)
+		}
+		out[id] = slug
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("dns: iterate tenants: %w", err)
+	}
+	return out, nil
+}
+
+// hasStack reports whether an active stack named `name` is among a
+// tenant's active stacks (the loadActiveStacks result for that tenant).
+func hasStack(stacks []stackInfo, name string) bool {
+	for _, s := range stacks {
+		if s.name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // loadActiveStacks returns the active, non-revoked stacks per tenant
 // (keyed by tenant_id) with each one's activation timestamp. One query,
 // fully drained before any per-zone work. Used to synthesize per-stack
-// records and to feed the per-zone serial.
+// records, to feed the per-zone serial, and to decide the observe-tap
+// subscription (zone.observe).
+//
+// `stacks.active_version` holds the active row's `version_id` (the
+// global primary key), NOT its per-stack `version_number` — every other
+// consumer (admin, static index, datasets, control publish) joins on
+// version_id. This query once joined on version_number, which only
+// matches by coincidence on a fresh chassis (id == number for the first
+// few versions), so per-stack host synthesis silently stopped once ids
+// and numbers diverged.
 func loadActiveStacks(db *sql.DB) (map[string][]stackInfo, error) {
 	rows, err := db.Query(`SELECT s.tenant_id, s.name, COALESCE(sv.activated_at, '')
 	                          FROM stacks s
 	                          JOIN stack_versions sv
 	                            ON sv.stack_id = s.stack_id
-	                           AND sv.version_number = s.active_version
+	                           AND sv.version_id = s.active_version
 	                         WHERE s.active_version IS NOT NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("dns: query active stacks: %w", err)

@@ -57,27 +57,39 @@ func (c *Controller) requireDNSZoneAccess(w http.ResponseWriter, r *http.Request
 }
 
 type dnsZoneDTO struct {
-	Origin     string `json:"origin"`
-	Mode       string `json:"mode"`
-	MName      string `json:"mname"`
-	RName      string `json:"rname"`
-	DefaultTTL int    `json:"default_ttl"`
-	CreatedAt  string `json:"created_at,omitempty"`
-	RevokedAt  string `json:"revoked_at,omitempty"`
-	VerifiedAt string `json:"verified_at,omitempty"` // empty = pending (awaiting NS verification)
+	Origin        string `json:"origin"`
+	Mode          string `json:"mode"`
+	AnswerMode    string `json:"answer_mode"`    // "snapshot" | "stack" (0024)
+	StackFallback string `json:"stack_fallback"` // "proposal" | "servfail" (0024)
+	MName         string `json:"mname"`
+	RName         string `json:"rname"`
+	DefaultTTL    int    `json:"default_ttl"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	RevokedAt     string `json:"revoked_at,omitempty"`
+	VerifiedAt    string `json:"verified_at,omitempty"` // empty = pending (awaiting NS verification)
 }
 
 func zoneToDTO(z tenants.DNSZone) dnsZoneDTO {
 	return dnsZoneDTO{
 		Origin: z.Origin, Mode: z.Mode, MName: z.MName, RName: z.RName,
+		AnswerMode: z.AnswerMode, StackFallback: z.StackFallback,
 		DefaultTTL: z.DefaultTTL, CreatedAt: z.CreatedAt, RevokedAt: z.RevokedAt,
 		VerifiedAt: z.VerifiedAt,
 	}
 }
 
 type createZoneRequest struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode,omitempty"` // "pattern" (default) | "manual"
+	Origin        string `json:"origin"`
+	Mode          string `json:"mode,omitempty"`           // "pattern" (default) | "manual"
+	AnswerMode    string `json:"answer_mode,omitempty"`    // "snapshot" (default) | "stack"
+	StackFallback string `json:"stack_fallback,omitempty"` // "proposal" (default) | "servfail"
+}
+
+// setZoneRequest is the PATCH body: the zone settings that may change after
+// creation. Empty = unchanged.
+type setZoneRequest struct {
+	AnswerMode    string `json:"answer_mode,omitempty"`
+	StackFallback string `json:"stack_fallback,omitempty"`
 }
 
 type createZoneResponse struct {
@@ -144,6 +156,10 @@ func (c *Controller) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		RName:     "hostmaster." + canon,
 		Mode:      strings.TrimSpace(req.Mode),
 		CreatedBy: ac.ActorID,
+		// 0024: who answers + what a stack zone falls back to. Validated
+		// (and defaulted) by CreateZoneTx.
+		AnswerMode:    strings.TrimSpace(req.AnswerMode),
+		StackFallback: strings.TrimSpace(req.StackFallback),
 	}
 	// Verification gate (0019): with --dns-require-zone-verification off (default),
 	// stamp verified_at now so the zone confers authority immediately (current
@@ -361,6 +377,90 @@ func (c *Controller) handleVerifyZone(w http.ResponseWriter, r *http.Request) {
 		resp["warning"] = warning
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleSetZone (PATCH /dns/zones/{origin}) changes a zone's answer mode
+// and/or stack fallback (0024) in place — the settings that legitimately
+// change after creation, and how an existing zone opts into (or out of) the
+// `_dns` inlet without a revoke+recreate (which would mint a new DKIM key and
+// drop override records). Fleet-publishes the updated row; the dbcache reload
+// rebuilds the dns head's snapshot so the flip is live without a restart.
+func (c *Controller) handleSetZone(w http.ResponseWriter, r *http.Request) {
+	if !c.requireDNSZoneAccess(w, r, true) {
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	var req setZoneRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body", map[string]any{"err": err.Error()})
+		return
+	}
+	if !tenants.ValidDNSAnswerMode(req.AnswerMode) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_answer_mode",
+			map[string]any{"answer_mode": req.AnswerMode, "allowed": []string{tenants.DNSAnswerSnapshot, tenants.DNSAnswerStack}})
+		return
+	}
+	if !tenants.ValidDNSStackFallback(req.StackFallback) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_stack_fallback",
+			map[string]any{"stack_fallback": req.StackFallback, "allowed": []string{tenants.DNSFallbackProposal, tenants.DNSFallbackServfail}})
+		return
+	}
+	if strings.TrimSpace(req.AnswerMode) == "" && strings.TrimSpace(req.StackFallback) == "" {
+		writeJSONError(w, http.StatusBadRequest, "nothing_to_set",
+			map[string]any{"hint": "pass answer_mode and/or stack_fallback"})
+		return
+	}
+	zone, ok := c.lookupTenantZone(w, r, ac.TenantID)
+	if !ok {
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := c.pu.RuntimeDB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "begin_tx", map[string]any{"err": err.Error()})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := tenants.SetZoneAnswerTx(r.Context(), tx, ac.TenantID, zone.Origin,
+		req.AnswerMode, req.StackFallback, now, c.pu.RuntimeDialect); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "set_zone", map[string]any{"err": err.Error()})
+		return
+	}
+	persisted, gerr := tenants.GetZoneByIDTx(r.Context(), tx, zone.ID, c.pu.RuntimeDialect)
+	if gerr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "load_zone", map[string]any{"err": gerr.Error()})
+		return
+	}
+	// Only verified zones are ever fleet-published (see zoneToRow); a
+	// pending zone's settings ride along when verify publishes it.
+	if persisted.VerifiedAt != "" && c.fleetEnabled() {
+		if err := c.fleetPublishZone(r.Context(), tx, persisted); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "publish_zone", map[string]any{"err": err.Error()})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "commit", map[string]any{"err": err.Error()})
+		return
+	}
+	committed = true
+	if err := c.pu.Dbc.ReloadAfterWrite(); err != nil {
+		c.pu.Logger.Warn("dbcache reload after dns zone set failed; FS watcher will retry",
+			zap.String("err", err.Error()))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zone": zoneToDTO(persisted)})
 }
 
 // handleListZones lists the tenant's zones (?history=true includes revoked).
@@ -740,6 +840,12 @@ func withTrailingDot(s string) string {
 func zoneSOADefaultsForDTO(z *tenants.DNSZone) {
 	if z.Mode == "" {
 		z.Mode = "pattern"
+	}
+	if z.AnswerMode == "" {
+		z.AnswerMode = tenants.DNSAnswerSnapshot
+	}
+	if z.StackFallback == "" {
+		z.StackFallback = tenants.DNSFallbackProposal
 	}
 	if z.DefaultTTL == 0 {
 		z.DefaultTTL = 300

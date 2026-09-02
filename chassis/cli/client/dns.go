@@ -48,14 +48,56 @@ func (c *Client) GetDNSRender(ctx context.Context, zone string) (string, error) 
 
 // DNSZoneInfo mirrors the admin zone DTO.
 type DNSZoneInfo struct {
-	Origin     string `json:"origin"`
-	Mode       string `json:"mode"`
-	MName      string `json:"mname"`
-	RName      string `json:"rname"`
-	DefaultTTL int    `json:"default_ttl"`
-	CreatedAt  string `json:"created_at,omitempty"`
-	RevokedAt  string `json:"revoked_at,omitempty"`
-	VerifiedAt string `json:"verified_at,omitempty"`
+	Origin        string `json:"origin"`
+	Mode          string `json:"mode"`
+	AnswerMode    string `json:"answer_mode"`    // "snapshot" | "stack"
+	StackFallback string `json:"stack_fallback"` // "proposal" | "servfail"
+	MName         string `json:"mname"`
+	RName         string `json:"rname"`
+	DefaultTTL    int    `json:"default_ttl"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	RevokedAt     string `json:"revoked_at,omitempty"`
+	VerifiedAt    string `json:"verified_at,omitempty"`
+}
+
+// SetZone changes a zone's answer mode and/or stack fallback in place
+// (PATCH /dns/zones/{origin}); "" leaves a field unchanged.
+func (c *Client) SetZone(ctx context.Context, origin, answerMode, fallback string) (*DNSZoneInfo, error) {
+	payload := map[string]string{}
+	if answerMode != "" {
+		payload["answer_mode"] = answerMode
+	}
+	if fallback != "" {
+		payload["stack_fallback"] = fallback
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+		c.scopedURL("/dns/zones/"+url.PathEscape(origin)), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(req, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out struct {
+		Zone DNSZoneInfo `json:"zone"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode set zone: %w", err)
+	}
+	return &out.Zone, nil
 }
 
 // CreateZoneResult is the create-zone response (zone + delegation hint).
@@ -74,9 +116,18 @@ type DNSRecordInfo struct {
 	Rdata string `json:"rdata"`
 }
 
-// CreateZone registers a delegated zone. mode is "" (pattern) or "manual".
-func (c *Client) CreateZone(ctx context.Context, origin, mode string) (*CreateZoneResult, error) {
-	body, err := json.Marshal(map[string]string{"origin": origin, "mode": mode})
+// CreateZone registers a delegated zone. mode is "" (pattern) or "manual";
+// answerMode is "" (snapshot) or "stack"; fallback is "" (proposal) or
+// "servfail".
+func (c *Client) CreateZone(ctx context.Context, origin, mode, answerMode, fallback string) (*CreateZoneResult, error) {
+	payload := map[string]string{"origin": origin, "mode": mode}
+	if answerMode != "" {
+		payload["answer_mode"] = answerMode
+	}
+	if fallback != "" {
+		payload["stack_fallback"] = fallback
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
