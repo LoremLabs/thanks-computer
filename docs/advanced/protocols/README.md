@@ -67,4 +67,5 @@ in an opstack's flows into the protocol.
 | [MCP](./mcp.md) (agent tools) | out, in as diy |
 | [AI gateway](./llm-gateway.md) | in, then proxied out — an AI client's own requests, through a stack |
 | [DNS](./dns.md) | authoritative answers for delegated zones; in, post-reply — answered queries flow into `_dns` |
+| [IMAP](./imap.md) | out, read by a mail client — `txco://imap/append` materializes messages into a mailbox the `imap` head serves |
 

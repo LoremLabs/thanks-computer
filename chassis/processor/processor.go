@@ -2196,6 +2196,18 @@ func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh
 		}
 		out = jsonx.SetMany(out, vals)
 	}
+	// Same reasoning for the IMAP answer lane: a mailbox whose policy asks
+	// the stack first gets a durable suspend as "ok" — the client's APPEND
+	// (or MOVE) is accepted and the flow keeps working on it. A pre-emitted
+	// `_txc.imap.res` always wins. Mirrors the LMTP 250 above.
+	if sourceScope(ctx) == "imap" && !gjson.Get(out, "_txc.imap.res").Exists() {
+		pu.Logger.Info("continuation promoted on imap with no verdict; synthesizing ok",
+			zap.String("rcid", rcid))
+		out = jsonx.SetMany(out, []jsonx.PathVal{
+			{Path: "_txc.imap.res.ok", Val: true},
+			{Path: "_txc.imap.res.msg", Val: "accepted; processing continues"},
+		})
+	}
 
 	select {
 	case resCh <- event.Payload{Raw: out, Type: event.JSON}:

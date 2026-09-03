@@ -1,0 +1,6 @@
+# GET /imap/folders?username=… — the account's mailboxes with counts, as
+# the studio (or any web view) would read them out of the store.
+WHEN @src == "http" && @web.req.method == "GET" && @web.req.url.path == "/imap/folders"
+  EXEC "txco://imap/list"
+    WITH username = @web.req.url.query.username.0,
+         into = "_folders"

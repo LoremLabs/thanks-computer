@@ -1,0 +1,14 @@
+# Success: both ops answered (an account, and a hello uid — present on a
+# noop too). The generated password (if any) appears here once and
+# nowhere else.
+WHEN ._acct.username != "" && ._hello.uid != null
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "username", ._acct.username,
+         "created", ._acct.created,
+         "password", ._acct.password,
+         "hello_uid", ._hello.uid,
+         "hello_noop", ._hello.noop,
+         "imap", &object("host", "pony.local.thanks.computer", "port", 1993, "tls", true, "self_signed", true)))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

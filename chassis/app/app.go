@@ -35,6 +35,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
+	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/repl"
@@ -341,6 +342,22 @@ func Run(bi BuildInfo) int {
 			zap.String("personalities", conf.Personalities))
 	}
 
+	// IMAP mailbox index — the durable store the `imap` personality serves
+	// and txco://imap/* write to. Own file (never the runtime DB: the
+	// dbcache watcher reloads the mirror on every runtime-file write, and a
+	// mailbox index is written on every \Seen). Opened only when the imap
+	// personality is active; ops on other nodes answer txco_imap_disabled.
+	var imapStore *chimap.Store
+	if strings.Contains(conf.Personalities, "imap") {
+		st, ierr := chimap.Open(conf.IMAPStore, chimap.Config{DBPath: conf.IMAPDBPath})
+		if ierr != nil {
+			logger.Fatal("imap store open failed",
+				zap.String("store", conf.IMAPStore), zap.String("err", ierr.Error()))
+		}
+		defer st.Close()
+		imapStore = st
+	}
+
 	logger.Info("db setup") // feedback here proved helpful in debugging file locking for db
 
 	// Setup read-only db cache. The cache dumps THROUGH the chassis's
@@ -470,7 +487,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, imapStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)

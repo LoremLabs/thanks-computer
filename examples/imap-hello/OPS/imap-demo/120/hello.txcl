@@ -1,0 +1,21 @@
+# POST /imap/provision — step 3: drop a placeholder hello into the new
+# INBOX so the mail client shows something on first open.
+#
+# This is a RECORD append: the platform retains the canonical form
+# (headers subset + normalized text + part references) in the content
+# store by its own sha and renders RFC 5322 when a client FETCHes. The
+# `object_key` is the stack's stable identity for the message — appending
+# the same key with the same content is a no-op, so re-provisioning
+# (a password reset through this route) does not duplicate the hello.
+# ._acct.username is only set when the account op succeeded.
+WHEN ._acct.username != ""
+  EXEC "txco://imap/append"
+    WITH username = ._acct.username,
+         object_key = "hello",
+         message = &object(
+           "from", "Your stack <hello@thanks.computer>",
+           "to", ._acct.username,
+           "subject", "Hello from your stack",
+           "text", "This mailbox is served by a txco stack.\n\nNothing lands here on its own: a rule chooses what to materialize with txco://imap/append, and only what it chose is retained.\n"),
+         flags = &array("$Hello"),
+         into = "_hello"

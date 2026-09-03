@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -51,6 +52,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	_ "github.com/loremlabs/thanks-computer/chassis/filecas/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
@@ -67,6 +69,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/llmgw"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
+	imapp "github.com/loremlabs/thanks-computer/chassis/server/personality/imap"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
 	mailmapp "github.com/loremlabs/thanks-computer/chassis/server/personality/mailmap"
 	scheduledp "github.com/loremlabs/thanks-computer/chassis/server/personality/scheduled"
@@ -147,11 +150,11 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.route.to", "_txc.continuation", "_txc.src",
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
-		"_txc.dns.tenant")
+		"_txc.dns.tenant", "_txc.imap.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
-	dnsTenant := fields[9]
+	dnsTenant, imapTenant := fields[9], fields[10]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -245,6 +248,25 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "dns")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_dns/0")
+			return b.String()
+		}
+	}
+	// IMAP mutation. The imap head dispatches a client mutation (observe
+	// lane, after commit) or a policy question (answer lane, before commit)
+	// into the account's tenant, stamping the slug in `_txc.imap.tenant`
+	// (trusted: the account row's tenant, never client input). Propose a
+	// route into that tenant's `_imap/0` — the same sanctioned _sys→tenant
+	// pin as dns. The head only dispatches for tenants with an active
+	// `_imap` stack, so a 404 here is a stack deleted between check and
+	// dispatch (the answer lane treats that as a deny).
+	if src.String() == "imap" {
+		if it := imapTenant.String(); it != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", it)
+			b.Set("_txc.route.stack", "_imap")
+			b.Set("_txc.route.ingress", "imap")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_imap/0")
 			return b.String()
 		}
 	}
@@ -858,7 +880,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, imapStore *chimap.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1432,6 +1454,39 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			return blobDelete(ctx, blobD, in)
 		}))
 
+	// IMAP mailbox store ops (txco://imap/{account,append}): provisioning
+	// for the `imap` personality — an argon2id account with its INBOX, and
+	// a message RECORD materialized into a mailbox (CAS by sha + index row;
+	// the head renders RFC 5322 on FETCH). Registered unconditionally so a
+	// node without the store answers `_imap.error txco_imap_disabled` and a
+	// stack can branch. Tenant pinned from ctx; the username's domain must
+	// pass the sendmail ownership rule against the mirror snapshot. See
+	// chassis/server/imap.go + chassis/imap.
+	imapD := imapDeps{store: imapStore, fcas: fcas, ix: blobIndex, snap: dbc.Snapshot,
+		maxBytes: int64(conf.IMAPAppendMaxBytes)} // nil dialect ⇒ SQLite (the mirror)
+	pu.Handle([]byte("txco://imap/account"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return imapAccount(ctx, imapD, in)
+		}))
+	pu.Handle([]byte("txco://imap/append"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return imapAppend(ctx, imapD, in)
+		}))
+	for name, fn := range map[string]func(context.Context, imapDeps, []byte) (event.Payload, error){
+		"txco://imap/mailbox":  imapMailbox,
+		"txco://imap/remove":   imapRemove,
+		"txco://imap/flags":    imapFlags,
+		"txco://imap/list":     imapList,
+		"txco://imap/messages": imapMessages,
+		"txco://imap/get":      imapGet,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, imapD, in)
+			}))
+	}
+
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
 	// delete}). The backend is selected by --vector-store (default "sqlite",
 	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
@@ -1614,10 +1669,32 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// in-process ACME DNS-01 against its OWN authoritative DNS head (the
 	// solver writes the _acme-challenge into the dns head's challenge store,
 	// which that head serves). Requires the 'dns' personality.
+	//
+	// The IMAP head shares the manager: with `imap` active, --imap-tls-addrs
+	// set and no cert files given, the manager is built even when
+	// --web-tls-addr is empty, and --imap-hostname joins the managed set.
+	imapCtrl := imapp.NewController(ctx, pu, imapStore)
+	imapCtrl.SetFileCAS(fcas)
+	imapCtrl.SetBlobIndex(blobIndex)
+	// --imap-self-signed (txco dev) mints its own certificate in the head
+	// and must not pull the ACME manager in — in dev there is no dns head
+	// or CA behind it, and a managed config with no certificate fails every
+	// handshake.
+	imapWantsManagedCert := strings.Contains(conf.Personalities, "imap") &&
+		len(nonEmptyStrings(conf.IMAPTLSAddrs)) > 0 && !conf.IMAPSelfSigned &&
+		strings.TrimSpace(conf.IMAPTLSCertFile) == "" && strings.TrimSpace(conf.IMAPTLSKeyFile) == ""
+	if strings.TrimSpace(conf.IMAPTLSCertFile) != "" || strings.TrimSpace(conf.IMAPTLSKeyFile) != "" {
+		cert, cerr := tls.LoadX509KeyPair(conf.IMAPTLSCertFile, conf.IMAPTLSKeyFile)
+		if cerr != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("imap TLS cert files: %w", cerr)
+		}
+		imapCtrl.SetTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	}
 	var certMgr *txtls.Manager
-	if strings.TrimSpace(conf.WebTLSAddr) != "" {
+	if strings.TrimSpace(conf.WebTLSAddr) != "" || imapWantsManagedCert {
 		if !strings.Contains(conf.Personalities, "dns") {
-			logger.Warn("web-tls-addr set without the 'dns' personality: ACME DNS-01 has no authoritative server to answer challenges — enable 'dns' or terminate TLS at a front proxy")
+			logger.Warn("bundled TLS requested without the 'dns' personality: ACME DNS-01 has no authoritative server to answer challenges — enable 'dns', terminate TLS at a front proxy, or (imap) pass cert files")
 		}
 		m, mErr := txtls.NewManager(txtls.Options{
 			Publisher:   dnsCtrl.ChallengeStore(),
@@ -1634,7 +1711,16 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			return nil, nil, fmt.Errorf("bundled TLS: %w", mErr)
 		}
 		certMgr = m
-		webCtrl.SetTLSConfig(certMgr.TLSConfig())
+		if strings.TrimSpace(conf.WebTLSAddr) != "" {
+			webCtrl.SetTLSConfig(certMgr.TLSConfig())
+		}
+		if imapWantsManagedCert {
+			// A copy with no ALPN: the web config advertises h2, which an
+			// IMAP client must never be offered.
+			t := certMgr.TLSConfig().Clone()
+			t.NextProtos = nil
+			imapCtrl.SetTLSConfig(t)
+		}
 	}
 
 	controllers := []controller{
@@ -1652,6 +1738,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		// --personalities AND --mailmap-listen-addrs is set.
 		mailmapp.NewController(ctx, pu, mailResolver),
 		dnsCtrl,
+		imapCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
 	}
@@ -1714,6 +1801,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			certMu.Lock()
 			defer certMu.Unlock()
 			domains := txtls.WildcardDomains(dnsCtrl.Origins())
+			if imapWantsManagedCert && strings.TrimSpace(conf.IMAPHostname) != "" {
+				domains = append(domains, strings.TrimSuffix(strings.TrimSpace(conf.IMAPHostname), "."))
+			}
 			if err := certMgr.Manage(ctx, domains); err != nil {
 				logger.Error("bundled TLS manage failed",
 					zap.Strings("domains", domains), zap.String("err", err.Error()))
@@ -2017,4 +2107,15 @@ func resolveUsageNodeID(fqdn string) string {
 		return h
 	}
 	return "local"
+}
+
+// nonEmptyStrings drops blank entries from a []string flag value.
+func nonEmptyStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

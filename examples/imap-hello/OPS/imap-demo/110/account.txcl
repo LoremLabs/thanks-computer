@@ -1,0 +1,12 @@
+# POST /imap/provision — step 2: create (or update) the account.
+#
+# An omitted/empty password GENERATES one and returns it exactly once in
+# ._acct.password — only its argon2id hash is stored, so this response is
+# the only time anyone sees it. A body that carries `password` stores that
+# one instead and nothing comes back. Creating an account creates its
+# INBOX.
+WHEN ._prov.username != ""
+  EXEC "txco://imap/account"
+    WITH username = ._prov.username,
+         password = ._prov.password,
+         into = "_acct"

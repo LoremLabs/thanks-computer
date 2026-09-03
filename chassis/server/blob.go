@@ -248,36 +248,67 @@ func blobPut(ctx context.Context, d blobDeps, in []byte) (event.Payload, error) 
 			return blobErr("txco_blob_denied", "name requires permissions this op does not hold"), nil
 		}
 	}
-	// Bytes — nothing moved before the checks above.
-	data, err := blobBytes(meta, in)
-	if err != nil {
-		return blobErr("txco_blob_invalid_arg", "blob/put: "+err.Error()), nil
-	}
-	size := int64(len(data))
-	if d.maxBytes > 0 && size > d.maxBytes {
-		return blobErr("txco_blob_too_large",
-			fmt.Sprintf("%d bytes exceeds blob-max-bytes %d", size, d.maxBytes)), nil
-	}
-	blobChargeBytes(ctx, size, in)
-	sum := sha256.Sum256(data)
-	sha := hex.EncodeToString(sum[:])
-
-	present, err := d.fcas.Exists(ctx, sha)
-	if err != nil {
-		return blobStoreErr(err), nil
-	}
-	if !present {
-		// PutReader bypasses the LRU's admit-clone; the backend verifies the
-		// hash before the bytes become visible.
-		if err := filecas.PutReader(ctx, d.fcas, sha, bytes.NewReader(data), size); err != nil {
+	// Bytes — nothing moved before the checks above. `from_sha` adopts an
+	// object the tenant ALREADY owns (a part the IMAP head stored, an
+	// earlier put) under this name without re-uploading it: ownership is
+	// checked against the tenant's sha rows, never the CAS, so a sha
+	// another tenant holds is "not found" here.
+	var (
+		data    []byte
+		size    int64
+		sha     string
+		existed bool
+	)
+	if fs := strings.ToLower(strings.TrimSpace(gjson.GetBytes(meta, "from_sha").String())); fs != "" {
+		if gjson.GetBytes(meta, "from").Exists() || gjson.GetBytes(meta, "value").Exists() {
+			return blobErr("txco_blob_invalid_arg", "give `from_sha` or bytes (`from`/`value`), not both"), nil
+		}
+		if !blob.ValidSha256(fs) {
+			return blobErr("txco_blob_invalid_arg", "from_sha must be 64 lowercase hex chars"), nil
+		}
+		srow, owned, err := d.ix.GetSha(ctx, tenant, fs)
+		if err != nil {
 			return blobStoreErr(err), nil
 		}
-	}
-	// Ownership: `existed` is THIS tenant's prior knowledge of the bytes —
-	// never the CAS's (which would leak other tenants' holdings).
-	_, existed, err := d.ix.GetSha(ctx, tenant, sha)
-	if err != nil {
-		return blobStoreErr(err), nil
+		if !owned {
+			return blobErr("txco_blob_not_found", "no object with that sha256 for this tenant"), nil
+		}
+		if name == "" {
+			return blobErr("txco_blob_invalid_arg", "from_sha needs a `name` (or `under`+`filename`) to point at the object"), nil
+		}
+		sha, size, existed = fs, srow.Size, true
+	} else {
+		var err error
+		data, err = blobBytes(meta, in)
+		if err != nil {
+			return blobErr("txco_blob_invalid_arg", "blob/put: "+err.Error()), nil
+		}
+		size = int64(len(data))
+		if d.maxBytes > 0 && size > d.maxBytes {
+			return blobErr("txco_blob_too_large",
+				fmt.Sprintf("%d bytes exceeds blob-max-bytes %d", size, d.maxBytes)), nil
+		}
+		blobChargeBytes(ctx, size, in)
+		sum := sha256.Sum256(data)
+		sha = hex.EncodeToString(sum[:])
+
+		present, err := d.fcas.Exists(ctx, sha)
+		if err != nil {
+			return blobStoreErr(err), nil
+		}
+		if !present {
+			// PutReader bypasses the LRU's admit-clone; the backend verifies the
+			// hash before the bytes become visible.
+			if err := filecas.PutReader(ctx, d.fcas, sha, bytes.NewReader(data), size); err != nil {
+				return blobStoreErr(err), nil
+			}
+		}
+		// Ownership: `existed` is THIS tenant's prior knowledge of the bytes —
+		// never the CAS's (which would leak other tenants' holdings).
+		_, existed, err = d.ix.GetSha(ctx, tenant, sha)
+		if err != nil {
+			return blobStoreErr(err), nil
+		}
 	}
 	now := blobNow(d)
 	ct := gjson.GetBytes(meta, "content_type").String()

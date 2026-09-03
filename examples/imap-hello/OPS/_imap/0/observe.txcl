@@ -1,0 +1,14 @@
+# The `_imap` stack is the subscription: while it exists, every committed
+# client mutation in this tenant's mailboxes (append, copy, move, expunge,
+# create, delete, rename; flags only where a mailbox opts in) arrives here
+# with @imap.phase == "observe", after the client already got its reply.
+# Facts ride under @imap.*: op, mailbox{id,name,role}, dest, uid, objects[]
+# {uid, object_key, sha256, flags}, and for an append msg{...} with part
+# REFERENCES (sha256) — never bytes. This rule just records what it saw;
+# a product would key off @imap.mailbox.role (e.g. "knowledge" → ingest).
+WHEN @imap.phase == "observe"
+  EMIT ._observed = &object(
+         "op", @imap.op,
+         "mailbox", @imap.mailbox.name,
+         "role", @imap.mailbox.role,
+         "uid", @imap.uid)

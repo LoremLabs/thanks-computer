@@ -1,0 +1,25 @@
+# POST /imap/provision — step 1: the body is JSON {"username": …,
+# "password"?: …}.
+#
+# UNAUTHENTICATED BY DESIGN — a loopback demo. Anyone who can reach the
+# web port can create or reset an account under a domain this tenant
+# owns. The boundary that always holds is in the op, not this route:
+# txco://imap/account runs only inside this tenant's rules and only for
+# usernames under a domain the tenant has verified (or serves DNS for).
+# WHO may call it is this WHEN clause. A product gates it on its own
+# session (a magic-link cookie, an API key checked with txco://hmac-verify)
+# or does not expose a route at all and provisions from an internal flow
+# (first inbound mail, an owner's claim step). The web inlet stamps the raw body base64 at
+# @web.req.body; decode + parse it into a private key for the next scopes,
+# and mark that a provision request is in flight (the later "missing
+# username" reply gates on the marker, never on the absence of a path).
+#
+# `username` must be <local>@<domain> where <domain> is a hostname this
+# tenant owns (a verified hostname binding or a delegated zone) — the same
+# rule txco://sendmail applies to From:. Under `txco dev` the dev-local
+# names (localhost, *.localhost, *.local.thanks.computer) are auto-verified
+# on bind, so `paris@pony.local.thanks.computer` works once that hostname
+# is bound to this stack.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/imap/provision"
+  EMIT ._prov = &try_json(&b64decode(@web.req.body)),
+       ._prov_req = true

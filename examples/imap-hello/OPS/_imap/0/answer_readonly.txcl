@@ -1,0 +1,9 @@
+# The answer lane: a mailbox whose policy says "stack" for a verb asks
+# this stack BEFORE committing, with @imap.phase == "answer". Absent or
+# false @imap.res.ok means NO to the client; `code` maps to an RFC 5530
+# response code (cannot | limit | unavailable) and `msg` is what the
+# client shows. Here: a folder tagged role "readonly" refuses appends.
+WHEN @imap.phase == "answer" && @imap.mailbox.role == "readonly"
+  EMIT @imap.res.ok = false,
+       @imap.res.code = "cannot",
+       @imap.res.msg = "This folder is read-only"

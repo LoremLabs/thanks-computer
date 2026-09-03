@@ -1,0 +1,73 @@
+{
+  "note": "IMAP head + provisioning: POST /imap/provision creates an account (argon2id) with its INBOX and drops a hello record into it; POST /imap/folders creates a role-tagged folder with a per-verb policy; GET /imap/folders lists the account's mailboxes. The account is then readable by any mail client on 127.0.0.1:1143, and the `_imap` stack observes client mutations (and refuses appends into role \"readonly\"). Binds localhost \u2192 imap-demo for the routes and pony.local.thanks.computer (dev-local, auto-verified) as the domain the username must belong to. Needs `txco dev --imap`.",
+  "dev_flags": [
+    "--imap"
+  ],
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "imap-demo"
+    },
+    {
+      "host": "pony.local.thanks.computer",
+      "stack": "imap-demo"
+    }
+  ],
+  "checks": [
+    {
+      "name": "provision creates the account and returns the password once",
+      "method": "POST",
+      "path": "/imap/provision",
+      "status": 200,
+      "contains": "\"created\":true",
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\"}"
+    },
+    {
+      "name": "re-provision updates in place, no new password, hello is a noop",
+      "method": "POST",
+      "path": "/imap/provision",
+      "status": 200,
+      "contains": "\"hello_noop\":true",
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\",\"password\":\"correct-horse-battery\"}"
+    },
+    {
+      "name": "a domain the tenant does not own is refused",
+      "method": "POST",
+      "path": "/imap/provision",
+      "status": 400,
+      "contains": "txco_imap_domain_not_owned",
+      "body": "{\"username\":\"paris@example.com\"}"
+    },
+    {
+      "name": "missing username is a 400 before any op runs",
+      "method": "POST",
+      "path": "/imap/provision",
+      "status": 400,
+      "contains": "missing_username",
+      "body": "{}"
+    },
+    {
+      "name": "a role-tagged folder with a stack policy",
+      "method": "POST",
+      "path": "/imap/folders",
+      "status": 200,
+      "contains": "\"role\":\"readonly\"",
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\",\"name\":\"Reference\",\"role\":\"readonly\",\"policy\":{\"append\":\"stack\",\"move_in\":\"stack\"}}"
+    },
+    {
+      "name": "folders list shows INBOX with the hello and the new folder",
+      "method": "GET",
+      "path": "/imap/folders?username=paris@pony.local.thanks.computer",
+      "status": 200,
+      "contains": "\"name\":\"Reference\""
+    },
+    {
+      "name": "a folder for an unknown account is refused",
+      "method": "POST",
+      "path": "/imap/folders",
+      "status": 400,
+      "contains": "txco_imap_no_account",
+      "body": "{\"username\":\"ghost@pony.local.thanks.computer\",\"name\":\"X\"}"
+    }
+  ]
+}

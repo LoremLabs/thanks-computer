@@ -1,0 +1,8 @@
+# POST /imap/folders — step 1 (unauthenticated demo route, see
+# provision_parse.txcl): {"username": …, "name": …, "role"?: …,
+# "policy"?: {…}} creates (or updates) a folder in that account. The
+# probe uses it to make a read-only "Reference" folder whose appends the
+# `_imap` stack refuses (see OPS/_imap/0/answer_readonly.txcl).
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/imap/folders"
+  EMIT ._folder = &try_json(&b64decode(@web.req.body)),
+       ._folder_req = true

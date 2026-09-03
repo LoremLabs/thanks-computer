@@ -1,0 +1,10 @@
+# POST /imap/folders — step 2: txco://imap/mailbox. `role` is the stack's
+# stable key for the folder (survives a client RENAME); `policy` picks,
+# per verb, deny | local | observe | stack.
+WHEN ._folder.username != "" && ._folder.name != ""
+  EXEC "txco://imap/mailbox"
+    WITH username = ._folder.username,
+         name = ._folder.name,
+         role = ._folder.role,
+         policy = ._folder.policy,
+         into = "_mbox"

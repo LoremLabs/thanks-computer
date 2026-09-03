@@ -29,6 +29,7 @@ var authorWritableTxcPaths = []string{
 	"web.res",      // the rendered HTTP response (status/body/headers)
 	"lmtp.res",     // the SMTP verdict
 	"dns.res",      // the DNS answer for a stack-answered zone (rcode/answer/authority)
+	"imap.res",     // the IMAP answer-lane verdict (ok/msg/code/flags/object_key)
 	"goto",         // flow control: jump to another stage
 	"halt",         // flow control: stop the pipeline
 	"delete",       // prune envelope paths (targets are separately guarded)
@@ -71,7 +72,10 @@ func authorMayWriteTxc(path string) bool {
 // rest of the flow is pure cost. Deleting a stamped fact can't forge one,
 // so this list is broader than the write allowlist but still explicit.
 var authorDeletableTxcPaths = []string{
-	"web.req.body", // the inbound HTTP body, consumed by blob/put / parsers
+	"web.req.body",     // the inbound HTTP body, consumed by blob/put / parsers
+	"imap.msg.text",    // an appended message's bodies + headers: consumed by the
+	"imap.msg.html",    // _imap stack, then omitted from the trace/continuation
+	"imap.msg.headers", // payload (the record is in the store already)
 }
 
 // authorMayDeleteTxc is the `_txc.delete` target guard: everything an

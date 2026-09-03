@@ -1,0 +1,5 @@
+# Everything else a stack-policy mailbox asks about is allowed. A stack
+# may also stamp initial flags and its own object_key on an accepted
+# append: @imap.res.flags = &array("$Ingested"), @imap.res.object_key = …
+WHEN @imap.phase == "answer" && @imap.mailbox.role != "readonly"
+  EMIT @imap.res.ok = true

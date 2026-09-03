@@ -1,0 +1,8 @@
+WHEN ._folders.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "step", "list",
+         "error", ._folders.error.code,
+         "message", ._folders.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
 
@@ -16,10 +17,24 @@ import (
 // a tenant may only send as a domain it owns. Reads the mirror snapshot (see
 // readDB) — these tables are fully mirrored and this runs on every send.
 func (m *Mailer) fromDomainVerified(ctx context.Context, slug, domain string) (bool, error) {
-	if slug == "" || domain == "" {
+	db, dia := m.readDB()
+	return DomainOwnedByTenant(ctx, db, dia, slug, domain)
+}
+
+// DomainOwnedByTenant is the single ownership rule for "may tenant `slug`
+// act as `domain`": a non-revoked tenant_hostnames row with verified_at
+// set, OR a domain the chassis serves authoritative DNS for (an active
+// dns_zones row — delegation is itself proof of control). Applied by
+// txco://sendmail (the From: guard) and by txco://imap/account (the
+// username's domain); package-level so both read the same tables the same
+// way. db is normally the dbcache mirror snapshot (dialect SQLite).
+func DomainOwnedByTenant(ctx context.Context, db *sql.DB, dia registry.Dialect, slug, domain string) (bool, error) {
+	if slug == "" || domain == "" || db == nil {
 		return false, nil
 	}
-	db, dia := m.readDB()
+	if dia == nil {
+		dia = registry.SQLite
+	}
 	var verifiedAt sql.NullString
 	err := db.QueryRowContext(ctx,
 		dia.Rebind(`SELECT h.verified_at

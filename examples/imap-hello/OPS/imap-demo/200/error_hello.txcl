@@ -1,0 +1,10 @@
+# The account exists but the hello append failed (e.g. no content store on
+# this node): still a 400, naming the step.
+WHEN ._hello.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "step", "hello",
+         "error", ._hello.error.code,
+         "message", ._hello.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

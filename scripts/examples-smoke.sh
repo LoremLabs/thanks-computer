@@ -29,6 +29,7 @@
 # Usage:
 #   scripts/examples-smoke.sh                     # build txco + run
 #   TXCO=/path/to/txco scripts/examples-smoke.sh  # use a pre-built binary
+#   EXAMPLES_ONLY=imap-hello scripts/examples-smoke.sh   # just these examples
 #
 # Exit status: 0 if every example passes (skips are not failures), 1 on
 # any failure. Failed runs preserve $LOG_DIR for inspection.
@@ -160,13 +161,18 @@ app_ports() {
 }
 
 # emit_probe <probe.json> — print the probe as tab-separated lines:
+#   DEVFLAG<TAB>flag
 #   BIND<TAB>host<TAB>stack
 #   CHECK<TAB>name<TAB>method<TAB>host<TAB>path<TAB>status<TAB>contains<TAB>body
 # (body is the only field that can be empty; none of the fields contain tabs.)
+# DEVFLAG lines are extra `txco dev` flags the example needs (e.g. "--imap"
+# for a head that is off by default); they are read before dev is spawned.
 emit_probe() {
     python3 - "$1" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))
+for f in p.get("dev_flags", []):
+    print("DEVFLAG\t%s" % f)
 for b in p.get("bind", []):
     print("BIND\t%s\t%s" % (b["host"], b["stack"]))
 for c in p.get("checks", []):
@@ -254,13 +260,20 @@ run_checks() {
     # (dev passes its env down to spawned apps), so a short value still
     # exercises the full 202→poll→200 continuation path in ~1s. Harmless
     # for examples without a worker.
+    # Extra dev flags the probe asks for (heads that are off by default).
+    local -a dev_flags=()
+    local dkind dflag
+    while IFS=$'\t' read -r dkind dflag; do
+        [[ "${dkind}" == "DEVFLAG" ]] && dev_flags+=("${dflag}")
+    done < <(emit_probe "${probe}")
+
     ( cd "${DEV_WS}" && \
         TXCO_DEBUG_BREAKPOINTS=false \
         WORKER_JOB_MS=500 \
         "${TXCO}" dev \
         --chassis-addr ":${ADMIN_PORT}" \
         --web-addr ":${WEB_PORT}" \
-        --watch=false ) >"${log}" 2>&1 &
+        --watch=false "${dev_flags[@]}" ) >"${log}" 2>&1 &
     DEV_PID=$!
 
     local up=
@@ -415,8 +428,13 @@ echo "txco:     ${TXCO}"
 echo "examples: ${EXAMPLES_DIR}"
 echo "ports:    admin :${ADMIN_PORT}, web :${WEB_PORT}"
 
+# EXAMPLES_ONLY=name[,name] restricts the run to those examples (iterating
+# on one probe without booting every workspace).
 for dir in "${EXAMPLES_DIR}"/*/; do
     [[ -f "${dir}/probe.json" ]] || continue
+    if [[ -n "${EXAMPLES_ONLY:-}" ]] && [[ ",${EXAMPLES_ONLY}," != *",$(basename "${dir}"),"* ]]; then
+        continue
+    fi
     run_example "$(basename "${dir}")" "${dir%/}"
 done
 

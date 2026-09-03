@@ -46,6 +46,16 @@ const devDNSListenAddr = "127.0.0.1:5354"
 // on — the same :2424 the docs, examples, and swaks invocations use.
 const devLMTPListenAddr = ":2424"
 
+// devIMAPListenAddr / devIMAPTLSAddr are the loopback addresses `txco dev
+// --imap` binds the IMAP head on: plaintext (+ STARTTLS) and IMAPS. Both
+// serve a self-signed certificate minted at boot — desktop mail clients
+// refuse LOGIN over plaintext, so the account is added with SSL on port
+// 1993 and the certificate trusted once.
+const (
+	devIMAPListenAddr = "127.0.0.1:1143"
+	devIMAPTLSAddr    = "127.0.0.1:1993"
+)
+
 // devMailRelayAddr is where `txco dev --lmtp` relays OUTBOUND mail by
 // default: the conventional local sink (MailHog/Mailpit SMTP port,
 // plaintext). A dev chassis should never be able to deliver real mail
@@ -78,6 +88,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
+	imapHead := fs.Bool("imap", false, "start the IMAP head with dev defaults: binds "+devIMAPListenAddr+" (plaintext + STARTTLS, LOGIN allowed over loopback) and "+devIMAPTLSAddr+" (IMAPS) with a self-signed certificate minted at boot, index at .txco/dev/imap.db — so a stack can provision an account with txco://imap/account and a mail client can open it (server <dev host>, port 1993, SSL on, trust the certificate). Disabled by default. Override TXCO_IMAP_LISTEN_ADDRS/IMAP_TLS_ADDRS/IMAP_DB_PATH.")
 	lmtpHead := fs.Bool("lmtp", false, "start the LMTP mail head with dev defaults: binds "+devLMTPListenAddr+", relays outbound mail to a local sink ("+devMailRelayAddr+", TLS off — MailHog/Mailpit), and auto-loads ./ingress.yaml from the workspace when present (the local stand-in for minted hostnames). Disabled by default. Override any of TXCO_LMTP_LISTEN_ADDRS/MAIL_RELAY_ADDR/MAIL_RELAY_TLS/INGRESS_CONFIG.")
 	watch := fs.Bool("watch", true, "watch sources and hot-reload: compute edits rebuild + reactivate; OPS edits push to a per-stack draft. On by default (that's what `dev` is for); pass --watch=false to disable.")
 	watchIgnore := fs.StringArray("watch-ignore", nil, "glob pattern (repeatable) whose matching directories are pruned from the watcher — CPU saver in big workspaces. A pattern with `/` matches a dir's path under OPS/ (e.g. `publications/*/FILES`); a bare name matches anywhere (e.g. `node_modules`). Per-stack FILES/ trees are pruned by default; add `dev.watch.includeFiles: true` to txco.yaml to watch them.")
@@ -100,6 +111,12 @@ Flags:
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		if err == pflag.ErrHelp {
+			return 0
+		}
+		// pflag only prints the error itself under ExitOnError; with
+		// ContinueOnError a typo'd flag would otherwise exit 2 in silence.
+		fmt.Fprintf(stderr, "dev: %v\n(chassis flags such as --imap-wire-debug are environment variables here: TXCO_IMAP_WIRE_DEBUG=true txco dev …; `txco dev --help` lists the dev flags)\n", err)
 		return 2
 	}
 
@@ -251,7 +268,7 @@ Flags:
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *imapHead, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -467,6 +484,14 @@ Flags:
 		if *lmtpHead {
 			fmt.Fprintf(stdout, "[txco]   lmtp head: %s → relay %s (run MailHog/Mailpit for the sink)\n", devLMTPListenAddr, devMailRelayAddr)
 			fmt.Fprintf(stdout, "[txco]        test: swaks --protocol LMTP --server localhost%s --to you@<host>\n", devLMTPListenAddr)
+		}
+		if *imapHead {
+			certPath := filepath.Join(dir, ".txco", "dev", "imap-selfsigned.crt")
+			fmt.Fprintf(stdout, "[txco]   imap head: %s (STARTTLS) and %s (IMAPS), self-signed certificate at %s\n", devIMAPListenAddr, devIMAPTLSAddr, certPath)
+			fmt.Fprintln(stdout, "[txco]        trust it once so mail clients connect without a warning (macOS):")
+			fmt.Fprintf(stdout, "[txco]          security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n", certPath)
+			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://imap/account\" WITH username = \"you@<bound-host>\"`, then add the account in Mail/Thunderbird:")
+			fmt.Fprintln(stdout, "[txco]        server <bound-host> (e.g. pony.local.thanks.computer), port 1993, SSL on")
 		}
 	} else {
 		fmt.Fprintf(stdout, "[txco] dev loop running (Ctrl-C to stop). chassis: %s\n", chassisURL)
@@ -984,7 +1009,7 @@ func isVersionNotDraftErr(err error) bool {
 // included. Off by default — most dev workflows use only web + cron +
 // admin, and the extra binds otherwise cause spurious "port in use"
 // failures on machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, imapHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
@@ -1024,6 +1049,14 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	dnsAddr := devDNSListenAddr
 	if dnsHead {
 		if err := requirePortFree(dnsAddr, "DNS inlet"); err != nil {
+			return "", "", err
+		}
+	}
+	if imapHead {
+		if err := requirePortFree(devIMAPListenAddr, "IMAP head"); err != nil {
+			return "", "", err
+		}
+		if err := requirePortFree(devIMAPTLSAddr, "IMAPS head"); err != nil {
 			return "", "", err
 		}
 	}
@@ -1103,6 +1136,12 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		heads = append(heads, "scheduled")
 		env = append(env, "TXCO_SCHEDULED_DB_PATH="+filepath.Join(devDir, "scheduled.db"))
 	}
+	if imapHead {
+		heads = append(heads, "imap")
+		env = append(env, "TXCO_IMAP_LISTEN_ADDRS="+devIMAPListenAddr)
+		env = append(env, "TXCO_IMAP_TLS_ADDRS="+devIMAPTLSAddr)
+		env = append(env, "TXCO_IMAP_DB_PATH="+filepath.Join(devDir, "imap.db"))
+	}
 	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
 
 	// Dev-default toggles: enabled by default so devs get full
@@ -1175,6 +1214,13 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// And when the workspace carries an ingress.yaml (the local stand-in
 	// for minted hostnames: recipient wildcards / http hosts → stacks),
 	// load it. Set-if-missing like the rest.
+	// IMAP dev default: LOGIN over the plaintext loopback listener. The
+	// serve default stays false (a real deployment terminates TLS at the
+	// edge or sets --imap-tls-addrs).
+	if imapHead {
+		devDefaults["TXCO_IMAP_INSECURE_AUTH"] = "true"
+		devDefaults["TXCO_IMAP_SELF_SIGNED"] = "true"
+	}
 	if lmtpHead {
 		devDefaults["TXCO_MAIL_RELAY_ADDR"] = devMailRelayAddr
 		devDefaults["TXCO_MAIL_RELAY_TLS"] = "none"

@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — the IMAP store is a chassis built-in
+# (txco://imap/*); the workspace ships only operations.

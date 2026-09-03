@@ -332,6 +332,30 @@ func TestDetectTenantBodyDNSNoTenantUnchanged(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyIMAP: a client mutation the imap head dispatches
+// (src=imap with a trusted _txc.imap.tenant from the account row) proposes
+// a route into that tenant's _imap/0; without the tenant stamp it falls
+// through to the resolver.
+func TestDetectTenantBodyIMAP(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"imap","imap":{"tenant":"acme","phase":"observe","op":"append","mailbox":{"name":"INBOX"}}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_imap/0" {
+		t.Errorf("_txc.route.to = %q, want _imap/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "imap" {
+		t.Errorf("_txc.route.ingress = %q, want imap", got)
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified must be true (chassis-stamped)")
+	}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"imap","imap":{"op":"append"}}}`)); body != "{}" {
+		t.Errorf("imap body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyLLM: an AI-gateway request (src=llm with a trusted
 // _txc.llm.tenant stamped by the inlet after its own Host resolution)
 // proposes a route into that tenant's _llm/0, carrying the inlet's

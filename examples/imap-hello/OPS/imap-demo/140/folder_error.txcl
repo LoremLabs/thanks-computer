@@ -1,0 +1,8 @@
+WHEN ._mbox.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "step", "mailbox",
+         "error", ._mbox.error.code,
+         "message", ._mbox.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

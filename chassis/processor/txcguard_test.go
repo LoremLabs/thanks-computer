@@ -27,6 +27,10 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.lmtp.res.code", true},
 		{"_txc.dns.res.rcode", true},
 		{"_txc.dns.res.answer", true},
+		{"_txc.imap.res.ok", true},
+		{"_txc.imap.res.flags", true},
+		{"_txc.imap.msg.text", false},       // an appended message's facts are read-only…
+		{"_txc.imap.tenant", false},         // …and the route hint especially
 		{"_txc.dns.proposed.answer", false}, // the head's proposal is read-only
 		{"_txc.dns.q.name", false},          // inbound facts are reserved
 		{"_txc.dns.tenant", false},          // the route hint especially
@@ -392,5 +396,15 @@ func TestAuthorMayDeleteTxc(t *testing.T) {
 	}
 	if authorMayWriteTxc("_txc.web.req.body") {
 		t.Fatal("_txc.web.req.body must stay non-writable (delete-only)")
+	}
+	// The appended message's bodies/headers are delete-only too: a stack
+	// omits them from the trace after it has consumed them.
+	for _, p := range []string{"_txc.imap.msg.text", "_txc.imap.msg.html", "_txc.imap.msg.headers", "_txc.imap.msg.headers.subject"} {
+		if !authorMayDeleteTxc(p) || authorMayWriteTxc(p) {
+			t.Errorf("%s: delete=%v write=%v, want delete-only", p, authorMayDeleteTxc(p), authorMayWriteTxc(p))
+		}
+	}
+	if authorMayDeleteTxc("_txc.imap.msg.sha256") || authorMayDeleteTxc("_txc.imap.tenant") {
+		t.Fatal("imap identity facts must not be deletable")
 	}
 }
