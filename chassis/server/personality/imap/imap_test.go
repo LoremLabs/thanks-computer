@@ -7,6 +7,7 @@ import (
 	"net/mail"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,15 +38,24 @@ func (fakeAdmission) AllowRate(string) (bool, time.Duration)           { return 
 func (fakeAdmission) AcquireConcurrency(string, *admission.Lease) bool { return true }
 
 type harness struct {
-	ctrl  *Controller
-	store *chimap.Store
-	fcas  filecas.Store
-	addr  string
+	ctrl   *Controller
+	store  *chimap.Store
+	fcas   filecas.Store
+	addr   string
+	dbPath string
+}
+
+// testDSN is the production SQLite DSN shape (chassis/imap/sqlite.go): WAL
+// + busy timeout + immediate write lock, so a second Store over the same
+// file (a "remote node" in the tests) behaves like one would in prod.
+func testDSN(path string) string {
+	return "file:" + path + "?mode=rwc&_journal_mode=WAL&_busy_timeout=15000&_txlock=immediate"
 }
 
 func newHarness(t *testing.T, conf config.Config) *harness {
 	t.Helper()
-	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "imap.db"))
+	dbPath := filepath.Join(t.TempDir(), "imap.db")
+	db, err := sql.Open("sqlite3", testDSN(dbPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +90,20 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	if len(addrs) < 1 {
 		t.Fatalf("bound %v", addrs)
 	}
-	return &harness{ctrl: ctrl, store: store, fcas: fs, addr: addrs[0]}
+	return &harness{ctrl: ctrl, store: store, fcas: fs, addr: addrs[0], dbPath: dbPath}
+}
+
+// remote is a second Store over the same index with NO change listener: a
+// writer on another node against a shared index. Whatever it commits
+// reaches the head only through the modseq sync.
+func (h *harness) remote(t *testing.T) *chimap.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite3", testDSN(h.dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return chimap.NewStore(db, registry.SQLite)
 }
 
 func (h *harness) account(t *testing.T, tenant, username, password, status string) {
@@ -98,8 +121,13 @@ func (h *harness) account(t *testing.T, tenant, username, password, status strin
 // txco://imap/append op does: build → CAS → row.
 func (h *harness) appendHello(t *testing.T, tenant, username, key, subject, text string) chimap.AppendResult {
 	t.Helper()
+	return h.appendHelloVia(t, h.store, tenant, username, key, subject, text)
+}
+
+func (h *harness) appendHelloVia(t *testing.T, store *chimap.Store, tenant, username, key, subject, text string) chimap.AppendResult {
+	t.Helper()
 	ctx := context.Background()
-	mb, ok, err := h.store.GetMailbox(ctx, tenant, username, "INBOX")
+	mb, ok, err := store.GetMailbox(ctx, tenant, username, "INBOX")
 	if err != nil || !ok {
 		t.Fatalf("INBOX: %v %v", ok, err)
 	}
@@ -111,11 +139,81 @@ func (h *harness) appendHello(t *testing.T, tenant, username, key, subject, text
 	if err := h.fcas.Put(ctx, ing.SHA256, ing.Canonical); err != nil {
 		t.Fatal(err)
 	}
-	res, err := h.store.AppendMessage(ctx, mb.ID, ing.Message)
+	res, err := store.AppendMessage(ctx, mb.ID, ing.Message)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return res
+}
+
+// unilateral records the untagged data a connection receives.
+type unilateral struct {
+	mu       sync.Mutex
+	exists   []uint32
+	expunged []uint32
+	fetched  []*imapclient.FetchMessageBuffer
+}
+
+func (u *unilateral) handler() *imapclient.UnilateralDataHandler {
+	return &imapclient.UnilateralDataHandler{
+		Expunge: func(seq uint32) { u.mu.Lock(); u.expunged = append(u.expunged, seq); u.mu.Unlock() },
+		Mailbox: func(d *imapclient.UnilateralDataMailbox) {
+			if d.NumMessages != nil {
+				u.mu.Lock()
+				u.exists = append(u.exists, *d.NumMessages)
+				u.mu.Unlock()
+			}
+		},
+		Fetch: func(m *imapclient.FetchMessageData) {
+			buf, err := m.Collect()
+			if err == nil {
+				u.mu.Lock()
+				u.fetched = append(u.fetched, buf)
+				u.mu.Unlock()
+			}
+		},
+	}
+}
+
+func (u *unilateral) snapshot() (exists, expunged []uint32, fetched int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]uint32{}, u.exists...), append([]uint32{}, u.expunged...), len(u.fetched)
+}
+
+// waitFetched waits for n unilateral FETCHes: the client hands untagged
+// FETCH data to the handler on its own goroutine, so a NOOP can return
+// before the recorder has seen it.
+func (u *unilateral) waitFetched(t *testing.T, n int) []*imapclient.FetchMessageBuffer {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		u.mu.Lock()
+		got := append([]*imapclient.FetchMessageBuffer{}, u.fetched...)
+		u.mu.Unlock()
+		if len(got) >= n {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("saw %d unilateral FETCH(es), want %d", len(got), n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// dialWith is dial with a unilateral-data recorder attached.
+func dialWith(t *testing.T, addr string) (*imapclient.Client, *unilateral) {
+	t.Helper()
+	u := &unilateral{}
+	c, err := imapclient.DialInsecure(addr, &imapclient.Options{UnilateralDataHandler: u.handler()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.WaitGreeting(); err != nil {
+		t.Fatal(err)
+	}
+	return c, u
 }
 
 func dial(t *testing.T, addr string) *imapclient.Client {

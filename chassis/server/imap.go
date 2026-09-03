@@ -84,7 +84,7 @@ func imapPrelude(ctx context.Context, d imapDeps) (tenant string, meta []byte, i
 		return "", nil, into, imapErr(into, "txco_imap_no_tenant", "no tenant in request scope"), false
 	}
 	if d.store == nil {
-		return "", nil, into, imapErr(into, "txco_imap_disabled", "no IMAP store on this node (imap personality not active)"), false
+		return "", nil, into, imapErr(into, "txco_imap_disabled", "no IMAP store on this node (imap personality off and --imap-store=sqlite, or the shared store failed to open at boot)"), false
 	}
 	return tenant, meta, into, event.Payload{}, true
 }

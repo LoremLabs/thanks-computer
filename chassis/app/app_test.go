@@ -29,3 +29,22 @@ func TestRoomAlias(t *testing.T) {
 		})
 	}
 }
+
+func TestIMAPStoreMode(t *testing.T) {
+	for _, c := range []struct {
+		personalities, store string
+		open, fatal          bool
+	}{
+		{"cron,web,admin", "sqlite", false, false},
+		{"cron,web,admin", "", false, false},
+		{"cron,web,admin,imap", "sqlite", true, true},
+		{"cron,web,admin", "postgres", true, false},
+		{"cron,web,imap", "postgres", true, true},
+		{"cron,web,mailmap", "sqlite", false, false}, // "mailmap" is not "imap"
+	} {
+		open, fatal := imapStoreMode(c.personalities, c.store)
+		if open != c.open || fatal != c.fatal {
+			t.Errorf("imapStoreMode(%q, %q) = (%v, %v), want (%v, %v)", c.personalities, c.store, open, fatal, c.open, c.fatal)
+		}
+	}
+}

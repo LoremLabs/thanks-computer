@@ -66,7 +66,7 @@ func (s *Store) CreateMailbox(ctx context.Context, tenant, username, name, role 
 		INSERT INTO imap_mailboxes (id, tenant, username, name, role, attrs, policy, uidvalidity, uidnext, modseq, subscribed, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 1, ?)`),
 		id, tenant, username, name, strings.TrimSpace(role), string(attrsJSON), rawOr(policy, "{}"), uidv, now.Format(time.RFC3339)); err != nil {
-		if _, ok, gerr := s.GetMailbox(ctx, tenant, username, name); gerr == nil && ok {
+		if s.dialect.IsUniqueViolationGeneric(err) {
 			return Mailbox{}, ErrMailboxExists
 		}
 		return Mailbox{}, fmt.Errorf("imap: insert mailbox: %w", err)
@@ -149,7 +149,7 @@ func (s *Store) RenameMailbox(ctx context.Context, tenant, username, oldName, ne
 	} else if taken {
 		return Mailbox{}, ErrMailboxExists
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.dialect.BeginWrite(ctx, s.db)
 	if err != nil {
 		return Mailbox{}, fmt.Errorf("imap: begin: %w", err)
 	}
@@ -226,17 +226,19 @@ func (s *Store) ResetMailbox(ctx context.Context, id string) (Mailbox, error) {
 	if uidv <= mb.UIDValidity {
 		uidv = mb.UIDValidity + 1
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.dialect.BeginWrite(ctx, s.db)
 	if err != nil {
 		return Mailbox{}, fmt.Errorf("imap: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.ExecContext(ctx, s.rb(`DELETE FROM imap_messages WHERE mailbox_id = ?`), id); err != nil {
-		return Mailbox{}, fmt.Errorf("imap: reset rows: %w", err)
-	}
+	// The mailbox update first: it is the row lock that serializes this
+	// against appends on other nodes.
 	if _, err := tx.ExecContext(ctx, s.rb(`
 		UPDATE imap_mailboxes SET uidvalidity = ?, uidnext = 1, modseq = modseq + 1 WHERE id = ?`), uidv, id); err != nil {
 		return Mailbox{}, fmt.Errorf("imap: reset mailbox: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rb(`DELETE FROM imap_messages WHERE mailbox_id = ?`), id); err != nil {
+		return Mailbox{}, fmt.Errorf("imap: reset rows: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Mailbox{}, fmt.Errorf("imap: commit: %w", err)
@@ -298,9 +300,25 @@ func (s *Store) Expunge(ctx context.Context, mailboxID string, uids []uint32) ([
 // removeRows deletes rows (all of `uids`, or — with onlyDeleted — those
 // among them, or all rows when uids is empty, carrying \Deleted), computing
 // each doomed row's pre-removal sequence number in one snapshot so the
-// EXPUNGE responses are correct when applied top-down.
+// EXPUNGE responses are correct when applied top-down. The snapshot is
+// taken inside the transaction, after the mailbox row is bumped (and so
+// locked), so it cannot shift under a concurrent writer on another node.
+// Nothing to remove ⇒ the transaction rolls back and modseq is unchanged.
 func (s *Store) removeRows(ctx context.Context, mailboxID string, uids []uint32, onlyDeleted bool) ([]Expunged, error) {
-	heads, err := s.ListMessageHeads(ctx, mailboxID)
+	tx, err := s.dialect.BeginWrite(ctx, s.db)
+	if err != nil {
+		return nil, fmt.Errorf("imap: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var modseq int64
+	if err := tx.QueryRowContext(ctx, s.rb(`
+		UPDATE imap_mailboxes SET modseq = modseq + 1 WHERE id = ? RETURNING modseq`), mailboxID).Scan(&modseq); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrMailboxNotFound
+		}
+		return nil, fmt.Errorf("imap: bump modseq: %w", err)
+	}
+	heads, err := s.listHeads(ctx, tx, mailboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -319,25 +337,14 @@ func (s *Store) removeRows(ctx context.Context, mailboxID string, uids []uint32,
 		doomed = append(doomed, Expunged{UID: h.UID, Seq: uint32(i) + 1})
 	}
 	if len(doomed) == 0 {
-		return nil, nil
+		return nil, nil // rollback: no bump for a no-op
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("imap: begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
 	for _, d := range doomed {
 		if _, err := tx.ExecContext(ctx, s.rb(`DELETE FROM imap_messages WHERE mailbox_id = ? AND uid = ?`), mailboxID, d.UID); err != nil {
 			return nil, fmt.Errorf("imap: expunge %d: %w", d.UID, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, s.rb(`UPDATE imap_mailboxes SET modseq = modseq + 1 WHERE id = ?`), mailboxID); err != nil {
-		return nil, fmt.Errorf("imap: bump modseq: %w", err)
-	}
-	var total uint32
-	if err := tx.QueryRowContext(ctx, s.rb(`SELECT COUNT(*) FROM imap_messages WHERE mailbox_id = ?`), mailboxID).Scan(&total); err != nil {
-		return nil, fmt.Errorf("imap: count: %w", err)
-	}
+	total := uint32(len(heads) - len(doomed))
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("imap: commit: %w", err)
 	}
@@ -407,6 +414,3 @@ func (s *Store) CountByMailbox(ctx context.Context, mailboxID string) (uint32, u
 	}
 	return uint32(len(heads)), unseen, nil
 }
-
-// ensure sql import stays used on every build.
-var _ = sql.ErrNoRows

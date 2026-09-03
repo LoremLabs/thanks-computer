@@ -180,6 +180,12 @@ func TestPostgresRebind(t *testing.T) {
 			`SELECT 'a"b ? c' WHERE id = ?`,
 			`SELECT 'a"b ? c' WHERE id = $1`,
 		},
+		// Placeholders adjacent to `||` concatenation (the IMAP store's
+		// local-part and subtree-rename predicates).
+		{"SELECT username FROM imap_accounts WHERE substr(username, 1, length(?) + 1) = ? || '@'",
+			"SELECT username FROM imap_accounts WHERE substr(username, 1, length($1) + 1) = $2 || '@'"},
+		{"UPDATE imap_mailboxes SET name = ? || substr(name, length(?) + 1) WHERE tenant = ? AND username = ? AND substr(name, 1, length(?) + 1) = ? || '/'",
+			"UPDATE imap_mailboxes SET name = $1 || substr(name, length($2) + 1) WHERE tenant = $3 AND username = $4 AND substr(name, 1, length($5) + 1) = $6 || '/'"},
 	}
 	for _, c := range cases {
 		if got := Postgres.Rebind(c.in); got != c.want {

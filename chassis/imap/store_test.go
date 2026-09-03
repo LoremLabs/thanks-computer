@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,8 +21,11 @@ import (
 // everywhere), applies the schema, and pins the clock.
 func newTestStore(t *testing.T) (*Store, *time.Time) {
 	t.Helper()
+	// The production DSN shape (sqlite.go): WAL + busy timeout + an
+	// immediate write lock at BEGIN, so the concurrency tests below behave
+	// like a real node.
 	path := filepath.Join(t.TempDir(), "imap.db")
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=rwc&_journal_mode=WAL&_busy_timeout=15000&_txlock=immediate")
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
@@ -250,5 +255,210 @@ func TestGetAccountByLocalPart(t *testing.T) {
 	}
 	if _, n, _ := s.GetAccountByLocalPart(ctx, "paris@a.example.com"); n != 0 {
 		t.Errorf("a full address is not a local part: n = %d", n)
+	}
+}
+
+// TestEnsureSchemaDeclaresBigint pins the one DDL for both engines: the
+// uint32/int64 counters are BIGINT (int8 on Postgres; INTEGER affinity on
+// SQLite), and a full uint32 round-trips.
+func TestEnsureSchemaDeclaresBigint(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	want := map[string][]string{
+		"imap_mailboxes": {"uidvalidity", "uidnext", "modseq"},
+		"imap_messages":  {"uid", "size", "modseq"},
+	}
+	for table, cols := range want {
+		rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		types := map[string]string{}
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notnull, pk int
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+				t.Fatal(err)
+			}
+			types[name] = typ
+		}
+		rows.Close()
+		for _, c := range cols {
+			if types[c] != "BIGINT" {
+				t.Errorf("%s.%s declared %q, want BIGINT", table, c, types[c])
+			}
+		}
+	}
+	mb := seedAccount(t, s)
+	if _, err := s.db.Exec(`UPDATE imap_mailboxes SET uidvalidity = 4294967295, uidnext = 4294967295 WHERE id = ?`, mb.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := s.GetMailboxByID(ctx, mb.ID)
+	if got.UIDValidity != 4294967295 || got.UIDNext != 4294967295 {
+		t.Errorf("uint32 round trip = %+v", got)
+	}
+}
+
+func TestConcurrentAppendsAllocateDistinctUIDs(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	mb := seedAccount(t, s)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	seen := map[uint32]bool{}
+	var errs []error
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				key := fmt.Sprintf("k-%d-%d", g, i)
+				r, err := s.AppendMessage(ctx, mb.ID, Message{ObjectKey: key, Kind: KindRecord, SHA256: "sha-" + key, Size: 1})
+				mu.Lock()
+				if err != nil {
+					errs = append(errs, err)
+				} else if seen[r.UID] {
+					errs = append(errs, fmt.Errorf("uid %d allocated twice", r.UID))
+				} else {
+					seen[r.UID] = true
+				}
+				mu.Unlock()
+			}
+		}(g)
+	}
+	wg.Wait()
+	if len(errs) > 0 {
+		t.Fatalf("errors: %v", errs[:1])
+	}
+	if len(seen) != 160 {
+		t.Errorf("distinct uids = %d, want 160", len(seen))
+	}
+	got, _, _ := s.GetMailboxByID(ctx, mb.ID)
+	if got.UIDNext != 161 || got.ModSeq != 160 {
+		t.Errorf("mailbox after = uidnext %d modseq %d", got.UIDNext, got.ModSeq)
+	}
+}
+
+// Eight writers racing on ONE object_key with the same content: exactly
+// one row, one UID, the others report Noop — never a leaked unique
+// violation.
+func TestConcurrentSameKeyAppendsSingleUID(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	mb := seedAccount(t, s)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var fresh int
+	var errs []error
+	uids := map[uint32]bool{}
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, err := s.AppendMessage(ctx, mb.ID, Message{ObjectKey: "same", Kind: KindRecord, SHA256: "sha-same", Size: 1})
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			uids[r.UID] = true
+			if !r.Noop {
+				fresh++
+			}
+		}()
+	}
+	wg.Wait()
+	if len(errs) > 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if fresh != 1 || len(uids) != 1 {
+		t.Errorf("fresh=%d uids=%v", fresh, uids)
+	}
+	if n, _, _ := s.CountByMailbox(ctx, mb.ID); n != 1 {
+		t.Errorf("rows = %d", n)
+	}
+}
+
+func TestAppendUnknownMailboxFails(t *testing.T) {
+	s, _ := newTestStore(t)
+	if _, err := s.AppendMessage(context.Background(), "mbox_nope", Message{Kind: KindRecord, SHA256: "x", Size: 1}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestHeadsAndChangesCarryModSeq(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	mb := seedAccount(t, s)
+	if _, err := s.AppendMessage(ctx, mb.ID, Message{ObjectKey: "a", Kind: KindRecord, SHA256: "sa", Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(ctx, mb.ID, Message{ObjectKey: "b", Kind: KindRecord, SHA256: "sb", Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	heads, _ := s.ListMessageHeads(ctx, mb.ID)
+	if len(heads) != 2 || heads[0].ModSeq != 1 || heads[1].ModSeq != 2 {
+		t.Fatalf("heads modseq = %+v", heads)
+	}
+	if _, err := s.SetFlags(ctx, mb.ID, 1, []string{`\Seen`}); err != nil {
+		t.Fatal(err)
+	}
+	heads, _ = s.ListMessageHeads(ctx, mb.ID)
+	m, _, _ := s.GetMessage(ctx, mb.ID, 1)
+	if heads[0].ModSeq != 3 || m.ModSeq != 3 || heads[1].ModSeq != 2 {
+		t.Errorf("after flags: heads=%+v row=%d", heads, m.ModSeq)
+	}
+	got, _, _ := s.GetMailboxByID(ctx, mb.ID)
+	if got.ModSeq != 3 {
+		t.Errorf("mailbox modseq = %d", got.ModSeq)
+	}
+	if ok, _ := s.RemoveMessage(ctx, mb.ID, 2); !ok {
+		t.Fatal("remove")
+	}
+	got, _, _ = s.GetMailboxByID(ctx, mb.ID)
+	if got.ModSeq != 4 {
+		t.Errorf("mailbox modseq after remove = %d", got.ModSeq)
+	}
+	// A remove of a missing uid rolls its bump back.
+	if ok, _ := s.RemoveMessage(ctx, mb.ID, 99); ok {
+		t.Error("removed a missing uid")
+	}
+	got, _, _ = s.GetMailboxByID(ctx, mb.ID)
+	if got.ModSeq != 4 {
+		t.Errorf("no-op remove bumped modseq to %d", got.ModSeq)
+	}
+}
+
+func TestUpsertAccountConcurrentCreate(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var created int
+	var errs []error
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := s.UpsertAccount(ctx, "acme", "race@example.com", "h", "", nil)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+			} else if c {
+				created++
+			}
+		}()
+	}
+	wg.Wait()
+	if len(errs) > 0 || created != 1 {
+		t.Errorf("created=%d errs=%v", created, errs)
+	}
+	mbs, _ := s.ListMailboxes(ctx, "acme", "race@example.com")
+	if len(mbs) != 1 {
+		t.Errorf("mailboxes = %d, want the one INBOX", len(mbs))
 	}
 }

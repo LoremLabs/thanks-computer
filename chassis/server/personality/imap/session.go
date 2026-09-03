@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net"
 	"sort"
 	"strings"
@@ -35,12 +36,13 @@ type session struct {
 	sel *selected
 }
 
-// selected is the SELECTed mailbox: the UID-ordered heads (sequence number
-// = index+1 in the server's view) and this session's tracker.
+// selected is the SELECTed mailbox: this session's copy of the hub's
+// snapshot (sequence number = index+1 in the server's view) and its
+// tracker on the hub's per-mailbox state.
 type selected struct {
 	mb      chimap.Mailbox
 	heads   []chimap.MessageHead
-	mt      *imapserver.MailboxTracker
+	st      *mailboxState
 	tracker *imapserver.SessionTracker
 }
 
@@ -72,10 +74,7 @@ func no(code imap.ResponseCode, text string) error {
 func cannot(text string) error { return no(imap.ResponseCodeCannot, text) }
 
 func (s *session) Close() error {
-	if s.sel != nil {
-		s.sel.tracker.Close()
-		s.sel = nil
-	}
+	s.unselect()
 	if s.slot && s.acct != nil {
 		s.c.conns.release(s.acct.Username)
 		s.slot = false
@@ -385,16 +384,15 @@ func (s *session) Select(name string, options *imap.SelectOptions) (*imap.Select
 	if err != nil {
 		return nil, err
 	}
-	if s.sel != nil {
-		s.sel.tracker.Close()
-		s.sel = nil
-	}
-	heads, err := s.c.store.ListMessageHeads(s.ctx(), mb.ID)
+	s.unselect()
+	st, tr, mb, heads, err := s.c.hub.open(s.ctx(), mb.ID)
 	if err != nil {
+		if errors.Is(err, errMailboxGone) {
+			return nil, no(imap.ResponseCodeNonExistent, "No such mailbox")
+		}
 		return nil, no(imap.ResponseCodeUnavailable, "Temporary failure")
 	}
-	mt := s.c.hub.tracker(mb.ID, uint32(len(heads)))
-	s.sel = &selected{mb: mb, heads: heads, mt: mt, tracker: mt.NewSession()}
+	s.sel = &selected{mb: mb, heads: heads, st: st, tracker: tr}
 
 	flags := s.sel.flagSet()
 	perm := append(append([]imap.Flag{}, flags...), imap.FlagWildcard)
@@ -434,11 +432,28 @@ func (sel *selected) flagSet() []imap.Flag {
 }
 
 func (s *session) Unselect() error {
+	s.unselect()
+	return nil
+}
+
+// unselect releases this session's registration on the hub state. Safe to
+// call when nothing is selected.
+func (s *session) unselect() {
 	if s.sel != nil {
-		s.sel.tracker.Close()
+		s.c.hub.close(s.sel.st, s.sel.tracker)
 		s.sel = nil
 	}
-	return nil
+}
+
+// bye ends the connection: the selected mailbox was reset or deleted (a
+// new UIDVALIDITY), which no session can follow in place — the client
+// reconnects and reselects, as with any other server.
+func (s *session) bye(text string) error {
+	s.unselect()
+	if s.conn != nil {
+		_ = s.conn.Bye(text)
+	}
+	return no(imap.ResponseCodeUnavailable, text)
 }
 
 func (s *session) Subscribe(name string) error {
@@ -465,16 +480,18 @@ func (s *session) Unsubscribe(name string) error {
 
 // ---- selected state ------------------------------------------------------
 
-// refresh reloads the UID view from the store. Appends from an op only
-// ever add at the tail, and removals reach the tracker as EXPUNGE first,
-// so reloading at every command entry keeps the server view and the
-// tracker's client view in step.
+// refresh syncs the hub's snapshot with the index (one point read when
+// nothing changed) and takes this session's copy, so the sequence numbers
+// resolve sees are exactly the ones the tracker will translate.
 func (s *session) refresh() error {
-	heads, err := s.c.store.ListMessageHeads(s.ctx(), s.sel.mb.ID)
+	mb, heads, err := s.c.hub.sync(s.ctx(), s.sel.st)
+	if errors.Is(err, errMailboxGone) {
+		return s.bye("Mailbox was reset or deleted; reselect")
+	}
 	if err != nil {
 		return no(imap.ResponseCodeUnavailable, "Temporary failure")
 	}
-	s.sel.heads = heads
+	s.sel.mb, s.sel.heads = mb, heads
 	return nil
 }
 
@@ -722,7 +739,27 @@ func (s *session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
 		<-stop
 		return nil
 	}
-	return s.sel.tracker.Idle(w, stop)
+	if err := s.refresh(); err != nil {
+		return err
+	}
+	// Drain what was queued before Idle registers its channel (the tracker
+	// only wakes on updates that arrive afterwards).
+	if err := s.sel.tracker.Poll(w, true); err != nil {
+		return err
+	}
+	inner := make(chan struct{})
+	done := make(chan error, 1)
+	tr := s.sel.tracker
+	go func() { done <- tr.Idle(w, inner) }()
+	select {
+	case <-stop:
+		close(inner)
+		return <-done
+	case <-s.sel.st.goneCh:
+		close(inner)
+		<-done
+		return s.bye("Mailbox was reset or deleted; reselect")
+	}
 }
 
 // ---- search ----------------------------------------------------------------

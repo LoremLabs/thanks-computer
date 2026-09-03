@@ -108,6 +108,14 @@ type MessageHead struct {
 	Flags        []string
 	Size         int64
 	InternalDate time.Time
+	// ModSeq is the mailbox modseq at the row's last change (append or
+	// flags); the head diffs snapshots by it.
+	ModSeq int64
+}
+
+// rowQuerier is what listHeads needs: *sql.DB or *sql.Tx.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // AppendResult reports what AppendMessage did.
@@ -209,7 +217,10 @@ func (s *Store) emit(changes []Change) {
 
 // EnsureSchema creates the tables + indexes if absent. Portable DDL: TEXT
 // ids (hxid) instead of engine-specific autoincrement, TEXT RFC3339
-// timestamps, JSON as TEXT, native partial indexes.
+// timestamps, JSON as TEXT, native partial indexes, and BIGINT for the
+// uint32/int64 counters (uidvalidity is a Unix timestamp, uid copies
+// uidnext, size and modseq are int64) — SQLite reads BIGINT as INTEGER
+// affinity, Postgres as int8, so one DDL serves both engines.
 func (s *Store) EnsureSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS imap_accounts (
@@ -231,9 +242,9 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			role        TEXT NOT NULL DEFAULT '',
 			attrs       TEXT NOT NULL DEFAULT '[]',
 			policy      TEXT NOT NULL DEFAULT '{}',
-			uidvalidity INTEGER NOT NULL,
-			uidnext     INTEGER NOT NULL DEFAULT 1,
-			modseq      INTEGER NOT NULL DEFAULT 0,
+			uidvalidity BIGINT NOT NULL,
+			uidnext     BIGINT NOT NULL DEFAULT 1,
+			modseq      BIGINT NOT NULL DEFAULT 0,
 			subscribed  INTEGER NOT NULL DEFAULT 1,
 			created_at  TEXT NOT NULL,
 			deleted_at  TEXT
@@ -242,12 +253,12 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			ON imap_mailboxes (tenant, username, name) WHERE deleted_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS imap_messages (
 			mailbox_id     TEXT NOT NULL,
-			uid            INTEGER NOT NULL,
+			uid            BIGINT NOT NULL,
 			object_key     TEXT NOT NULL DEFAULT '',
 			kind           TEXT NOT NULL,
 			sha256         TEXT NOT NULL,
 			format_version INTEGER NOT NULL DEFAULT 0,
-			size           INTEGER NOT NULL,
+			size           BIGINT NOT NULL,
 			internaldate   TEXT NOT NULL,
 			flags          TEXT NOT NULL DEFAULT '[]',
 			envelope       TEXT NOT NULL DEFAULT '{}',
@@ -256,7 +267,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			from_addr      TEXT NOT NULL DEFAULT '',
 			text_excerpt   TEXT NOT NULL DEFAULT '',
 			parts          TEXT NOT NULL DEFAULT '[]',
-			modseq         INTEGER NOT NULL DEFAULT 0,
+			modseq         BIGINT NOT NULL DEFAULT 0,
 			state          TEXT NOT NULL DEFAULT 'live',
 			created_at     TEXT NOT NULL,
 			PRIMARY KEY (mailbox_id, uid)
@@ -299,6 +310,7 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 
 	var owner string
 	err = s.db.QueryRowContext(ctx, s.rb(`SELECT tenant FROM imap_accounts WHERE username = ?`), username).Scan(&owner)
+	exists := err == nil
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		if pwHash == "" {
@@ -310,16 +322,30 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 		if len(policy) == 0 {
 			policy = json.RawMessage(`{}`)
 		}
-		if _, err := s.db.ExecContext(ctx, s.rb(`
+		_, ierr := s.db.ExecContext(ctx, s.rb(`
 			INSERT INTO imap_accounts (tenant, username, pw_hash, status, policy, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`),
-			tenant, username, pwHash, status, string(policy), now, now); err != nil {
-			return false, fmt.Errorf("imap: insert account: %w", err)
+			tenant, username, pwHash, status, string(policy), now, now)
+		switch {
+		case ierr == nil:
+			created = true
+		case s.dialect.IsUniqueViolationGeneric(ierr):
+			// A concurrent creator won (two nodes provisioning the same
+			// address). Re-read: ours ⇒ treat as an update; theirs ⇒ taken.
+			if rerr := s.db.QueryRowContext(ctx, s.rb(`SELECT tenant FROM imap_accounts WHERE username = ?`), username).Scan(&owner); rerr != nil {
+				return false, fmt.Errorf("imap: insert account: %w", ierr)
+			}
+			if owner != tenant {
+				return false, ErrUsernameTaken
+			}
+			exists = true
+		default:
+			return false, fmt.Errorf("imap: insert account: %w", ierr)
 		}
-		created = true
 	case err != nil:
 		return false, fmt.Errorf("imap: lookup account: %w", err)
-	default:
+	}
+	if exists {
 		if owner != tenant {
 			return false, ErrUsernameTaken
 		}
@@ -449,8 +475,10 @@ func (s *Store) EnsureMailbox(ctx context.Context, tenant, username, name string
 		VALUES (?, ?, ?, ?, '', '[]', '{}', ?, 1, 0, 1, ?)`),
 		id, tenant, username, name, uidv, now.Format(time.RFC3339)); err != nil {
 		// A concurrent creator may have won the unique index; read it back.
-		if mb, ok, gerr := s.GetMailbox(ctx, tenant, username, name); gerr == nil && ok {
-			return mb, false, nil
+		if s.dialect.IsUniqueViolationGeneric(err) {
+			if mb, ok, gerr := s.GetMailbox(ctx, tenant, username, name); gerr == nil && ok {
+				return mb, false, nil
+			}
 		}
 		return Mailbox{}, false, fmt.Errorf("imap: insert mailbox: %w", err)
 	}
@@ -623,6 +651,14 @@ func rawOr(r json.RawMessage, def string) string {
 // retry can't heal). Semantics by object_key (§25.6): same key + same sha
 // → Noop; same key + different sha → the old row is expunged and a NEW UID
 // allocated (Replaced); empty key → always a new row.
+//
+// Appends to one mailbox are serialized: the transaction first locks the
+// mailbox row (LockClause — FOR UPDATE on Postgres; on SQLite the
+// _txlock=immediate connection already holds the write lock), so the
+// object_key check and the uidnext allocation can never interleave across
+// nodes. A unique-index violation (a concurrent writer that won the same
+// key between an out-of-tx check and this call, e.g. CopyMessage) is
+// retried once.
 func (s *Store) AppendMessage(ctx context.Context, mailboxID string, m Message) (AppendResult, error) {
 	if mailboxID == "" {
 		return AppendResult{}, errors.New("imap: empty mailbox id")
@@ -636,17 +672,46 @@ func (s *Store) AppendMessage(ctx context.Context, mailboxID string, m Message) 
 	if m.State == "" {
 		m.State = "live"
 	}
-	now := s.now().Format(time.RFC3339)
-
-	tx, err := s.db.BeginTx(ctx, nil)
+	var res AppendResult
+	var changes []Change
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		res, changes, err = s.appendOnce(ctx, mailboxID, m)
+		if err == nil || !s.dialect.IsUniqueViolationGeneric(err) {
+			break
+		}
+	}
 	if err != nil {
-		return AppendResult{}, fmt.Errorf("imap: begin: %w", err)
+		return AppendResult{}, err
+	}
+	s.emit(changes)
+	return res, nil
+}
+
+// appendOnce is one attempt of AppendMessage: the whole thing in one
+// transaction, returning the changes to emit after commit.
+func (s *Store) appendOnce(ctx context.Context, mailboxID string, m Message) (AppendResult, []Change, error) {
+	now := s.now().Format(time.RFC3339)
+	tx, err := s.dialect.BeginWrite(ctx, s.db)
+	if err != nil {
+		return AppendResult{}, nil, fmt.Errorf("imap: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
+	// Lock the mailbox row for the rest of the transaction.
+	var uidv uint32
+	err = tx.QueryRowContext(ctx, s.rb(`
+		SELECT uidvalidity FROM imap_mailboxes WHERE id = ? AND deleted_at IS NULL`+s.dialect.LockClause()),
+		mailboxID).Scan(&uidv)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AppendResult{}, nil, fmt.Errorf("imap: mailbox %s not found", mailboxID)
+	}
+	if err != nil {
+		return AppendResult{}, nil, fmt.Errorf("imap: lock mailbox: %w", err)
+	}
+
 	var res AppendResult
 	var changes []Change
-
 	if m.ObjectKey != "" {
 		var oldUID uint32
 		var oldSha string
@@ -656,21 +721,17 @@ func (s *Store) AppendMessage(ctx context.Context, mailboxID string, m Message) 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 		case err != nil:
-			return AppendResult{}, fmt.Errorf("imap: lookup object_key: %w", err)
+			return AppendResult{}, nil, fmt.Errorf("imap: lookup object_key: %w", err)
 		case oldSha == m.SHA256:
-			var uidv uint32
-			if err := tx.QueryRowContext(ctx, s.rb(`SELECT uidvalidity FROM imap_mailboxes WHERE id = ?`), mailboxID).Scan(&uidv); err != nil {
-				return AppendResult{}, fmt.Errorf("imap: mailbox: %w", err)
-			}
-			return AppendResult{UID: oldUID, UIDValidity: uidv, Noop: true}, nil
+			return AppendResult{UID: oldUID, UIDValidity: uidv, Noop: true}, nil, nil
 		default:
 			var oldSeq uint32
 			if err := tx.QueryRowContext(ctx, s.rb(`
 				SELECT COUNT(*) FROM imap_messages WHERE mailbox_id = ? AND uid <= ?`), mailboxID, oldUID).Scan(&oldSeq); err != nil {
-				return AppendResult{}, fmt.Errorf("imap: seq of replaced: %w", err)
+				return AppendResult{}, nil, fmt.Errorf("imap: seq of replaced: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx, s.rb(`DELETE FROM imap_messages WHERE mailbox_id = ? AND uid = ?`), mailboxID, oldUID); err != nil {
-				return AppendResult{}, fmt.Errorf("imap: expunge replaced: %w", err)
+				return AppendResult{}, nil, fmt.Errorf("imap: expunge replaced: %w", err)
 			}
 			res.Replaced = true
 			res.ReplacedUID = oldUID
@@ -680,16 +741,16 @@ func (s *Store) AppendMessage(ctx context.Context, mailboxID string, m Message) 
 
 	// Allocate the UID atomically on the mailbox row; uidnext is stored,
 	// never MAX(uid)+1, so a removed tail never recycles a UID.
-	var uid, uidv uint32
+	var uid uint32
 	var modseq int64
 	if err := tx.QueryRowContext(ctx, s.rb(`
 		UPDATE imap_mailboxes SET uidnext = uidnext + 1, modseq = modseq + 1
 		 WHERE id = ? AND deleted_at IS NULL
 		 RETURNING uidnext - 1, uidvalidity, modseq`), mailboxID).Scan(&uid, &uidv, &modseq); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return AppendResult{}, fmt.Errorf("imap: mailbox %s not found", mailboxID)
+			return AppendResult{}, nil, fmt.Errorf("imap: mailbox %s not found", mailboxID)
 		}
-		return AppendResult{}, fmt.Errorf("imap: allocate uid: %w", err)
+		return AppendResult{}, nil, fmt.Errorf("imap: allocate uid: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, s.rb(`
 		INSERT INTO imap_messages
@@ -700,27 +761,33 @@ func (s *Store) AppendMessage(ctx context.Context, mailboxID string, m Message) 
 		m.InternalDate.UTC().Format(time.RFC3339), flagsJSON(m.Flags),
 		rawOr(m.Envelope, "{}"), rawOr(m.BodyStructure, "{}"), m.Subject, m.FromAddr, m.TextExcerpt,
 		rawOr(m.Parts, "[]"), modseq, m.State, now); err != nil {
-		return AppendResult{}, fmt.Errorf("imap: insert message: %w", err)
+		if s.dialect.IsUniqueViolationGeneric(err) {
+			return AppendResult{}, nil, err // retried by AppendMessage
+		}
+		return AppendResult{}, nil, fmt.Errorf("imap: insert message: %w", err)
 	}
 	var total uint32
 	if err := tx.QueryRowContext(ctx, s.rb(`SELECT COUNT(*) FROM imap_messages WHERE mailbox_id = ?`), mailboxID).Scan(&total); err != nil {
-		return AppendResult{}, fmt.Errorf("imap: count: %w", err)
+		return AppendResult{}, nil, fmt.Errorf("imap: count: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return AppendResult{}, fmt.Errorf("imap: commit: %w", err)
+		return AppendResult{}, nil, fmt.Errorf("imap: commit: %w", err)
 	}
 	res.UID = uid
 	res.UIDValidity = uidv
 	changes = append(changes, Change{MailboxID: mailboxID, Kind: ChangeAppend, UID: uid, Seq: total, Total: total})
-	s.emit(changes)
-	return res, nil
+	return res, changes, nil
 }
 
 // ListMessageHeads returns the mailbox's live messages in UID order — the
 // slice a session holds while selected (sequence number = index + 1).
 func (s *Store) ListMessageHeads(ctx context.Context, mailboxID string) ([]MessageHead, error) {
-	rows, err := s.db.QueryContext(ctx, s.rb(`
-		SELECT uid, flags, size, internaldate FROM imap_messages
+	return s.listHeads(ctx, s.db, mailboxID)
+}
+
+func (s *Store) listHeads(ctx context.Context, q rowQuerier, mailboxID string) ([]MessageHead, error) {
+	rows, err := q.QueryContext(ctx, s.rb(`
+		SELECT uid, flags, size, internaldate, modseq FROM imap_messages
 		 WHERE mailbox_id = ? ORDER BY uid`), mailboxID)
 	if err != nil {
 		return nil, fmt.Errorf("imap: list heads: %w", err)
@@ -730,7 +797,7 @@ func (s *Store) ListMessageHeads(ctx context.Context, mailboxID string) ([]Messa
 	for rows.Next() {
 		var h MessageHead
 		var flags, idate string
-		if err := rows.Scan(&h.UID, &flags, &h.Size, &idate); err != nil {
+		if err := rows.Scan(&h.UID, &flags, &h.Size, &idate, &h.ModSeq); err != nil {
 			return nil, fmt.Errorf("imap: scan head: %w", err)
 		}
 		_ = json.Unmarshal([]byte(flags), &h.Flags)
@@ -792,7 +859,7 @@ func (s *Store) GetMessageByKey(ctx context.Context, mailboxID, objectKey string
 // (normalised) set. Flags are the only mutable state under a UID.
 func (s *Store) SetFlags(ctx context.Context, mailboxID string, uid uint32, flags []string) ([]string, error) {
 	norm := NormalizeFlags(flags)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.dialect.BeginWrite(ctx, s.db)
 	if err != nil {
 		return nil, fmt.Errorf("imap: begin: %w", err)
 	}
@@ -824,13 +891,22 @@ func (s *Store) SetFlags(ctx context.Context, mailboxID string, uid uint32, flag
 }
 
 // RemoveMessage expunges one row (an op-side removal). Returns false when
-// no such UID.
+// no such UID. The mailbox row is bumped (and thereby locked) first so the
+// reported sequence number cannot shift under a concurrent writer.
 func (s *Store) RemoveMessage(ctx context.Context, mailboxID string, uid uint32) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.dialect.BeginWrite(ctx, s.db)
 	if err != nil {
 		return false, fmt.Errorf("imap: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	var modseq int64
+	if err := tx.QueryRowContext(ctx, s.rb(`
+		UPDATE imap_mailboxes SET modseq = modseq + 1 WHERE id = ? RETURNING modseq`), mailboxID).Scan(&modseq); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("imap: bump modseq: %w", err)
+	}
 	var seq uint32
 	if err := tx.QueryRowContext(ctx, s.rb(`
 		SELECT COUNT(*) FROM imap_messages WHERE mailbox_id = ? AND uid <= ?`), mailboxID, uid).Scan(&seq); err != nil {
@@ -841,10 +917,7 @@ func (s *Store) RemoveMessage(ctx context.Context, mailboxID string, uid uint32)
 		return false, fmt.Errorf("imap: remove: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return false, nil
-	}
-	if _, err := tx.ExecContext(ctx, s.rb(`UPDATE imap_mailboxes SET modseq = modseq + 1 WHERE id = ?`), mailboxID); err != nil {
-		return false, fmt.Errorf("imap: bump modseq: %w", err)
+		return false, nil // rollback undoes the bump
 	}
 	var total uint32
 	if err := tx.QueryRowContext(ctx, s.rb(`SELECT COUNT(*) FROM imap_messages WHERE mailbox_id = ?`), mailboxID).Scan(&total); err != nil {
@@ -853,7 +926,7 @@ func (s *Store) RemoveMessage(ctx context.Context, mailboxID string, uid uint32)
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("imap: commit: %w", err)
 	}
-	s.emit([]Change{{MailboxID: mailboxID, Kind: ChangeExpunge, UID: uid, Seq: seq, Total: total}})
+	s.emit([]Change{{MailboxID: mailboxID, Kind: ChangeExpunge, UID: uid, Seq: seq, Total: total, Origin: originFrom(ctx)}})
 	return true, nil
 }
 

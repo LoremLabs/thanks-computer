@@ -182,3 +182,52 @@ func join(s []string) string {
 	}
 	return out
 }
+
+func TestRenameSubtreeIgnoresSiblingsAndWildcards(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	seedAccount(t, s)
+	for _, n := range []string{"Brain/Knowledge", "Brain/Knowledge/Old", "Brain/Knowledge2", "Brain/Kn_wledge", "Brain/Knowledge/%"} {
+		if _, err := s.CreateMailbox(ctx, "acme", "p@example.com", n, "", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RenameMailbox(ctx, "acme", "p@example.com", "Brain/Knowledge", "Mind"); err != nil {
+		t.Fatal(err)
+	}
+	mbs, _ := s.ListMailboxes(ctx, "acme", "p@example.com")
+	var names []string
+	for _, m := range mbs {
+		names = append(names, m.Name)
+	}
+	if got := join(names); got != "Brain/Kn_wledge,Brain/Knowledge2,INBOX,Mind,Mind/%,Mind/Old" {
+		t.Errorf("names = %s", got)
+	}
+}
+
+func TestExpungeNoopDoesNotBumpModSeq(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	inbox := seedAccount(t, s)
+	if _, err := s.AppendMessage(ctx, inbox.ID, Message{ObjectKey: "a", Kind: KindRecord, SHA256: "sa", Size: 1}); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _ := s.GetMailboxByID(ctx, inbox.ID)
+	if exp, err := s.Expunge(ctx, inbox.ID, nil); err != nil || len(exp) != 0 {
+		t.Fatalf("expunge = %+v err=%v", exp, err)
+	}
+	after, _, _ := s.GetMailboxByID(ctx, inbox.ID)
+	if after.ModSeq != before.ModSeq {
+		t.Errorf("no-op expunge bumped modseq %d → %d", before.ModSeq, after.ModSeq)
+	}
+	if _, err := s.SetFlags(ctx, inbox.ID, 1, []string{`\Deleted`}); err != nil {
+		t.Fatal(err)
+	}
+	if exp, _ := s.Expunge(ctx, inbox.ID, nil); len(exp) != 1 {
+		t.Fatalf("expunge = %+v", exp)
+	}
+	final, _, _ := s.GetMailboxByID(ctx, inbox.ID)
+	if final.ModSeq != before.ModSeq+2 {
+		t.Errorf("modseq after flags+expunge = %d, want %d", final.ModSeq, before.ModSeq+2)
+	}
+}

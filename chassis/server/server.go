@@ -1459,7 +1459,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// a message RECORD materialized into a mailbox (CAS by sha + index row;
 	// the head renders RFC 5322 on FETCH). Registered unconditionally so a
 	// node without the store answers `_imap.error txco_imap_disabled` and a
-	// stack can branch. Tenant pinned from ctx; the username's domain must
+	// stack can branch. With a shared backend (--imap-store=postgres in the
+	// hosted build) every node opens the store, head or not, so an op here
+	// projects into the index another node's head serves. Tenant pinned from ctx; the username's domain must
 	// pass the sendmail ownership rule against the mirror snapshot. See
 	// chassis/server/imap.go + chassis/imap.
 	imapD := imapDeps{store: imapStore, fcas: fcas, ix: blobIndex, snap: dbc.Snapshot,

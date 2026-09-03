@@ -3,7 +3,6 @@ package imap
 import (
 	"errors"
 	"io"
-	"sort"
 	"strings"
 	"time"
 
@@ -338,7 +337,7 @@ func (s *session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, destName st
 	for _, seq := range seqs {
 		uids = append(uids, s.sel.heads[seq-1].UID)
 	}
-	moved, expunged, err := s.c.store.MoveMessages(chimap.WithOrigin(s.ctx(), s.sel.tracker), s.sel.mb.ID, uids, dest.ID)
+	moved, _, err := s.c.store.MoveMessages(chimap.WithOrigin(s.ctx(), s.sel.tracker), s.sel.mb.ID, uids, dest.ID)
 	if err != nil {
 		return s.storeErr("move", err)
 	}
@@ -349,34 +348,14 @@ func (s *session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, destName st
 			data.DestUIDs.AddNum(imap.UID(d))
 		}
 	}
+	// The committed expunges reach this session through the hub like any
+	// other change: go-imap polls after the handler (before the tagged
+	// OK), so the `* n EXPUNGE` lines follow COPYUID in RFC 6851 order.
 	if err := w.WriteCopyData(data); err != nil {
-		return err
-	}
-	if err := s.writeExpunges(expunged, w.WriteExpunge); err != nil {
 		return err
 	}
 	s.after(m, mut)
 	return nil
-}
-
-// writeExpunges emits this session's EXPUNGE responses for rows the store
-// just removed (descending sequence), then drops them from the view. The
-// hub queued the same expunges for every session, including this one;
-// draining our own tracker of them first keeps the client from seeing
-// them twice.
-func (s *session) writeExpunges(exp []chimap.Expunged, write func(uint32) error) error {
-	if len(exp) == 0 {
-		return nil
-	}
-	// Drain our queued copies silently.
-	_ = s.sel.tracker.Poll(&imapserver.UpdateWriter{}, true)
-	sort.Slice(exp, func(i, j int) bool { return exp[i].Seq > exp[j].Seq })
-	for _, e := range exp {
-		if err := write(e.Seq); err != nil {
-			return err
-		}
-	}
-	return s.refresh()
 }
 
 func (s *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error {
@@ -416,12 +395,10 @@ func (s *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error 
 	if err != nil {
 		return err
 	}
-	exp, err := s.c.store.Expunge(chimap.WithOrigin(s.ctx(), s.sel.tracker), s.sel.mb.ID, only)
-	if err != nil {
+	// EXPUNGE responses are written by go-imap's post-command poll from
+	// the hub's queue (descending sequence), never here.
+	if _, err := s.c.store.Expunge(chimap.WithOrigin(s.ctx(), s.sel.tracker), s.sel.mb.ID, only); err != nil {
 		return s.storeErr("expunge", err)
-	}
-	if err := s.writeExpunges(exp, w.WriteExpunge); err != nil {
-		return err
 	}
 	s.after(m, mut)
 	return nil

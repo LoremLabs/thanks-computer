@@ -33,6 +33,15 @@ listen list non-empty. The index lives in its own SQLite file
 (`--imap-db-path`, default `./chassis/data/imap.db`); message bytes go to
 the content store the blob plane uses.
 
+On a fleet, `--imap-store` selects a backend an overlay registers (the
+hosted build ships `postgres`, reading `TXCO_DB_AUTH_DSN`). A shared backend
+is opened on **every** node, head or not, so `txco://imap/*` on any node
+project into the one index the head serves; a node whose open failed at
+boot answers `txco_imap_disabled` until restart. The head keeps one
+snapshot per selected mailbox and diffs it against the index by `modseq`,
+so a client's next command always sees the latest index and, during IDLE,
+changes made on other nodes arrive within `--imap-sync-interval`.
+
 For local development:
 
 ```
@@ -141,7 +150,11 @@ Subject/From/To/Cc/Bcc/Message-ID, BODY/TEXT over the stored text),
 `STORE`, `CREATE` (nested, `CREATE-SPECIAL-USE`), `DELETE`, `RENAME`
 (subtree), `APPEND` (verbatim, `APPENDLIMIT`), `COPY`, `MOVE`, `EXPUNGE`,
 `SUBSCRIBE`, `NOOP`/`IDLE` — a rule's append shows up in an open client
-as `EXISTS`. Bytes under a UID never change; a client APPEND of the same
+as `EXISTS`: at once when the op ran on this node, within
+`--imap-sync-interval` (15s) when it ran on another node against a shared
+index. An operator reset of a selected mailbox (a new UIDVALIDITY) ends
+the session with `BYE`; the client reconnects and reselects. Bytes under a
+UID never change; a client APPEND of the same
 message twice is two UIDs (no `object_key`), a stack append with the same
 key is a no-op or a replacement.
 
@@ -238,7 +251,8 @@ for `txco dev` and behind-a-proxy deployments only.
 | `--imap-tls-addrs` | (empty) | Implicit-TLS listeners |
 | `--imap-hostname` | (empty) | Public name, added to the managed certificates |
 | `--imap-tls-cert-file` / `--imap-tls-key-file` | (empty) | Certificate from elsewhere |
-| `--imap-store` / `--imap-db-path` | `sqlite` / `./chassis/data/imap.db` | The index |
+| `--imap-store` / `--imap-db-path` | `sqlite` / `./chassis/data/imap.db` | The index; a non-sqlite backend is shared and opened on every node |
+| `--imap-sync-interval` | `15s` | How often selected mailboxes are re-read for changes from other nodes (0 = next command only) |
 | `--imap-insecure-auth` | `false` | LOGIN without TLS |
 | `--imap-self-signed` | `false` | Mint a self-signed certificate at boot (dev; `txco dev --imap` sets it) |
 | `--imap-wire-debug` | `false` | Log every IMAP line at DEBUG, credentials included (dev) |

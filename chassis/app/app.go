@@ -345,17 +345,31 @@ func Run(bi BuildInfo) int {
 	// IMAP mailbox index — the durable store the `imap` personality serves
 	// and txco://imap/* write to. Own file (never the runtime DB: the
 	// dbcache watcher reloads the mirror on every runtime-file write, and a
-	// mailbox index is written on every \Seen). Opened only when the imap
-	// personality is active; ops on other nodes answer txco_imap_disabled.
+	// mailbox index is written on every \Seen). Opened when the head is on
+	// (fatal on failure: there the store is the product) OR when
+	// --imap-store names a shared backend (warn-and-continue: every node
+	// then projects into the one index the head serves, and a node whose
+	// open failed answers txco_imap_disabled until restart — the vector
+	// store's posture). A per-node sqlite index on a node without the head
+	// would be a write-only black hole, so that combination stays closed.
 	var imapStore *chimap.Store
-	if strings.Contains(conf.Personalities, "imap") {
+	if open, fatal := imapStoreMode(conf.Personalities, conf.IMAPStore); open {
 		st, ierr := chimap.Open(conf.IMAPStore, chimap.Config{DBPath: conf.IMAPDBPath})
-		if ierr != nil {
+		switch {
+		case ierr != nil && fatal:
 			logger.Fatal("imap store open failed",
 				zap.String("store", conf.IMAPStore), zap.String("err", ierr.Error()))
+		case ierr != nil:
+			logger.Warn("imap store open failed; txco://imap/* answer txco_imap_disabled on this node until restart",
+				zap.String("store", conf.IMAPStore), zap.String("err", ierr.Error()))
+		default:
+			defer st.Close()
+			imapStore = st
+			logger.Info("imap store opened", zap.String("store", conf.IMAPStore), zap.Bool("head", fatal))
 		}
-		defer st.Close()
-		imapStore = st
+	} else {
+		logger.Info("skipping imap store open — imap personality not active and --imap-store=sqlite",
+			zap.String("personalities", conf.Personalities))
 	}
 
 	logger.Info("db setup") // feedback here proved helpful in debugging file locking for db
@@ -885,4 +899,15 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 			zap.String("schemaFile", f.Name()))
 		current = fileID
 	}
+}
+
+// imapStoreMode decides whether to open the IMAP mailbox index on this
+// node and whether a failure is fatal: the head needs it (fatal); a shared
+// backend is opened everywhere so txco://imap/* on any node project into
+// it (warn-and-continue); the bundled sqlite file without the head is not
+// opened at all.
+func imapStoreMode(personalities, store string) (open, fatal bool) {
+	head := strings.Contains(personalities, "imap")
+	shared := store != "" && store != "sqlite"
+	return head || shared, head
 }

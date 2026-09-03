@@ -82,12 +82,16 @@ type Controller struct {
 // store (imap personality not active) yields an inert controller whose
 // Start is a no-op.
 func NewController(ctx context.Context, pu *processor.Unit, store *chimap.Store) *Controller {
+	var logger *zap.Logger
+	if pu != nil {
+		logger = pu.Logger
+	}
 	c := &Controller{
 		ctx:   ctx,
 		pu:    pu,
 		store: store,
 		cache: newLoginCache(loginCacheTTL, loginCacheMax),
-		hub:   newHub(),
+		hub:   newHub(ctx, store, logger),
 	}
 	if pu != nil {
 		c.loginIP = throttle.New(pu.Conf.IMAPLoginRate, time.Minute)
@@ -176,6 +180,7 @@ func (c *Controller) Start() {
 	// sessions. Installed before the first listener so an op's append
 	// can never race a SELECT's first Poll.
 	c.store.SetOnChange(c.hub.onChange)
+	c.hub.start(parseSyncInterval(c.pu.Conf.IMAPSyncInterval, c.pu.Logger))
 	c.lanes.start()
 
 	opts := &imapserver.Options{
@@ -260,8 +265,29 @@ func (c *Controller) Stop() {
 		}
 	}
 	c.wg.Wait()
+	c.hub.stopTicker()
 	c.lanes.stop()
 	c.pu.Logger.Info("imap controller stopped")
+}
+
+// parseSyncInterval reads --imap-sync-interval: "" or a parse error ⇒ the
+// 15s default (warned); "0" disables the tick.
+func parseSyncInterval(v string, log *zap.Logger) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 15 * time.Second
+	}
+	if v == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		if log != nil {
+			log.Warn("invalid imap-sync-interval, using 15s", zap.String("value", v), zap.String("err", err.Error()))
+		}
+		return 15 * time.Second
+	}
+	return d
 }
 
 // trustedProxy reports whether a peer address is inside
