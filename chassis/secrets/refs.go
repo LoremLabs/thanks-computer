@@ -31,13 +31,23 @@ type Ref struct {
 	// Format is the optional `{}`-template (see format.go); empty
 	// string means "raw substitution — the cleartext is the value".
 	Format string
+	// Optional marks a reference whose secret MAY be unset. Normally a
+	// secret the store cannot materialize is a dispatch failure: the op
+	// never runs and the processor logs an error. With
+	// `secrets.<x>.optional = true` the processor runs the op anyway and
+	// simply leaves the name out of op.Secrets, so the handler sees
+	// bag.Get(name) == (nil, false) and decides what absence means —
+	// txco://basic-auth-verify, for one, reports it as "not configured".
+	// Only ErrSecretNotFound is forgiven; a store or key error still
+	// fails the dispatch.
+	Optional bool
 }
 
 // ParseRefs walks the `secrets` subtree of op.Meta (a JSON-string
 // produced by the WITH-clause decoration pipeline) and returns one
 // Ref per leaf path. Leaves are objects of the shape
 //
-//	{ "secret": "NAME", "format": "..{}.." }   // .format optional
+//	{ "secret": "NAME", "format": "..{}..", "optional": true }   // .format, .optional optional
 //
 // The walker descends through arbitrary nesting, treating any node
 // that itself has a string `secret` field as a leaf (so
@@ -67,10 +77,10 @@ func ParseRefs(meta string) ([]Ref, error) {
 
 // walkRefs recursively descends `node`, accumulating Refs at each
 // leaf. A leaf is a node that has a string `secret` child; we treat
-// it as opaque from there (siblings other than `secret`/`format` are
-// reserved for future extension — we ignore unknown keys at the leaf
-// rather than error, so adding new optional fields stays backward-
-// compatible).
+// it as opaque from there (siblings other than `secret`/`format`/
+// `optional` are reserved for future extension — we ignore unknown keys
+// at the leaf rather than error, so adding new optional fields stays
+// backward-compatible).
 func walkRefs(pathPrefix string, node gjson.Result, out *[]Ref) error {
 	if !node.IsObject() {
 		// Stray scalar inside the tree — invalid shape. The operator
@@ -105,6 +115,12 @@ func walkRefs(pathPrefix string, node gjson.Result, out *[]Ref) error {
 				return fmt.Errorf("secrets: %q.format: %w", pathPrefix, err)
 			}
 		}
+		if optField := node.Get("optional"); optField.Exists() {
+			if !optField.IsBool() {
+				return fmt.Errorf("secrets: %q.optional must be a boolean, got %s", pathPrefix, optField.Type)
+			}
+			ref.Optional = optField.Bool()
+		}
 
 		*out = append(*out, ref)
 		return nil
@@ -117,7 +133,7 @@ func walkRefs(pathPrefix string, node gjson.Result, out *[]Ref) error {
 		// Reserved leaf-only keys: if they appear here it's a malformed
 		// declaration (e.g. `secrets.format = "Bearer {}"` at the top
 		// level, no path attached).
-		if k == "secret" || k == "format" {
+		if k == "secret" || k == "format" || k == "optional" {
 			iterErr = fmt.Errorf("secrets: top-level %q key at %q (must be inside an object with `secret`)", k, pathPrefix)
 			return false
 		}
@@ -155,6 +171,24 @@ func DistinctNames(refs []Ref) []string {
 	return out
 }
 
+// OptionalNames returns the set of NAMEs whose absence the op accepts:
+// a name is optional only when EVERY reference to it says so, because
+// one required use of a secret makes the whole op need it.
+func OptionalNames(refs []Ref) map[string]bool {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		if prev, seen := out[r.Secret]; seen {
+			out[r.Secret] = prev && r.Optional
+		} else {
+			out[r.Secret] = r.Optional
+		}
+	}
+	return out
+}
+
 // HasRefs reports whether op.Meta has any `secrets` declaration at
 // all (without parsing it). Cheap pre-check for the processor
 // splice's fast path.
@@ -164,4 +198,3 @@ func HasRefs(meta string) bool {
 	}
 	return gjson.Get(meta, "secrets").Exists()
 }
-

@@ -179,3 +179,41 @@ func TestHasRefs(t *testing.T) {
 		t.Errorf("HasRefs(meta with 'secrets') should be true")
 	}
 }
+
+func TestParseRefsOptional(t *testing.T) {
+	meta := `{"secrets":{"password":{"secret":"PW","optional":true},"key":{"secret":"K"},"again":{"secret":"PW"}}}`
+	refs, err := ParseRefs(meta)
+	if err != nil {
+		t.Fatalf("ParseRefs: %v", err)
+	}
+	var pwOpt, kOpt int
+	for _, r := range refs {
+		switch {
+		case r.Path == "password" && r.Optional:
+			pwOpt++
+		case r.Path == "key" && !r.Optional:
+			kOpt++
+		}
+	}
+	if pwOpt != 1 || kOpt != 1 {
+		t.Errorf("optional flags not parsed: refs=%+v", refs)
+	}
+	// PW is referenced once optional and once required → required overall.
+	opt := OptionalNames(refs)
+	if opt["PW"] || opt["K"] {
+		t.Errorf("OptionalNames = %v, want PW and K required", opt)
+	}
+	// A name referenced only optionally is optional.
+	only, _ := ParseRefs(`{"secrets":{"password":{"secret":"PW","optional":true}}}`)
+	if !OptionalNames(only)["PW"] {
+		t.Errorf("single optional ref should be optional")
+	}
+	// Wrong type is a parse error, like a wrong-typed format.
+	if _, err := ParseRefs(`{"secrets":{"password":{"secret":"PW","optional":"yes"}}}`); err == nil {
+		t.Errorf("non-boolean optional accepted")
+	}
+	// `optional` at a non-leaf is malformed, like `format` there.
+	if _, err := ParseRefs(`{"secrets":{"optional":true,"password":{"secret":"PW"}}}`); err == nil {
+		t.Errorf("top-level optional accepted")
+	}
+}

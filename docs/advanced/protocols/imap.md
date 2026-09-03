@@ -224,6 +224,23 @@ when adding an account; there is no submission head yet, so for a local
 test run Mailpit (`mailpit --smtp-auth-accept-any --smtp-auth-allow-insecure`)
 and point outgoing at `localhost:1025`, or use a real SMTP account.
 
+## Mail client settings
+
+The head never routes by name: a connection only needs a certificate to
+present, and the front proxy serves whichever one it holds for the name
+the client asked for. So on a fleet where every stack has its own hostname
+(and its own certificate), **the server a mail client should use is the
+domain of the address** — `paris@<stack>.stacks.example` connects to
+`<stack>.stacks.example`, port 993, SSL on. There is no `imap.` name.
+Apple Mail guesses `imap.`/`mail.` and has to be told the server; Thunderbird
+also tries the bare domain when guessing, and would follow an
+`_imaps._tcp` SRV record where the zone publishes one.
+
+On the hosted fleet that is exactly the topology: the edge terminates
+`:993` with the stack's existing certificate and forwards the session to
+the head over the private network with the PROXY protocol, the same path
+the stack's HTTP takes.
+
 ## TLS
 
 Three ways to hold the certificate, all supported:
@@ -251,6 +268,7 @@ for `txco dev` and behind-a-proxy deployments only.
 | `--imap-tls-addrs` | (empty) | Implicit-TLS listeners |
 | `--imap-hostname` | (empty) | Public name, added to the managed certificates |
 | `--imap-tls-cert-file` / `--imap-tls-key-file` | (empty) | Certificate from elsewhere |
+| `--imap-proxy-protocol` | (empty) | CIDRs of front proxies whose PROXY v1/v2 header is honoured (the real client IP) |
 | `--imap-store` / `--imap-db-path` | `sqlite` / `./chassis/data/imap.db` | The index; a non-sqlite backend is shared and opened on every node |
 | `--imap-sync-interval` | `15s` | How often selected mailboxes are re-read for changes from other nodes (0 = next command only) |
 | `--imap-insecure-auth` | `false` | LOGIN without TLS |

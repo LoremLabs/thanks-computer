@@ -27,6 +27,7 @@
 | `txco://hmac-sign` | Compute an HMAC signature (key via `WITH secrets.*`). |
 | `txco://hmac-verify` | Verify an HMAC, constant-time; result lands under `@computed.*`. |
 | `txco://basic-auth-encode` | Encode `user:pass` to a basic-auth header value. |
+| `txco://basic-auth-verify` | Check an inbound `Authorization: Basic …` header against a user and a secret password, constant-time; only the verdict lands under `@computed.*` (`basic_auth_ok`, `basic_auth_configured`). With `secrets.password.optional = true` + `allow_unconfigured = true` an unset secret leaves the route open — the demo/dev shape. |
 | `txco://copy` | Path-to-path copy inside the envelope (what `SET` can't do with computed paths). |
 | `txco://kv/get` · `kv/set` · `kv/delete` · `kv/incr` · `kv/cas` | Read + write durable state across requests — counters, flags, locks, caches (`boltdb` local / `redis` shared). See [kv](./kv.md). |
 | `txco://blob/put` · `blob/get` · `blob/stat` · `blob/list` · `blob/delete` | Runtime-writable BYTES under mutable, permissioned names over the content-addressed store — uploads, documents, artifacts; seeded with a stack via `BLOBS/`. See [blobs](./blobs.md). |

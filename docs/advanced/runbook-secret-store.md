@@ -270,6 +270,34 @@ Two computed-secret ops ship with the chassis:
 - `txco://hmac-sign` — HMAC-SHA256/SHA512, hex or base64 digest.
 - `txco://basic-auth-encode` — base64(`user:password`) for HTTP Basic.
 
+And two verifiers, which consume the secret and emit ONLY a verdict —
+never the digest or the credential, so nothing secret reaches the
+envelope or the trace:
+
+- `txco://hmac-verify` — recompute + constant-time compare, `@computed.sig_valid`.
+- `txco://basic-auth-verify` — an inbound `Authorization: Basic …` header
+  against `user` and the `secrets.password` secret, `@computed.basic_auth_ok`.
+
+### Optional secrets
+
+A secret the store cannot materialize normally fails the dispatch: the
+op does not run and the chassis logs an error. Declare the reference
+`optional` when the rule itself decides what absence means:
+
+```txcl
+WITH user = "provision",
+     secrets.password.secret = "PROVISION_PASSWORD",
+     secrets.password.optional = true,
+     allow_unconfigured = true          # the DECISION, visible here: unset ⇒ open
+  EXEC "txco://basic-auth-verify"
+```
+
+The op then runs with the name absent from `op.Secrets` and reports
+`basic_auth_configured = false`. Only "not found" is forgiven; a store
+or key error still fails the op. Use it for a demo route that is open
+until a password is set — and remember that a misspelled secret name
+reads as "unset".
+
 Custom signing schemes: register your own op handler that reads
 `op.Secrets` via `secrets.BagFromContext(ctx)`.
 

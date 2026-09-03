@@ -1553,6 +1553,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	pu.Handle([]byte("txco://hmac-sign"), event.OpsHandlerFunc(ops.HMACSign))
 	pu.Handle([]byte("txco://hmac-verify"), event.OpsHandlerFunc(ops.HMACVerify))
 	pu.Handle([]byte("txco://basic-auth-encode"), event.OpsHandlerFunc(ops.BasicAuthEncode))
+	pu.Handle([]byte("txco://basic-auth-verify"), event.OpsHandlerFunc(ops.BasicAuthVerify))
 
 	// Envelope-shape core ops. `txco://copy` is the path→path
 	// primitive that closes the "txcl SET RHS is literal-only" gap

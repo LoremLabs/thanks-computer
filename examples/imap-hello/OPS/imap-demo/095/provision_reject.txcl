@@ -1,0 +1,17 @@
+# POST /imap/provision — step 0b: refuse a caller 090 did not vouch for.
+#
+# Fires on anything but an explicit `true` — a wrong or missing
+# Authorization header once a password is set, and equally an absent
+# verdict (an older chassis without txco://basic-auth-verify), so the
+# gate fails closed rather than open. The `_prov_req` marker is what
+# scopes this to the provision route: 090 runs only there, but a
+# missing @computed path is missing on EVERY request, and this rule
+# must not 401 the folders routes.
+WHEN @web.req.method == "POST" && @web.req.url.path == "/imap/provision" && @computed.basic_auth_ok != true
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error", "unauthorized",
+         "message", "POST /imap/provision needs Basic auth: user provision, password = the IMAP_PROVISION_PASSWORD secret"))),
+       @web.res.status = 401,
+       @web.res.headers.www-authenticate.0 = "Basic realm=imap-provision",
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

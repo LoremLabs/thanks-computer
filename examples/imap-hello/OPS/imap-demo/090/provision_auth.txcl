@@ -1,0 +1,26 @@
+# POST /imap/provision — step 0: who may call it.
+#
+# The route is open on loopback (the demo) and closed the moment a
+# password is set: `txco auth tenant secrets set IMAP_PROVISION_PASSWORD
+# --tenant <slug>` for the tenant that runs this stack, then callers send
+# `Authorization: Basic base64("provision:<password>")` —
+# `curl -u provision:<password>`. The secret never reaches the envelope:
+# txco://basic-auth-verify consumes it inside the op and emits only a
+# verdict (@computed.basic_auth_ok) plus whether a password was present
+# (@computed.basic_auth_configured). The comparison is constant-time.
+#
+# `secrets.password.optional = true` lets the op run when the secret is
+# unset (the processor otherwise skips an op whose secret it cannot
+# materialize), and `allow_unconfigured = true` is the DECISION, written
+# here where it can be seen: unset ⇒ open. Two consequences to know:
+# a misspelled secret name reads as "unset", and the reject rule in 095
+# fires only on an explicit false — on a chassis without this op the
+# verdict is absent and 095 still fires, so the route fails CLOSED
+# there rather than open. Verify after deploying with a password set:
+# a POST without credentials must answer 401.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/imap/provision"
+WITH user = "provision",
+     secrets.password.secret = "IMAP_PROVISION_PASSWORD",
+     secrets.password.optional = true,
+     allow_unconfigured = true
+  EXEC "txco://basic-auth-verify"

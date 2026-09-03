@@ -702,9 +702,31 @@ func loadFromFlagsAndEnv(c *Config) error {
 		case reflect.Bool:
 			val.Field(i).SetBool(v.GetBool(id))
 		case reflect.Slice:
-			val.Field(i).Set(reflect.ValueOf(v.GetStringSlice(id)))
+			val.Field(i).Set(reflect.ValueOf(splitListEntries(v.GetStringSlice(id))))
 		}
 	}
 
 	return nil
+}
+
+// splitListEntries normalizes a list-valued setting so the documented
+// comma form works no matter where the value came from. A CLI flag
+// (pflag StringSlice) already splits "a,b" into two entries, but an env
+// value reaches viper as one string and is split on WHITESPACE only
+// (cast.ToStringSlice → strings.Fields), so TXCO_X="a,b" arrived as the
+// single entry "a,b" — an unparseable CIDR, an unbindable address. Every
+// slice field holds addresses, CIDRs, hostnames or origins, none of which
+// contain a comma, so re-splitting each entry on commas (and dropping
+// blanks) is safe for all of them. Whitespace-separated env values keep
+// working as before.
+func splitListEntries(in []string) []string {
+	var out []string
+	for _, e := range in {
+		for _, p := range strings.Split(e, ",") {
+			if t := strings.TrimSpace(p); t != "" {
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }

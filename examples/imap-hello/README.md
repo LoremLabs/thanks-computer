@@ -7,6 +7,8 @@ what goes in it with `txco://imap/append`. Nothing lands there on its own.
 
 ```
 OPS/imap-demo/
+  090/provision_auth.txcl    POST /imap/provision → txco://basic-auth-verify (open until IMAP_PROVISION_PASSWORD is set)
+  095/provision_reject.txcl  …401 unless the verdict is an explicit true
   100/provision_parse.txcl   POST /imap/provision → parse {"username", "password"?}
   100/folders_*.txcl         POST /imap/folders (create a role-tagged folder), GET /imap/folders
   110/account.txcl           txco://imap/account (argon2id; password generated when omitted)
@@ -32,14 +34,38 @@ curl -X POST http://localhost:8080/imap/provision \
 ```
 
 The password is returned exactly once — only its hash is stored. The
-routes in this example are **unauthenticated on purpose** (it is a loopback
-demo); the guarantee that holds everywhere is in the op: `txco://imap/account`
-runs only inside this tenant's rules and only for a domain the tenant
-owns. A product decides who may call it in the route's WHEN clause. The
+routes in this example are **open on loopback** (it is a demo); the
+guarantee that holds everywhere is in the op: `txco://imap/account` runs
+only inside this tenant's rules and only for a domain the tenant owns. A
+product decides who may call it in the route's WHEN clause. The
 username's domain must be one the tenant owns (a verified hostname
 binding or a delegated zone); `*.local.thanks.computer` resolves to
 loopback and is auto-verified by `txco dev`, which is why the hostname
 bind above is enough.
+
+### Closing the provision route
+
+`POST /imap/provision` closes the moment a password is set on the
+tenant running the stack (`OPS/imap-demo/090` + `095`):
+
+```
+txco auth tenant secrets set IMAP_PROVISION_PASSWORD --tenant <slug>   # hidden prompt
+curl -u provision:<that password> -X POST https://<stack host>/imap/provision \
+  -d '{"username":"paris@<stack host>"}'
+```
+
+Without the header the route answers `401` with `WWW-Authenticate: Basic
+realm=imap-provision`. `txco://basic-auth-verify` checks the header inside
+the op, constant-time, and emits only a verdict — the password never
+touches the envelope or a trace. The rule declares the secret
+`optional` and says `allow_unconfigured = true`, which is the whole
+policy in one visible line: **unset ⇒ open** (the demo), **set ⇒ Basic
+auth**. Two things follow from that choice: a misspelled secret name
+reads as "unset", so after deploying with a password, prove the gate
+with one POST that carries no credentials and expect `401`; and on a
+chassis without this op the verdict is absent and the reject rule still
+fires, so the route fails closed there rather than open. The folders
+routes stay open — gate them the same way if a deployment needs it.
 
 The dev head serves a self-signed certificate kept at
 `.txco/dev/imap-selfsigned.crt`. Trust it once so the mail client connects

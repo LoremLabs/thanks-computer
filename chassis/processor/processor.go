@@ -1796,9 +1796,20 @@ func (pu *Unit) materializeOpSecrets(ctx context.Context, op *operation.Operatio
 		return fmt.Errorf("invalid `secrets` declaration: %w", perr)
 	}
 	tenantSlug := tenantScope(ctx)
+	optional := secrets.OptionalNames(refs)
 	for _, name := range secrets.DistinctNames(refs) {
 		cleartext, _, merr := pu.Secrets.MaterializeForOpSlug(ctx, tenantSlug, op.Stack, name)
 		if merr != nil {
+			if optional[name] && errors.Is(merr, secrets.ErrSecretNotFound) {
+				// Declared `secrets.<x>.optional = true`: an unset secret is
+				// a state the handler interprets (bag.Get reports absence),
+				// not a dispatch failure. Only "not found" is forgiven; a
+				// store/key error below still fails the op.
+				pu.Logger.Debug("optional secret not set; op runs without it",
+					zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
+					zap.String("op_name", op.Name), zap.String("secret", name))
+				continue
+			}
 			return fmt.Errorf("secret %q: %w", name, merr)
 		}
 		op.Secrets.Set(name, cleartext)
@@ -2510,7 +2521,11 @@ func (pu *Unit) ExecCore(ctx context.Context, op operation.Operation) (event.Pay
 	// signing ops) can read materialized cleartext AND their WITH-
 	// clause parameters. ExecHTTP gets `op` directly; core handlers
 	// only get (ctx, opName, in, out), so both travel via ctx.
-	if op.Secrets.Len() > 0 {
+	// An op that DECLARED `secrets.*` gets its bag even when every
+	// declared name was optional and unset (bag empty), so a handler can
+	// tell "declared, absent" (bag present, Get reports !ok) from "no
+	// secret plumbing at all" (nil bag → a config error in the handler).
+	if op.Secrets.Len() > 0 || secrets.HasRefs(op.Meta) {
 		ctx = secrets.WithBag(ctx, &op.Secrets)
 	}
 	if op.Meta != "" {

@@ -57,3 +57,54 @@ func TestLoadFromFlagsAndEnv(t *testing.T) {
 		t.Errorf("AdminAddr = %q, want default :8081", c.AdminAddr)
 	}
 }
+
+// TestLoadFromFlagsAndEnv_ListEnvSeparators pins the separator contract for
+// list-valued settings coming from the ENVIRONMENT. A CLI flag splits on
+// commas (pflag StringSlice CSV); an env value reaches viper as one string
+// and used to be split on whitespace only, so TXCO_IMAP_PROXY_PROTOCOL=
+// "172.16.0.0/12,fdaa::/8" arrived as ONE unparseable entry (first IMAP 0c
+// deploy, 2026-09-03). splitListEntries makes the documented comma form
+// work from env too, keeps whitespace working, and drops blanks.
+func TestLoadFromFlagsAndEnv_ListEnvSeparators(t *testing.T) {
+	origArgs := os.Args
+	t.Cleanup(func() { os.Args = origArgs })
+	os.Args = []string{"chassis"}
+
+	t.Setenv("TXCO_IMAP_PROXY_PROTOCOL", "172.16.0.0/12,fdaa::/8") // comma
+	t.Setenv("TXCO_LMTP_LISTEN_ADDRS", ":2424 :2425")              // whitespace
+	t.Setenv("TXCO_DNS_NAMESERVERS", "ns1.example, ns2.example ,") // mixed + blanks
+	t.Setenv("TXCO_IMAP_LISTEN_ADDRS", ":1143")                    // single
+
+	var c Config
+	if err := loadFromFlagsAndEnv(&c); err != nil {
+		t.Fatalf("loadFromFlagsAndEnv: %v", err)
+	}
+	want := map[string][]string{
+		"IMAPProxyProtocol": {"172.16.0.0/12", "fdaa::/8"},
+		"LMTPListenAddrs":   {":2424", ":2425"},
+		"DNSNameservers":    {"ns1.example", "ns2.example"},
+		"IMAPListenAddrs":   {":1143"},
+	}
+	got := map[string][]string{
+		"IMAPProxyProtocol": c.IMAPProxyProtocol,
+		"LMTPListenAddrs":   c.LMTPListenAddrs,
+		"DNSNameservers":    c.DNSNameservers,
+		"IMAPListenAddrs":   c.IMAPListenAddrs,
+	}
+	for k, w := range want {
+		g := got[k]
+		if len(g) != len(w) {
+			t.Errorf("%s = %q, want %q", k, g, w)
+			continue
+		}
+		for i := range w {
+			if g[i] != w[i] {
+				t.Errorf("%s[%d] = %q, want %q", k, i, g[i], w[i])
+			}
+		}
+	}
+	// A list flag left unset stays empty (no [""] from splitting "").
+	if len(c.IMAPTLSAddrs) != 0 {
+		t.Errorf("IMAPTLSAddrs = %q, want empty", c.IMAPTLSAddrs)
+	}
+}
