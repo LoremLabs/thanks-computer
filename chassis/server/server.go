@@ -1477,6 +1477,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	for name, fn := range map[string]func(context.Context, imapDeps, []byte) (event.Payload, error){
 		"txco://imap/mailbox":  imapMailbox,
 		"txco://imap/remove":   imapRemove,
+		"txco://imap/move":     imapMove,
 		"txco://imap/flags":    imapFlags,
 		"txco://imap/list":     imapList,
 		"txco://imap/messages": imapMessages,

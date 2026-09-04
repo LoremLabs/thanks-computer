@@ -65,11 +65,7 @@ func imapMailboxFor(ctx context.Context, d imapDeps, acct chimap.Account, meta [
 		if target == "" {
 			target = "INBOX"
 		}
-		if role, isRole := strings.CutPrefix(target, "role:"); isRole {
-			mb, found, err = d.store.GetMailboxByRole(ctx, acct.Tenant, acct.Username, role)
-		} else {
-			mb, found, err = d.store.GetMailbox(ctx, acct.Tenant, acct.Username, target)
-		}
+		mb, found, err = lookupMailboxRef(ctx, d, acct, target)
 	}
 	if err != nil {
 		return chimap.Mailbox{}, imapErr(into, "txco_imap_store", err.Error()), false
@@ -78,6 +74,16 @@ func imapMailboxFor(ctx context.Context, d imapDeps, acct chimap.Account, meta [
 		return chimap.Mailbox{}, imapErr(into, "txco_imap_no_mailbox", "no such mailbox for "+acct.Username), false
 	}
 	return mb, event.Payload{}, true
+}
+
+// lookupMailboxRef resolves a mailbox reference as the ops spell it: a full
+// name ("Done", "Projects/2026") or "role:<role>". Shared by the `mailbox`
+// param of every message op and the `to` param of txco://imap/move.
+func lookupMailboxRef(ctx context.Context, d imapDeps, acct chimap.Account, ref string) (chimap.Mailbox, bool, error) {
+	if role, isRole := strings.CutPrefix(ref, "role:"); isRole {
+		return d.store.GetMailboxByRole(ctx, acct.Tenant, acct.Username, role)
+	}
+	return d.store.GetMailbox(ctx, acct.Tenant, acct.Username, ref)
 }
 
 func mailboxJSON(b *jsonx.Builder, prefix string, mb chimap.Mailbox) {
@@ -281,6 +287,64 @@ func imapRemove(ctx context.Context, d imapDeps, in []byte) (event.Payload, erro
 	}
 	raw, _ := sjson.Set(`{}`, into+".removed", removed)
 	raw, _ = sjson.Set(raw, into+".uid", m.UID)
+	return event.Payload{Raw: raw, Type: event.JSON}, nil
+}
+
+// imapMove moves one message to another mailbox of the same account — the
+// stack's counterpart to a client's MOVE: a lifecycle step ("done",
+// "needs attention") expressed as a folder, with the message keeping its
+// bytes and flags and getting a new UID in the destination. WITH `username`,
+// `mailbox` (source, default INBOX), `uid` or `object_key`, `to` (a name or
+// "role:<role>"). Result: {moved, uid (new), from_uid, mailbox (dest name)}.
+// Same source and destination is a no-op (moved=false). IDLE clients see
+// the EXPUNGE + EXISTS through the store's change events, as for any move.
+func imapMove(ctx context.Context, d imapDeps, in []byte) (event.Payload, error) {
+	tenant, meta, into, ep, ok := imapPrelude(ctx, d)
+	if !ok {
+		return ep, nil
+	}
+	acct, ep, ok := imapAccountFor(ctx, d, tenant, meta, into)
+	if !ok {
+		return ep, nil
+	}
+	src, ep, ok := imapMailboxFor(ctx, d, acct, meta, into)
+	if !ok {
+		return ep, nil
+	}
+	to := gjson.GetBytes(meta, "to").String()
+	if to == "" {
+		return imapErr(into, "txco_imap_invalid_arg", "need `to` (destination mailbox name or role:<role>)"), nil
+	}
+	dest, found, err := lookupMailboxRef(ctx, d, acct, to)
+	if err != nil {
+		return imapErr(into, "txco_imap_store", err.Error()), nil
+	}
+	if !found {
+		return imapErr(into, "txco_imap_no_mailbox", "no such destination mailbox "+to+" for "+acct.Username), nil
+	}
+	m, ep, ok := imapMessageFor(ctx, d, src, meta, into)
+	if !ok {
+		return ep, nil
+	}
+	if dest.ID == src.ID {
+		raw, _ := sjson.Set(`{}`, into+".moved", false)
+		raw, _ = sjson.Set(raw, into+".uid", m.UID)
+		raw, _ = sjson.Set(raw, into+".from_uid", m.UID)
+		raw, _ = sjson.Set(raw, into+".mailbox", dest.Name)
+		return event.Payload{Raw: raw, Type: event.JSON}, nil
+	}
+	moved, _, err := d.store.MoveMessages(ctx, src.ID, []uint32{m.UID}, dest.ID)
+	if err != nil {
+		return imapErr(into, "txco_imap_store", err.Error()), nil
+	}
+	newUID, ok := moved[m.UID]
+	if !ok {
+		return imapErr(into, "txco_imap_no_message", "message vanished during move"), nil
+	}
+	raw, _ := sjson.Set(`{}`, into+".moved", true)
+	raw, _ = sjson.Set(raw, into+".uid", newUID)
+	raw, _ = sjson.Set(raw, into+".from_uid", m.UID)
+	raw, _ = sjson.Set(raw, into+".mailbox", dest.Name)
 	return event.Payload{Raw: raw, Type: event.JSON}, nil
 }
 

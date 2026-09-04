@@ -230,6 +230,9 @@ func TestMailboxHelpers(t *testing.T) {
 	if _, ok, _ := s.GetMailboxByRole(ctx, "acme", "p@example.com", "knowledge"); ok {
 		t.Error("no role assigned yet")
 	}
+	if got := strings.Join(NormalizeFlags([]string{"Flagged", `\flagged`, "seen", "$Failed", "recent"}), ","); got != `$Failed,\Flagged,\Seen` {
+		t.Errorf("backslash-less system flags: %q", got)
+	}
 	if NormalizeFlags([]string{`\Recent`, "", " x "}) == nil || len(NormalizeFlags([]string{`\Recent`})) != 0 {
 		t.Error("\\Recent must be dropped")
 	}

@@ -107,7 +107,7 @@ EXEC "txco://imap/append"
 | `username`, `mailbox` | The account (must belong to this tenant) and the target mailbox (default `INBOX`). |
 | `object_key` (req) | Your key. Same key + same content → `noop`; same key + different content → the old UID is expunged and a **new** UID allocated (`replaced`). Bytes under a UID never change. |
 | `message` | `{from, to, cc, reply_to, subject, date, message_id, in_reply_to, references, headers{}, text, html, attachments[{name, content_type, size, sha256?}]}`. Attachments are references: name/type/size always, a `sha256` only when the bytes are in the content store. |
-| `flags` | Initial flags/keywords (`\Seen`, `$Anything`). |
+| `flags` | Initial flags/keywords (`\Seen`, `$Anything`). System flags may be written without the backslash (`"Flagged"` → `\Flagged`), which keeps txcl string literals escape-free. |
 | `internaldate` | RFC3339; default now. Also the `Date:` fallback. |
 
 Result: `{uid, uidvalidity, sha256, size, noop, replaced, mailbox}`.
@@ -128,6 +128,7 @@ message renders byte-identically on every fetch.
 |---|---|---|
 | `txco://imap/mailbox` | `username`, `name` (full path) or `id`, `role`, `attrs[]` (special-use), `policy{}`, `rename_to`, `delete`, `reset` | `{id, name, role, attrs, policy, uidvalidity, created, deleted?}` — creates when absent, updates otherwise |
 | `txco://imap/remove` | `username`, `mailbox`, `uid` or `object_key` | `{removed, uid}` |
+| `txco://imap/move` | `username`, `mailbox` (source), `uid` or `object_key`, `to` (name or `role:<role>`) | `{moved, uid, from_uid, mailbox}` — a lifecycle step as a folder ("Done"); the message keeps its bytes and flags under a new UID; same folder is a no-op |
 | `txco://imap/flags` | `username`, `mailbox`, `uid` or `object_key`, `add[]`, `remove[]` | `{uid, flags[]}` |
 | `txco://imap/list` | `username`, `prefix` | `{mailboxes:[{id, name, role, attrs, policy, uidvalidity, messages, unseen}], count}` |
 | `txco://imap/messages` | `username`, `mailbox`, `after` (uid cursor), `limit` (≤ 1000), `flags[]` (any-of) | `{items:[{uid, object_key, kind, sha256, size, internaldate, flags, subject, from, parts[]}], next, count}` |

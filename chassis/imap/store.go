@@ -586,10 +586,14 @@ func (s *Store) SetSubscribed(ctx context.Context, mailboxID string, subscribed 
 // ---- messages ------------------------------------------------------------
 
 // systemFlags maps the lowercase form of each RFC 3501 system flag to its
-// conventional spelling.
+// conventional spelling — with and without the leading backslash, so a rule
+// author can write `"Flagged"` in txcl (where a backslash in a string
+// literal is a hazard) and store the same `\Flagged` a client sets.
 var systemFlags = map[string]string{
 	`\seen`: `\Seen`, `\answered`: `\Answered`, `\flagged`: `\Flagged`,
 	`\deleted`: `\Deleted`, `\draft`: `\Draft`, `\recent`: `\Recent`,
+	`seen`: `\Seen`, `answered`: `\Answered`, `flagged`: `\Flagged`,
+	`deleted`: `\Deleted`, `draft`: `\Draft`, `recent`: `\Recent`,
 }
 
 // NormalizeFlags trims, drops empties and \Recent (server-owned, never
@@ -604,11 +608,12 @@ func NormalizeFlags(in []string) []string {
 			continue
 		}
 		lc := strings.ToLower(f)
-		if lc == `\recent` {
-			continue
-		}
 		if canon, ok := systemFlags[lc]; ok {
 			f = canon
+			lc = strings.ToLower(canon) // "flagged" and `\flagged` are one flag
+		}
+		if lc == `\recent` {
+			continue
 		}
 		if seen[lc] {
 			continue

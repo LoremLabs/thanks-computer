@@ -224,3 +224,48 @@ func gjsonStrings(raw, path string) []string {
 	}
 	return out
 }
+
+// TestIMAPMoveOp: a stack moves a message between folders by object_key,
+// the destination may be a role, flags survive, same-folder is a no-op,
+// and system flags spelled without the backslash canonicalise.
+func TestIMAPMoveOp(t *testing.T) {
+	d := newIMAPDeps(t, map[string]string{"pony.example.com": "acme"})
+	provision(t, d)
+	if out := callIMAP(t, imapMailbox, d, "acme", `{"username":"paris@pony.example.com","name":"Done","role":"done"}`); gjson.Get(out, "_imap.error").Exists() {
+		t.Fatal(out)
+	}
+	out := callIMAP(t, imapAppend, d, "acme", `{"username":"paris@pony.example.com","object_key":"mail:1","message":{"subject":"job","text":"body"},"flags":["Flagged","$Failed"]}`)
+	if gjson.Get(out, "_imap.error").Exists() {
+		t.Fatal(out)
+	}
+	srcUID := gjson.Get(out, "_imap.uid").Uint()
+
+	// Move by object_key into the role.
+	out = callIMAP(t, imapMove, d, "acme", `{"username":"paris@pony.example.com","object_key":"mail:1","to":"role:done"}`)
+	if !gjson.Get(out, "_imap.moved").Bool() || gjson.Get(out, "_imap.mailbox").String() != "Done" || gjson.Get(out, "_imap.from_uid").Uint() != srcUID || gjson.Get(out, "_imap.uid").Uint() == 0 {
+		t.Fatalf("move = %s", out)
+	}
+	// Gone from INBOX, present in Done with its flags (backslash-less "Flagged" stored canonically).
+	if out = callIMAP(t, imapGet, d, "acme", `{"username":"paris@pony.example.com","object_key":"mail:1"}`); gjson.Get(out, "_imap.error.code").String() != "txco_imap_no_message" {
+		t.Errorf("still in INBOX: %s", out)
+	}
+	out = callIMAP(t, imapGet, d, "acme", `{"username":"paris@pony.example.com","mailbox":"Done","object_key":"mail:1"}`)
+	if gjson.Get(out, "_imap.headers.Subject").String() != "job" || strings.Join(gjsonStrings(out, "_imap.flags"), ",") != `$Failed,\Flagged` {
+		t.Errorf("moved message = %s", out)
+	}
+	// Same folder: no-op, not an error.
+	out = callIMAP(t, imapMove, d, "acme", `{"username":"paris@pony.example.com","mailbox":"Done","object_key":"mail:1","to":"Done"}`)
+	if gjson.Get(out, "_imap.moved").Bool() || gjson.Get(out, "_imap.error").Exists() {
+		t.Errorf("same-folder move = %s", out)
+	}
+	// Unknown destination and missing message are the usual coded errors.
+	if out = callIMAP(t, imapMove, d, "acme", `{"username":"paris@pony.example.com","mailbox":"Done","object_key":"mail:1","to":"role:nope"}`); gjson.Get(out, "_imap.error.code").String() != "txco_imap_no_mailbox" {
+		t.Errorf("bad dest = %s", out)
+	}
+	if out = callIMAP(t, imapMove, d, "acme", `{"username":"paris@pony.example.com","object_key":"mail:1","to":"Done"}`); gjson.Get(out, "_imap.error.code").String() != "txco_imap_no_message" {
+		t.Errorf("missing = %s", out)
+	}
+	if out = callIMAP(t, imapMove, d, "acme", `{"username":"paris@pony.example.com","object_key":"mail:1"}`); gjson.Get(out, "_imap.error.code").String() != "txco_imap_invalid_arg" {
+		t.Errorf("no to = %s", out)
+	}
+}
