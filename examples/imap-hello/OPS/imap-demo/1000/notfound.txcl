@@ -1,0 +1,12 @@
+# Anything this stack did not answer: 404, not `200 {}`.
+#
+# Every responding rule above halts, so reaching scope 1000 over HTTP
+# means nothing matched (a mail client probing /autodiscover/…, a
+# crawler). Without this the chassis's default projection answers an
+# empty envelope as 200 — which Thunderbird then tried to parse as a
+# config, and which still ran the flow and billed fuel.
+WHEN @src == "http"
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.body = &b64encode(&to_json(&object("error", "not_found"))),
+       @halt = true

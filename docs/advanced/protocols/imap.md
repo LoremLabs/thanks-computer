@@ -75,12 +75,16 @@ EXEC "txco://imap/account"
 |---|---|
 | `username` (req) | `<local>@<domain>`. The domain must be a verified hostname binding or a delegated DNS zone of the tenant — the same ownership rule `txco://sendmail` applies to `From:`. Usernames are global: one tenant per address. |
 | `password` | Omitted: unchanged on update, generated on create. `""`: generated. Otherwise stored (≥ 8 chars). Only an argon2id hash is kept. |
+| `rotate` | `true`: generate a new password for an existing account and return it once (a "rotate mailbox password" button). With an explicit `password` it is simply that password. |
+| `password_style` | How a generated password looks: `token` (default) is a 24-character group token (`xxxx-xxxx-…`, ~116 bits); `words` is hyphen-joined words from the BIP-39 list (`river-galaxy-bamboo-orbit-velvet`), 11 bits per word — the phrase a person types into a phone. |
+| `password_words` | Word count for `words`, 4–12, default 5 (55 bits: online guessing is throttled by the head, and an offline attack on the argon2id hash is measured in millennia). |
 | `status` | `active` (default) or `disabled`. |
 | `policy` | Account-default policy object (reserved for the next phase). |
 
-Result at `into` (default `_imap`): `{username, created, password?}` —
-`password` appears **only** when it was generated, and only this once.
-Creating an account creates its `INBOX`.
+Result at `into` (default `_imap`): `{username, created, password?, rotated?}` —
+`password` appears **only** when it was generated (create, `""`, or
+`rotate`), and only this once; `rotated` is `true` when an existing
+account's password was regenerated. Creating an account creates its `INBOX`.
 
 ## Messages: `txco://imap/append`
 
@@ -232,11 +236,13 @@ the client asked for. So on a fleet where every stack has its own hostname
 (and its own certificate), **the server a mail client should use is the
 domain of the address** — `paris@<stack>.stacks.example` connects to
 `<stack>.stacks.example`, port 993, SSL on. There is no `imap.` name.
-Apple Mail guesses `imap.`/`mail.` and has to be told the server. Thunderbird,
-K-9 and Evolution look up an `_imaps._tcp` SRV record first (RFC 6186): a
-zone the `dns` personality serves publishes one for every name when
-`--dns-imaps-port` is set (see [dns](./dns.md)), so those clients fill in
-the server and port themselves.
+Apple Mail guesses `imap.`/`mail.` and has to be told the server. Thunderbird
+fetches `https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`
+before it guesses; a stack answers that with two short rules
+(`examples/imap-hello`, `OPS/imap-demo/080` and `085`) and a Thunderbird
+user then types only the address and password. Thunderbird does not
+consult RFC 6186 `_imaps._tcp` SRV records; the `dns` personality can still
+publish them for clients that do (`--dns-imaps-port`, see [dns](./dns.md)).
 
 On the hosted fleet that is exactly the topology: the edge terminates
 `:993` with the stack's existing certificate and forwards the session to

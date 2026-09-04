@@ -1,5 +1,5 @@
 {
-  "note": "IMAP head + provisioning: POST /imap/provision creates an account (argon2id) with its INBOX and drops a hello record into it; POST /imap/folders creates a role-tagged folder with a per-verb policy; GET /imap/folders lists the account's mailboxes. The account is then readable by any mail client on 127.0.0.1:1143, and the `_imap` stack observes client mutations (and refuses appends into role \"readonly\"). Binds localhost \u2192 imap-demo for the routes and pony.local.thanks.computer (dev-local, auto-verified) as the domain the username must belong to. Needs `txco dev --imap`. The provision route is gated by txco://basic-auth-verify but stays OPEN here because no IMAP_PROVISION_PASSWORD secret is set (the rule declares the secret optional + allow_unconfigured); the 401 path is exercised by hand — see the README.",
+  "note": "IMAP head + provisioning: POST /imap/provision creates an account (argon2id) with its INBOX and drops a hello record into it; POST /imap/folders creates a role-tagged folder with a per-verb policy; GET /imap/folders lists the account's mailboxes. The account is then readable by any mail client on 127.0.0.1:1143, and the `_imap` stack observes client mutations (and refuses appends into role \"readonly\"). Binds localhost \u2192 imap-demo for the routes and pony.local.thanks.computer (dev-local, auto-verified) as the domain the username must belong to. Needs `txco dev --imap`. The provision route is gated by txco://basic-auth-verify but stays OPEN here because no IMAP_PROVISION_PASSWORD secret is set (the rule declares the secret optional + allow_unconfigured); the 401 path is exercised by hand \u2014 see the README.",
   "dev_flags": [
     "--imap"
   ],
@@ -68,6 +68,20 @@
       "status": 400,
       "contains": "txco_imap_no_account",
       "body": "{\"username\":\"ghost@pony.local.thanks.computer\",\"name\":\"X\"}"
+    },
+    {
+      "name": "thunderbird autoconfig XML names the request host as the IMAP server",
+      "method": "GET",
+      "path": "/.well-known/autoconfig/mail/config-v1.1.xml?emailaddress=paris%40localhost",
+      "status": 200,
+      "contains": "<hostname>localhost</hostname>"
+    },
+    {
+      "name": "unhandled paths are 404, not 200 {}",
+      "method": "POST",
+      "path": "/autodiscover/autodiscover.xml",
+      "status": 404,
+      "contains": "not_found"
     }
   ]
 }

@@ -1,0 +1,14 @@
+# GET /.well-known/autoconfig/mail/config-v1.1.xml — step 1: which host.
+#
+# Thunderbird's account setup fetches this URL on the address's domain
+# (after the ISPDB and autoconfig.<domain>, before Exchange autodiscover
+# and hostname guessing) and, given a parseable answer, fills in the
+# server itself — the user types only the address and password. It does
+# NOT consult RFC 6186 `_imaps._tcp` SRV records. Apple Mail uses neither.
+#
+# The IMAP server for paris@<host> is <host> itself (the head does not
+# route by name; the front door serves every hostname), so the answer is
+# built from the request's Host, minus any :port. 085 renders it.
+WHEN @src == "http" && @web.req.method == "GET" && @web.req.url.path == "/.well-known/autoconfig/mail/config-v1.1.xml"
+  EMIT ._ac.host = &get(&split(@web.req.host, ":"), "0"),
+       ._ac.req = true

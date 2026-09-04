@@ -213,3 +213,85 @@ func TestIMAPAppendOp(t *testing.T) {
 		t.Errorf("too large = %s", out)
 	}
 }
+
+// TestIMAPAccountOpWordsAndRotate covers the studio-facing password
+// shapes: `password_style = "words"` (BIP-39 words, default 5) and
+// `rotate = true` (regenerate for an existing account, returned once).
+func TestIMAPAccountOpWordsAndRotate(t *testing.T) {
+	d := newIMAPDeps(t, map[string]string{"pony.example.com": "acme"})
+	wordShape := func(t *testing.T, pw string, n int) {
+		t.Helper()
+		parts := strings.Split(pw, "-")
+		if len(parts) != n {
+			t.Fatalf("password %q has %d words, want %d", pw, len(parts), n)
+		}
+		for _, w := range parts {
+			if w == "" || strings.ToLower(w) != w || strings.Trim(w, "abcdefghijklmnopqrstuvwxyz") != "" {
+				t.Fatalf("password %q: word %q is not a lowercase word", pw, w)
+			}
+		}
+	}
+	verify := func(t *testing.T, pw string) bool {
+		t.Helper()
+		a, ok, _ := d.store.GetAccount(context.Background(), "paris@pony.example.com")
+		if !ok {
+			t.Fatal("account missing")
+		}
+		m, _ := chimap.VerifyPassword(a.PwHash, pw)
+		return m
+	}
+
+	// Create with words (default 5).
+	out := callIMAP(t, imapAccount, d, "acme", `{"username":"paris@pony.example.com","password_style":"words"}`)
+	if gjson.Get(out, "_imap.error").Exists() || !gjson.Get(out, "_imap.created").Bool() || gjson.Get(out, "_imap.rotated").Exists() {
+		t.Fatalf("create words = %s", out)
+	}
+	pw1 := gjson.Get(out, "_imap.password").String()
+	wordShape(t, pw1, 5)
+	if !verify(t, pw1) {
+		t.Error("word password does not verify")
+	}
+
+	// Rotate: a new generated password, returned once; the old one is dead.
+	out = callIMAP(t, imapAccount, d, "acme", `{"username":"paris@pony.example.com","password_style":"words","password_words":6,"rotate":true}`)
+	if gjson.Get(out, "_imap.error").Exists() || gjson.Get(out, "_imap.created").Bool() || !gjson.Get(out, "_imap.rotated").Bool() {
+		t.Fatalf("rotate = %s", out)
+	}
+	pw2 := gjson.Get(out, "_imap.password").String()
+	wordShape(t, pw2, 6)
+	if pw2 == pw1 || verify(t, pw1) || !verify(t, pw2) {
+		t.Errorf("rotation did not replace the password (pw1 verifies=%v pw2 verifies=%v)", verify(t, pw1), verify(t, pw2))
+	}
+
+	// Rotate with an explicit password: that password, nothing returned.
+	out = callIMAP(t, imapAccount, d, "acme", `{"username":"paris@pony.example.com","rotate":true,"password":"chosen-by-owner"}`)
+	if gjson.Get(out, "_imap.error").Exists() || gjson.Get(out, "_imap.password").Exists() || gjson.Get(out, "_imap.rotated").Exists() {
+		t.Errorf("rotate explicit = %s", out)
+	}
+	if !verify(t, "chosen-by-owner") {
+		t.Error("explicit rotation password not stored")
+	}
+
+	// Plain update still leaves the password alone.
+	out = callIMAP(t, imapAccount, d, "acme", `{"username":"paris@pony.example.com","status":"active"}`)
+	if gjson.Get(out, "_imap.password").Exists() || !verify(t, "chosen-by-owner") {
+		t.Errorf("update rotated unexpectedly: %s", out)
+	}
+
+	// Token style is still the default; rotate on a NEW account is just create.
+	out = callIMAP(t, imapAccount, d, "acme", `{"username":"rome@pony.example.com","rotate":true}`)
+	if !gjson.Get(out, "_imap.created").Bool() || gjson.Get(out, "_imap.rotated").Exists() || len(gjson.Get(out, "_imap.password").String()) != 29 {
+		t.Errorf("rotate on new = %s", out)
+	}
+
+	// Bad arguments.
+	for _, meta := range []string{
+		`{"username":"paris@pony.example.com","password_style":"haiku"}`,
+		`{"username":"paris@pony.example.com","password_style":"words","password_words":3}`,
+		`{"username":"paris@pony.example.com","password_style":"words","password_words":13}`,
+	} {
+		if out := callIMAP(t, imapAccount, d, "acme", meta); gjson.Get(out, "_imap.error.code").String() != "txco_imap_invalid_arg" {
+			t.Errorf("%s → %s, want txco_imap_invalid_arg", meta, out)
+		}
+	}
+}

@@ -7,6 +7,8 @@ what goes in it with `txco://imap/append`. Nothing lands there on its own.
 
 ```
 OPS/imap-demo/
+  080/autoconfig_host.txcl   GET /.well-known/autoconfig/mail/config-v1.1.xml → Thunderbird autoconfig (host from the request)
+  085/autoconfig_respond.txcl  …the config-v1.1.xml: this host, 993, SSL, %EMAILADDRESS%
   090/provision_auth.txcl    POST /imap/provision → txco://basic-auth-verify (open until IMAP_PROVISION_PASSWORD is set)
   095/provision_reject.txcl  …401 unless the verdict is an explicit true
   100/provision_parse.txcl   POST /imap/provision → parse {"username", "password"?}
@@ -15,6 +17,7 @@ OPS/imap-demo/
   120/hello.txcl             txco://imap/append — a RECORD, rendered to RFC 5322 on FETCH
   130/folder.txcl            txco://imap/mailbox — role + per-verb policy
   140/*, 200/*               JSON responses
+  1000/notfound.txcl         anything else → 404 (never `200 {}`)
 OPS/_imap/0/
   observe.txcl               every committed client mutation, after the reply (@imap.phase observe)
   answer_readonly.txcl       a folder with role "readonly" refuses appends (@imap.phase answer)
@@ -42,6 +45,21 @@ username's domain must be one the tenant owns (a verified hostname
 binding or a delegated zone); `*.local.thanks.computer` resolves to
 loopback and is auto-verified by `txco dev`, which is why the hostname
 bind above is enough.
+
+### Thunderbird finds the server by itself
+
+Thunderbird's account setup fetches
+`https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml` for the
+address's domain before it starts guessing hostnames. `080`/`085` answer
+it with the request's host as the IMAP server, port 993, SSL — the
+fleet's front door — so on a deployed stack a Thunderbird user types
+only `paris@<stack host>` and the password. Thunderbird discards a config
+without an `<outgoingServer>`, and there is no submission head, so the
+file carries a placeholder SMTP entry (this host, 465) flagged
+`useGlobalPreferredServer`: Thunderbird sends through the user's existing
+default SMTP server instead. Apple Mail ignores autoconfig and needs the
+server typed in either way. (Thunderbird does not consult `_imaps._tcp`
+SRV records; the `dns` personality can publish them for clients that do.)
 
 ### Closing the provision route
 

@@ -1,0 +1,38 @@
+# GET /.well-known/autoconfig/mail/config-v1.1.xml — step 2: the XML.
+#
+# Thunderbird's config-v1.1.xml (wiki.mozilla.org/Thunderbird:
+# Autoconfiguration:ConfigFileFormat): must be served as text/xml, UTF-8.
+# Port 993 + SSL is the fleet's IMAPS front door; under `txco dev --imap`
+# the head is 1993 with a self-signed certificate, so use the README's
+# manual settings there.
+#
+# <outgoingServer> is MANDATORY: Thunderbird's readFromXML throws "Need
+# proper <outgoingServer> in XML file" and discards the whole config
+# without one (verified against the parser, 2026-09-04). There is no
+# submission head, so the entry is a placeholder on this host:465 with
+# <useGlobalPreferredServer>true</useGlobalPreferredServer>, which tells
+# Thunderbird to send through the user's existing default SMTP server
+# instead. Sending via the placeholder itself fails until a submission
+# head exists. Single-quoted XML attributes keep the string escape-free.
+WHEN ._ac.req == true
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/xml; charset=utf-8",
+       @web.res.body = &b64encode(&concat(
+         "<?xml version='1.0' encoding='UTF-8'?><clientConfig version='1.1'>",
+         "<emailProvider id='", ._ac.host, "'>",
+         "<domain>", ._ac.host, "</domain>",
+         "<displayName>", ._ac.host, "</displayName>",
+         "<incomingServer type='imap'>",
+         "<hostname>", ._ac.host, "</hostname>",
+         "<port>993</port><socketType>SSL</socketType>",
+         "<authentication>password-cleartext</authentication>",
+         "<username>%EMAILADDRESS%</username>",
+         "</incomingServer>",
+         "<outgoingServer type='smtp'>",
+         "<hostname>", ._ac.host, "</hostname>",
+         "<port>465</port><socketType>SSL</socketType>",
+         "<authentication>password-cleartext</authentication>",
+         "<username>%EMAILADDRESS%</username>",
+         "<useGlobalPreferredServer>true</useGlobalPreferredServer>",
+         "</outgoingServer></emailProvider></clientConfig>")),
+       @halt = true

@@ -40,7 +40,7 @@ you'd otherwise hand-maintain:
 | Receiving mail | **MX** for the zone (and per-stack hosts) |
 | Sender reputation | **SPF** derived from your edge; a **DKIM** keypair minted at zone creation, the public key published, the private key used to sign your [outbound mail](./sendmail.md); a **DMARC** record |
 | Web | **A/AAAA** for the zone apex and for each active stack (`support.ai.example.com` → your `support` stack) |
-| Mail clients | **SRV** `_imaps._tcp` (RFC 6186) at the apex and each stack host when `--dns-imaps-port` is set, so Thunderbird and friends find the [IMAP](./imap.md) server for `paris@support.ai.example.com` without being told |
+| Mail clients | **SRV** `_imaps._tcp` (RFC 6186) at the apex and each stack host when `--dns-imaps-port` is set, for clients that implement SRV discovery of the [IMAP](./imap.md) server (Thunderbird does not — it fetches the autoconfig XML a stack serves; see the IMAP page) |
 | TLS | Wildcard certificates for the zone, issued and renewed automatically via ACME DNS-01 against the chassis's own nameserver |
 
 Records follow your state: activate a stack and its hostname resolves; the same
