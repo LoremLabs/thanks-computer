@@ -192,7 +192,7 @@ func (c *Controller) priorActiveFileHashes(
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
 		   AND sf.content_hash <> ''
-		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'BLOBS/%' OR sf.path LIKE 'DATASETS/%')`),
+		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'BLOBS/%' OR sf.path LIKE 'CALENDARS/%' OR sf.path LIKE 'DATASETS/%')`),
 		tenantID, stackName)
 	if err != nil {
 		return nil

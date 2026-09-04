@@ -94,7 +94,7 @@ The CLI verbs map onto that flow:
 | `txco lint [dir]` | Validate the `OPS/` tree **offline** (no chassis): name collisions, mis-placed files, txcl parse, unconditional-loop warnings; `--list` prints the op graph; exit 1 on errors (CI-friendly) |
 | `txco status [dir]` | Per-stack drift summary; exit 1 on divergence (CI-friendly) |
 | `txco edit <stack> <path>` | `$EDITOR` one file of a draft, PATCH it back |
-| `txco data apply [dir]` | Deploy the `VECTORS/`, `KV/`, `BLOBS/` packs (code carried forward); same fast-forward rule, plus a refusal over runtime-edited seeded blobs — see [blobs](./blobs.md) |
+| `txco data apply [dir]` | Deploy the `VECTORS/`, `KV/`, `BLOBS/`, `CALENDARS/` packs (code carried forward); same fast-forward rule, plus a refusal over runtime-edited seeded blobs — see [blobs](./blobs.md) |
 | `txco data pull [dir]` | Bring each stack's live seeded blobs into `BLOBS/` |
 
 ### Fast-forward rule

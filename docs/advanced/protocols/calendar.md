@@ -183,6 +183,41 @@ renders every live object with an ETag and `Cache-Control: private,
 max-age=<--calendar-feed-max-age>`; `If-None-Match` answers 304. Feeds are
 off until a stack asks for one.
 
+## Seeding calendars with a stack
+
+A stack may ship whole calendars declaratively in the reserved `CALENDARS/`
+tree, the fourth pack kind beside `VECTORS/`, `KV/` and `BLOBS/`
+(deployed by `txco data apply`, mirrored live by `txco dev`):
+
+```
+OPS/<stack>/
+  CALENDARS/
+    paris@pony.example.com/events.jsonl     → the calendar "events" of that account
+```
+
+Each file is NDJSON and **owns one calendar of one account**:
+
+```jsonc
+{"calendar":{"display_name":"Paris events","timezone":"Europe/Paris","color":"#2a9d8f"}}
+{"name":"welcome.ics","event":{"summary":"Welcome","start":"2026-09-04T18:00:00","tzid":"Europe/Paris","duration":"PT1H"}}
+{"name":"visit.ics","event":{"summary":"Visit","start":"2026-09-05","end":"2026-09-06"}}
+{"name":"notice.ics","ical":"BEGIN:VCALENDAR\r\n…"}
+```
+
+The optional `calendar` line sets the display fields (and `policy`); every
+other line is one object — `event{}` as `txco://calendar/put` takes it (the
+`uid` defaults to `<name>.<local>@<domain>`) or `ical` text. On activation
+the calendar is ensured, every object put (unchanged content is a no-op,
+changed content gets a higher SEQUENCE), and every live object the pack no
+longer lists is deleted — the pack is the calendar's desired state. The
+**account must already exist** (only `txco://calendar/account` mints a
+password); a pack for an unknown account is an error for that pack, logged,
+activation unaffected, retried on the next apply. A calendar the pack
+creates denies client `put`/`delete` unless its header says otherwise: a
+client edit in a pack-owned calendar would be undone by the next apply, so
+keep runtime-written calendars out of packs and give pack-owned ones their
+own name.
+
 ## Policy: what a stack hears, and when
 
 Per calendar, five verbs — `put`, `delete`, `mkcalendar` (a client creates

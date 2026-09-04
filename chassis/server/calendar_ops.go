@@ -177,40 +177,6 @@ func calendarCalendar(ctx context.Context, d calendarDeps, in []byte) (event.Pay
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
 }
 
-var objectNameSan = regexp.MustCompile(`[^A-Za-z0-9._~-]+`)
-
-// defaultObjectName derives a resource name from a UID's local part.
-func defaultObjectName(uid string) string {
-	local := uid
-	if at := strings.Index(uid, "@"); at > 0 {
-		local = uid[:at]
-	}
-	local = strings.Trim(objectNameSan.ReplaceAllString(local, "-"), "-.")
-	if local == "" {
-		local = "event"
-	}
-	if len(local) > 200 {
-		local = local[:200]
-	}
-	return local + ".ics"
-}
-
-// deriveUID is the deterministic default UID for a stack-materialized
-// object: <name without .ics>.<local>@<domain> — stable across
-// re-materializations, unique per persona.
-func deriveUID(name, username string) string {
-	base := strings.TrimSuffix(strings.TrimSpace(name), ".ics")
-	base = strings.Trim(objectNameSan.ReplaceAllString(base, "-"), "-.")
-	local, domain := username, ""
-	if at := strings.LastIndex(username, "@"); at > 0 {
-		local, domain = username[:at], username[at+1:]
-	}
-	if domain == "" {
-		return base + "." + local
-	}
-	return base + "." + local + "@" + domain
-}
-
 // calendarPut materializes one object, addressed by UID. Either `event{}`
 // (rendered by the chassis; `uid` optional, else derived from `name`) or
 // `ical` (text; the UID is the bytes' own). `name` is the resource name on
@@ -243,76 +209,50 @@ func calendarPut(ctx context.Context, d calendarDeps, in []byte) (event.Payload,
 	}
 	now := calendarNow(d)
 
-	var bytes []byte
-	var facts chcal.Event
+	var res chcal.PutResult
+	var err error
 	if evW.Exists() {
 		if !evW.IsObject() {
 			return calendarErr(into, "txco_calendar_invalid_arg", "`event` must be an object"), nil
 		}
-		ev, err := chcal.EventFromJSON([]byte(evW.Raw))
-		if err != nil {
-			return calendarErr(into, "txco_calendar_invalid_arg", err.Error()), nil
+		ev, perr := chcal.EventFromJSON([]byte(evW.Raw))
+		if perr != nil {
+			return calendarErr(into, "txco_calendar_invalid_arg", perr.Error()), nil
 		}
 		if ev.UID == "" {
 			ev.UID = uidW
 		}
-		if ev.UID == "" {
-			if nameW == "" {
-				return calendarErr(into, "txco_calendar_invalid_arg", "give `uid` or `name` (the uid is derived from the name)"), nil
-			}
-			ev.UID = deriveUID(nameW, acct.Username)
-		}
 		if uidW != "" && uidW != ev.UID {
 			return calendarErr(into, "txco_calendar_invalid_arg", "`uid` disagrees with event.uid"), nil
 		}
-		existing, found, err := d.store.GetObjectByUID(ctx, cal.ID, ev.UID)
-		if err != nil {
-			return calendarErr(into, "txco_calendar_store", err.Error()), nil
+		if ev.UID == "" && nameW != "" {
+			ev.UID = chcal.DefaultUID(nameW, acct.Username)
 		}
-		if found && ev.Sequence < existing.Sequence {
-			ev.Sequence = existing.Sequence
+		if b, rerr := chcal.Render(ev, now); rerr == nil && d.maxBytes > 0 && int64(len(b)) > d.maxBytes {
+			return calendarErr(into, "txco_calendar_too_large",
+				fmt.Sprintf("object is %d bytes, over calendar-object-max-bytes %d", len(b), d.maxBytes)), nil
+		} else if rerr == nil {
+			blobChargeBytes(ctx, int64(len(b)), in)
 		}
-		bytes, err = chcal.Render(ev, now)
-		if err != nil {
-			return calendarErr(into, "txco_calendar_invalid_arg", err.Error()), nil
+		res, err = d.store.PutEvent(ctx, cal.ID, acct.Username, nameW, ev, now)
+	} else {
+		raw := []byte(icalW.String())
+		if d.maxBytes > 0 && int64(len(raw)) > d.maxBytes {
+			return calendarErr(into, "txco_calendar_too_large",
+				fmt.Sprintf("object is %d bytes, over calendar-object-max-bytes %d", len(raw), d.maxBytes)), nil
 		}
-		if found && !chcal.SameContent(existing.ICal, bytes) {
-			// A changed object gets a higher SEQUENCE than the stored one.
-			ev.Sequence = existing.Sequence + 1
-			if bytes, err = chcal.Render(ev, now); err != nil {
-				return calendarErr(into, "txco_calendar_invalid_arg", err.Error()), nil
+		if uidW != "" {
+			if facts, perr := chcal.Parse(raw); perr == nil && facts.UID != uidW {
+				return calendarErr(into, "txco_calendar_invalid_arg", "`uid` disagrees with the UID in `ical`"), nil
 			}
 		}
-		if facts, err = chcal.Parse(bytes); err != nil {
-			return calendarErr(into, "txco_calendar_invalid_arg", err.Error()), nil
-		}
-	} else {
-		var err error
-		if bytes, err = chcal.Canonical([]byte(icalW.String())); err != nil {
-			return calendarErr(into, "txco_calendar_invalid_arg", err.Error()), nil
-		}
-		if facts, err = chcal.Parse(bytes); err != nil {
-			return calendarErr(into, "txco_calendar_invalid_arg", err.Error()), nil
-		}
-		if uidW != "" && uidW != facts.UID {
-			return calendarErr(into, "txco_calendar_invalid_arg", "`uid` disagrees with the UID in `ical`"), nil
-		}
+		blobChargeBytes(ctx, int64(len(raw)), in)
+		res, err = d.store.PutICal(ctx, cal.ID, nameW, raw)
 	}
-	if d.maxBytes > 0 && int64(len(bytes)) > d.maxBytes {
-		return calendarErr(into, "txco_calendar_too_large",
-			fmt.Sprintf("object is %d bytes, over calendar-object-max-bytes %d", len(bytes), d.maxBytes)), nil
-	}
-	blobChargeBytes(ctx, int64(len(bytes)), in)
-	name := nameW
-	if name == "" {
-		name = defaultObjectName(facts.UID)
-	}
-	res, err := d.store.PutObject(ctx, cal.ID, chcal.Object{
-		Name: name, UID: facts.UID, Component: facts.Component, ICal: bytes, Summary: facts.Summary,
-		DTStartUTC: facts.StartUTC, DTEndUTC: facts.EndUTC, Recurs: facts.Recurs, Sequence: facts.Sequence,
-	}, chcal.PutOpts{ByUID: true})
 	if err != nil {
 		switch {
+		case errors.Is(err, chcal.ErrInvalidEvent):
+			return calendarErr(into, "txco_calendar_invalid_arg", strings.TrimPrefix(err.Error(), chcal.ErrInvalidEvent.Error()+"\n")), nil
 		case errors.Is(err, chcal.ErrUIDConflict):
 			return calendarErr(into, "txco_calendar_conflict", err.Error()), nil
 		case errors.Is(err, chcal.ErrNotFound):

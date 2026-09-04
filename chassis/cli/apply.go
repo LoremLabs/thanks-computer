@@ -989,9 +989,9 @@ func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 	return collectTreeAssets(stackDir, "FILES")
 }
 
-// collectStorePacks walks <stackDir>/{VECTORS,KV,BLOBS}/** and returns the
+// collectStorePacks walks <stackDir>/{VECTORS,KV,CALENDARS,BLOBS}/** and returns the
 // declarative store-seed packs as StackFiles ("VECTORS/<rel>", "KV/<rel>",
-// "BLOBS/<rel>") plus the BLOBS/ bytes that must be streamed to the CAS
+// "CALENDARS/<user>/<rel>", "BLOBS/<rel>") plus the BLOBS/ bytes that must be streamed to the CAS
 // (ensureBlobsResident) BEFORE the draft references them — the NDJSON packs
 // ride the draft body inline; blob files are fingerprint-only rows. This is
 // the DATA half of a stack, deployed only by `txco data apply` — `txco apply`
@@ -1000,7 +1000,7 @@ func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 // chassis/storeseed.
 func collectStorePacks(stackDir string) ([]client.StackFile, []casUpload, error) {
 	var out []client.StackFile
-	for _, top := range []string{storeseed.DirVectors, storeseed.DirKV} {
+	for _, top := range []string{storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars} {
 		assets, err := collectTreeAssets(stackDir, top)
 		if err != nil {
 			return nil, nil, err

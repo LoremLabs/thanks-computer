@@ -306,7 +306,7 @@ func (c *Controller) codeManifestHash(ctx context.Context, tenantID, name string
 		  FROM stack_files sf
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
-		   AND sf.path NOT LIKE 'VECTORS/%' AND sf.path NOT LIKE 'KV/%' AND sf.path NOT LIKE 'BLOBS/%'`),
+		   AND sf.path NOT LIKE 'VECTORS/%' AND sf.path NOT LIKE 'KV/%' AND sf.path NOT LIKE 'BLOBS/%' AND sf.path NOT LIKE 'CALENDARS/%'`),
 		tenantID, name)
 	if err != nil {
 		return "", err
@@ -432,7 +432,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "DATASETS", "BLOBS":
+		case "FILES", "VECTORS", "KV", "CALENDARS", "DATASETS", "BLOBS":
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -464,17 +464,19 @@ func validateStackFilePath(p string) error {
 		return nil
 	}
 
-	// VECTORS/** and KV/** are declarative store-seed packs (NDJSON),
-	// reconciled into the vector / KV stores on activation rather than served
-	// or materialised into ops (see chassis/storeseed). Their bytes are
-	// content-addressed like FILES/. We require a single name segment with the
-	// .jsonl extension — "VECTORS/<collection>.jsonl", "KV/<namespace>.jsonl" —
-	// so the collection/namespace each pack owns is unambiguous (no nesting).
+	// VECTORS/**, KV/** and CALENDARS/** are declarative store-seed packs
+	// (NDJSON), reconciled into the vector / KV / calendar stores on
+	// activation rather than served or materialised into ops (see
+	// chassis/storeseed). Their bytes are content-addressed like FILES/. We
+	// require the .jsonl extension and the kind's exact shape —
+	// "VECTORS/<collection>.jsonl", "KV/<namespace>.jsonl" (one segment),
+	// "CALENDARS/<username>/<calendar>.jsonl" (two) — so what each pack
+	// owns is unambiguous.
 	if storeseed.KindForPath(p) != "" {
 		name := storeseed.PackName(p)
 		if name == "" {
-			return fmt.Errorf("store-seed packs must be a single %q file directly under %s/ or %s/ (got %q)",
-				storeseed.PackExt, storeseed.DirVectors, storeseed.DirKV, p)
+			return fmt.Errorf("store-seed packs must be a %q file: %s/<collection>, %s/<namespace> or %s/<username>/<calendar> (got %q)",
+				storeseed.PackExt, storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, p)
 		}
 		// A '_'-prefixed collection/namespace is chassis-reserved (the
 		// txco://blob name index lives in the KV namespace "_txc.blob"); a
@@ -1811,10 +1813,10 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 	switch req.Manage {
 	case "code":
 		delQuery = `DELETE FROM stack_files WHERE version_id = ?
-			   AND NOT (path LIKE 'VECTORS/%' OR path LIKE 'KV/%' OR path LIKE 'BLOBS/%')`
+			   AND NOT (path LIKE 'VECTORS/%' OR path LIKE 'KV/%' OR path LIKE 'BLOBS/%' OR path LIKE 'CALENDARS/%')`
 	case "data":
 		delQuery = `DELETE FROM stack_files WHERE version_id = ?
-			   AND (path LIKE 'VECTORS/%' OR path LIKE 'KV/%' OR path LIKE 'BLOBS/%')`
+			   AND (path LIKE 'VECTORS/%' OR path LIKE 'KV/%' OR path LIKE 'BLOBS/%' OR path LIKE 'CALENDARS/%')`
 	}
 	if _, err := tx.ExecContext(r.Context(), c.rb(delQuery), versionID); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "clear_files", map[string]any{"err": err.Error()})

@@ -327,7 +327,7 @@ func (c *Controller) packHashes(
 		  JOIN stack_versions sv ON sf.version_id = sv.version_id
 		  JOIN stacks s          ON sv.stack_id = s.stack_id
 		 WHERE s.tenant_id = ? AND s.name = ? AND sv.version_number = ?
-		   AND (sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'BLOBS/%')`),
+		   AND (sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'BLOBS/%' OR sf.path LIKE 'CALENDARS/%')`),
 		tenantID, stack, version)
 	if err != nil {
 		return nil, err

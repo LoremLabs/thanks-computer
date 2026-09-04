@@ -3,23 +3,26 @@ package storeseed
 import "strings"
 
 // Reserved store-seed trees under OPS/<stack>/. Each maps to a pack kind
-// owned by one Materializer (vecseed, kvseed, blobseed).
+// owned by one Materializer (vecseed, kvseed, blobseed, calseed).
 const (
-	DirVectors = "VECTORS"
-	DirKV      = "KV"
-	DirBlobs   = "BLOBS"
+	DirVectors   = "VECTORS"
+	DirKV        = "KV"
+	DirBlobs     = "BLOBS"
+	DirCalendars = "CALENDARS"
 
-	KindVector = "vector"
-	KindKV     = "kv"
-	KindBlob   = "blob"
+	KindVector   = "vector"
+	KindKV       = "kv"
+	KindBlob     = "blob"
+	KindCalendar = "calendar"
 
 	PackExt = ".jsonl"
 )
 
 var packDirs = map[string]string{
-	DirVectors + "/": KindVector,
-	DirKV + "/":      KindKV,
-	DirBlobs + "/":   KindBlob,
+	DirVectors + "/":   KindVector,
+	DirKV + "/":        KindKV,
+	DirBlobs + "/":     KindBlob,
+	DirCalendars + "/": KindCalendar,
 }
 
 // IsPackPath reports whether p lives in a store-seed tree.
@@ -42,24 +45,45 @@ func IsBlobPath(p string) bool { return KindForPath(p) == KindBlob }
 
 // PackName returns the name the pack owns, or "" when p is not a well-formed
 // pack path. VECTORS/ and KV/ packs are a single "<name>.jsonl" segment (the
-// collection / namespace is unambiguous; no nesting). A BLOBS/ row is the
-// opposite shape: the tree IS the hierarchy, so the name is everything after
-// "BLOBS/" — "BLOBS/faqs/house-01.doc" owns the blob name "faqs/house-01.doc".
-// Whether that is a VALID blob name is the blob package's call
-// (blob.ValidName), enforced at the write boundary and by the collector.
+// collection / namespace is unambiguous; no nesting). A CALENDARS/ pack is
+// exactly two segments, "CALENDARS/<username>/<calendar>.jsonl", and owns
+// that one calendar of that account — the name is "<username>/<calendar>".
+// A BLOBS/ row is the opposite shape: the tree IS the hierarchy, so the
+// name is everything after "BLOBS/" — "BLOBS/faqs/house-01.doc" owns the
+// blob name "faqs/house-01.doc". Whether that is a VALID blob name is the
+// blob package's call (blob.ValidName), enforced at the write boundary and
+// by the collector.
 func PackName(p string) string {
 	kind := KindForPath(p)
 	if kind == "" {
 		return ""
 	}
-	rest := p[strings.Index(p, "/")+1:] // after "VECTORS/" / "KV/" / "BLOBS/"
+	rest := p[strings.Index(p, "/")+1:] // after "VECTORS/" / "KV/" / "BLOBS/" / "CALENDARS/"
 	if kind == KindBlob {
 		return rest // "" for a bare "BLOBS/" — caller rejects
 	}
-	if rest == "" || strings.Contains(rest, "/") || !strings.HasSuffix(rest, PackExt) {
+	if rest == "" || !strings.HasSuffix(rest, PackExt) {
 		return ""
 	}
-	return strings.TrimSuffix(rest, PackExt)
+	stem := strings.TrimSuffix(rest, PackExt)
+	if kind == KindCalendar {
+		user, cal, ok := strings.Cut(stem, "/")
+		if !ok || user == "" || cal == "" || strings.Contains(cal, "/") || !strings.Contains(user, "@") {
+			return ""
+		}
+		return stem
+	}
+	if strings.Contains(stem, "/") {
+		return ""
+	}
+	return stem
+}
+
+// CalendarPackName splits a CALENDARS/ pack name into its account and
+// calendar ("<username>/<calendar>" → username, calendar).
+func CalendarPackName(name string) (username, calendar string, ok bool) {
+	username, calendar, ok = strings.Cut(name, "/")
+	return
 }
 
 // EmptyTree is the marker pack a Reconciler passes to a kind whose tree was

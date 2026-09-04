@@ -82,6 +82,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/blobseed"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed/calseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/kvseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/vecseed"
 	"github.com/loremlabs/thanks-computer/chassis/telemetry"
@@ -1591,6 +1592,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// index (in KV, hence kvShared) for bytes the CLI already streamed into
 	// the filecas. Nil-fcas nodes register it too and error at reconcile.
 	storeSeedMaterializers = append(storeSeedMaterializers, blobseed.New(blobIndex, fcas, kvShared))
+	// CALENDARS/ packs seed the calendar store when this node opened one
+	// (the head, or a shared backend named by --calendar-store). Shared ⇔
+	// reconciled once on the origin, like the other shared stores.
+	if calendarStore != nil {
+		storeSeedMaterializers = append(storeSeedMaterializers, calseed.New(calendarStore, conf.CalendarStore != "sqlite"))
+	}
 
 	// Computed-secret core ops. These consume cleartext from
 	// op.Secrets (plumbed onto ctx by processor.ExecCore) and emit

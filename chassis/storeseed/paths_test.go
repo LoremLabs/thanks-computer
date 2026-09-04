@@ -16,6 +16,7 @@ func TestKindForPath(t *testing.T) {
 		"":                     "",
 		"VECTORSX/books.jsonl": "", // prefix must be the dir + slash
 		"VECTORS":              "", // bare dir
+		"CALENDARS/paris@pony.example.com/events.jsonl": KindCalendar,
 	}
 	for p, want := range cases {
 		if got := KindForPath(p); got != want {
@@ -29,12 +30,17 @@ func TestKindForPath(t *testing.T) {
 
 func TestPackName(t *testing.T) {
 	cases := map[string]string{
-		"VECTORS/books.jsonl":    "books",
-		"KV/seed-config.jsonl":   "seed-config",
-		"VECTORS/nested/x.jsonl": "", // no nesting
-		"VECTORS/books.json":     "", // wrong ext
-		"VECTORS/.jsonl":         "", // empty-ish name still has a stem "" → reject
-		"FILES/index.html":       "",
+		"VECTORS/books.jsonl":                           "books",
+		"KV/seed-config.jsonl":                          "seed-config",
+		"VECTORS/nested/x.jsonl":                        "", // no nesting
+		"VECTORS/books.json":                            "", // wrong ext
+		"VECTORS/.jsonl":                                "", // empty-ish name still has a stem "" → reject
+		"FILES/index.html":                              "",
+		"CALENDARS/paris@pony.example.com/events.jsonl": "paris@pony.example.com/events",
+		"CALENDARS/events.jsonl":                        "", // needs <username>/<calendar>
+		"CALENDARS/paris/events.jsonl":                  "", // the account is an address
+		"CALENDARS/paris@pony.example.com/a/b.jsonl":    "", // exactly two segments
+		"CALENDARS/paris@pony.example.com/events.json":  "", // wrong ext
 	}
 	for p, want := range cases {
 		if got := PackName(p); got != want {

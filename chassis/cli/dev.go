@@ -958,7 +958,7 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
 	}
 	// Asset half: stat-only walk of the same trees the collectors read.
-	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirBlobs, dataset.Dir} {
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirBlobs, dataset.Dir} {
 		treeDir := filepath.Join(stackDir, top)
 		info, err := os.Stat(treeDir)
 		if err != nil || !info.IsDir() {

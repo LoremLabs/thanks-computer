@@ -58,11 +58,11 @@ func printDataUsage(w io.Writer) {
 	fmt.Fprint(w, `
 Usage: txco data <subcommand> ...
 
-Deploy + inspect declarative store-seed packs (VECTORS/, KV/, BLOBS/). Data is opt-in:
+Deploy + inspect declarative store-seed packs (VECTORS/, KV/, BLOBS/, CALENDARS/). Data is opt-in:
 `+"`txco apply`"+` deploys code only; data moves through these verbs.
 
 Subcommands:
-  apply [<dir>]            Deploy the local VECTORS/+KV/+BLOBS/ packs 
+  apply [<dir>]            Deploy the local VECTORS/+KV/+BLOBS/+CALENDARS/ packs 
   ls                       List the tenant's vector collections (model/dims/count)
   show <collection>        Show a collection's pin + item IDs
   diff <collection> <pack> Compare a local VECTORS/*.jsonl pack to the live store
@@ -348,7 +348,7 @@ func runDataApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, `
 Usage: txco data apply [flags] [<dir>]
 
-Deploy the local VECTORS/+KV/+BLOBS/ store-seed packs for every stack under
+Deploy the local VECTORS/+KV/+BLOBS/+CALENDARS/ store-seed packs for every stack under
 <dir>/OPS/. Each stack's code is carried forward from its active version; only
 the data is replaced, then reconciled into the runtime stores (BLOBS/ files are
 streamed to the content store first and become named blobs). The stack must
@@ -519,7 +519,7 @@ Flags:
 	if *f.jsonOut {
 		_ = emitJSON(stdout, stderr, results)
 	} else if len(results) == 0 {
-		fmt.Fprintln(stdout, "no data packs found (VECTORS/, KV/ or BLOBS/) under any stack")
+		fmt.Fprintln(stdout, "no data packs found (VECTORS/, KV/, BLOBS/ or CALENDARS/) under any stack")
 	}
 	return rc
 }

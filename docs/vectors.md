@@ -98,7 +98,8 @@ OPS/<stack>/
   FILES/…             # static assets │ code
   VECTORS/books.jsonl # a collection ─┐
   KV/config.jsonl     # a namespace   │ data
-  BLOBS/faqs/a.md     # named blobs  ─┘  (see advanced/blobs.md)
+  BLOBS/faqs/a.md     # named blobs   │  (see advanced/blobs.md)
+  CALENDARS/paris@pony.example.com/events.jsonl  # a calendar ─┘ (see advanced/protocols/calendar.md)
 ```
 
 **Code and data deploy separately, and data is opt-in:**

@@ -273,10 +273,10 @@ func TestCalendarPathsAndUIDs(t *testing.T) {
 	if got := feedPath("cal", "tok"); got != "/cal/feed/tok.ics" {
 		t.Errorf("feedPath = %s", got)
 	}
-	if got := deriveUID("Daily Digest.ics", "paris@pony.example.com"); got != "Daily-Digest.paris@pony.example.com" {
+	if got := chcal.DefaultUID("Daily Digest.ics", "paris@pony.example.com"); got != "Daily-Digest.paris@pony.example.com" {
 		t.Errorf("deriveUID = %s", got)
 	}
-	if got := defaultObjectName("8F2C/1A34@apple"); got != "8F2C-1A34.ics" {
+	if got := chcal.DefaultObjectName("8F2C/1A34@apple"); got != "8F2C-1A34.ics" {
 		t.Errorf("defaultObjectName = %s", got)
 	}
 }
