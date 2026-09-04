@@ -89,6 +89,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
 	imapHead := fs.Bool("imap", false, "start the IMAP head with dev defaults: binds "+devIMAPListenAddr+" (plaintext + STARTTLS, LOGIN allowed over loopback) and "+devIMAPTLSAddr+" (IMAPS) with a self-signed certificate minted at boot, index at .txco/dev/imap.db — so a stack can provision an account with txco://imap/account and a mail client can open it (server <dev host>, port 1993, SSL on, trust the certificate). Disabled by default. Override TXCO_IMAP_LISTEN_ADDRS/IMAP_TLS_ADDRS/IMAP_DB_PATH.")
+	calendarHead := fs.Bool("calendar", false, "start the calendar personality (CalDAV + ICS feeds) on the web head with dev defaults: served under http://<dev host>:<web port>/dav/ with Basic auth allowed over plaintext, index at .txco/dev/calendar.db — so a stack can provision an account with txco://calendar/account and a calendar app can open it (server <bound-host>, port = the web port, SSL off, path /dav/). Disabled by default. Override TXCO_CALENDAR_DB_PATH/CALENDAR_PATH_PREFIX.")
 	lmtpHead := fs.Bool("lmtp", false, "start the LMTP mail head with dev defaults: binds "+devLMTPListenAddr+", relays outbound mail to a local sink ("+devMailRelayAddr+", TLS off — MailHog/Mailpit), and auto-loads ./ingress.yaml from the workspace when present (the local stand-in for minted hostnames). Disabled by default. Override any of TXCO_LMTP_LISTEN_ADDRS/MAIL_RELAY_ADDR/MAIL_RELAY_TLS/INGRESS_CONFIG.")
 	watch := fs.Bool("watch", true, "watch sources and hot-reload: compute edits rebuild + reactivate; OPS edits push to a per-stack draft. On by default (that's what `dev` is for); pass --watch=false to disable.")
 	watchIgnore := fs.StringArray("watch-ignore", nil, "glob pattern (repeatable) whose matching directories are pruned from the watcher — CPU saver in big workspaces. A pattern with `/` matches a dir's path under OPS/ (e.g. `publications/*/FILES`); a bare name matches anywhere (e.g. `node_modules`). Per-stack FILES/ trees are pruned by default; add `dev.watch.includeFiles: true` to txco.yaml to watch them.")
@@ -268,7 +269,7 @@ Flags:
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *imapHead, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *imapHead, *calendarHead, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -492,6 +493,11 @@ Flags:
 			fmt.Fprintf(stdout, "[txco]          security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n", certPath)
 			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://imap/account\" WITH username = \"you@<bound-host>\"`, then add the account in Mail/Thunderbird:")
 			fmt.Fprintln(stdout, "[txco]        server <bound-host> (e.g. pony.local.thanks.computer), port 1993, SSL on")
+		}
+		if *calendarHead {
+			fmt.Fprintf(stdout, "[txco]   calendar head: %s/dav/ (CalDAV, Basic auth over plaintext) and /.well-known/caldav; index at .txco/dev/calendar.db\n", webURL)
+			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://calendar/account\" WITH username = \"you@<bound-host>\"` and `txco://calendar/calendar`, then add a CalDAV account in Calendar/Thunderbird:")
+			fmt.Fprintln(stdout, "[txco]        server <bound-host> (e.g. pony.local.thanks.computer), the web port, SSL off, path /dav/")
 		}
 	} else {
 		fmt.Fprintf(stdout, "[txco] dev loop running (Ctrl-C to stop). chassis: %s\n", chassisURL)
@@ -1009,7 +1015,7 @@ func isVersionNotDraftErr(err error) bool {
 // included. Off by default — most dev workflows use only web + cron +
 // admin, and the extra binds otherwise cause spurious "port in use"
 // failures on machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, imapHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, imapHead, calendarHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
@@ -1145,6 +1151,10 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		env = append(env, "TXCO_IMAP_TLS_ADDRS="+devIMAPTLSAddr)
 		env = append(env, "TXCO_IMAP_DB_PATH="+filepath.Join(devDir, "imap.db"))
 	}
+	if calendarHead {
+		heads = append(heads, "calendar")
+		env = append(env, "TXCO_CALENDAR_DB_PATH="+filepath.Join(devDir, "calendar.db"))
+	}
 	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
 
 	// Dev-default toggles: enabled by default so devs get full
@@ -1223,6 +1233,12 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	if imapHead {
 		devDefaults["TXCO_IMAP_INSECURE_AUTH"] = "true"
 		devDefaults["TXCO_IMAP_SELF_SIGNED"] = "true"
+	}
+	// Calendar dev default: Basic auth over the plaintext web port. The
+	// serve default stays false (a real deployment terminates TLS at the
+	// edge and forwards X-Forwarded-Proto, or sets --web-tls-addr).
+	if calendarHead {
+		devDefaults["TXCO_CALENDAR_INSECURE_AUTH"] = "true"
 	}
 	if lmtpHead {
 		devDefaults["TXCO_MAIL_RELAY_ADDR"] = devMailRelayAddr

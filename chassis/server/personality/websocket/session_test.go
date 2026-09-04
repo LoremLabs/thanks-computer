@@ -37,6 +37,13 @@ type harness struct {
 
 func newHarness(t *testing.T, tune func(*config.Config), acc Accept) *harness {
 	t.Helper()
+	return newHarnessWith(t, tune, acc, nil)
+}
+
+// newHarnessWith also runs setup on the controller before Start — the hook
+// the cross-node tests use to wire a relay + directory.
+func newHarnessWith(t *testing.T, tune func(*config.Config), acc Accept, setup func(*Controller)) *harness {
+	t.Helper()
 	conf := config.Config{
 		Personalities:              "web,websocket",
 		WebsocketMaxConns:          0,
@@ -57,6 +64,9 @@ func newHarness(t *testing.T, tune func(*config.Config), acc Accept) *harness {
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), Bus: bus}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu)
+	if setup != nil {
+		setup(ctrl)
+	}
 	ctrl.Start()
 	if acc.Tenant == "" {
 		acc.Tenant = "acme"

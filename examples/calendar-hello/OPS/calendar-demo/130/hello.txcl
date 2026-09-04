@@ -1,0 +1,19 @@
+# POST /calendar/provision — step 4: a daily hello event, so the calendar
+# app shows something on first open.
+#
+# `event{}` is the structured form: the chassis renders a canonical
+# VEVENT, mints the UID from `name` (hello.paris@…, stable across runs),
+# and a second put of the same content is a no-op — re-provisioning does
+# not churn the object's ETag.
+WHEN ._cal.name != ""
+  EXEC "txco://calendar/put"
+    WITH username = ._acct.username,
+         calendar = "hello",
+         name     = "hello.ics",
+         event    = &object(
+           "summary",     "Hello from your stack",
+           "description", "This calendar is served by a txco stack. Nothing lands here on its own: a rule chooses what to materialize with txco://calendar/put.",
+           "start",       "2026-01-01T09:00:00Z",
+           "duration",    "PT30M",
+           "rrule",       "FREQ=DAILY"),
+         into     = "_put"

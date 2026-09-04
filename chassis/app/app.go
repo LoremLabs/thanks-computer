@@ -32,6 +32,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/cli"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
@@ -372,6 +373,30 @@ func Run(bi BuildInfo) int {
 			zap.String("personalities", conf.Personalities))
 	}
 
+	// Calendar index — the durable store the `calendar` personality serves
+	// (CalDAV + ICS feeds) and txco://calendar/* write to. Same posture as the
+	// IMAP index: its own file, opened when the head is on (fatal on failure)
+	// or when --calendar-store names a shared backend (warn-and-continue).
+	var calendarStore *chcal.Store
+	if open, fatal := calendarStoreMode(conf.Personalities, conf.CalendarStore); open {
+		st, cerr := chcal.Open(conf.CalendarStore, chcal.Config{DBPath: conf.CalendarDBPath})
+		switch {
+		case cerr != nil && fatal:
+			logger.Fatal("calendar store open failed",
+				zap.String("store", conf.CalendarStore), zap.String("err", cerr.Error()))
+		case cerr != nil:
+			logger.Warn("calendar store open failed; txco://calendar/* answer txco_calendar_disabled on this node until restart",
+				zap.String("store", conf.CalendarStore), zap.String("err", cerr.Error()))
+		default:
+			defer st.Close()
+			calendarStore = st
+			logger.Info("calendar store opened", zap.String("store", conf.CalendarStore), zap.Bool("head", fatal))
+		}
+	} else {
+		logger.Info("skipping calendar store open — calendar personality not active and --calendar-store=sqlite",
+			zap.String("personalities", conf.Personalities))
+	}
+
 	logger.Info("db setup") // feedback here proved helpful in debugging file locking for db
 
 	// Setup read-only db cache. The cache dumps THROUGH the chassis's
@@ -501,7 +526,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, imapStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, imapStore, calendarStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)
@@ -908,6 +933,16 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 // opened at all.
 func imapStoreMode(personalities, store string) (open, fatal bool) {
 	head := strings.Contains(personalities, "imap")
+	shared := store != "" && store != "sqlite"
+	return head || shared, head
+}
+
+// calendarStoreMode is imapStoreMode for the calendar index: the head needs
+// it (fatal); a shared backend is opened everywhere so txco://calendar/* on
+// any node project into it (warn-and-continue); the bundled sqlite file
+// without the head is not opened at all.
+func calendarStoreMode(personalities, store string) (open, fatal bool) {
+	head := config.Config{Personalities: personalities}.HasPersonality("calendar")
 	shared := store != "" && store != "sqlite"
 	return head || shared, head
 }

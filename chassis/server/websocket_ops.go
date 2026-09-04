@@ -75,7 +75,9 @@ func websocketRegistryErr(into string, err error) event.Payload {
 	case errors.Is(err, websocketp.ErrDisabled):
 		return websocketErr(into, "txco_websocket_disabled", err.Error())
 	case errors.Is(err, websocketp.ErrSessionNotFound):
-		return websocketErr(into, "txco_websocket_session_not_found", "no live session with that id for this tenant on this node")
+		return websocketErr(into, "txco_websocket_session_not_found", "no live session with that id for this tenant")
+	case errors.Is(err, websocketp.ErrRelayUnavailable):
+		return websocketErr(into, "txco_websocket_relay_unavailable", "the session is not on this node and cross-node delivery is unavailable right now")
 	case errors.Is(err, websocketp.ErrSessionClosed):
 		return websocketErr(into, "txco_websocket_session_closed", err.Error())
 	case errors.Is(err, websocketp.ErrWriteTimeout):

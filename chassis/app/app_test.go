@@ -48,3 +48,22 @@ func TestIMAPStoreMode(t *testing.T) {
 		}
 	}
 }
+
+func TestCalendarStoreMode(t *testing.T) {
+	for _, c := range []struct {
+		personalities, store string
+		open, fatal          bool
+	}{
+		{"cron,web,admin", "sqlite", false, false},
+		{"cron,web,admin", "", false, false},
+		{"cron,web,admin,calendar", "sqlite", true, true},
+		{"cron,web,admin", "postgres", true, false},
+		{"cron,web,calendar", "postgres", true, true},
+		{"cron,web,calendars", "sqlite", false, false}, // whole-token match
+	} {
+		open, fatal := calendarStoreMode(c.personalities, c.store)
+		if open != c.open || fatal != c.fatal {
+			t.Errorf("calendarStoreMode(%q, %q) = (%v, %v), want (%v, %v)", c.personalities, c.store, open, fatal, c.open, c.fatal)
+		}
+	}
+}

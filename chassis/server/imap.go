@@ -140,66 +140,18 @@ func imapAccount(ctx context.Context, d imapDeps, in []byte) (event.Payload, err
 			fmt.Sprintf("domain %q is not a verified hostname or delegated zone of this tenant", domain)), nil
 	}
 
-	// password: absent ⇒ unchanged on update / generated on create;
-	// explicit "" ⇒ generated (and returned once); otherwise stored.
-	// `rotate = true` ⇒ generated even for an existing account (the
-	// studio's "rotate mailbox password"); an explicit password with
-	// rotate is simply that password. Generated passwords come in two
-	// styles: `password_style = "token"` (default; 24-char group token,
-	// ~116 bits) or `"words"` — `password_words` (default 5) hyphen-joined
-	// BIP-39 words, 11 bits each, the phrase a person types into a phone.
-	style := gjson.GetBytes(meta, "password_style").String()
-	if style == "" {
-		style = "token"
+	// The password block is shared with txco://calendar/account
+	// (account_password.go): absent ⇒ unchanged on update / generated on
+	// create; "" ⇒ generated and returned once; `rotate` ⇒ regenerated;
+	// `password_style` token|words.
+	pwr, pcode, pmsg := resolveAccountPassword(meta, func() (bool, error) {
+		_, exists, gerr := d.store.GetAccount(ctx, username)
+		return exists, gerr
+	})
+	if pcode != "" {
+		return imapErr(into, "txco_imap_"+pcode, pmsg), nil
 	}
-	words := chimap.WordPasswordDefaultWords
-	if w := gjson.GetBytes(meta, "password_words"); w.Exists() {
-		words = int(w.Int())
-		if words < 4 || words > 12 {
-			return imapErr(into, "txco_imap_invalid_arg", "password_words must be between 4 and 12"), nil
-		}
-	}
-	var generate func() string
-	switch style {
-	case "token":
-		generate = chimap.GeneratePassword
-	case "words":
-		generate = func() string { return chimap.GenerateWordPassword(words) }
-	default:
-		return imapErr(into, "txco_imap_invalid_arg", "password_style must be \"token\" or \"words\""), nil
-	}
-	rotate := gjson.GetBytes(meta, "rotate").Bool()
-
-	var generated, pwHash string
-	rotated := false
-	pw := gjson.GetBytes(meta, "password")
-	switch {
-	case pw.Exists() && pw.String() != "":
-		if len(pw.String()) < 8 {
-			return imapErr(into, "txco_imap_invalid_arg", "password must be at least 8 characters"), nil
-		}
-		pwHash, err = chimap.HashPassword(pw.String())
-	case pw.Exists() || rotate:
-		generated = generate()
-		pwHash, err = chimap.HashPassword(generated)
-		if rotate {
-			_, exists, gerr := d.store.GetAccount(ctx, username)
-			if gerr != nil {
-				err = gerr
-			}
-			rotated = exists
-		}
-	default:
-		if _, exists, gerr := d.store.GetAccount(ctx, username); gerr == nil && !exists {
-			generated = generate()
-			pwHash, err = chimap.HashPassword(generated)
-		} else if gerr != nil {
-			err = gerr
-		}
-	}
-	if err != nil {
-		return imapErr(into, "txco_imap_store", err.Error()), nil
-	}
+	generated, pwHash, rotated := pwr.generated, pwr.hash, pwr.rotated
 	status := gjson.GetBytes(meta, "status").String()
 	var policy json.RawMessage
 	if p := gjson.GetBytes(meta, "policy"); p.Exists() && p.IsObject() {

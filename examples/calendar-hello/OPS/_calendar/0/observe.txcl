@@ -1,0 +1,16 @@
+# The `_calendar` stack is the subscription: while it exists, every
+# committed client mutation in this tenant's calendars (put, delete,
+# mkcalendar, remove, proppatch — where the calendar's policy says
+# observe) arrives here with @calendar.phase == "observe", after the
+# client already got its reply. Facts ride under @calendar.*: op,
+# calendar{id,name,display_name,timezone}, object{name,uid,etag,…}, the
+# object's iCalendar text at @calendar.ical and its parse at
+# @calendar.event (start_utc, recur{freq,…}, …). This rule just records
+# what it saw; a product would reconcile @calendar.event into its own
+# canonical state.
+WHEN @calendar.phase == "observe"
+  EMIT ._observed = &object(
+         "op", @calendar.op,
+         "calendar", @calendar.calendar.name,
+         "uid", @calendar.object.uid,
+         "summary", @calendar.event.summary)

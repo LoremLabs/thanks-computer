@@ -34,6 +34,7 @@ package websocket
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,13 +104,39 @@ type Controller struct {
 	sweepCtx context.Context
 	sweepEnd context.CancelFunc
 
-	upgrades metric.Int64Counter
-	messages metric.Int64Counter
-	closes   metric.Int64Counter
-	conns    metric.Int64UpDownCounter
+	upgrades  metric.Int64Counter
+	messages  metric.Int64Counter
+	closes    metric.Int64Counter
+	directory metric.Int64Counter
+	conns     metric.Int64UpDownCounter
+
+	// relay + dir, set once at boot (SetRelay) before Start; nil = every
+	// session is reachable on this node only. leaseTTL is the directory
+	// lease a session holds while it lives; refreshed past half-life.
+	relay    Relay
+	dir      Directory
+	leaseTTL time.Duration
 
 	now func() time.Time
 }
+
+// SetRelay wires cross-node delivery: a Relay to reach other nodes' sessions
+// and a Directory that records which node owns each session. Call before
+// Start. With neither, a session is reachable only on the node holding its
+// socket (the open-core default).
+func (c *Controller) SetRelay(r Relay, d Directory) {
+	c.relay, c.dir = r, d
+	c.leaseTTL = 2 * c.lim.maxIdleTimeout
+	if c.leaseTTL < time.Hour {
+		c.leaseTTL = time.Hour
+	}
+}
+
+// crossNode reports whether the controller can look beyond this node.
+func (c *Controller) crossNode() bool { return c != nil && c.relay != nil && c.dir != nil }
+
+// LeaseTTL is the directory lease length (tests).
+func (c *Controller) LeaseTTL() time.Duration { return c.leaseTTL }
 
 // NewController constructs (but does not start) the websocket controller.
 // Inert unless both `websocket` and `web` are in --personalities: the
@@ -141,6 +168,9 @@ func NewController(ctx context.Context, pu *processor.Unit) *Controller {
 		c.conns, _ = pu.Mc.Meter.Int64UpDownCounter("chassis.websocket.connections",
 			metric.WithDescription("Open WebSocket sessions on this node"),
 			metric.WithUnit("1"))
+		c.directory, _ = pu.Mc.Meter.Int64Counter("chassis.websocket.directory",
+			metric.WithDescription("Session directory operations by op and outcome"),
+			metric.WithUnit("1"))
 	}
 	return c
 }
@@ -157,12 +187,19 @@ func (c *Controller) Start() {
 	c.sweepCtx, c.sweepEnd = context.WithCancel(c.ctx)
 	c.wg.Add(1)
 	go c.sweeper(c.sweepCtx)
+	node := ""
+	if c.relay != nil {
+		node = c.relay.Node()
+	}
 	c.pu.Logger.Info("websocket controller started",
 		zap.Int("max_conns", c.lim.maxConns),
 		zap.Int("max_conns_per_tenant", c.lim.maxConnsPerTenant),
 		zap.Int64("max_message_bytes", c.lim.maxMessageBytes),
 		zap.Duration("idle_timeout", c.lim.idleTimeout),
-		zap.Duration("ping_interval", c.lim.pingInterval))
+		zap.Duration("ping_interval", c.lim.pingInterval),
+		zap.Bool("cross_node", c.crossNode()),
+		zap.String("node", node),
+		zap.Duration("lease_ttl", c.leaseTTL))
 }
 
 // Stop closes every session with 1001 (going away) and waits, bounded by
@@ -198,6 +235,7 @@ func (c *Controller) Stop() {
 		c.wg.Wait()
 		close(done)
 	}()
+	deadline := time.Now().Add(c.lim.drainTimeout)
 	select {
 	case <-done:
 		c.pu.Logger.Info("websocket controller stopped")
@@ -207,6 +245,147 @@ func (c *Controller) Stop() {
 		c.mu.Unlock()
 		c.pu.Logger.Warn("websocket drain timeout; abandoning stragglers",
 			zap.Duration("drain_timeout", c.lim.drainTimeout), zap.Int("sessions", left))
+	}
+	// Stop answering for this node only after its sessions are gone, so a
+	// request that races the drain gets a real answer; whatever is left in
+	// the bus after this is a no-responder, which the sender reads as not
+	// found.
+	if c.relay != nil {
+		sctx, cancel := context.WithDeadline(context.Background(), deadline.Add(2*time.Second))
+		defer cancel()
+		if err := c.relay.Shutdown(sctx); err != nil {
+			c.pu.Logger.Warn("websocket relay shutdown", zap.String("err", err.Error()))
+		}
+	}
+}
+
+// --- cross-node ---------------------------------------------------------------
+
+const directoryOpTimeout = 2 * time.Second
+
+func dirOp(v string) attribute.KeyValue { return attribute.String("txco.websocket.op", v) }
+
+// dirRegister records this node as the session's owner. Best-effort: on
+// failure the session still serves — it is simply reachable only here until
+// the sweeper's refresh succeeds.
+func (c *Controller) dirRegister(s *session) {
+	if !c.crossNode() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), directoryOpTimeout)
+	defer cancel()
+	if err := c.dir.Register(ctx, s.tenant, s.id, c.relay.Node(), s.stack); err != nil {
+		c.record(c.directory, dirOp("register"), outcome("error"))
+		c.pu.Logger.Warn("websocket directory register failed; session reachable on this node only until refreshed",
+			zap.String("sid", s.id), zap.String("err", err.Error()))
+		return
+	}
+	s.leasedAt.Store(c.now().UnixNano())
+	c.record(c.directory, dirOp("register"), outcome("ok"))
+}
+
+func (c *Controller) dirUnregister(s *session) {
+	if !c.crossNode() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), directoryOpTimeout)
+	defer cancel()
+	if err := c.dir.Unregister(ctx, s.tenant, s.id); err != nil {
+		c.record(c.directory, dirOp("unregister"), outcome("error"))
+		c.pu.Logger.Warn("websocket directory unregister failed; the lease expires on its own",
+			zap.String("sid", s.id), zap.String("err", err.Error()))
+		return
+	}
+	c.record(c.directory, dirOp("unregister"), outcome("ok"))
+}
+
+// refreshLeases renews the directory lease of every session past half-life
+// (and re-registers one whose registration failed), a bounded batch per
+// sweep so a node full of long sessions never stalls the sweeper.
+func (c *Controller) refreshLeases(now time.Time) {
+	if !c.crossNode() {
+		return
+	}
+	const perTick = 256
+	cutoff := now.Add(-c.leaseTTL / 2).UnixNano()
+	c.mu.Lock()
+	due := make([]*session, 0, 16)
+	for _, s := range c.sessions {
+		if s.leasedAt.Load() <= cutoff {
+			due = append(due, s)
+			if len(due) == perTick {
+				break
+			}
+		}
+	}
+	c.mu.Unlock()
+	for _, s := range due {
+		if s.closed.Load() {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), directoryOpTimeout)
+		err := c.dir.Refresh(ctx, s.tenant, s.id, c.relay.Node(), s.stack)
+		cancel()
+		if err != nil {
+			c.record(c.directory, dirOp("refresh"), outcome("error"))
+			continue
+		}
+		s.leasedAt.Store(now.UnixNano())
+		c.record(c.directory, dirOp("refresh"), outcome("ok"))
+	}
+}
+
+// resolveRemote finds the node that owns a session this node does not.
+// A miss, a directory error, or an entry naming this node (stale: the
+// session is gone from here) each end the attempt with the right error.
+func (c *Controller) resolveRemote(ctx context.Context, tenant, sid string) (string, error) {
+	lctx, cancel := context.WithTimeout(ctx, directoryOpTimeout)
+	defer cancel()
+	node, found, err := c.dir.Lookup(lctx, tenant, sid)
+	if err != nil {
+		c.record(c.directory, dirOp("lookup"), outcome("error"))
+		c.pu.Logger.Warn("websocket directory lookup failed", zap.String("sid", sid), zap.String("err", err.Error()))
+		return "", ErrRelayUnavailable
+	}
+	if !found {
+		c.record(c.directory, dirOp("lookup"), outcome("miss"))
+		return "", ErrSessionNotFound
+	}
+	if node == c.relay.Node() {
+		// Our own stale entry: the session closed here and the delete was
+		// lost. Clean it up and answer as the local lookup already did.
+		c.record(c.directory, dirOp("lookup"), outcome("stale_self"))
+		c.dirForget(tenant, sid)
+		return "", ErrSessionNotFound
+	}
+	c.record(c.directory, dirOp("lookup"), outcome("ok"))
+	return node, nil
+}
+
+// dirForget drops a directory entry that proved stale (best effort).
+func (c *Controller) dirForget(tenant, sid string) {
+	ctx, cancel := context.WithTimeout(context.Background(), directoryOpTimeout)
+	defer cancel()
+	_ = c.dir.Unregister(ctx, tenant, sid)
+}
+
+// remoteTimeout bounds one cross-node request: the owner's own write
+// timeout plus the bus round trip.
+func (c *Controller) remoteTimeout() time.Duration { return c.lim.writeTimeout + 2*time.Second }
+
+// noteRemote maps a relay answer to the outbound message outcome and tidies
+// the directory when the owner says the session is gone.
+func (c *Controller) noteRemote(tenant, sid string, err error) {
+	switch {
+	case err == nil:
+		c.record(c.messages, direction("out"), outcome("remote_ok"))
+	case errors.Is(err, ErrSessionNotFound):
+		c.record(c.messages, direction("out"), outcome("remote_miss"))
+		c.dirForget(tenant, sid)
+	case errors.Is(err, ErrWriteTimeout):
+		c.record(c.messages, direction("out"), outcome("remote_timeout"))
+	default:
+		c.record(c.messages, direction("out"), outcome("remote_failed"))
 	}
 }
 
@@ -220,7 +399,9 @@ func (c *Controller) sweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.sweepPending(c.now())
+			now := c.now()
+			c.sweepPending(now)
+			c.refreshLeases(now)
 		}
 	}
 }
@@ -257,6 +438,7 @@ func (c *Controller) register(s *session) {
 	if c.conns != nil {
 		c.conns.Add(context.Background(), 1)
 	}
+	c.dirRegister(s)
 }
 
 func (c *Controller) unregister(s *session) {
@@ -271,6 +453,7 @@ func (c *Controller) unregister(s *session) {
 	if c.conns != nil {
 		c.conns.Add(context.Background(), -1)
 	}
+	c.dirUnregister(s)
 }
 
 // lookup finds a live session of the tenant. A session of ANOTHER tenant is

@@ -219,11 +219,12 @@ func TestWebsocketSendAndReply(t *testing.T) {
 	}
 	// registry errors map to codes
 	for err, code := range map[error]string{
-		websocketp.ErrSessionNotFound: "txco_websocket_session_not_found",
-		websocketp.ErrSessionClosed:   "txco_websocket_session_closed",
-		websocketp.ErrWriteTimeout:    "txco_websocket_write_timeout",
-		websocketp.ErrMessageTooLarge: "txco_websocket_message_too_large",
-		errors.New("boom"):            "txco_websocket_error",
+		websocketp.ErrSessionNotFound:  "txco_websocket_session_not_found",
+		websocketp.ErrSessionClosed:    "txco_websocket_session_closed",
+		websocketp.ErrWriteTimeout:     "txco_websocket_write_timeout",
+		websocketp.ErrMessageTooLarge:  "txco_websocket_message_too_large",
+		websocketp.ErrRelayUnavailable: "txco_websocket_relay_unavailable",
+		errors.New("boom"):             "txco_websocket_error",
 	} {
 		reg.sendErr = err
 		res, _ := websocketSend(wsCtx("acme", "http", `{"session_id":"ws_S","text":"x"}`), d, []byte(`{}`))

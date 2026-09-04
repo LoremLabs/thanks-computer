@@ -15,6 +15,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 )
 
@@ -131,8 +132,8 @@ func (s *session) Login(username, password string) error {
 		note("failed")
 		return imapserver.ErrAuthFailed
 	}
-	key := loginKey(acct.Username, acct.PwHash, password)
-	if !s.c.cache.hit(key) {
+	key := apppass.LoginKey(acct.Username, acct.PwHash, password)
+	if !s.c.cache.Hit(key) {
 		match, verr := chimap.VerifyPassword(acct.PwHash, password)
 		if verr != nil {
 			s.c.pu.Logger.Warn("imap account has an unreadable password hash", zap.String("user", username), zap.String("err", verr.Error()))
@@ -143,7 +144,7 @@ func (s *session) Login(username, password string) error {
 			note("failed")
 			return imapserver.ErrAuthFailed
 		}
-		s.c.cache.put(key)
+		s.c.cache.Put(key)
 	}
 	if acct.Status != chimap.StatusActive {
 		note("disabled")

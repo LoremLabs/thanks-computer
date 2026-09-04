@@ -1,0 +1,13 @@
+# Success: all three ops answered. The generated password (if any) and the
+# feed token (when minted) appear here once and nowhere else.
+WHEN ._acct.username != "" && ._cal.name != "" && ._put.uid != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "username", ._acct.username,
+         "created", ._acct.created,
+         "password", ._acct.password,
+         "calendar", &object("name", ._cal.name, "path", ._cal.path, "feed_path", ._cal.feed_path),
+         "hello", &object("uid", ._put.uid, "etag", ._put.etag, "noop", ._put.noop),
+         "caldav", &object("server", "pony.local.thanks.computer", "port", 8080, "tls", false, "path", "/dav/")))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

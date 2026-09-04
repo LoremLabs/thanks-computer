@@ -1,0 +1,12 @@
+# POST /calendar/provision — step 2: create (or update) the account.
+#
+# An omitted/empty password GENERATES one and returns it exactly once in
+# ._acct.password — only its argon2id hash is stored. A product that also
+# runs the IMAP head passes the password that account got
+# (`password = ._imapacct.password`) so one credential opens Mail and
+# Calendar alike.
+WHEN ._prov.username != ""
+  EXEC "txco://calendar/account"
+    WITH username = ._prov.username,
+         password = ._prov.password,
+         into = "_acct"

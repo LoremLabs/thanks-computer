@@ -1,0 +1,14 @@
+# Everything else is allowed. An accepting answer may carry a REWRITE —
+# @calendar.res.event (structured) or @calendar.res.ical (text) — which
+# the head commits instead of the client's bytes, keeping the client's
+# UID: the way a stack normalizes an edit to what it can actually run.
+# Here a daily put is re-anchored in UTC with a 30-minute duration — the
+# shape this stack runs — whatever timezone or length the client sent.
+WHEN @calendar.phase == "answer" && @calendar.op == "put" && @calendar.event.recur.freq == "DAILY"
+  EMIT @calendar.res.ok = true,
+       @calendar.res.event = &object(
+         "summary",     @calendar.event.summary,
+         "description", @calendar.event.description,
+         "start",       @calendar.event.start_utc,
+         "duration",    "PT30M",
+         "rrule",       "FREQ=DAILY")

@@ -1,0 +1,3 @@
+# A delete, a new calendar, a renamed one: nothing to normalize — allowed.
+WHEN @calendar.phase == "answer" && @calendar.op != "put"
+  EMIT @calendar.res.ok = true

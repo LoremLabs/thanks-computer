@@ -356,6 +356,30 @@ func TestDetectTenantBodyIMAP(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyCalendar: a client mutation the calendar head
+// dispatches (src=calendar with a trusted _txc.calendar.tenant from the
+// account row) proposes a route into that tenant's _calendar/0; without the
+// tenant stamp it falls through to the resolver.
+func TestDetectTenantBodyCalendar(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"calendar","calendar":{"tenant":"acme","phase":"answer","op":"put","calendar":{"name":"schedule"}}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_calendar/0" {
+		t.Errorf("_txc.route.to = %q, want _calendar/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "calendar" {
+		t.Errorf("_txc.route.ingress = %q, want calendar", got)
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified must be true (chassis-stamped)")
+	}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"calendar","calendar":{"op":"put"}}}`)); body != "{}" {
+		t.Errorf("calendar body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyLLM: an AI-gateway request (src=llm with a trusted
 // _txc.llm.tenant stamped by the inlet after its own Host resolution)
 // proposes a route into that tenant's _llm/0, carrying the inlet's

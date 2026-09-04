@@ -50,6 +50,13 @@ type WebController struct {
 	llmHandler      http.HandlerFunc
 	llmCountHandler http.HandlerFunc
 
+	// calendarHandler / calendarPrefix, when set (via SetCalendar), serve
+	// the `calendar` personality — CalDAV and ICS feeds — under the prefix
+	// (and /.well-known/caldav) on every hostname. Nil ⇒ the paths fall
+	// through to the catch-all like any other request.
+	calendarHandler http.Handler
+	calendarPrefix  string
+
 	// ws, when set (via SetWebSocket) and enabled, makes the catch-all
 	// handler stamp `_txc.websocket.upgrade` + a minted session id on every
 	// WebSocket upgrade request and, after the run, hand the socket over
@@ -77,6 +84,16 @@ func (web *WebController) SetTLSConfig(c *tls.Config) { web.tlsConfig = c }
 func (web *WebController) SetLLMGateway(messages, countTokens http.HandlerFunc) {
 	web.llmHandler = messages
 	web.llmCountHandler = countTokens
+}
+
+// SetCalendar mounts the calendar personality's handler on prefix (no
+// trailing slash, e.g. "/dav") and on /.well-known/caldav. Call before
+// Start. The handler answers from the calendar store and never runs a
+// stack for a read; it bypasses the operator BasicAuth wrapper (it has its
+// own account-table Basic auth) exactly as the AI gateway does.
+func (web *WebController) SetCalendar(h http.Handler, prefix string) {
+	web.calendarHandler = h
+	web.calendarPrefix = strings.TrimSuffix(prefix, "/")
 }
 
 // splitMocksHeader splits an X-Txco-Mocks header value into a clean
@@ -234,6 +251,17 @@ func (web *WebController) Start() {
 			}
 			if web.llmCountHandler != nil {
 				r.Path("/v1/messages/count_tokens").HandlerFunc(web.llmCountHandler).Methods(http.MethodPost)
+			}
+
+			// Calendar personality (CalDAV + ICS feeds): a reserved prefix
+			// on every hostname, registered BEFORE the catch-all so PROPFIND
+			// / REPORT / MKCALENDAR reach it (no .Methods() filter) and the
+			// operator BasicAuth wrapper is bypassed — the head authenticates
+			// against its own account table. Reads never touch the bus.
+			if web.calendarHandler != nil && web.calendarPrefix != "" {
+				r.Path("/.well-known/caldav").Handler(web.calendarHandler)
+				r.Path(web.calendarPrefix).Handler(web.calendarHandler)
+				r.PathPrefix(web.calendarPrefix + "/").Handler(web.calendarHandler)
 			}
 
 			r.PathPrefix("/").HandlerFunc(web.BasicAuth(func(w http.ResponseWriter, r *http.Request) {

@@ -440,3 +440,68 @@ func TestSynthesisIMAPSSRV(t *testing.T) {
 		}
 	})
 }
+
+func TestSynthCalDAVSRV(t *testing.T) {
+	srv := func(t *testing.T, snap *ZoneSnapshot, name string) *dns.SRV {
+		t.Helper()
+		ans, _, rc := snap.Lookup(q(name, dns.TypeSRV))
+		if rc != dns.RcodeSuccess || len(ans) != 1 {
+			t.Fatalf("%s SRV: rc=%d ans=%v", name, rc, ans)
+		}
+		rr, ok := ans[0].(*dns.SRV)
+		if !ok {
+			t.Fatalf("%s: not an SRV: %T", name, ans[0])
+		}
+		return rr
+	}
+	t.Run("pattern zone: SRV + path TXT at apex and per stack", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+		seedActiveStack(t, db, patTenant, "web-api", fixedTS)
+		cfg := patCfg()
+		cfg.CalDAVSPort = 443
+		snap := buildOrDie(t, db, cfg)
+		for _, name := range []string{"_caldavs._tcp.pat.example.com.", "_caldavs._tcp.web-api.pat.example.com."} {
+			rr := srv(t, snap, name)
+			want := strings.TrimPrefix(name, "_caldavs._tcp.")
+			if rr.Port != 443 || rr.Target != want || rr.Priority != 0 || rr.Weight != 1 {
+				t.Fatalf("%s SRV: %v", name, rr)
+			}
+			txt, _, rc := snap.Lookup(q(name, dns.TypeTXT))
+			if rc != dns.RcodeSuccess || len(txt) != 1 || !strings.Contains(txt[0].String(), "path=/.well-known/caldav") {
+				t.Fatalf("%s TXT: rc=%d %v", name, rc, txt)
+			}
+		}
+	})
+	t.Run("wildcard suffix zone: no caldav SRV under the wildcard", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "stacks.example.com", fixedTS)
+		cfg := patCfg()
+		cfg.StructuredSuffix = "stacks.example.com"
+		cfg.IMAPSPort = 993
+		cfg.CalDAVSPort = 443
+		snap := buildOrDie(t, db, cfg)
+		// The wildcard answers one service only: a client asking for
+		// _caldavs._tcp.foo gets the imaps record (wildcard semantics) and
+		// must not also get a caldav one it cannot tell apart.
+		ans, _, _ := snap.Lookup(q("_caldavs._tcp.foo-rand.stacks.example.com.", dns.TypeSRV))
+		if len(ans) != 1 {
+			t.Fatalf("wildcard SRV answers: %v", ans)
+		}
+		// The apex has its explicit pair.
+		if rr := srv(t, snap, "_caldavs._tcp.stacks.example.com."); rr.Port != 443 || rr.Target != "stacks.example.com." {
+			t.Fatalf("apex SRV: %v", rr)
+		}
+	})
+	t.Run("off by default", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+		snap := buildOrDie(t, db, patCfg())
+		if ans, _, _ := snap.Lookup(q("_caldavs._tcp.pat.example.com.", dns.TypeSRV)); len(ans) != 0 {
+			t.Fatalf("SRV emitted with port 0: %v", ans)
+		}
+		if ans, _, _ := snap.Lookup(q("_caldavs._tcp.pat.example.com.", dns.TypeTXT)); len(ans) != 0 {
+			t.Fatalf("TXT emitted with port 0: %v", ans)
+		}
+	})
+}

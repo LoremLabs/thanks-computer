@@ -29,11 +29,15 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.dns.res.answer", true},
 		{"_txc.imap.res.ok", true},
 		{"_txc.imap.res.flags", true},
-		{"_txc.imap.msg.text", false},       // an appended message's facts are read-only…
-		{"_txc.imap.tenant", false},         // …and the route hint especially
-		{"_txc.dns.proposed.answer", false}, // the head's proposal is read-only
-		{"_txc.dns.q.name", false},          // inbound facts are reserved
-		{"_txc.dns.tenant", false},          // the route hint especially
+		{"_txc.calendar.res.ok", true},
+		{"_txc.calendar.res.event.start", true},
+		{"_txc.calendar.event.summary", false}, // a client's object facts are read-only…
+		{"_txc.calendar.tenant", false},        // …and the route hint especially
+		{"_txc.imap.msg.text", false},          // an appended message's facts are read-only…
+		{"_txc.imap.tenant", false},            // …and the route hint especially
+		{"_txc.dns.proposed.answer", false},    // the head's proposal is read-only
+		{"_txc.dns.q.name", false},             // inbound facts are reserved
+		{"_txc.dns.tenant", false},             // the route hint especially
 		{"_txc.goto", true},
 		{"_txc.halt", true},
 		{"_txc.delete", true},
@@ -410,6 +414,16 @@ func TestAuthorMayDeleteTxc(t *testing.T) {
 		if !authorMayDeleteTxc(p) || authorMayWriteTxc(p) {
 			t.Errorf("%s: delete=%v write=%v, want delete-only", p, authorMayDeleteTxc(p), authorMayWriteTxc(p))
 		}
+	}
+	// A client's calendar object and its parse are delete-only the same
+	// way; the route hint beside them is not even deletable.
+	for _, p := range []string{"_txc.calendar.ical", "_txc.calendar.event", "_txc.calendar.event.recur", "_txc.calendar.prior", "_txc.calendar.prior.event"} {
+		if !authorMayDeleteTxc(p) || authorMayWriteTxc(p) {
+			t.Errorf("%s: delete=%v write=%v, want delete-only", p, authorMayDeleteTxc(p), authorMayWriteTxc(p))
+		}
+	}
+	if authorMayDeleteTxc("_txc.calendar.tenant") || authorMayDeleteTxc("_txc.calendar.object") {
+		t.Error("calendar route hint / object identity must not be deletable")
 	}
 	// An inbound WebSocket payload is delete-only the same way; the session
 	// facts beside it are not even deletable.

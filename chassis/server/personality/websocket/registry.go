@@ -31,6 +31,10 @@ var (
 	ErrWriteTimeout    = errors.New("write timed out")
 	ErrMessageTooLarge = errors.New("message exceeds the session's size limit")
 	ErrPendingFull     = errors.New("too many unclaimed accepts")
+	// ErrRelayUnavailable: the session is not on this node and the cross-
+	// node path (directory or relay) could not be used. Tenant-independent,
+	// so it reveals nothing about another tenant's sessions.
+	ErrRelayUnavailable = errors.New("cross-node delivery is unavailable")
 )
 
 // Accept is the decision a stack makes with txco://websocket/accept. The

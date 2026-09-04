@@ -1,0 +1,16 @@
+# POST /calendar/provision — step 3: the account's first calendar, with a
+# policy that asks the `_calendar` stack before a client edit commits
+# (`stack`), and an ICS feed token minted once (`feed = "ensure"` mints
+# only when the calendar has none; `"rotate"` retires the old link).
+# ._acct.username is only set when the account op succeeded.
+WHEN ._acct.username != ""
+  EXEC "txco://calendar/calendar"
+    WITH username     = ._acct.username,
+         name         = "hello",
+         display_name = "Hello calendar",
+         description  = "A calendar a txco stack materializes.",
+         timezone     = "UTC",
+         color        = "#6b4de6",
+         policy       = &object("put", "stack", "delete", "stack"),
+         feed         = "ensure",
+         into         = "_cal"

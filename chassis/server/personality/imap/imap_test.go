@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
@@ -417,7 +418,7 @@ func TestLoginFailuresAndThrottle(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Too many login attempts") {
 		t.Fatalf("throttle err = %v", err)
 	}
-	if h.ctrl.cache.hit(loginKey("paris@example.com", "", "right")) {
+	if h.ctrl.cache.Hit(apppass.LoginKey("paris@example.com", "", "right")) {
 		t.Error("nothing should be cached")
 	}
 }

@@ -39,7 +39,8 @@ Each key is stored under **`<tenant>/<namespace>/<key>`**:
   namespace (`<stack>`): the app owns its state across inlets. Pass
   `namespace = "shared"` (any name) to
   share keys across a tenant's stacks. Names starting with `_txc` are reserved
-  for the chassis' own indexes (the blob name index lives in `_txc.blob`) and
+  for the chassis' own indexes (the blob name index lives in `_txc.blob`, the
+  WebSocket session directory in `_txc.websocket`) and
   are refused by every `kv/*` op and by `KV/` seed packs.
 - **key** — yours; no `/` (use a namespace to group).
 

@@ -81,6 +81,14 @@ type SynthConfig struct {
 	// name, so its wildcard SRV points at `imap.<suffix>` — a name the
 	// wildcard A record resolves and the wildcard certificate covers.
 	IMAPSPort uint16
+	// CalDAVSPort, when non-zero, adds an RFC 6764 `_caldavs._tcp` SRV
+	// (plus the TXT "path=/.well-known/caldav") at the apex and every
+	// per-stack host, target = the owner itself — the calendar personality
+	// serves every hostname under its path prefix. NOT on the default-suffix
+	// wildcard: a wildcard RRset cannot tell `_imaps._tcp.x` from
+	// `_caldavs._tcp.x`, and mixing two services in one answer misleads
+	// both clients; structured hosts discover through /.well-known/caldav.
+	CalDAVSPort uint16
 	// StructuredSuffix is the platform's default structured-host suffix
 	// (TXCO_STRUCTURED_HOST_SUFFIX), bare (no leading dot), e.g.
 	// "stacks.thanks.computer". When a served zone's origin equals it, the
@@ -105,6 +113,10 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 	if imaps < 0 || imaps > 65535 {
 		imaps = 0
 	}
+	caldavs := conf.DNSCalDAVSPort
+	if caldavs < 0 || caldavs > 65535 {
+		caldavs = 0
+	}
 	return SynthConfig{
 		Nameservers: flattenCSV(conf.DNSNameservers),
 		EdgeIPs:     flattenCSV(conf.DNSEdgeIPs),
@@ -114,6 +126,7 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 		SPFOverride: strings.TrimSpace(conf.DNSSPF),
 		DMARC:       strings.TrimSpace(conf.DNSDMARC),
 		IMAPSPort:   uint16(imaps),
+		CalDAVSPort: uint16(caldavs),
 		StructuredSuffix: strings.ToLower(strings.TrimSuffix(
 			strings.TrimPrefix(strings.TrimSpace(conf.StructuredHostSuffix), "."), ".")),
 	}
@@ -171,6 +184,7 @@ func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
 		SPFOverride:      flagDefaults.SPFOverride,
 		DMARC:            flagDefaults.DMARC,
 		IMAPSPort:        flagDefaults.IMAPSPort,
+		CalDAVSPort:      flagDefaults.CalDAVSPort,
 		StructuredSuffix: flagDefaults.StructuredSuffix,
 	}
 }
@@ -213,6 +227,7 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 	if rr := mkSRV("_imaps._tcp."+z.originFQDN, ttl, cfg.IMAPSPort, z.originFQDN); rr != nil {
 		out = append(out, rr)
 	}
+	out = append(out, mkCalDAVS("_caldavs._tcp."+z.originFQDN, ttl, cfg.CalDAVSPort, z.originFQDN)...)
 
 	// Apex mail-auth TXT (SPF + DMARC), emitted alongside the MX (mail
 	// enabled). SPF is softfail (~all) so it never hard-rejects a tenant's
@@ -283,6 +298,22 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 		if rr := mkSRV("_imaps._tcp."+owner, ttl, cfg.IMAPSPort, owner); rr != nil {
 			out = append(out, rr)
 		}
+		out = append(out, mkCalDAVS("_caldavs._tcp."+owner, ttl, cfg.CalDAVSPort, owner)...)
+	}
+	return out
+}
+
+// mkCalDAVS builds the RFC 6764 CalDAV discovery pair for one owner: the
+// `_caldavs._tcp` SRV and the TXT naming the context path. Nil when port
+// is 0.
+func mkCalDAVS(owner string, ttl uint32, port uint16, target string) []dns.RR {
+	rr := mkSRV(owner, ttl, port, target)
+	if rr == nil {
+		return nil
+	}
+	out := []dns.RR{rr}
+	if txt := mkTXT(owner, ttl, "path=/.well-known/caldav"); txt != nil {
+		out = append(out, txt)
 	}
 	return out
 }

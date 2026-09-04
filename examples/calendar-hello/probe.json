@@ -1,0 +1,71 @@
+{
+  "note": "Calendar head + provisioning: POST /calendar/provision creates an account (argon2id), a calendar whose policy asks the `_calendar` stack before a client edit commits, a daily hello event from event{}, and a feed token. The calendar is then readable by any CalDAV client on the web port under /dav/ (Basic auth over plaintext in dev), the feed at /dav/feed/<token>.ics needs no auth, and the `_calendar` stack refuses non-daily puts and snaps daily ones to the hour. Binds localhost → calendar-demo for the route and pony.local.thanks.computer (dev-local, auto-verified) as the domain the username must belong to. Needs `txco dev --calendar`.",
+  "dev_flags": [
+    "--calendar"
+  ],
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "calendar-demo"
+    },
+    {
+      "host": "pony.local.thanks.computer",
+      "stack": "calendar-demo"
+    }
+  ],
+  "checks": [
+    {
+      "name": "provision creates the account, the calendar, the hello event and a feed link",
+      "method": "POST",
+      "path": "/calendar/provision",
+      "status": 200,
+      "contains": "\"feed_path\":\"/dav/feed/",
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\"}"
+    },
+    {
+      "name": "re-provision keeps the event (noop) and mints no new feed token",
+      "method": "POST",
+      "path": "/calendar/provision",
+      "status": 200,
+      "contains": "\"noop\":true",
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\",\"password\":\"correct-horse-battery\"}"
+    },
+    {
+      "name": "a domain the tenant does not own is refused",
+      "method": "POST",
+      "path": "/calendar/provision",
+      "status": 400,
+      "contains": "txco_calendar_domain_not_owned",
+      "body": "{\"username\":\"paris@example.com\"}"
+    },
+    {
+      "name": "missing username is a 400 before any op runs",
+      "method": "POST",
+      "path": "/calendar/provision",
+      "status": 400,
+      "contains": "missing_username",
+      "body": "{}"
+    },
+    {
+      "name": "the CalDAV prefix answers on the bound host without credentials: 401 with a challenge",
+      "method": "GET",
+      "path": "/dav/",
+      "status": 401,
+      "contains": "authentication required"
+    },
+    {
+      "name": "well-known discovery redirects into the prefix",
+      "method": "GET",
+      "path": "/.well-known/caldav",
+      "status": 301,
+      "contains": ""
+    },
+    {
+      "name": "unhandled paths are 404, not 200 {}",
+      "method": "POST",
+      "path": "/principals/",
+      "status": 404,
+      "contains": "not_found"
+    }
+  ]
+}

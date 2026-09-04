@@ -1,4 +1,4 @@
-package imap
+package apppass
 
 import (
 	"crypto/rand"
@@ -42,7 +42,7 @@ const WordPasswordDefaultWords = 5
 // hyphens ("river-galaxy-bamboo-orbit-velvet"). n < 1 uses the default.
 // Each word is one unbiased 11-bit draw from crypto/rand: 65536 is a
 // multiple of 2048, so the modulo introduces no bias. Returned to the
-// caller exactly once by txco://imap/account; only its hash is stored.
+// caller exactly once by the account ops; only its hash is stored.
 func GenerateWordPassword(n int) string {
 	if n < 1 {
 		n = WordPasswordDefaultWords
@@ -50,7 +50,7 @@ func GenerateWordPassword(n int) string {
 	words := wordList()
 	buf := make([]byte, 2*n)
 	if _, err := rand.Read(buf); err != nil {
-		panic("imap: crypto/rand failed: " + err.Error())
+		panic("apppass: crypto/rand failed: " + err.Error())
 	}
 	out := make([]string, n)
 	for i := range out {

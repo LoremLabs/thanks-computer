@@ -1,0 +1,11 @@
+# An account error (domain not owned, bad username, store disabled because
+# the chassis was started without --calendar) answers 400 with the
+# structured code so the probe — and a human — can see what broke.
+WHEN ._acct.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "step", "account",
+         "error", ._acct.error.code,
+         "message", ._acct.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

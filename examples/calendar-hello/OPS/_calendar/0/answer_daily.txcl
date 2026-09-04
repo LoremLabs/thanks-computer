@@ -1,0 +1,10 @@
+# The answer lane: a calendar whose policy says "stack" for a verb asks
+# this stack BEFORE committing, with @calendar.phase == "answer". Absent
+# or false @calendar.res.ok is a 403 to the client; `code` maps to an HTTP
+# status (cannot 403 | limit 507 | unavailable 503) and `msg` is what the
+# client shows. Here: an event put into the demo calendar must recur
+# daily — the shape this stack knows how to run.
+WHEN @calendar.phase == "answer" && @calendar.op == "put" && @calendar.event.recur.freq != "DAILY"
+  EMIT @calendar.res.ok = false,
+       @calendar.res.code = "cannot",
+       @calendar.res.msg = "this calendar holds daily schedules; give the event a daily repeat"

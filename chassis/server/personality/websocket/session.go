@@ -63,6 +63,7 @@ type session struct {
 
 	seq          atomic.Int64
 	lastActivity atomic.Int64 // unix nanos
+	leasedAt     atomic.Int64 // unix nanos of the last directory write; 0 = none
 	msgsIn       atomic.Int64
 	msgsOut      atomic.Int64
 	bytesIn      atomic.Int64
@@ -392,8 +393,8 @@ func truncate(s string, n int) string {
 
 // --- Registry ---------------------------------------------------------------
 
-// Send implements Registry.
-func (c *Controller) Send(ctx context.Context, tenant, id string, typ MessageType, data []byte) error {
+// sendLocal writes to a session on THIS node only.
+func (c *Controller) sendLocal(ctx context.Context, tenant, id string, typ MessageType, data []byte) error {
 	if !c.Enabled() {
 		return ErrDisabled
 	}
@@ -404,9 +405,10 @@ func (c *Controller) Send(ctx context.Context, tenant, id string, typ MessageTyp
 	return s.send(ctx, typ, data)
 }
 
-// CloseSession implements Registry. The close handshake runs off the
-// caller's goroutine; the op returns as soon as the close is underway.
-func (c *Controller) CloseSession(ctx context.Context, tenant, id string, code int, reason string) error {
+// closeLocal starts the close handshake on a session on THIS node only. The
+// handshake runs off the caller's goroutine; the call returns as soon as
+// the close is underway.
+func (c *Controller) closeLocal(_ context.Context, tenant, id string, code int, reason string) error {
 	if !c.Enabled() {
 		return ErrDisabled
 	}
@@ -423,4 +425,40 @@ func (c *Controller) CloseSession(ctx context.Context, tenant, id string, code i
 		s.closeWith(code, reason, initiatorStack)
 	}()
 	return nil
+}
+
+// Send implements Registry: this node first; otherwise, with a relay wired,
+// the node the directory names.
+func (c *Controller) Send(ctx context.Context, tenant, id string, typ MessageType, data []byte) error {
+	err := c.sendLocal(ctx, tenant, id, typ, data)
+	if !errors.Is(err, ErrSessionNotFound) || !c.crossNode() {
+		return err
+	}
+	node, rerr := c.resolveRemote(ctx, tenant, id)
+	if rerr != nil {
+		return rerr
+	}
+	rctx, cancel := context.WithTimeout(ctx, c.remoteTimeout())
+	defer cancel()
+	err = c.relay.Send(rctx, node, tenant, id, typ, data)
+	c.noteRemote(tenant, id, err)
+	return err
+}
+
+// CloseSession implements Registry: this node first; otherwise the node the
+// directory names.
+func (c *Controller) CloseSession(ctx context.Context, tenant, id string, code int, reason string) error {
+	err := c.closeLocal(ctx, tenant, id, code, reason)
+	if !errors.Is(err, ErrSessionNotFound) || !c.crossNode() {
+		return err
+	}
+	node, rerr := c.resolveRemote(ctx, tenant, id)
+	if rerr != nil {
+		return rerr
+	}
+	rctx, cancel := context.WithTimeout(ctx, c.remoteTimeout())
+	defer cancel()
+	err = c.relay.Close(rctx, node, tenant, id, code, reason)
+	c.noteRemote(tenant, id, err)
+	return err
 }

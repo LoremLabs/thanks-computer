@@ -161,6 +161,7 @@ durability is the continuation store / pub-sub").
 | `--websocket-ping-interval` | 25s | chassis liveness pings; a missing pong closes with `1011`. Under fly-proxy's ~60s HTTP idle on the Flycast hop |
 | `--websocket-write-timeout` | 10s | one `send`/`reply` write; a peer that will not read is closed (`1011`) — messages are never silently dropped |
 | `--websocket-drain-timeout` | 5s | shutdown: every session gets `1001 going away`; this bounds the wait |
+| `--websocket-relay` | (none) | cross-node delivery: names a registered relay backend (the hosted build: `nats`); needs a shared `--kvstore` (redis), where the chassis records which node owns each session. Empty = a session is reachable only on its own node |
 
 **Admission** runs per message like any run (the `_sys` → tenant pin fires
 once per run): a `429` (rate limit, concurrency) drops that message and keeps
@@ -178,20 +179,29 @@ meters nothing; each message run meters as a run, each op as an op; ping/pong
 never reaches a stack. Outbound bytes are not metered separately in v1.
 
 **Continuations:** a message run that suspends is "finished" from the
-session's point of view; when it resumes, `txco://websocket/reply` still finds
-the session if it is alive on this node (the resume re-pins the source), and
-`send` with `session_id = @websocket.session.id` is the belt-and-braces
-spelling.
+session's point of view; when it resumes (on whichever node the callback or
+poll landed), `txco://websocket/reply` still reaches the session (the resume
+re-pins the source, and with `--websocket-relay` the socket's node is found
+through the directory), and `send` with `session_id = @websocket.session.id`
+is the belt-and-braces spelling.
 
 **Streaming:** `@web.res.body` written from a websocket run is drained and
 ignored — the socket is the transport; use `reply`, as many times as needed.
 
 ## Deployment
 
-- Sends resolve on **this node** in v1: a session lives where its socket is,
-  `reply` always works (the run executes there), and a `send` from another
-  node answers `session_not_found`. A fleet session directory is the next
-  step behind the same registry seam.
+- **Cross-node delivery** is `--websocket-relay`. A session lives where its
+  socket is; a `send`, `reply` or `close` that runs on another node looks the
+  owner up in the shared KV (namespace `_txc.websocket`, one lease per
+  session, written on open, refreshed while it lives, deleted on close,
+  expired if the node dies) and hands the request to that node over the
+  relay, which answers with the same errors a local write would. A node that
+  is gone answers nothing, which reads as `session_not_found`; a bus or
+  directory outage is `txco_websocket_relay_unavailable`. Without the flag a
+  session is reachable only on its own node, and a `send` from another
+  answers `session_not_found`. The chassis refuses to boot with the flag set
+  but no shared KV or no working relay: a node that silently stayed local
+  would hide every cross-node send as an application error.
 - Fronting proxies must pass Upgrade and keep the stream: on the hosted edge,
   Caddy's `reverse_proxy` does by default, with `stream_close_delay` set so an
   edge reload drains sessions instead of severing them; keep `stream_timeout`

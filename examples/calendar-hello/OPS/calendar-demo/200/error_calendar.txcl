@@ -1,0 +1,8 @@
+WHEN ._cal.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "step", "calendar",
+         "error", ._cal.error.code,
+         "message", ._cal.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

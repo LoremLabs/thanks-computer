@@ -38,6 +38,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
@@ -71,7 +72,7 @@ type Controller struct {
 
 	loginIP   *throttle.Throttle
 	loginAcct *throttle.Throttle
-	cache     *loginCache
+	cache     *apppass.LoginCache
 	conns     *connCounter
 	hub       *hub
 
@@ -90,7 +91,7 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chimap.Store)
 		ctx:   ctx,
 		pu:    pu,
 		store: store,
-		cache: newLoginCache(loginCacheTTL, loginCacheMax),
+		cache: apppass.NewLoginCache(loginCacheTTL, loginCacheMax),
 		hub:   newHub(ctx, store, logger),
 	}
 	if pu != nil {

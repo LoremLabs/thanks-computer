@@ -26,6 +26,7 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/bgservice"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
+	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	_ "github.com/loremlabs/thanks-computer/chassis/chat/openai"     // registers the "openai" ai://chat backend
 	_ "github.com/loremlabs/thanks-computer/chassis/chat/openrouter" // registers the "openrouter" ai://chat backend
 	"github.com/loremlabs/thanks-computer/chassis/compute"
@@ -67,6 +68,7 @@ import (
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 	"github.com/loremlabs/thanks-computer/chassis/server/llmgw"
+	calendarp "github.com/loremlabs/thanks-computer/chassis/server/personality/calendar"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	imapp "github.com/loremlabs/thanks-computer/chassis/server/personality/imap"
@@ -151,11 +153,11 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.route.to", "_txc.continuation", "_txc.src",
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
-		"_txc.dns.tenant", "_txc.imap.tenant")
+		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
-	dnsTenant, imapTenant := fields[9], fields[10]
+	dnsTenant, imapTenant, calendarTenant := fields[9], fields[10], fields[11]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -268,6 +270,24 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "imap")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_imap/0")
+			return b.String()
+		}
+	}
+	// Calendar mutation. The calendar head dispatches a client mutation
+	// (observe lane, after commit) or a policy question (answer lane, before
+	// commit) into the account's tenant, stamping the slug in
+	// `_txc.calendar.tenant` (trusted: the account row's tenant, never client
+	// input). Propose a route into that tenant's `_calendar/0` — the same
+	// sanctioned _sys→tenant pin as imap. The head only dispatches for
+	// tenants with an active `_calendar` stack.
+	if src.String() == "calendar" {
+		if ct := calendarTenant.String(); ct != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", ct)
+			b.Set("_txc.route.stack", "_calendar")
+			b.Set("_txc.route.ingress", "calendar")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_calendar/0")
 			return b.String()
 		}
 	}
@@ -881,7 +901,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, imapStore *chimap.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, imapStore *chimap.Store, calendarStore *chcal.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1491,6 +1511,31 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			}))
 	}
 
+	// Calendar store ops (txco://calendar/{account,calendar,put,get,list,
+	// delete}): provisioning for the `calendar` personality — an argon2id
+	// account, a calendar with its policy and feed token, and iCalendar
+	// objects materialized by UID. Registered unconditionally so a node
+	// without the store answers `_calendar.error txco_calendar_disabled`.
+	// With a shared backend every node opens the store, head or not. Tenant
+	// pinned from ctx; the username's domain must pass the sendmail
+	// ownership rule. See chassis/server/calendar.go + chassis/calendar.
+	calD := calendarDeps{store: calendarStore, snap: dbc.Snapshot,
+		maxBytes: int64(conf.CalendarObjectMaxBytes), prefix: conf.CalendarPathPrefix}
+	for name, fn := range map[string]func(context.Context, calendarDeps, []byte) (event.Payload, error){
+		"txco://calendar/account":  calendarAccount,
+		"txco://calendar/calendar": calendarCalendar,
+		"txco://calendar/put":      calendarPut,
+		"txco://calendar/get":      calendarGet,
+		"txco://calendar/list":     calendarList,
+		"txco://calendar/delete":   calendarDelete,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, calD, in)
+			}))
+	}
+
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
 	// delete}). The backend is selected by --vector-store (default "sqlite",
 	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
@@ -1631,6 +1676,31 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// branch. Tenant pinned from ctx; `reply` also gates on the pinned source.
 	// See chassis/server/websocket_ops.go + personality/websocket.
 	wsCtrl := websocketp.NewController(ctx, pu)
+	// Cross-node delivery (--websocket-relay): the directory of session
+	// owners lives in the shared KV store, the messages ride the named relay
+	// backend. Both must be there or the flag is a misconfiguration — fail
+	// the boot rather than serve a node that silently answers
+	// session_not_found for every session on another node.
+	if conf.WebsocketRelay != "" {
+		if !kvShared {
+			cancel()
+			return ctx, nil, fmt.Errorf("--websocket-relay=%s needs a shared --kvstore (redis); the session directory cannot live in a node-local store", conf.WebsocketRelay)
+		}
+		relay, rerr := websocketp.OpenRelay(conf.WebsocketRelay, websocketp.RelayConfig{
+			NodeID:  resolveUsageNodeID(conf.Fqdn),
+			Logger:  logger,
+			Handler: wsCtrl.Local(),
+		})
+		if rerr != nil {
+			cancel()
+			return ctx, nil, fmt.Errorf("websocket relay %q: %w", conf.WebsocketRelay, rerr)
+		}
+		// A dedicated handle with no TTL clamp: --kv-max-ttl guards authors'
+		// keys and must not shorten a session lease.
+		wsCtrl.SetRelay(relay, websocketp.NewKVDirectory(kvstore.New(kv, 0, 0), 0))
+		logger.Info("websocket relay enabled",
+			zap.String("relay", conf.WebsocketRelay), zap.String("node", relay.Node()))
+	}
 	wsD := websocketDeps{reg: wsCtrl}
 	for name, fn := range map[string]func(context.Context, websocketDeps, []byte) (event.Payload, error){
 		"txco://websocket/accept": websocketAccept,
@@ -1706,6 +1776,16 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		return ctx, nil, lerr
 	}
 	webCtrl.SetLLMGateway(llmGateway.HandleMessages, llmGateway.HandleCountTokens)
+
+	// Calendar personality (CalDAV + ICS feeds on the web head under
+	// --calendar-path-prefix). The controller owns the store, the login
+	// cache/throttles and the `_calendar` lanes; the web head mounts its
+	// handler. Off (a 404 on the prefix) unless `calendar` is in
+	// --personalities and the store opened.
+	calCtrl := calendarp.NewController(ctx, pu, calendarStore, resolver)
+	if calCtrl.Enabled() {
+		webCtrl.SetCalendar(calCtrl.Handler(), calCtrl.Prefix())
+	}
 
 	// Bundled TLS: when --web-tls-addr is set the chassis terminates TLS
 	// itself, obtaining + renewing wildcard certs for delegated zones via
@@ -1786,6 +1866,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		mailmapp.NewController(ctx, pu, mailResolver),
 		dnsCtrl,
 		imapCtrl,
+		calCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
 	}
