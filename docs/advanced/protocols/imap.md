@@ -232,9 +232,11 @@ the client asked for. So on a fleet where every stack has its own hostname
 (and its own certificate), **the server a mail client should use is the
 domain of the address** — `paris@<stack>.stacks.example` connects to
 `<stack>.stacks.example`, port 993, SSL on. There is no `imap.` name.
-Apple Mail guesses `imap.`/`mail.` and has to be told the server; Thunderbird
-also tries the bare domain when guessing, and would follow an
-`_imaps._tcp` SRV record where the zone publishes one.
+Apple Mail guesses `imap.`/`mail.` and has to be told the server. Thunderbird,
+K-9 and Evolution look up an `_imaps._tcp` SRV record first (RFC 6186): a
+zone the `dns` personality serves publishes one for every name when
+`--dns-imaps-port` is set (see [dns](./dns.md)), so those clients fill in
+the server and port themselves.
 
 On the hosted fleet that is exactly the topology: the edge terminates
 `:993` with the stack's existing certificate and forwards the session to

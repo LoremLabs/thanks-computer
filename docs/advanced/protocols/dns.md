@@ -40,6 +40,7 @@ you'd otherwise hand-maintain:
 | Receiving mail | **MX** for the zone (and per-stack hosts) |
 | Sender reputation | **SPF** derived from your edge; a **DKIM** keypair minted at zone creation, the public key published, the private key used to sign your [outbound mail](./sendmail.md); a **DMARC** record |
 | Web | **A/AAAA** for the zone apex and for each active stack (`support.ai.example.com` → your `support` stack) |
+| Mail clients | **SRV** `_imaps._tcp` (RFC 6186) at the apex and each stack host when `--dns-imaps-port` is set, so Thunderbird and friends find the [IMAP](./imap.md) server for `paris@support.ai.example.com` without being told |
 | TLS | Wildcard certificates for the zone, issued and renewed automatically via ACME DNS-01 against the chassis's own nameserver |
 
 Records follow your state: activate a stack and its hostname resolves; the same
@@ -69,6 +70,7 @@ runtime via `txco dns config set` (hot-reload, no restart):
 | MX host | `--dns-mx-host` / `--mx` (+ `--dns-mx-priority`, default 10) | Where the zone's MX points — your mail edge |
 | TTL | `--dns-synth-ttl` (default 60) | TTL on synthesized records |
 | SPF override | `--dns-spf` | Replaces the auto-derived SPF |
+| IMAPS port | `--dns-imaps-port` (default 0 = off) | Publishes `_imaps._tcp` SRV records pointing each name at itself on this port; the default-suffix wildcard zone points at `imap.<suffix>` |
 
 ## Zones
 

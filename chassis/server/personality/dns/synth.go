@@ -74,6 +74,13 @@ type SynthConfig struct {
 	// dns_records TXT (first-match-clears).
 	SPFOverride string // "" → auto-derive from EdgeIPs + mx
 	DMARC       string // e.g. "v=DMARC1; p=none"
+	// IMAPSPort, when non-zero, adds an RFC 6186 `_imaps._tcp` SRV at
+	// every owner that gets an A record (apex + per-stack hosts, target =
+	// the owner itself) so SRV-aware mail clients find the IMAP server.
+	// The default-suffix wildcard zone cannot vary a target per matched
+	// name, so its wildcard SRV points at `imap.<suffix>` — a name the
+	// wildcard A record resolves and the wildcard certificate covers.
+	IMAPSPort uint16
 	// StructuredSuffix is the platform's default structured-host suffix
 	// (TXCO_STRUCTURED_HOST_SUFFIX), bare (no leading dot), e.g.
 	// "stacks.thanks.computer". When a served zone's origin equals it, the
@@ -94,6 +101,10 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 	if ttl < 0 {
 		ttl = 0
 	}
+	imaps := conf.DNSIMAPSPort
+	if imaps < 0 || imaps > 65535 {
+		imaps = 0
+	}
 	return SynthConfig{
 		Nameservers: flattenCSV(conf.DNSNameservers),
 		EdgeIPs:     flattenCSV(conf.DNSEdgeIPs),
@@ -102,6 +113,7 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 		TTL:         uint32(ttl),
 		SPFOverride: strings.TrimSpace(conf.DNSSPF),
 		DMARC:       strings.TrimSpace(conf.DNSDMARC),
+		IMAPSPort:   uint16(imaps),
 		StructuredSuffix: strings.ToLower(strings.TrimSuffix(
 			strings.TrimPrefix(strings.TrimSpace(conf.StructuredHostSuffix), "."), ".")),
 	}
@@ -153,11 +165,12 @@ func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
 		MXHost:      s.MXHost,
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
-		// dns_settings carries no mail-auth/suffix columns; keep the flag
-		// values so SPF/DMARC + the structured suffix stay configured even when
-		// an operator sets a settings row.
+		// dns_settings carries no mail-auth/suffix/IMAPS columns; keep the
+		// flag values so SPF/DMARC, the structured suffix and the IMAPS SRV
+		// stay configured even when an operator sets a settings row.
 		SPFOverride:      flagDefaults.SPFOverride,
 		DMARC:            flagDefaults.DMARC,
+		IMAPSPort:        flagDefaults.IMAPSPort,
 		StructuredSuffix: flagDefaults.StructuredSuffix,
 	}
 }
@@ -192,6 +205,12 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 	}
 	out = append(out, mkAddrs(z.originFQDN, ttl, cfg.EdgeIPs)...)
 	if rr := mkMX(z.originFQDN, ttl, cfg.MXPriority, cfg.MXHost); rr != nil {
+		out = append(out, rr)
+	}
+	// RFC 6186: `_imaps._tcp.<apex> SRV 0 1 <port> <apex>` — the IMAP
+	// server for paris@<apex> is <apex> itself (the front door serves every
+	// name the zone resolves; the head does not route by name).
+	if rr := mkSRV("_imaps._tcp."+z.originFQDN, ttl, cfg.IMAPSPort, z.originFQDN); rr != nil {
 		out = append(out, rr)
 	}
 
@@ -234,6 +253,16 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 		if rr := mkTXT(wild, ttl, effectiveSPF(cfg)); rr != nil {
 			out = append(out, rr)
 		}
+		// The SRV joins the wildcard RRset itself: `*` only wildcards as the
+		// LEFTMOST label, so `_imaps._tcp.foo.<suffix>` is matched by
+		// `*.<suffix>` and answered from its RRset (the lookup substitutes
+		// the queried owner). A wildcard SRV cannot name the matched host as
+		// its target, so it points at one name under the wildcard:
+		// imap.<suffix> resolves through the wildcard A above and the
+		// wildcard certificate covers it. No new cert, no new A.
+		if rr := mkSRV(wild, ttl, cfg.IMAPSPort, dns.Fqdn("imap."+z.origin)); rr != nil {
+			out = append(out, rr)
+		}
 		return out
 	}
 
@@ -251,8 +280,30 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 		if rr := mkMX(owner, ttl, cfg.MXPriority, cfg.MXHost); rr != nil {
 			out = append(out, rr)
 		}
+		if rr := mkSRV("_imaps._tcp."+owner, ttl, cfg.IMAPSPort, owner); rr != nil {
+			out = append(out, rr)
+		}
 	}
 	return out
+}
+
+// mkSRV builds an RFC 6186 IMAPS discovery record `<owner> SRV 0 1 <port>
+// <target>`. The caller chooses the owner: `_imaps._tcp.<host>` for a
+// concrete host, or the wildcard owner itself for the default-suffix zone.
+// Nil when port is 0 (the feature is off) so callers can append
+// unconditionally. Priority 0 and weight 1 because there is exactly one
+// target. `owner` and `target` must already be FQDNs (trailing dot).
+func mkSRV(owner string, ttl uint32, port uint16, target string) dns.RR {
+	if port == 0 || owner == "" || target == "" {
+		return nil
+	}
+	return &dns.SRV{
+		Hdr:      dns.RR_Header{Name: owner, Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: ttl},
+		Priority: 0,
+		Weight:   1,
+		Port:     port,
+		Target:   target,
+	}
 }
 
 func mkNS(owner string, ttl uint32, ns string) dns.RR {

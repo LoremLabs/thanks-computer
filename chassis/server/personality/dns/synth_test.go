@@ -360,3 +360,83 @@ func TestSerialReflectsStackActivation(t *testing.T) {
 		t.Fatalf("serial did not advance after stack activation: %d -> %d", base, after)
 	}
 }
+
+// TestSynthesisIMAPSSRV covers the RFC 6186 discovery record: at the apex
+// and every per-stack host of a pattern zone (target = the name itself),
+// at the default-suffix wildcard (target = imap.<suffix>, the one name a
+// wildcard can point at), and absent when the port is 0.
+func TestSynthesisIMAPSSRV(t *testing.T) {
+	srv := func(t *testing.T, snap *ZoneSnapshot, name string) *dns.SRV {
+		t.Helper()
+		ans, _, rc := snap.Lookup(q(name, dns.TypeSRV))
+		if rc != dns.RcodeSuccess || len(ans) != 1 {
+			t.Fatalf("%s SRV: rc=%d ans=%v", name, rc, ans)
+		}
+		rr, ok := ans[0].(*dns.SRV)
+		if !ok {
+			t.Fatalf("%s: not an SRV: %T", name, ans[0])
+		}
+		if rr.Header().Name != name {
+			t.Fatalf("%s: owner must be the queried name, got %s", name, rr.Header().Name)
+		}
+		return rr
+	}
+
+	t.Run("pattern zone: apex + per-stack, target = the host", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+		seedActiveStack(t, db, patTenant, "web-api", fixedTS)
+		cfg := patCfg()
+		cfg.IMAPSPort = 993
+		snap := buildOrDie(t, db, cfg)
+
+		apex := srv(t, snap, "_imaps._tcp.pat.example.com.")
+		if apex.Port != 993 || apex.Target != "pat.example.com." || apex.Priority != 0 || apex.Weight != 1 {
+			t.Fatalf("apex SRV: %v", apex)
+		}
+		host := srv(t, snap, "_imaps._tcp.web-api.pat.example.com.")
+		if host.Port != 993 || host.Target != "web-api.pat.example.com." {
+			t.Fatalf("stack SRV: %v", host)
+		}
+		// The SRV target resolves in the same zone.
+		if a, _, rc := snap.Lookup(q(host.Target, dns.TypeA)); rc != dns.RcodeSuccess || len(a) != 1 {
+			t.Fatalf("SRV target A: rc=%d %v", rc, a)
+		}
+	})
+
+	t.Run("wildcard suffix zone: one target under the wildcard", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "stacks.example.com", fixedTS)
+		cfg := patCfg()
+		cfg.StructuredSuffix = "stacks.example.com"
+		cfg.IMAPSPort = 993
+		snap := buildOrDie(t, db, cfg)
+
+		for _, name := range []string{"_imaps._tcp.foo-rand.stacks.example.com.", "_imaps._tcp.a.b.stacks.example.com."} {
+			rr := srv(t, snap, name)
+			if rr.Port != 993 || rr.Target != "imap.stacks.example.com." {
+				t.Fatalf("%s: %v", name, rr)
+			}
+		}
+		// The shared target resolves through the wildcard A.
+		if a, _, rc := snap.Lookup(q("imap.stacks.example.com.", dns.TypeA)); rc != dns.RcodeSuccess || len(a) != 1 {
+			t.Fatalf("imap.<suffix> A: rc=%d %v", rc, a)
+		}
+		// The apex still gets its own explicit record.
+		if rr := srv(t, snap, "_imaps._tcp.stacks.example.com."); rr.Target != "stacks.example.com." {
+			t.Fatalf("apex SRV: %v", rr)
+		}
+	})
+
+	t.Run("off by default", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
+		seedActiveStack(t, db, patTenant, "web-api", fixedTS)
+		snap := buildOrDie(t, db, patCfg())
+		for _, name := range []string{"_imaps._tcp.pat.example.com.", "_imaps._tcp.web-api.pat.example.com."} {
+			if ans, _, _ := snap.Lookup(q(name, dns.TypeSRV)); len(ans) != 0 {
+				t.Fatalf("%s: SRV emitted with port 0: %v", name, ans)
+			}
+		}
+	})
+}
