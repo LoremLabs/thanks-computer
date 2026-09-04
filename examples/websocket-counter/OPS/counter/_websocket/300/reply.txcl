@@ -1,0 +1,10 @@
+# counter/_websocket scope 300 — answer on the same socket.
+#
+# `reply` targets the session this envelope came from; `text` given as an
+# object is sent as JSON text, so the browser receives {"count": N}.
+# (`txco://websocket/send WITH session_id = @websocket.session.id` is the
+# explicit spelling, and the one to use from any other run — a cron, an
+# HTTP request — that wants to push to a known session.)
+WHEN .msg.type == "increment"
+  EXEC "txco://websocket/reply"
+  WITH text.count = ._kv

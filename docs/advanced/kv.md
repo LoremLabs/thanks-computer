@@ -34,7 +34,10 @@ Each key is stored under **`<tenant>/<namespace>/<key>`**:
 
 - **tenant** — the request's resolved tenant. You can't reach another tenant's keys.
 - **namespace** — defaults to the **stack** serving the request, so one stack's
-  keys never collide with another's. Pass `namespace = "shared"` (any name) to
+  keys never collide with another's. A `_`-nested inlet sub-stack
+  (`<stack>/_mail`, `<stack>/_websocket`) defaults to its app stack's
+  namespace (`<stack>`): the app owns its state across inlets. Pass
+  `namespace = "shared"` (any name) to
   share keys across a tenant's stacks. Names starting with `_txc` are reserved
   for the chassis' own indexes (the blob name index lives in `_txc.blob`) and
   are refused by every `kv/*` op and by `KV/` seed packs.

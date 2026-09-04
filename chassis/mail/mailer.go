@@ -9,9 +9,13 @@ package mail
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/loremlabs/thanks-computer/chassis/blob"
+	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	htmltemplate "html/template"
 	"net/mail"
 	"strings"
@@ -52,6 +56,22 @@ type Mailer struct {
 	submit        SubmitFunc
 	relayOK       bool         // a relay is configured
 	rl            *rateLimiter // per-tenant, per-node send caps; nil = disabled
+
+	// Optional: the content store + blob index for `_sendmail.retain`
+	// (SetContentStore). Nil ⇒ retain is refused with retain_error.
+	fcas filecas.Store
+	ix   blob.Index
+}
+
+// SetContentStore wires the content store and the tenant blob index so a
+// send with `_sendmail.retain = true` keeps the exact bytes it submitted
+// (per recipient, DKIM-signed) under the tenant's ownership and returns
+// their sha256 — the reference a later op adopts (`txco://imap/append
+// from_sha`, `txco://blob/put from_sha`). Bytes never ride the envelope;
+// the content store is the byte plane between ops, as it is for the IMAP
+// head's parts and for blob/put.
+func (m *Mailer) SetContentStore(fcas filecas.Store, ix blob.Index) {
+	m.fcas, m.ix = fcas, ix
 }
 
 // NewMailer builds a Mailer. db must be the real runtime DB (e.g.
@@ -123,6 +143,12 @@ type recipResult struct {
 	Status    string `json:"status"` // sent | skipped | error
 	MessageID string `json:"message_id,omitempty"`
 	Reason    string `json:"reason,omitempty"`
+	// With `_sendmail.retain = true`: the submitted bytes' content-store
+	// reference (owned by the tenant), or why retention failed. Retention
+	// never fails the send — the mail is already out.
+	SHA256      string `json:"sha256,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	RetainError string `json:"retain_error,omitempty"`
 }
 
 // Send is the op body. tenant is the PINNED request tenant (resolved by the
@@ -202,6 +228,10 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 	// the structural / signing / loop-guard headers sendmail owns off-limits.
 	replyTo := sanitizeHeaderValue(s.Get("reply_to").String())
 	extraHeaders := parseHeaders(s.Get("headers"))
+	// `retain`: keep each delivered message's exact bytes in the content
+	// store under the tenant and report sha256/size per recipient. Opt-in:
+	// a stack that only sends stores nothing (materialization is explicit).
+	retain := s.Get("retain").Bool()
 
 	// Envelope MAIL FROM (becomes Return-Path). Defaults to the header From, so
 	// bounces come back where they're visible. Set `_sendmail.envelope_from =
@@ -311,7 +341,11 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 						}
 						m.emitUsage(rid, tenant, stack)
 						sent++
-						results = append(results, recipResult{To: r.addr.Address, Status: "sent", MessageID: msgID})
+						res := recipResult{To: r.addr.Address, Status: "sent", MessageID: msgID}
+						if retain {
+							res.SHA256, res.Size, res.RetainError = m.retain(ctx, tenant, msg, m.now())
+						}
+						results = append(results, res)
 						continue
 					}
 				}
@@ -471,6 +505,36 @@ func mergeVars(shared, over map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// retain writes one delivered message's bytes to the content store and
+// records the tenant's ownership of the sha (the row `from_sha` consumers
+// check), returning the reference. Write order CAS → sha row, like blob/put
+// and the IMAP head, so a crash between the two self-heals on the next
+// identical send. Errors are reported, not raised: the message is already
+// delivered and the send result must say so.
+func (m *Mailer) retain(ctx context.Context, tenant string, msg []byte, now time.Time) (sha string, size int64, retainErr string) {
+	if m.fcas == nil || m.ix == nil {
+		return "", 0, "no content store on this node"
+	}
+	sum := sha256.Sum256(msg)
+	sha = hex.EncodeToString(sum[:])
+	size = int64(len(msg))
+	present, err := m.fcas.Exists(ctx, sha)
+	if err != nil {
+		return "", 0, "content store: " + shortErr(err)
+	}
+	if !present {
+		if err := m.fcas.Put(ctx, sha, msg); err != nil {
+			return "", 0, "content store: " + shortErr(err)
+		}
+	}
+	if _, err := m.ix.PutShaIfAbsent(ctx, tenant, blob.ShaRow{
+		SHA256: sha, Size: size, ContentType: "message/rfc822", FirstSeen: now,
+	}); err != nil {
+		return "", 0, "blob index: " + shortErr(err)
+	}
+	return sha, size, ""
 }
 
 func buildResult(sent, skipped, failed int, recips []recipResult) event.Payload {

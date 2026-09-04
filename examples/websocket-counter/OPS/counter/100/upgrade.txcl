@@ -1,0 +1,14 @@
+# counter scope 100 — take the WebSocket connection.
+#
+# The chassis stamps `@websocket.upgrade = true` on any request that asks
+# to upgrade, whatever its path, and does nothing else on its own. WHICH
+# paths become sessions, and for whom, is this stack's decision: this op
+# is where a session cookie check, an Origin allowlist, or a subprotocol
+# would go (`WITH origins = &array("app.example"), subprotocols = …`).
+#
+# `events = &array("close")` opts into one extra run when the session
+# ends (see _websocket/900/closed.txcl). Every later message runs at
+# counter/_websocket/0 — the stack nested under this one, like _mail.
+WHEN @websocket.upgrade == true && @web.req.url.path == "/ws"
+  EXEC "txco://websocket/accept"
+  WITH events = &array("close")

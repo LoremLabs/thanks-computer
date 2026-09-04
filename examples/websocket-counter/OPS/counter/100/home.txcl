@@ -1,0 +1,7 @@
+# counter scope 100 — the front door is the demo page (FILES/index.html,
+# served by the stock _sys/boot/50 static op at /index.html).
+WHEN @web.req.url.path == "/"
+  EMIT @web.res.status = 302,
+       @web.res.headers.location.0 = "/index.html",
+       @web.res.body = b64"see /index.html
+"

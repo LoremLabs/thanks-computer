@@ -1,0 +1,7 @@
+# counter/_websocket scope 300 — anything else gets an error frame.
+#
+# A missing `.msg.type` (unparseable JSON) compares as "", so this also
+# answers garbage. The socket stays open either way.
+WHEN @websocket.phase == "message" && .msg.type != "increment"
+  EXEC "txco://websocket/reply"
+  WITH text.error = "unknown message type; send {\"type\":\"increment\"}"

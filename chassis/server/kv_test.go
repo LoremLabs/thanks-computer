@@ -201,3 +201,44 @@ func TestKVCASOp(t *testing.T) {
 		t.Fatalf("from-path cas should swap and report current: %s", pay.Raw)
 	}
 }
+
+// A `_`-nested inlet sub-stack (mail at <stack>/_mail, a WebSocket session
+// at <stack>/_websocket) shares its app stack's KV namespace by default: the
+// nested name is not a legal namespace segment (it contains `/`), and the
+// app is the unit that owns state across inlets.
+func TestKVNamespaceNestedInletStackSharesApp(t *testing.T) {
+	for in, want := range map[string]string{
+		"counter":               "counter",
+		"counter/_websocket":    "counter",
+		"test-01/_mail":         "test-01",
+		"a/_mail/deeper":        "a",
+		"plain/nested":          "plain/nested", // no inlet segment: untouched
+		"_cron":                 "_cron",
+		"":                      "",
+		"counter/_websocket/_x": "counter",
+	} {
+		if got := appStackNamespace(in); got != want {
+			t.Errorf("appStackNamespace(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	k := newKVHandle(t)
+	if _, err := callKV(t, kvSet, k, "t1", "counter", `{"key":"k","value":1}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	pay, err := callKV(t, kvGet, k, "t1", "counter/_websocket", `{"key":"k"}`, "")
+	if err != nil {
+		t.Fatalf("nested sub-stack kv op errored: %v", err)
+	}
+	if gjson.Get(pay.Raw, "_kv").Int() != 1 {
+		t.Fatalf("nested sub-stack must read the app's namespace: raw=%s", pay.Raw)
+	}
+	pay, err = callKV(t, kvIncr, k, "t1", "counter/_websocket", `{"key":"n"}`, "")
+	if err != nil || gjson.Get(pay.Raw, "_kv").Int() != 1 {
+		t.Fatalf("incr from the nested sub-stack: raw=%s err=%v", pay.Raw, err)
+	}
+	pay, _ = callKV(t, kvGet, k, "t1", "counter", `{"key":"n"}`, "")
+	if gjson.Get(pay.Raw, "_kv").Int() != 1 {
+		t.Fatalf("the app stack must see the nested sub-stack's write: raw=%s", pay.Raw)
+	}
+}

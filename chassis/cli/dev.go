@@ -1119,7 +1119,10 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// its own default); pinning Personalities suppresses an un-opted head
 	// entirely (see the strings.Contains gate in each personality's
 	// Start).
-	heads := []string{"cron", "web", "admin"}
+	// websocket rides the web listener (no port of its own) and does nothing
+	// until a stack accepts an upgrade, so dev turns it on by default; prod
+	// opts in via TXCO_PERSONALITIES.
+	heads := []string{"cron", "web", "admin", "websocket"}
 	if tcpHead {
 		heads = append(heads, "tcp")
 		env = append(env, "TXCO_TCP_LISTEN_ADDRS="+tcpAddr)

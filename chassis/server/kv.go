@@ -28,8 +28,27 @@ import (
 // with another's. Values land under a private `_kv` key by default (dropped
 // from the web projection), mirroring read-file's `into` convention.
 
+// appStackNamespace maps a routed stack name to its default KV namespace.
+// A stack is one app that owns its hostname across inlets: web runs as
+// `<stack>`, mail as `<stack>/_mail`, a WebSocket session as
+// `<stack>/_websocket`. Those `_`-nested inlet sub-stacks share the app's
+// KV by default — the name up to the first `_`-prefixed segment — rather
+// than each getting a namespace of its own (which a `/` could not even
+// spell: kv segments forbid it, so before this every kv op from a nested
+// sub-stack failed with "invalid namespace"). An explicit WITH `namespace`
+// still wins; a nested name with no `_` segment is left alone.
+func appStackNamespace(stack string) string {
+	for i := 0; i < len(stack); i++ {
+		if stack[i] == '/' && i+1 < len(stack) && stack[i+1] == '_' {
+			return stack[:i]
+		}
+	}
+	return stack
+}
+
 // kvScope resolves the trusted tenant + the namespace (WITH `namespace`,
-// else the routed stack, else "default").
+// else the routed stack's app namespace — see appStackNamespace — else
+// "default").
 func kvScope(ctx context.Context, in []byte) (tenant, ns string, err error) {
 	tenant = processor.TenantScope(ctx)
 	if tenant == "" {
@@ -49,6 +68,7 @@ func kvScope(ctx context.Context, in []byte) (tenant, ns string, err error) {
 	if ns == "" {
 		ns = "default"
 	}
+	ns = appStackNamespace(ns)
 	// Chassis-owned namespaces (the txco://blob name index) are not plain KV:
 	// refused here so an author can neither read an index as data nor write
 	// into one. Same reservation idiom as `_txc.*` on the envelope.

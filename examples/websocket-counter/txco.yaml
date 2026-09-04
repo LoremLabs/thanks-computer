@@ -1,0 +1,27 @@
+# examples/websocket-counter — the doc's spike: a live browser session with
+# the socket entirely out of processor execution.
+#
+# A `counter` stack accepts a WebSocket upgrade on /ws (its own decision, in
+# its own web op), then every message the browser sends runs ONCE through
+# `counter/_websocket/0`: parse, bump a per-session KV counter, reply
+# `{"count": N}` over the same socket with txco://websocket/reply. The
+# connection stays open between runs; an idle tab runs nothing. Closing the
+# tab runs the opt-in close event, which deletes the counter.
+#
+# Try it (against a running chassis — `txco dev` in this directory has the
+# websocket personality on by default):
+#
+#   txco apply
+#   open http://<the counter URL txco dev printed>/index.html   # click "increment"
+#   websocat ws://localhost:8080/ws -H 'Host: <that hostname>'   # or by hand:
+#   {"type":"increment"}
+#
+# Every message is a normal traced run — `txco trace last` shows it entering
+# counter/_websocket/0 with the session id on `@websocket.session.id`.
+
+target: dev
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow

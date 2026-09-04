@@ -561,7 +561,7 @@ The convention is **transport-agnostic**: an HTTP op signals control flow by inc
 }
 ```
 
-Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise.
+Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise. Each inlet stamps its own read-only facts there too (`@web.req.*`, `@lmtp.*`, `@imap.*`, `@dns.*`, `@websocket.*`); see [protocols](../protocols/README.md).
 
 ## Streaming the response body
 

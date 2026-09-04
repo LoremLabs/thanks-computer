@@ -25,6 +25,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	websocketp "github.com/loremlabs/thanks-computer/chassis/server/personality/websocket"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -48,7 +49,22 @@ type WebController struct {
 	// other request.
 	llmHandler      http.HandlerFunc
 	llmCountHandler http.HandlerFunc
+
+	// ws, when set (via SetWebSocket) and enabled, makes the catch-all
+	// handler stamp `_txc.websocket.upgrade` + a minted session id on every
+	// WebSocket upgrade request and, after the run, hand the socket over
+	// when the stack recorded an accept. Nil ⇒ upgrade requests are plain
+	// HTTP requests.
+	ws *websocketp.Controller
+
+	// bound receives the plain listener's actual address once bound (tests
+	// bind "127.0.0.1:0"); buffered so Start never blocks on it.
+	bound chan string
 }
+
+// SetWebSocket wires the websocket personality's controller into the web
+// head. Call before Start. Inert unless the controller is enabled.
+func (web *WebController) SetWebSocket(c *websocketp.Controller) { web.ws = c }
 
 // SetTLSConfig wires the bundled cert manager's TLS config into the web
 // head, enabling the HTTPS listener. Call before Start. No-op effect unless
@@ -146,6 +162,7 @@ func NewController(ctx context.Context, pu *processor.Unit, sink trace.Sink) *We
 		pu:       pu,
 		sink:     sink,
 		shutdown: make(chan bool),
+		bound:    make(chan string, 1),
 	}
 
 	return web
@@ -262,6 +279,23 @@ func (web *WebController) Start() {
 				pb.Set("_txc.web.req.host", r.Host)
 				pb.Set("_txc.web.req.proto", r.Proto)
 				pb.Set("_txc.web.req.method", r.Method)
+
+				// WebSocket upgrade request: stamp the fact and mint the
+				// session id the stack's txco://websocket/accept op will
+				// record against. The path, auth, and Origin decisions are
+				// the stack's, in its ordinary web ops; the chassis only
+				// says "this request asked to upgrade". The sid stays a
+				// handler local — the handoff below reads nothing from the
+				// result envelope.
+				wsSID := ""
+				if web.ws != nil && web.ws.Enabled() && websocketp.IsUpgrade(r) {
+					wsSID = web.ws.NewSessionID()
+					pb.Set("_txc.websocket.upgrade", true)
+					pb.Set("_txc.websocket.session.id", wsSID)
+					if sp := websocketp.RequestedSubprotocols(r); len(sp) > 0 {
+						pb.Set("_txc.websocket.subprotocols", sp)
+					}
+				}
 
 				// Header-driven mock interception. Gated by WebMockHeader so
 				// production chassis can't be coerced into mocking by a hostile
@@ -444,6 +478,20 @@ func (web *WebController) Start() {
 						return
 					}
 
+					// WebSocket handoff: the stack accepted this upgrade
+					// (txco://websocket/accept recorded against the sid we
+					// minted). Upgrade writes the 101 — or its own refusal —
+					// and takes the socket; the request handler is done. An
+					// upgrade request with no recorded accept renders as
+					// ordinary HTTP below (the stack's 404/401, or the default
+					// projection): a refused upgrade is a normal HTTP response.
+					if wsSID != "" {
+						if acc, claimed := web.ws.Claim(wsSID); claimed {
+							web.ws.Upgrade(w, r, wsSID, acc)
+							return
+						}
+					}
+
 					output := res.Raw // is this doubling the allocation?
 
 					// Shared admission gate denials arrive transport-neutral
@@ -593,6 +641,10 @@ func (web *WebController) Start() {
 			}
 
 			web.pu.Logger.Info("Listening on web port", zap.String("port", web.pu.Conf.WebAddr))
+			select {
+			case web.bound <- listener.Addr().String():
+			default:
+			}
 			web.wg.Add(1)
 			if err := web.server.Serve(listener); err != nil && err != http.ErrServerClosed {
 				// Error starting or closing listener

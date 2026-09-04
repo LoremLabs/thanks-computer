@@ -2363,6 +2363,13 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 		segBytes: len(ss.ScopeEnvelope), segStart: start,
 	})
 	rctx = WithTenant(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.tenant").String())
+	// Re-pin the originating inlet the same way, from the same chassis-
+	// stamped envelope: a resumed scope runs under a fresh context (every
+	// resume caller starts from Background), and Run's first-Run pin block
+	// is skipped once the opstack snapshot is attached below — so without
+	// this, SourceScope(ctx) is "" after a suspend and every op that gates
+	// on the pinned source (txco://websocket/reply, txco://relay) refuses.
+	rctx = WithSource(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.src").String())
 
 	// Resume against the opstack frozen at suspend, not the live one. The
 	// snapshot DB is attached to rctx so EVERY opstack lookup in the

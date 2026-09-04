@@ -261,6 +261,9 @@ run_checks() {
     # exercises the full 202→poll→200 continuation path in ~1s. Harmless
     # for examples without a worker.
     # Extra dev flags the probe asks for (heads that are off by default).
+    # Expanded with the `${arr[@]+"${arr[@]}"}` idiom: under `set -u`, bash
+    # 3.2 (macOS /bin/bash) treats an EMPTY array as unbound and aborts the
+    # boot for every example that has no dev_flags.
     local -a dev_flags=()
     local dkind dflag
     while IFS=$'\t' read -r dkind dflag; do
@@ -273,7 +276,7 @@ run_checks() {
         "${TXCO}" dev \
         --chassis-addr ":${ADMIN_PORT}" \
         --web-addr ":${WEB_PORT}" \
-        --watch=false "${dev_flags[@]}" ) >"${log}" 2>&1 &
+        --watch=false ${dev_flags[@]+"${dev_flags[@]}"} ) >"${log}" 2>&1 &
     DEV_PID=$!
 
     local up=

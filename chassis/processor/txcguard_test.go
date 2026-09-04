@@ -66,6 +66,13 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.llm.completion.status", false},
 		{"_txc.llm.completion.usage.input_tokens", false},
 		{"_txc.llm.context_result", false}, // gateway ground truth; a stack must not forge it
+		// WebSocket sessions: every fact is chassis-stamped and there is no
+		// verdict subtree at all (a stack talks back with txco://websocket/*).
+		{"_txc.websocket.upgrade", false},
+		{"_txc.websocket.session.id", false},
+		{"_txc.websocket.session.state.email", false},
+		{"_txc.websocket.msg.text", false},
+		{"_txc.websocket.res.text", false},
 		// A reserved prefix must not be defeated by a lookalike sibling.
 		{"_txc.web.response", false}, // not "web.res"
 		{"_txc.gotoxyz", false},      // not "goto"
@@ -402,6 +409,18 @@ func TestAuthorMayDeleteTxc(t *testing.T) {
 	for _, p := range []string{"_txc.imap.msg.text", "_txc.imap.msg.html", "_txc.imap.msg.headers", "_txc.imap.msg.headers.subject"} {
 		if !authorMayDeleteTxc(p) || authorMayWriteTxc(p) {
 			t.Errorf("%s: delete=%v write=%v, want delete-only", p, authorMayDeleteTxc(p), authorMayWriteTxc(p))
+		}
+	}
+	// An inbound WebSocket payload is delete-only the same way; the session
+	// facts beside it are not even deletable.
+	for _, p := range []string{"_txc.websocket.msg.text", "_txc.websocket.msg.data"} {
+		if !authorMayDeleteTxc(p) || authorMayWriteTxc(p) {
+			t.Errorf("%s: delete=%v write=%v, want delete-only", p, authorMayDeleteTxc(p), authorMayWriteTxc(p))
+		}
+	}
+	for _, p := range []string{"_txc.websocket.msg", "_txc.websocket.msg.type", "_txc.websocket.session.id", "_txc.websocket.msg.textual"} {
+		if authorMayDeleteTxc(p) {
+			t.Errorf("%s must not be deletable", p)
 		}
 	}
 	if authorMayDeleteTxc("_txc.imap.msg.sha256") || authorMayDeleteTxc("_txc.imap.tenant") {

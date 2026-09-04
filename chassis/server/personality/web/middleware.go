@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"net"
 	"net/http"
@@ -55,6 +56,15 @@ func (w *contextResponseWriter) Write(b []byte) (int, error) {
 // AI gateway proxy) silently lose per-chunk flushing and cannot extend
 // the listener write deadline mid-stream.
 func (w *contextResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Hijack exposes the underlying connection for a WebSocket upgrade through
+// this wrapper. The WebSocket library already walks Unwrap to find a
+// Hijacker, so this is belt-and-braces against a library or wrapper change:
+// a wrapper that silently stops satisfying http.Hijacker turns every
+// upgrade into a 501, which reads as a mysterious edge problem.
+func (w *contextResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
 
 // func (web *WebController) BasicAuthMiddleware(next http.Handler) http.Handler {
 // 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

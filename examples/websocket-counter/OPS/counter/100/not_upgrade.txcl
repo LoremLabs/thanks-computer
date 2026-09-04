@@ -1,0 +1,12 @@
+# counter scope 100 — /ws without an Upgrade is not a page.
+#
+# A refused or absent upgrade is an ordinary HTTP response (the stack's,
+# not the chassis's). `!= true` is the missing-path-safe spelling: on a
+# plain GET `@websocket.upgrade` is absent, and an absent path compares
+# as "", never as true.
+WHEN @web.req.url.path == "/ws" && @websocket.upgrade != true
+  EMIT @web.res.status = 426,
+       @web.res.headers.upgrade.0 = "websocket",
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"Upgrade Required: open /ws as a WebSocket (see /index.html).
+"

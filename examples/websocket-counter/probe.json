@@ -1,0 +1,25 @@
+{
+  "note": "WebSocket sessions ride the web port, but the smoke harness speaks plain HTTP only, so these checks prove the route and the demo page without upgrading; the session itself (upgrade → per-message runs → reply → close event) is covered by the Go tests in chassis/server/personality/websocket and exercised by hand with the browser page or websocat (see README.md).",
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "counter"
+    }
+  ],
+  "checks": [
+    {
+      "name": "/ws without an Upgrade is the stack's own 426, not a session",
+      "method": "GET",
+      "path": "/ws",
+      "status": 426,
+      "contains": "Upgrade Required"
+    },
+    {
+      "name": "the demo page is served from FILES/",
+      "method": "GET",
+      "path": "/index.html",
+      "status": 200,
+      "contains": "websocket-counter"
+    }
+  ]
+}

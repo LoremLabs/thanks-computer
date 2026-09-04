@@ -1,0 +1,10 @@
+# counter/_websocket scope 200 — bump this session's counter.
+#
+# One key per session: `@websocket.session.id` is chassis-minted and
+# unguessable, so it is a fine key prefix for per-connection state. The new
+# value lands at `._kv`. These runs share the `counter` app's KV namespace
+# (a `_`-nested inlet sub-stack defaults to its app stack's namespace), so
+# a web request could read the same key.
+WHEN .msg.type == "increment"
+  EXEC "txco://kv/incr"
+  WITH key = &concat("count:", @websocket.session.id)

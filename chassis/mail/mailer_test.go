@@ -3,7 +3,11 @@ package mail
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"errors"
+	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"strings"
 	"testing"
 	"time"
@@ -728,5 +732,111 @@ func TestDomainOfAndVerify(t *testing.T) {
 		if err != nil || ok != c.want {
 			t.Errorf("verify(%s,%s)=%v,%v want %v", c.slug, c.domain, ok, err, c.want)
 		}
+	}
+}
+
+// --- retain: the delivered bytes into the content store, owned by the tenant ---
+
+type memCAS struct{ blobs map[string][]byte }
+
+func (c *memCAS) Put(_ context.Context, hash string, data []byte) error {
+	if c.blobs == nil {
+		c.blobs = map[string][]byte{}
+	}
+	c.blobs[hash] = append([]byte(nil), data...)
+	return nil
+}
+func (c *memCAS) Get(_ context.Context, hash string) ([]byte, error) {
+	b, ok := c.blobs[hash]
+	if !ok {
+		return nil, errors.New("not found")
+	}
+	return b, nil
+}
+func (c *memCAS) Exists(_ context.Context, hash string) (bool, error) {
+	_, ok := c.blobs[hash]
+	return ok, nil
+}
+func (c *memCAS) Name() string { return "mem" }
+
+type memIndex struct{ shas map[string]blob.ShaRow } // key tenant+"|"+sha
+
+func (x *memIndex) GetName(context.Context, string, string) (blob.NameRow, bool, error) {
+	return blob.NameRow{}, false, nil
+}
+func (x *memIndex) PutName(context.Context, string, blob.NameRow) error { return nil }
+func (x *memIndex) DeleteName(context.Context, string, string) error    { return nil }
+func (x *memIndex) ListNames(context.Context, string, blob.ListOpts) (blob.ListPage, error) {
+	return blob.ListPage{}, nil
+}
+func (x *memIndex) GetSha(_ context.Context, tenant, sha string) (blob.ShaRow, bool, error) {
+	r, ok := x.shas[tenant+"|"+sha]
+	return r, ok, nil
+}
+func (x *memIndex) PutShaIfAbsent(_ context.Context, tenant string, row blob.ShaRow) (bool, error) {
+	if x.shas == nil {
+		x.shas = map[string]blob.ShaRow{}
+	}
+	if _, ok := x.shas[tenant+"|"+row.SHA256]; ok {
+		return false, nil
+	}
+	x.shas[tenant+"|"+row.SHA256] = row
+	return true, nil
+}
+
+func TestSendRetain(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	cas := &memCAS{}
+	ix := &memIndex{}
+	m.SetContentStore(cas, ix)
+
+	in := env(t, map[string]any{
+		"to": "matt@example.com", "subject": "Kept", "body": "<p>kept</p>", "from": "noreply@acme.com",
+		"retain": true,
+	})
+	p, err := m.Send(context.Background(), "acme", in)
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	r := gjson.Get(p.Raw, "_sendmail.result.recipients.0")
+	sha, size := r.Get("sha256").String(), r.Get("size").Int()
+	if r.Get("status").String() != "sent" || len(sha) != 64 || size == 0 || r.Get("retain_error").Exists() {
+		t.Fatalf("recipient = %s", r.Raw)
+	}
+	// The reference is the submitted bytes, exactly.
+	if len(sub.calls) != 1 || !bytes.Equal(cas.blobs[sha], sub.calls[0].msg) || int64(len(sub.calls[0].msg)) != size {
+		t.Fatalf("retained bytes differ from the submitted message")
+	}
+	sum := sha256.Sum256(sub.calls[0].msg)
+	if hex.EncodeToString(sum[:]) != sha {
+		t.Fatalf("sha256 %s does not hash the submitted bytes", sha)
+	}
+	// Owned by the sending tenant only (what from_sha consumers check).
+	if row, ok, _ := ix.GetSha(context.Background(), "acme", sha); !ok || row.ContentType != "message/rfc822" || row.Size != size {
+		t.Fatalf("ownership row = %+v ok=%v", row, ok)
+	}
+	if _, ok, _ := ix.GetSha(context.Background(), "other", sha); ok {
+		t.Fatal("another tenant owns the retained message")
+	}
+
+	// Default: nothing kept, nothing reported.
+	sub.calls = nil
+	p, _ = m.Send(context.Background(), "acme", env(t, map[string]any{
+		"to": "matt@example.com", "subject": "Plain", "body": "<p>x</p>", "from": "noreply@acme.com",
+	}))
+	if r := gjson.Get(p.Raw, "_sendmail.result.recipients.0"); r.Get("sha256").Exists() || r.Get("size").Exists() {
+		t.Fatalf("unretained send reported a reference: %s", r.Raw)
+	}
+	if len(cas.blobs) != 1 {
+		t.Fatalf("content store has %d objects, want 1", len(cas.blobs))
+	}
+
+	// No store wired: the send still succeeds, retention says why not.
+	m2 := newTestMailer(t, db, &fakeSubmit{}, &fakeUsage{})
+	p, _ = m2.Send(context.Background(), "acme", in)
+	if r := gjson.Get(p.Raw, "_sendmail.result.recipients.0"); r.Get("status").String() != "sent" || r.Get("sha256").Exists() || r.Get("retain_error").String() == "" {
+		t.Fatalf("no-store retain = %s", r.Raw)
 	}
 }

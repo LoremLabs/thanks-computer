@@ -30,6 +30,7 @@ Required: `subject`, `body` (HTML), `from`.
 | `headers` | Extra headers map — structural/signing/loop-guard headers are denylisted (use `reply_to`, not a raw header) |
 | `envelope_from` | MAIL FROM / Return-Path override. Defaults to `from`. Set `"<>"` for a null reverse-path — the RFC 3834 posture for auto-replies (no bounce loops) |
 | `campaign` | Label for rate-limit and audit grouping |
+| `retain` | `true` keeps each delivered message's exact bytes (per recipient, as submitted, DKIM-signed) in the content store under this tenant and reports `sha256`/`size` per recipient in the result — the reference a later `txco://imap/append WITH from_sha = …` or `txco://blob/put from_sha` adopts. Off by default; bytes never ride the envelope. Charged per MiB like `blob/put`. Retention never fails a send: a store problem shows as `retain_error` on that recipient. |
 | `templates.html` | A custom HTML template to wrap the `body` in, replacing the bundled default. Slots: `{{.Subject}}`, `{{.Body}}`, `{{.Preheader}}`, and `{{.Vars.x}}` for any `vars`. Omitted → the default template |
 
 The HTML body is wrapped in a responsive, CSS-inlined shell — the bundled default, or a
@@ -71,8 +72,9 @@ verify the hostname first (`txco auth tenant hostnames add … && … verify`).
 The `EXEC` of the operation merges a result under `_sendmail.result`:
 
 - success: `{sent, skipped, failed, recipients: […]}` — per-recipient
-  outcomes; rate-limited recipients are skipped with reason
-  `rate_limited`
+  outcomes `{to, status, message_id?, reason?, sha256?, size?, retain_error?}`;
+  rate-limited recipients are skipped with reason `rate_limited`;
+  `sha256`/`size` appear only with `retain = true`
 - error: `{status: "error", reason, error}` — reasons include
   `no_relay`, `missing_field`, `invalid_from`, `from_not_verified`,
   `no_recipients`, `too_many_recipients`, `invalid_template`

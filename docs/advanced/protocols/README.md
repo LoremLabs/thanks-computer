@@ -48,7 +48,7 @@ ingress points speak the native protocol and then serialize it to a `JSON` event
 ```
 
 When these events arrive, the head that received it stamps `_txc.src` and its
-own namespace (`@web.req.*`, `@lmtp.*`, `@cron.*`, `@tcp.*`) onto one flow
+own namespace (`@web.req.*`, `@lmtp.*`, `@cron.*`, `@tcp.*`, `@websocket.*`) onto one flow
 envelope, and the same rules engine takes it from there. 
 
 Each of these protocol heads also know how to convert back from the JSON event used
@@ -68,4 +68,5 @@ in an opstack's flows into the protocol.
 | [AI gateway](./llm-gateway.md) | in, then proxied out — an AI client's own requests, through a stack |
 | [DNS](./dns.md) | authoritative answers for delegated zones; in, post-reply — answered queries flow into `_dns` |
 | [IMAP](./imap.md) | out, read by a mail client — `txco://imap/append` materializes messages into a mailbox the `imap` head serves |
+| [WebSocket](./websocket.md) | bidirectional, session — a stack accepts the upgrade, each message is one run of `_websocket`, `txco://websocket/reply` answers on the socket |
 

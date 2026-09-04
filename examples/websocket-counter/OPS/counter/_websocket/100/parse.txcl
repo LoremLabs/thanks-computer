@@ -1,0 +1,10 @@
+# counter/_websocket scope 100 — parse the message.
+#
+# Each complete WebSocket message the browser sends is ONE run of this
+# stack, entering at scope 0 with the text on `@websocket.msg.text` (a
+# binary frame would arrive base64 on `@websocket.msg.data`). The parsed
+# object lands at `.msg` — a bare author path, since `_txc.*` is the
+# chassis control plane. Invalid JSON fails this EMIT, `.msg` stays absent,
+# and 300/unknown.txcl answers.
+WHEN @websocket.phase == "message"
+  EMIT .msg = &json(@websocket.msg.text)

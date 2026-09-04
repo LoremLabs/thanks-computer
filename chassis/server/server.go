@@ -76,6 +76,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
+	websocketp "github.com/loremlabs/thanks-computer/chassis/server/personality/websocket"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/blobseed"
@@ -1580,9 +1581,22 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		MaxRecipients: conf.MailMaxRecipients,
 		RateLimits:    conf.MailRateLimits,
 	})
+	// `_sendmail.retain = true` keeps each delivered message's bytes in the
+	// content store under the tenant (the reference a later
+	// txco://imap/append from_sha adopts). Same byte plane as blob/put and
+	// the IMAP head; charged like blob/put, per MiB retained.
+	mailer.SetContentStore(fcas, blobIndex)
 	pu.Handle([]byte("txco://sendmail"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
-			return mailer.Send(ctx, processor.TenantScope(ctx), in)
+			p, err := mailer.Send(ctx, processor.TenantScope(ctx), in)
+			var retained int64
+			for _, r := range gjson.Get(p.Raw, "_sendmail.result.recipients").Array() {
+				retained += r.Get("size").Int()
+			}
+			if retained > 0 {
+				blobChargeBytes(ctx, retained, in)
+			}
+			return p, err
 		}))
 
 	// `txco://relay`: the `.forward` primitive — re-send an inbound message
@@ -1606,6 +1620,28 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		pu.Handle([]byte("txco://schedule"), event.OpsHandlerFunc(
 			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 				return scheduleOp(ctx, scheduledStore, in)
+			}))
+	}
+
+	// WebSocket sessions (txco://websocket/{accept,send,reply,close}): the
+	// stack's side of a connection the `websocket` personality owns after the
+	// web head's Upgrade handoff. Registered unconditionally — on a node
+	// without the personality every op answers `_websocket.error
+	// txco_websocket_disabled` rather than "op not found", so a stack can
+	// branch. Tenant pinned from ctx; `reply` also gates on the pinned source.
+	// See chassis/server/websocket_ops.go + personality/websocket.
+	wsCtrl := websocketp.NewController(ctx, pu)
+	wsD := websocketDeps{reg: wsCtrl}
+	for name, fn := range map[string]func(context.Context, websocketDeps, []byte) (event.Payload, error){
+		"txco://websocket/accept": websocketAccept,
+		"txco://websocket/send":   websocketSend,
+		"txco://websocket/reply":  websocketReply,
+		"txco://websocket/close":  websocketClose,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, wsD, in)
 			}))
 	}
 
@@ -1654,6 +1690,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	var mailResolver ingress.MailResolver = resolver
 
 	webCtrl := web.NewController(ctx, pu, traceSink)
+	// The web head mints a session id on every upgrade request and, when the
+	// run recorded an accept, hands the socket to the websocket controller.
+	webCtrl.SetWebSocket(wsCtrl)
 	dnsCtrl := dnsp.NewController(ctx, pu)
 
 	// AI-gateway inlet (POST /v1/messages on the web head): one stack
@@ -1732,6 +1771,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		scheduledp.NewController(ctx, pu, scheduledStore),
 		tcp.NewController(ctx, pu),
 		webCtrl,
+		// websocket: no listener of its own — sessions arrive through the web
+		// head's Upgrade handoff. Off unless 'websocket' AND 'web' are in
+		// --personalities; Stop() is the only drain hijacked sockets get.
+		wsCtrl,
 		adminCtrl,
 		sweep.NewController(ctx, pu),
 		lmtp.NewController(ctx, pu, mailResolver),

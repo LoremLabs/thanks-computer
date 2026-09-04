@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>websocket-counter</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+  button { font: inherit; padding: .4rem 1rem; }
+  #count { font-size: 3rem; font-weight: 700; }
+  #log { font: 13px/1.4 ui-monospace, monospace; white-space: pre-wrap; color: #555; }
+</style>
+<h1>websocket-counter</h1>
+<p>One socket, many runs. Each click sends <code>{"type":"increment"}</code>;
+the chassis runs <code>counter/_websocket/0</code> once per message and
+replies <code>{"count": N}</code> on the same connection. Between clicks
+nothing runs.</p>
+<p><span id="status">connecting…</span></p>
+<p id="count">–</p>
+<p><button id="inc" disabled>increment</button>
+   <button id="junk" disabled>send junk</button>
+   <button id="close" disabled>close</button></p>
+<div id="log"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const log = (s) => { $('log').textContent = (new Date().toISOString().slice(11, 19) + ' ' + s + '\n') + $('log').textContent; };
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(scheme + '://' + location.host + '/ws');
+  ws.onopen = () => { $('status').textContent = 'connected'; for (const b of ['inc', 'junk', 'close']) $(b).disabled = false; log('open'); };
+  ws.onmessage = (e) => {
+    log('< ' + e.data);
+    try { const m = JSON.parse(e.data); if (typeof m.count === 'number') $('count').textContent = m.count; } catch {}
+  };
+  ws.onclose = (e) => { $('status').textContent = 'closed (' + e.code + (e.reason ? ' ' + e.reason : '') + ')'; for (const b of ['inc', 'junk', 'close']) $(b).disabled = true; log('close ' + e.code + ' ' + e.reason); };
+  ws.onerror = () => log('error');
+  const send = (s) => { log('> ' + s); ws.send(s); };
+  $('inc').onclick = () => send(JSON.stringify({ type: 'increment' }));
+  $('junk').onclick = () => send('not json');
+  $('close').onclick = () => ws.close(1000, 'bye');
+</script>

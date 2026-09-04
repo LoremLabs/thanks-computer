@@ -1,0 +1,9 @@
+# counter/_websocket scope 900 — the opt-in close event.
+#
+# Because the accept op asked for `events = &array("close")`, the chassis
+# runs this stack once more when the session ends — whoever ended it
+# (`@websocket.close.initiated_by` is client, stack, or chassis; the code
+# and reason ride beside it). Presence cleanup goes here.
+WHEN @websocket.phase == "close"
+  EXEC "txco://kv/delete"
+  WITH key = &concat("count:", @websocket.session.id)

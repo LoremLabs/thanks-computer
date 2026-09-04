@@ -64,6 +64,7 @@ require (
 )
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/pires/go-proxyproto v0.15.0

@@ -137,7 +137,9 @@ message renders byte-identically on every fetch.
 `txco://imap/append` also takes **verbatim** bytes instead of `message{}`:
 `from` (an envelope path holding base64 RFC 5322, e.g. `@lmtp.msg.raw`) or
 `from_sha` (an RFC 5322 object the tenant already owns in the content
-store). The exact bytes are retained and every decoded attachment becomes
+store — for instance what `txco://sendmail` kept with `retain = true`,
+`._sendmail.result.recipients.0.sha256`, so a mailbox holds the exact reply
+the stack sent). The exact bytes are retained and every decoded attachment becomes
 its own owned object. `txco://blob/put` gained `from_sha` too: name an
 owned object (a part the head stored) under your own scheme without
 re-uploading it.
