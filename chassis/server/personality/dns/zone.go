@@ -39,6 +39,12 @@ type zone struct {
 
 	dkimSelector string // DKIM selector for the zone's published key (0016)
 	dkimPubB64   string // base64 PKIX DER public key → <selector>._domainkey TXT
+	// wildSRVService is the `_service._proto.` the zone's wildcard SRV was
+	// synthesized for ("" = no wildcard SRV). Lookup answers a wildcard SRV
+	// only for that service and NODATA for any other `_x._tcp.<name>`,
+	// since one wildcard RRset cannot vary by service (RFC 4592 would hand
+	// the IMAPS record to a `_caldavs._tcp` question).
+	wildSRVService string
 
 	// mode is the zone's normalized serving mode: "pattern" (synthesis +
 	// overrides; the default, also for a blank column) or "manual"
@@ -253,17 +259,24 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 			for _, rr := range synthesize(z, eff, stacks) {
 				z.add(rr)
 			}
-			// Default-suffix zone: per-structured-host DKIM/DMARC TXT
-			// (reputation isolation — each host signs d=<host> with its own
-			// key). Exact owners, so they win over the wildcard from
-			// synthesize(). One filtered query per reload (see scale note).
+			// Default-suffix zone: per-structured-host exact owners — DKIM/
+			// DMARC TXT (reputation isolation — each host signs d=<host> with
+			// its own key) and the `_imaps._tcp` / `_caldavs._tcp` discovery
+			// SRVs. Exact owners win over the wildcard from synthesize(). One
+			// filtered query per reload (see scale note). The wildcard SRV
+			// itself answers only the one service it names (wildSRVService,
+			// read by Lookup): a wildcard cannot tell services apart, and a
+			// CalDAV client sent to the IMAPS port is a login failure.
 			if eff.StructuredSuffix != "" && z.origin == eff.StructuredSuffix {
 				stTTL := eff.TTL
 				if stTTL == 0 {
 					stTTL = z.defaultTTL
 				}
-				for _, rr := range perHostMailRRs(db, z.origin, stTTL, logger) {
+				for _, rr := range perHostRRs(db, z.origin, stTTL, eff.IMAPSPort, eff.CalDAVSPort, logger) {
 					z.add(rr)
+				}
+				if eff.IMAPSPort != 0 {
+					z.wildSRVService = "_imaps._tcp."
 				}
 			}
 		}
@@ -524,6 +537,12 @@ func (s *ZoneSnapshot) Lookup(q dns.Question) (answer, ns []dns.RR, rcode int) {
 	// closer-encloser below an existing non-wildcard node — such queries don't
 	// arise for structured hosts.)
 	if byType, ok := z.rr["*."+z.originFQDN]; ok {
+		if q.Qtype == dns.TypeSRV && z.wildSRVService != "" && !strings.HasPrefix(qname, z.wildSRVService) {
+			// Another service's discovery question: the wildcard SRV would
+			// mislead it (Apple Calendar → the IMAPS port). NODATA lets the
+			// client fall back to its next method (/.well-known/…).
+			return nil, []dns.RR{z.soa}, dns.RcodeSuccess
+		}
 		if rrs := byType[q.Qtype]; len(rrs) > 0 {
 			out := make([]dns.RR, 0, len(rrs))
 			for _, rr := range rrs {

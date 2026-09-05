@@ -13,46 +13,58 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
 
-// perHostMailRRs builds the per-structured-host DKIM + DMARC TXT records for
-// the default-suffix zone (origin): each chassis-minted host under the suffix
-// gets its OWN `<selector>._domainkey.<host>` (public key) + `_dmarc.<host>`,
-// so sending reputation is isolated per host. These are EXACT owners, so they
-// win over the zone's wildcard. Best-effort: a query/scan error logs and
-// yields what it has (the wildcard A/MX/SPF still serve). One filtered query
-// per snapshot build — fine at tens–hundreds of hosts (see plan scale note).
-func perHostMailRRs(db *sql.DB, origin string, ttl uint32, logger *zap.Logger) []dns.RR {
+// perHostRRs builds the per-structured-host EXACT-owner records for the
+// default-suffix zone (origin): for each chassis-minted host under the
+// suffix, its own `<selector>._domainkey.<host>` + `_dmarc.<host>` TXT when
+// it has a DKIM key (sending reputation isolated per host), and the RFC
+// 6186/6764 discovery records `_imaps._tcp.<host>` and `_caldavs._tcp.<host>`
+// (+ the `path=` TXT) when those ports are on — targets = the host itself.
+// Exact owners win over the zone's wildcard, and that is the point of the
+// SRVs: the wildcard's own SRV can name only one service, so a client
+// asking `_caldavs._tcp.<host>` must find an exact answer (see the SRV gate
+// in Lookup). Best-effort: a query/scan error logs and yields what it has.
+// One filtered query per snapshot build — fine at tens–hundreds of hosts.
+func perHostRRs(db *sql.DB, origin string, ttl uint32, imapsPort, caldavsPort uint16, logger *zap.Logger) []dns.RR {
 	rows, err := db.Query(
 		`SELECT hostname, dkim_selector, dkim_public_b64 FROM tenant_hostnames
-		  WHERE created_by = ? AND revoked_at IS NULL AND dkim_public_b64 != ''
+		  WHERE created_by = ? AND revoked_at IS NULL
 		    AND hostname LIKE '%.' || ?`,
 		tenants.SystemStructuredHostCreatedBy, origin)
 	if err != nil {
-		logger.Warn("dns: per-host mail records query failed",
+		logger.Warn("dns: per-host records query failed",
 			zap.String("zone", origin), zap.Error(err))
 		return nil
 	}
 	defer rows.Close()
 	var out []dns.RR
 	for rows.Next() {
-		var host, sel, pub string
+		var host, sel string
+		var pub sql.NullString
 		if err := rows.Scan(&host, &sel, &pub); err != nil {
-			logger.Warn("dns: per-host mail record scan failed",
+			logger.Warn("dns: per-host record scan failed",
 				zap.String("zone", origin), zap.Error(err))
 			return out
 		}
 		host = strings.ToLower(strings.TrimSuffix(host, "."))
-		if sel == "" {
-			sel = tenants.DKIMSelector
+		owner := dns.Fqdn(host)
+		if pub.Valid && pub.String != "" {
+			if sel == "" {
+				sel = tenants.DKIMSelector
+			}
+			if rr := mkTXT(dns.Fqdn(sel+"._domainkey."+host), ttl, "v=DKIM1; k=rsa; p="+pub.String); rr != nil {
+				out = append(out, rr)
+			}
+			if rr := mkTXT(dns.Fqdn("_dmarc."+host), ttl, "v=DMARC1; p=none"); rr != nil {
+				out = append(out, rr)
+			}
 		}
-		if rr := mkTXT(dns.Fqdn(sel+"._domainkey."+host), ttl, "v=DKIM1; k=rsa; p="+pub); rr != nil {
+		if rr := mkSRV("_imaps._tcp."+owner, ttl, imapsPort, owner); rr != nil {
 			out = append(out, rr)
 		}
-		if rr := mkTXT(dns.Fqdn("_dmarc."+host), ttl, "v=DMARC1; p=none"); rr != nil {
-			out = append(out, rr)
-		}
+		out = append(out, mkCalDAVS("_caldavs._tcp."+owner, ttl, caldavsPort, owner)...)
 	}
 	if err := rows.Err(); err != nil {
-		logger.Warn("dns: per-host mail records iterate failed",
+		logger.Warn("dns: per-host records iterate failed",
 			zap.String("zone", origin), zap.Error(err))
 	}
 	return out
@@ -82,12 +94,13 @@ type SynthConfig struct {
 	// wildcard A record resolves and the wildcard certificate covers.
 	IMAPSPort uint16
 	// CalDAVSPort, when non-zero, adds an RFC 6764 `_caldavs._tcp` SRV
-	// (plus the TXT "path=/.well-known/caldav") at the apex and every
-	// per-stack host, target = the owner itself — the calendar personality
-	// serves every hostname under its path prefix. NOT on the default-suffix
-	// wildcard: a wildcard RRset cannot tell `_imaps._tcp.x` from
-	// `_caldavs._tcp.x`, and mixing two services in one answer misleads
-	// both clients; structured hosts discover through /.well-known/caldav.
+	// (plus the TXT "path=/.well-known/caldav") at the apex, every per-stack
+	// host and every structured host (perHostRRs), target = the owner itself
+	// — the calendar personality serves every hostname under its path
+	// prefix. NOT on the default-suffix wildcard: a wildcard RRset cannot
+	// tell `_imaps._tcp.x` from `_caldavs._tcp.x`, and mixing two services
+	// in one answer misleads both clients (Apple Calendar followed the
+	// wildcard IMAPS SRV to port 993 — observed on prod 2026-09-05).
 	CalDAVSPort uint16
 	// StructuredSuffix is the platform's default structured-host suffix
 	// (TXCO_STRUCTURED_HOST_SUFFIX), bare (no leading dot), e.g.

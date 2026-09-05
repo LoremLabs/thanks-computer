@@ -481,18 +481,58 @@ func TestSynthCalDAVSRV(t *testing.T) {
 		cfg.IMAPSPort = 993
 		cfg.CalDAVSPort = 443
 		snap := buildOrDie(t, db, cfg)
-		// The wildcard answers one service only: a client asking for
-		// _caldavs._tcp.foo gets the imaps record (wildcard semantics) and
-		// must not also get a caldav one it cannot tell apart.
-		ans, _, _ := snap.Lookup(q("_caldavs._tcp.foo-rand.stacks.example.com.", dns.TypeSRV))
-		if len(ans) != 1 {
-			t.Fatalf("wildcard SRV answers: %v", ans)
+		// The wildcard SRV answers ONE service: a `_caldavs._tcp` question
+		// under it is NODATA (the client falls back to /.well-known/caldav),
+		// never the IMAPS record it cannot tell apart — that misdirection
+		// sent Apple Calendar to port 993 on prod.
+		ans, auth, rc := snap.Lookup(q("_caldavs._tcp.foo-rand.stacks.example.com.", dns.TypeSRV))
+		if rc != dns.RcodeSuccess || len(ans) != 0 || len(auth) != 1 {
+			t.Fatalf("wildcard caldav SRV: rc=%d ans=%v auth=%v (want NODATA)", rc, ans, auth)
+		}
+		if rr := srv(t, snap, "_imaps._tcp.foo-rand.stacks.example.com."); rr.Port != 993 {
+			t.Fatalf("wildcard imaps SRV: %v", rr)
+		}
+		// A also still resolves through the wildcard.
+		if a, _, rc := snap.Lookup(q("foo-rand.stacks.example.com.", dns.TypeA)); rc != dns.RcodeSuccess || len(a) != 1 {
+			t.Fatalf("wildcard A: rc=%d %v", rc, a)
 		}
 		// The apex has its explicit pair.
 		if rr := srv(t, snap, "_caldavs._tcp.stacks.example.com."); rr.Port != 443 || rr.Target != "stacks.example.com." {
 			t.Fatalf("apex SRV: %v", rr)
 		}
 	})
+	t.Run("structured host: exact SRVs for both services beat the wildcard", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "stacks.example.com", fixedTS)
+		if _, err := db.Exec(`INSERT INTO tenant_hostnames (id, hostname, tenant_id, stack, created_at, created_by, dkim_selector, dkim_public_b64)
+			VALUES ('h_c','core-abc.stacks.example.com', ?, 'core', ?, 'system:structured-host', '', '')`, patTenant, fixedTS); err != nil {
+			t.Fatalf("seed structured host: %v", err)
+		}
+		cfg := patCfg()
+		cfg.StructuredSuffix = "stacks.example.com"
+		cfg.IMAPSPort = 993
+		cfg.CalDAVSPort = 443
+		snap := buildOrDie(t, db, cfg)
+		if rr := srv(t, snap, "_caldavs._tcp.core-abc.stacks.example.com."); rr.Port != 443 || rr.Target != "core-abc.stacks.example.com." {
+			t.Fatalf("host caldav SRV: %v", rr)
+		}
+		if rr := srv(t, snap, "_imaps._tcp.core-abc.stacks.example.com."); rr.Port != 993 || rr.Target != "core-abc.stacks.example.com." {
+			t.Fatalf("host imaps SRV: %v (must be the host, not imap.<suffix>)", rr)
+		}
+		txt, _, rc := snap.Lookup(q("_caldavs._tcp.core-abc.stacks.example.com.", dns.TypeTXT))
+		if rc != dns.RcodeSuccess || len(txt) != 1 || !strings.Contains(txt[0].String(), "path=/.well-known/caldav") {
+			t.Fatalf("host caldav TXT: rc=%d %v", rc, txt)
+		}
+		// No DKIM key ⇒ no _domainkey TXT (the SRVs exist regardless).
+		if a, _, _ := snap.Lookup(q("txco._domainkey.core-abc.stacks.example.com.", dns.TypeTXT)); len(a) != 0 {
+			for _, rr := range a {
+				if strings.Contains(rr.String(), "DKIM1") {
+					t.Fatalf("unexpected DKIM for a host without a key: %v", a)
+				}
+			}
+		}
+	})
+
 	t.Run("off by default", func(t *testing.T) {
 		db := newTestDB(t)
 		seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
