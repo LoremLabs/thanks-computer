@@ -67,7 +67,12 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 2. Discovery: RFC 6764. Unauthenticated; the redirect target is the
 	// root, whose PROPFIND (authenticated) names the principal.
 	if r.URL.Path == "/.well-known/caldav" {
-		http.Redirect(w, r, c.prefix+"/", http.StatusMovedPermanently)
+		// An absolute Location: every client resolves it the same way.
+		scheme := "http"
+		if c.secure(r) {
+			scheme = "https"
+		}
+		http.Redirect(w, r, scheme+"://"+r.Host+c.prefix+"/", http.StatusMovedPermanently)
 		return
 	}
 	parts := c.pathParts(r.URL.Path)
@@ -91,6 +96,10 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 6. What the library cannot do at v0.7.0: MKCALENDAR, PROPPATCH, a
 	// DELETE of a calendar, the object size cap.
 	switch {
+	case r.Method == "PROPFIND" && len(parts) <= 1:
+		// Root + principal discovery, answered here (see discovery.go).
+		c.serveDiscoveryPropfind(w, r, pr, parts)
+		return
 	case r.Method == "MKCALENDAR" || (r.Method == "MKCOL" && len(parts) == 3 && parts[1] == "calendars"):
 		c.serveMkcalendar(w, r, pr, parts)
 		return

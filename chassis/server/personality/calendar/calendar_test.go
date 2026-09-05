@@ -219,7 +219,7 @@ func TestAuthAndDiscovery(t *testing.T) {
 	}
 	// Discovery redirect, unauthenticated.
 	resp, _ := h.do(t, req{method: "PROPFIND", path: "/.well-known/caldav"})
-	if resp.StatusCode != 301 || resp.Header.Get("Location") != "/dav/" {
+	if resp.StatusCode != 301 || resp.Header.Get("Location") != "https://pony.example.com/dav/" {
 		t.Errorf("well-known = %d %s", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	// Plaintext ⇒ 403 before credentials are read; insecure flag lifts it.
@@ -258,15 +258,33 @@ func TestAuthAndDiscovery(t *testing.T) {
 		}
 	}
 	// The discovery a client performs.
-	body := `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:current-user-principal/></D:prop></D:propfind>`
+	// The discovery a client performs, as Apple Calendar asks it: the root's
+	// response href must be the ROOT (the library answered with the
+	// principal's path), and the principal must carry the home set.
+	body := `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:current-user-principal/><D:principal-URL/><D:resourcetype/><D:quota-used-bytes/></D:prop></D:propfind>`
 	resp, out := h.do(t, req{method: "PROPFIND", path: "/dav/", user: user, pass: pw, body: body, headers: map[string]string{"Depth": "0"}})
-	if resp.StatusCode != 207 || !strings.Contains(out, "/dav/paris@pony.example.com/") {
+	if resp.StatusCode != 207 || !strings.Contains(out, "<D:response><D:href>/dav/</D:href>") ||
+		!strings.Contains(out, "<D:current-user-principal><D:href>/dav/paris%40pony.example.com/</D:href>") ||
+		!strings.Contains(out, "<D:principal-URL><D:href>/dav/paris%40pony.example.com/</D:href>") ||
+		!strings.Contains(out, "quota-used-bytes") || !strings.Contains(out, "404 Not Found") {
 		t.Errorf("root propfind = %d\n%s", resp.StatusCode, out)
 	}
-	body = `<?xml version="1.0"?><D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><C:calendar-home-set/></D:prop></D:propfind>`
-	resp, out = h.do(t, req{method: "PROPFIND", path: "/dav/paris@pony.example.com/", user: user, pass: pw, body: body, headers: map[string]string{"Depth": "0"}})
-	if resp.StatusCode != 207 || !strings.Contains(out, "/dav/paris@pony.example.com/calendars/") {
-		t.Errorf("principal propfind = %d\n%s", resp.StatusCode, out)
+	// The principal, requested with the client's own encoding — echoed back.
+	body = `<?xml version="1.0"?><D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><C:calendar-home-set/><C:calendar-user-address-set/><D:principal-URL/><D:resourcetype/><C:schedule-inbox-URL/></D:prop></D:propfind>`
+	resp, out = h.do(t, req{method: "PROPFIND", path: "/dav/paris%40pony.example.com/", user: user, pass: pw, body: body, headers: map[string]string{"Depth": "0"}})
+	if resp.StatusCode != 207 || !strings.Contains(out, "<D:response><D:href>/dav/paris%40pony.example.com/</D:href>") ||
+		!strings.Contains(out, "<C:calendar-home-set><D:href>/dav/paris%40pony.example.com/calendars/</D:href>") ||
+		!strings.Contains(out, "mailto:paris@pony.example.com") || !strings.Contains(out, "<D:principal/>") || !strings.Contains(out, "schedule-inbox-URL") {
+		t.Errorf("principal propfind (encoded) = %d\n%s", resp.StatusCode, out)
+	}
+	resp, out = h.do(t, req{method: "PROPFIND", path: "/dav/paris@pony.example.com", user: user, pass: pw, body: body, headers: map[string]string{"Depth": "0"}})
+	if resp.StatusCode != 207 || !strings.Contains(out, "<D:response><D:href>/dav/paris@pony.example.com/</D:href>") || !strings.Contains(out, "<D:href>/dav/paris@pony.example.com/calendars/</D:href>") {
+		t.Errorf("principal propfind (raw, no slash) = %d\n%s", resp.StatusCode, out)
+	}
+	// allprop works too.
+	resp, out = h.do(t, req{method: "PROPFIND", path: "/dav/", user: user, pass: pw, body: `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, headers: map[string]string{"Depth": "0"}})
+	if resp.StatusCode != 207 || !strings.Contains(out, "current-user-principal") {
+		t.Errorf("root allprop = %d\n%s", resp.StatusCode, out)
 	}
 	body = `<?xml version="1.0"?><D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:displayname/><D:resourcetype/><C:supported-calendar-component-set/></D:prop></D:propfind>`
 	resp, out = h.do(t, req{method: "PROPFIND", path: "/dav/paris@pony.example.com/calendars/", user: user, pass: pw, body: body, headers: map[string]string{"Depth": "1"}})
