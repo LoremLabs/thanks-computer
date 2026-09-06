@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — the contacts store is a chassis built-in
+# (txco://contacts/*); the workspace ships only operations.

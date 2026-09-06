@@ -1,0 +1,71 @@
+{
+  "note": "Contacts head + provisioning: POST /contacts/provision creates an account (argon2id), an address book whose policy asks the `_contacts` stack before a client edit commits, and a hello card from card{}. The book is then readable by any CardDAV client on the web port under /carddav/ (Basic auth over plaintext in dev), and the `_contacts` stack refuses cards without an email address. Binds localhost → contacts-demo for the route and pony.local.thanks.computer (dev-local, auto-verified) as the domain the username must belong to. Needs `txco dev --contacts`.",
+  "dev_flags": [
+    "--contacts"
+  ],
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "contacts-demo"
+    },
+    {
+      "host": "pony.local.thanks.computer",
+      "stack": "contacts-demo"
+    }
+  ],
+  "checks": [
+    {
+      "name": "provision creates the account, the address book and the hello card",
+      "method": "POST",
+      "path": "/contacts/provision",
+      "status": 200,
+      "contains": "\"path\":\"/carddav/paris@pony.local.thanks.computer/addressbooks/hello/\"",
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\"}"
+    },
+    {
+      "name": "re-provision keeps the card (noop)",
+      "method": "POST",
+      "path": "/contacts/provision",
+      "status": 200,
+      "contains": "\"noop\":true",
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\",\"password\":\"correct-horse-battery\"}"
+    },
+    {
+      "name": "a domain the tenant does not own is refused",
+      "method": "POST",
+      "path": "/contacts/provision",
+      "status": 400,
+      "contains": "txco_contacts_domain_not_owned",
+      "body": "{\"username\":\"paris@example.com\"}"
+    },
+    {
+      "name": "missing username is a 400 before any op runs",
+      "method": "POST",
+      "path": "/contacts/provision",
+      "status": 400,
+      "contains": "missing_username",
+      "body": "{}"
+    },
+    {
+      "name": "the CardDAV prefix answers on the bound host without credentials: 401 with a challenge",
+      "method": "GET",
+      "path": "/carddav/",
+      "status": 401,
+      "contains": "authentication required"
+    },
+    {
+      "name": "well-known discovery redirects into the prefix",
+      "method": "GET",
+      "path": "/.well-known/carddav",
+      "status": 301,
+      "contains": ""
+    },
+    {
+      "name": "unhandled paths are 404, not 200 {}",
+      "method": "POST",
+      "path": "/principals/",
+      "status": 404,
+      "contains": "not_found"
+    }
+  ]
+}

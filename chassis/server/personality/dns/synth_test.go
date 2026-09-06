@@ -533,6 +533,43 @@ func TestSynthCalDAVSRV(t *testing.T) {
 		}
 	})
 
+	t.Run("carddav: the same pair beside it, never on the wildcard", func(t *testing.T) {
+		db := newTestDB(t)
+		seedPatternZone(t, db, patTenant, "stacks.example.com", fixedTS)
+		if _, err := db.Exec(`INSERT INTO tenant_hostnames (id, hostname, tenant_id, stack, created_at, created_by, dkim_selector, dkim_public_b64)
+			VALUES ('h_c2','core-def.stacks.example.com', ?, 'core', ?, 'system:structured-host', '', '')`, patTenant, fixedTS); err != nil {
+			t.Fatalf("seed structured host: %v", err)
+		}
+		cfg := patCfg()
+		cfg.StructuredSuffix = "stacks.example.com"
+		cfg.IMAPSPort = 993
+		cfg.CalDAVSPort = 443
+		cfg.CardDAVSPort = 443
+		snap := buildOrDie(t, db, cfg)
+		for _, name := range []string{"_carddavs._tcp.stacks.example.com.", "_carddavs._tcp.core-def.stacks.example.com."} {
+			rr := srv(t, snap, name)
+			if want := strings.TrimPrefix(name, "_carddavs._tcp."); rr.Port != 443 || rr.Target != want {
+				t.Fatalf("%s SRV: %v", name, rr)
+			}
+			txt, _, rc := snap.Lookup(q(name, dns.TypeTXT))
+			if rc != dns.RcodeSuccess || len(txt) != 1 || !strings.Contains(txt[0].String(), "path=/.well-known/carddav") {
+				t.Fatalf("%s TXT: rc=%d %v", name, rc, txt)
+			}
+		}
+		if ans, auth, rc := snap.Lookup(q("_carddavs._tcp.foo-rand.stacks.example.com.", dns.TypeSRV)); rc != dns.RcodeSuccess || len(ans) != 0 || len(auth) != 1 {
+			t.Fatalf("wildcard carddav SRV: rc=%d ans=%v auth=%v (want NODATA)", rc, ans, auth)
+		}
+		// Off ⇒ nothing, while the caldav pair still stands.
+		cfg.CardDAVSPort = 0
+		snap = buildOrDie(t, db, cfg)
+		if ans, _, _ := snap.Lookup(q("_carddavs._tcp.stacks.example.com.", dns.TypeSRV)); len(ans) != 0 {
+			t.Fatalf("carddav SRV emitted with port 0: %v", ans)
+		}
+		if rr := srv(t, snap, "_caldavs._tcp.stacks.example.com."); rr.Port != 443 {
+			t.Fatalf("caldav SRV lost: %v", rr)
+		}
+	})
+
 	t.Run("off by default", func(t *testing.T) {
 		db := newTestDB(t)
 		seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)

@@ -50,12 +50,12 @@ type WebController struct {
 	llmHandler      http.HandlerFunc
 	llmCountHandler http.HandlerFunc
 
-	// calendarHandler / calendarPrefix, when set (via SetCalendar), serve
-	// the `calendar` personality — CalDAV and ICS feeds — under the prefix
-	// (and /.well-known/caldav) on every hostname. Nil ⇒ the paths fall
-	// through to the catch-all like any other request.
-	calendarHandler http.Handler
-	calendarPrefix  string
+	// davMounts, when set (via MountDAV / SetCalendar), serve a DAV
+	// personality — the calendar's CalDAV + ICS feeds, the contacts' CardDAV
+	// — under its prefix (and its /.well-known/ path) on every hostname.
+	// Empty ⇒ the paths fall through to the catch-all like any other
+	// request.
+	davMounts []davMount
 
 	// ws, when set (via SetWebSocket) and enabled, makes the catch-all
 	// handler stamp `_txc.websocket.upgrade` + a minted session id on every
@@ -86,14 +86,31 @@ func (web *WebController) SetLLMGateway(messages, countTokens http.HandlerFunc) 
 	web.llmCountHandler = countTokens
 }
 
-// SetCalendar mounts the calendar personality's handler on prefix (no
-// trailing slash, e.g. "/dav") and on /.well-known/caldav. Call before
-// Start. The handler answers from the calendar store and never runs a
-// stack for a read; it bypasses the operator BasicAuth wrapper (it has its
-// own account-table Basic auth) exactly as the AI gateway does.
+// davMount is one DAV personality's reservation on every hostname.
+type davMount struct {
+	wellKnown string // "/.well-known/caldav" | "/.well-known/carddav"
+	prefix    string // no trailing slash, e.g. "/dav"
+	handler   http.Handler
+}
+
+// MountDAV mounts a DAV personality's handler on prefix (no trailing
+// slash) and on its well-known path. Call before Start. The handler
+// answers from its own store and never runs a stack for a read; it
+// bypasses the operator BasicAuth wrapper (it has its own account-table
+// Basic auth) exactly as the AI gateway does. Two mounts must not share a
+// prefix (app.go refuses to start when they do).
+func (web *WebController) MountDAV(wellKnown, prefix string, h http.Handler) {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if h == nil || prefix == "" {
+		return
+	}
+	web.davMounts = append(web.davMounts, davMount{wellKnown: wellKnown, prefix: prefix, handler: h})
+}
+
+// SetCalendar mounts the calendar personality's handler on prefix and on
+// /.well-known/caldav (MountDAV with the CalDAV well-known path).
 func (web *WebController) SetCalendar(h http.Handler, prefix string) {
-	web.calendarHandler = h
-	web.calendarPrefix = strings.TrimSuffix(prefix, "/")
+	web.MountDAV("/.well-known/caldav", prefix, h)
 }
 
 // splitMocksHeader splits an X-Txco-Mocks header value into a clean
@@ -253,15 +270,18 @@ func (web *WebController) Start() {
 				r.Path("/v1/messages/count_tokens").HandlerFunc(web.llmCountHandler).Methods(http.MethodPost)
 			}
 
-			// Calendar personality (CalDAV + ICS feeds): a reserved prefix
-			// on every hostname, registered BEFORE the catch-all so PROPFIND
-			// / REPORT / MKCALENDAR reach it (no .Methods() filter) and the
-			// operator BasicAuth wrapper is bypassed — the head authenticates
-			// against its own account table. Reads never touch the bus.
-			if web.calendarHandler != nil && web.calendarPrefix != "" {
-				r.Path("/.well-known/caldav").Handler(web.calendarHandler)
-				r.Path(web.calendarPrefix).Handler(web.calendarHandler)
-				r.PathPrefix(web.calendarPrefix + "/").Handler(web.calendarHandler)
+			// DAV personalities (calendar: CalDAV + ICS feeds; contacts:
+			// CardDAV): a reserved prefix each on every hostname, registered
+			// BEFORE the catch-all so PROPFIND / REPORT / MKCALENDAR reach it
+			// (no .Methods() filter) and the operator BasicAuth wrapper is
+			// bypassed — each head authenticates against its own account
+			// table. Reads never touch the bus.
+			for _, m := range web.davMounts {
+				if m.wellKnown != "" {
+					r.Path(m.wellKnown).Handler(m.handler)
+				}
+				r.Path(m.prefix).Handler(m.handler)
+				r.PathPrefix(m.prefix + "/").Handler(m.handler)
 			}
 
 			r.PathPrefix("/").HandlerFunc(web.BasicAuth(func(w http.ResponseWriter, r *http.Request) {

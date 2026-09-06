@@ -272,7 +272,7 @@ func BuildSnapshot(db *sql.DB, cfg SynthConfig, logger *zap.Logger) (*ZoneSnapsh
 				if stTTL == 0 {
 					stTTL = z.defaultTTL
 				}
-				for _, rr := range perHostRRs(db, z.origin, stTTL, eff.IMAPSPort, eff.CalDAVSPort, logger) {
+				for _, rr := range perHostRRs(db, z.origin, stTTL, eff.IMAPSPort, eff.CalDAVSPort, eff.CardDAVSPort, logger) {
 					z.add(rr)
 				}
 				if eff.IMAPSPort != 0 {

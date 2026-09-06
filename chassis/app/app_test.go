@@ -67,3 +67,21 @@ func TestCalendarStoreMode(t *testing.T) {
 		}
 	}
 }
+
+func TestContactsStoreMode(t *testing.T) {
+	for _, c := range []struct {
+		personalities, store string
+		open, fatal          bool
+	}{
+		{"cron,web,admin", "sqlite", false, false},
+		{"cron,web,admin,contacts", "sqlite", true, true},
+		{"cron,web,admin", "postgres", true, false},
+		{"cron,web,contacts", "postgres", true, true},
+		{"cron,web,contactsx", "sqlite", false, false}, // whole-token match
+	} {
+		open, fatal := contactsStoreMode(c.personalities, c.store)
+		if open != c.open || fatal != c.fatal {
+			t.Errorf("contactsStoreMode(%q, %q) = (%v, %v), want (%v, %v)", c.personalities, c.store, open, fatal, c.open, c.fatal)
+		}
+	}
+}

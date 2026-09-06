@@ -33,11 +33,15 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.calendar.res.event.start", true},
 		{"_txc.calendar.event.summary", false}, // a client's object facts are read-only…
 		{"_txc.calendar.tenant", false},        // …and the route hint especially
-		{"_txc.imap.msg.text", false},          // an appended message's facts are read-only…
-		{"_txc.imap.tenant", false},            // …and the route hint especially
-		{"_txc.dns.proposed.answer", false},    // the head's proposal is read-only
-		{"_txc.dns.q.name", false},             // inbound facts are reserved
-		{"_txc.dns.tenant", false},             // the route hint especially
+		{"_txc.contacts.res.ok", true},
+		{"_txc.contacts.res.card.fn", true},
+		{"_txc.contacts.card.fn", false},    // a client's card facts are read-only…
+		{"_txc.contacts.tenant", false},     // …and the route hint especially
+		{"_txc.imap.msg.text", false},       // an appended message's facts are read-only…
+		{"_txc.imap.tenant", false},         // …and the route hint especially
+		{"_txc.dns.proposed.answer", false}, // the head's proposal is read-only
+		{"_txc.dns.q.name", false},          // inbound facts are reserved
+		{"_txc.dns.tenant", false},          // the route hint especially
 		{"_txc.goto", true},
 		{"_txc.halt", true},
 		{"_txc.delete", true},
@@ -424,6 +428,15 @@ func TestAuthorMayDeleteTxc(t *testing.T) {
 	}
 	if authorMayDeleteTxc("_txc.calendar.tenant") || authorMayDeleteTxc("_txc.calendar.object") {
 		t.Error("calendar route hint / object identity must not be deletable")
+	}
+	// A client's card and its parse are delete-only the same way.
+	for _, p := range []string{"_txc.contacts.vcard", "_txc.contacts.card", "_txc.contacts.card.addresses", "_txc.contacts.prior", "_txc.contacts.prior.card"} {
+		if !authorMayDeleteTxc(p) || authorMayWriteTxc(p) {
+			t.Errorf("%s: delete=%v write=%v, want delete-only", p, authorMayDeleteTxc(p), authorMayWriteTxc(p))
+		}
+	}
+	if authorMayDeleteTxc("_txc.contacts.tenant") || authorMayDeleteTxc("_txc.contacts.object") {
+		t.Error("contacts route hint / object identity must not be deletable")
 	}
 	// An inbound WebSocket payload is delete-only the same way; the session
 	// facts beside it are not even deletable.

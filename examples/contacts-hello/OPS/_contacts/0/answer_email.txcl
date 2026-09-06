@@ -1,0 +1,12 @@
+# The answer lane: an address book whose policy says "stack" for a verb
+# asks this stack BEFORE committing, with @contacts.phase == "answer".
+# Absent or false @contacts.res.ok is a 403 to the client; `code` maps to
+# an HTTP status (cannot 403 | limit 507 | unavailable 503) and `msg` is
+# what the client shows. Here: a card put into the demo book must carry an
+# email address — the fact this stack keys on. A group card (Apple
+# Contacts makes one for every group) has no address and is let through
+# by answer_other.txcl.
+WHEN @contacts.phase == "answer" && @contacts.op == "put" && @contacts.card.kind != "group" && @contacts.card.addresses.0 !~ /./
+  EMIT @contacts.res.ok = false,
+       @contacts.res.code = "cannot",
+       @contacts.res.msg = "add an email address to this card: that is what this address book keys on"

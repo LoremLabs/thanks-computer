@@ -3,17 +3,19 @@ package storeseed
 import "strings"
 
 // Reserved store-seed trees under OPS/<stack>/. Each maps to a pack kind
-// owned by one Materializer (vecseed, kvseed, blobseed, calseed).
+// owned by one Materializer (vecseed, kvseed, blobseed, calseed, conseed).
 const (
 	DirVectors   = "VECTORS"
 	DirKV        = "KV"
 	DirBlobs     = "BLOBS"
 	DirCalendars = "CALENDARS"
+	DirContacts  = "CONTACTS"
 
 	KindVector   = "vector"
 	KindKV       = "kv"
 	KindBlob     = "blob"
 	KindCalendar = "calendar"
+	KindContact  = "contact"
 
 	PackExt = ".jsonl"
 )
@@ -23,6 +25,7 @@ var packDirs = map[string]string{
 	DirKV + "/":        KindKV,
 	DirBlobs + "/":     KindBlob,
 	DirCalendars + "/": KindCalendar,
+	DirContacts + "/":  KindContact,
 }
 
 // IsPackPath reports whether p lives in a store-seed tree.
@@ -47,7 +50,8 @@ func IsBlobPath(p string) bool { return KindForPath(p) == KindBlob }
 // pack path. VECTORS/ and KV/ packs are a single "<name>.jsonl" segment (the
 // collection / namespace is unambiguous; no nesting). A CALENDARS/ pack is
 // exactly two segments, "CALENDARS/<username>/<calendar>.jsonl", and owns
-// that one calendar of that account — the name is "<username>/<calendar>".
+// that one calendar of that account — the name is "<username>/<calendar>";
+// a CONTACTS/ pack is the same shape, "CONTACTS/<username>/<addressbook>.jsonl".
 // A BLOBS/ row is the opposite shape: the tree IS the hierarchy, so the
 // name is everything after "BLOBS/" — "BLOBS/faqs/house-01.doc" owns the
 // blob name "faqs/house-01.doc". Whether that is a VALID blob name is the
@@ -58,7 +62,7 @@ func PackName(p string) string {
 	if kind == "" {
 		return ""
 	}
-	rest := p[strings.Index(p, "/")+1:] // after "VECTORS/" / "KV/" / "BLOBS/" / "CALENDARS/"
+	rest := p[strings.Index(p, "/")+1:] // after "VECTORS/" / "KV/" / "BLOBS/" / "CALENDARS/" / "CONTACTS/"
 	if kind == KindBlob {
 		return rest // "" for a bare "BLOBS/" — caller rejects
 	}
@@ -66,7 +70,7 @@ func PackName(p string) string {
 		return ""
 	}
 	stem := strings.TrimSuffix(rest, PackExt)
-	if kind == KindCalendar {
+	if kind == KindCalendar || kind == KindContact {
 		user, cal, ok := strings.Cut(stem, "/")
 		if !ok || user == "" || cal == "" || strings.Contains(cal, "/") || !strings.Contains(user, "@") {
 			return ""
@@ -83,6 +87,13 @@ func PackName(p string) string {
 // calendar ("<username>/<calendar>" → username, calendar).
 func CalendarPackName(name string) (username, calendar string, ok bool) {
 	username, calendar, ok = strings.Cut(name, "/")
+	return
+}
+
+// ContactsPackName splits a CONTACTS/ pack name into its account and
+// address book ("<username>/<addressbook>" → username, addressbook).
+func ContactsPackName(name string) (username, addressbook string, ok bool) {
+	username, addressbook, ok = strings.Cut(name, "/")
 	return
 }
 

@@ -33,6 +33,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
 	_ "github.com/loremlabs/thanks-computer/chassis/compute/wazero" // registers the "wazero" engine
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	_ "github.com/loremlabs/thanks-computer/chassis/continuation/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/controlapply"
@@ -69,6 +70,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 	"github.com/loremlabs/thanks-computer/chassis/server/llmgw"
 	calendarp "github.com/loremlabs/thanks-computer/chassis/server/personality/calendar"
+	contactsp "github.com/loremlabs/thanks-computer/chassis/server/personality/contacts"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	imapp "github.com/loremlabs/thanks-computer/chassis/server/personality/imap"
@@ -83,6 +85,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/blobseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/calseed"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed/conseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/kvseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/vecseed"
 	"github.com/loremlabs/thanks-computer/chassis/telemetry"
@@ -154,11 +157,11 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.route.to", "_txc.continuation", "_txc.src",
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
-		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant")
+		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
-	dnsTenant, imapTenant, calendarTenant := fields[9], fields[10], fields[11]
+	dnsTenant, imapTenant, calendarTenant, contactsTenant := fields[9], fields[10], fields[11], fields[12]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -289,6 +292,18 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "calendar")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_calendar/0")
+			return b.String()
+		}
+	}
+	// Contacts mutation: the contacts head, the same way, into `_contacts/0`.
+	if src.String() == "contacts" {
+		if ct := contactsTenant.String(); ct != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", ct)
+			b.Set("_txc.route.stack", "_contacts")
+			b.Set("_txc.route.ingress", "contacts")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_contacts/0")
 			return b.String()
 		}
 	}
@@ -902,7 +917,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, imapStore *chimap.Store, calendarStore *chcal.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1537,6 +1552,30 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			}))
 	}
 
+	// Contacts store ops (txco://contacts/{account,addressbook,put,get,list,
+	// delete,sync}): provisioning for the `contacts` personality — an
+	// argon2id account, an address book with its policy, vCard objects
+	// materialized by UID, and a bounded batch. Registered unconditionally
+	// so a node without the store answers `_contacts.error
+	// txco_contacts_disabled`. See chassis/server/contacts.go + chassis/contacts.
+	conD := contactsDeps{store: contactsStore, snap: dbc.Snapshot,
+		maxBytes: int64(conf.ContactsObjectMaxBytes), prefix: conf.ContactsPathPrefix}
+	for name, fn := range map[string]func(context.Context, contactsDeps, []byte) (event.Payload, error){
+		"txco://contacts/account":     contactsAccount,
+		"txco://contacts/addressbook": contactsAddressbook,
+		"txco://contacts/put":         contactsPut,
+		"txco://contacts/get":         contactsGet,
+		"txco://contacts/list":        contactsList,
+		"txco://contacts/delete":      contactsDelete,
+		"txco://contacts/sync":        contactsSync,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, conD, in)
+			}))
+	}
+
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
 	// delete}). The backend is selected by --vector-store (default "sqlite",
 	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
@@ -1597,6 +1636,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// reconciled once on the origin, like the other shared stores.
 	if calendarStore != nil {
 		storeSeedMaterializers = append(storeSeedMaterializers, calseed.New(calendarStore, conf.CalendarStore != "sqlite"))
+	}
+	// CONTACTS/ packs, the same way, into the contacts store.
+	if contactsStore != nil {
+		storeSeedMaterializers = append(storeSeedMaterializers, conseed.New(contactsStore, conf.ContactsStore != "sqlite"))
 	}
 
 	// Computed-secret core ops. These consume cleartext from
@@ -1793,6 +1836,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	if calCtrl.Enabled() {
 		webCtrl.SetCalendar(calCtrl.Handler(), calCtrl.Prefix())
 	}
+	// Contacts personality (CardDAV on the web head under
+	// --contacts-path-prefix), the calendar's sibling: same shape, its own
+	// store, lanes and prefix.
+	conCtrl := contactsp.NewController(ctx, pu, contactsStore, resolver)
+	if conCtrl.Enabled() {
+		webCtrl.MountDAV("/.well-known/carddav", conCtrl.Prefix(), conCtrl.Handler())
+	}
 
 	// Bundled TLS: when --web-tls-addr is set the chassis terminates TLS
 	// itself, obtaining + renewing wildcard certs for delegated zones via
@@ -1874,6 +1924,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		dnsCtrl,
 		imapCtrl,
 		calCtrl,
+		conCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
 	}

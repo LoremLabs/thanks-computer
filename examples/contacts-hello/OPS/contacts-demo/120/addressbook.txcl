@@ -1,0 +1,12 @@
+# POST /contacts/provision — step 3: the account's first address book,
+# with a policy that asks the `_contacts` stack before a client edit
+# commits (`stack`). ._acct.username is only set when the account op
+# succeeded.
+WHEN ._acct.username != ""
+  EXEC "txco://contacts/addressbook"
+    WITH username     = ._acct.username,
+         name         = "hello",
+         display_name = "Hello contacts",
+         description  = "An address book a txco stack materializes.",
+         policy       = &object("put", "stack", "delete", "stack"),
+         into         = "_book"

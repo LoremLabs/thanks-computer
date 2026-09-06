@@ -31,6 +31,7 @@ var authorWritableTxcPaths = []string{
 	"dns.res",      // the DNS answer for a stack-answered zone (rcode/answer/authority)
 	"imap.res",     // the IMAP answer-lane verdict (ok/msg/code/flags/object_key)
 	"calendar.res", // the calendar answer-lane verdict (ok/msg/code/event/ical)
+	"contacts.res", // the contacts answer-lane verdict (ok/msg/code/card/vcard)
 	"goto",         // flow control: jump to another stage
 	"halt",         // flow control: stop the pipeline
 	"delete",       // prune envelope paths (targets are separately guarded)
@@ -80,6 +81,9 @@ var authorDeletableTxcPaths = []string{
 	"calendar.ical",      // a client's calendar object and its parse: consumed by
 	"calendar.event",     // the _calendar stack, then omitted from the trace
 	"calendar.prior",     // (the store holds the bytes)
+	"contacts.vcard",     // a client's card and its parse: consumed by the
+	"contacts.card",      // _contacts stack, then omitted from the trace
+	"contacts.prior",     // (the store holds the bytes)
 	"websocket.msg.text", // an inbound WebSocket message's payload (text, or
 	"websocket.msg.data", // base64 binary): consumed, then out of the trace
 }

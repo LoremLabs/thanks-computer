@@ -1,0 +1,4 @@
+# A group card, a delete, a new address book, a renamed one: nothing to
+# check — allowed.
+WHEN @contacts.phase == "answer" && (@contacts.op != "put" || @contacts.card.kind == "group")
+  EMIT @contacts.res.ok = true

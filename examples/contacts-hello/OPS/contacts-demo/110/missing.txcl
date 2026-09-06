@@ -1,0 +1,8 @@
+# A provision request without a username is a 400 before any op runs.
+# Absence is tested with a negative regex on the path (a missing path does
+# not match /./), gated on the request marker from scope 100.
+WHEN ._prov_req == true && ._prov.username !~ /./
+  EMIT @web.res.body = b64"{\"error\":\"missing_username\",\"message\":\"body must be JSON {\\\"username\\\": \\\"<local>@<owned-domain>\\\"}\"}\n",
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

@@ -17,14 +17,15 @@ import (
 // default-suffix zone (origin): for each chassis-minted host under the
 // suffix, its own `<selector>._domainkey.<host>` + `_dmarc.<host>` TXT when
 // it has a DKIM key (sending reputation isolated per host), and the RFC
-// 6186/6764 discovery records `_imaps._tcp.<host>` and `_caldavs._tcp.<host>`
-// (+ the `path=` TXT) when those ports are on — targets = the host itself.
+// 6186/6764 discovery records `_imaps._tcp.<host>`, `_caldavs._tcp.<host>`
+// and `_carddavs._tcp.<host>` (+ the `path=` TXTs) when those ports are on —
+// targets = the host itself.
 // Exact owners win over the zone's wildcard, and that is the point of the
 // SRVs: the wildcard's own SRV can name only one service, so a client
 // asking `_caldavs._tcp.<host>` must find an exact answer (see the SRV gate
 // in Lookup). Best-effort: a query/scan error logs and yields what it has.
 // One filtered query per snapshot build — fine at tens–hundreds of hosts.
-func perHostRRs(db *sql.DB, origin string, ttl uint32, imapsPort, caldavsPort uint16, logger *zap.Logger) []dns.RR {
+func perHostRRs(db *sql.DB, origin string, ttl uint32, imapsPort, caldavsPort, carddavsPort uint16, logger *zap.Logger) []dns.RR {
 	rows, err := db.Query(
 		`SELECT hostname, dkim_selector, dkim_public_b64 FROM tenant_hostnames
 		  WHERE created_by = ? AND revoked_at IS NULL
@@ -62,6 +63,7 @@ func perHostRRs(db *sql.DB, origin string, ttl uint32, imapsPort, caldavsPort ui
 			out = append(out, rr)
 		}
 		out = append(out, mkCalDAVS("_caldavs._tcp."+owner, ttl, caldavsPort, owner)...)
+		out = append(out, mkCardDAVS("_carddavs._tcp."+owner, ttl, carddavsPort, owner)...)
 	}
 	if err := rows.Err(); err != nil {
 		logger.Warn("dns: per-host records iterate failed",
@@ -102,6 +104,10 @@ type SynthConfig struct {
 	// in one answer misleads both clients (Apple Calendar followed the
 	// wildcard IMAPS SRV to port 993 — observed on prod 2026-09-05).
 	CalDAVSPort uint16
+	// CardDAVSPort is CalDAVSPort for the contacts personality: an RFC 6764
+	// `_carddavs._tcp` SRV + TXT "path=/.well-known/carddav" at the same
+	// owners, never on the wildcard.
+	CardDAVSPort uint16
 	// StructuredSuffix is the platform's default structured-host suffix
 	// (TXCO_STRUCTURED_HOST_SUFFIX), bare (no leading dot), e.g.
 	// "stacks.thanks.computer". When a served zone's origin equals it, the
@@ -130,16 +136,21 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 	if caldavs < 0 || caldavs > 65535 {
 		caldavs = 0
 	}
+	carddavs := conf.DNSCardDAVSPort
+	if carddavs < 0 || carddavs > 65535 {
+		carddavs = 0
+	}
 	return SynthConfig{
-		Nameservers: flattenCSV(conf.DNSNameservers),
-		EdgeIPs:     flattenCSV(conf.DNSEdgeIPs),
-		MXHost:      strings.TrimSpace(conf.DNSMXHost),
-		MXPriority:  uint16(pri),
-		TTL:         uint32(ttl),
-		SPFOverride: strings.TrimSpace(conf.DNSSPF),
-		DMARC:       strings.TrimSpace(conf.DNSDMARC),
-		IMAPSPort:   uint16(imaps),
-		CalDAVSPort: uint16(caldavs),
+		Nameservers:  flattenCSV(conf.DNSNameservers),
+		EdgeIPs:      flattenCSV(conf.DNSEdgeIPs),
+		MXHost:       strings.TrimSpace(conf.DNSMXHost),
+		MXPriority:   uint16(pri),
+		TTL:          uint32(ttl),
+		SPFOverride:  strings.TrimSpace(conf.DNSSPF),
+		DMARC:        strings.TrimSpace(conf.DNSDMARC),
+		IMAPSPort:    uint16(imaps),
+		CalDAVSPort:  uint16(caldavs),
+		CardDAVSPort: uint16(carddavs),
 		StructuredSuffix: strings.ToLower(strings.TrimSuffix(
 			strings.TrimPrefix(strings.TrimSpace(conf.StructuredHostSuffix), "."), ".")),
 	}
@@ -241,6 +252,7 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 		out = append(out, rr)
 	}
 	out = append(out, mkCalDAVS("_caldavs._tcp."+z.originFQDN, ttl, cfg.CalDAVSPort, z.originFQDN)...)
+	out = append(out, mkCardDAVS("_carddavs._tcp."+z.originFQDN, ttl, cfg.CardDAVSPort, z.originFQDN)...)
 
 	// Apex mail-auth TXT (SPF + DMARC), emitted alongside the MX (mail
 	// enabled). SPF is softfail (~all) so it never hard-rejects a tenant's
@@ -312,6 +324,7 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 			out = append(out, rr)
 		}
 		out = append(out, mkCalDAVS("_caldavs._tcp."+owner, ttl, cfg.CalDAVSPort, owner)...)
+		out = append(out, mkCardDAVS("_carddavs._tcp."+owner, ttl, cfg.CardDAVSPort, owner)...)
 	}
 	return out
 }
@@ -320,12 +333,21 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 // `_caldavs._tcp` SRV and the TXT naming the context path. Nil when port
 // is 0.
 func mkCalDAVS(owner string, ttl uint32, port uint16, target string) []dns.RR {
+	return mkDAVS(owner, ttl, port, target, "path=/.well-known/caldav")
+}
+
+// mkCardDAVS is mkCalDAVS for CardDAV: `_carddavs._tcp` + the carddav path.
+func mkCardDAVS(owner string, ttl uint32, port uint16, target string) []dns.RR {
+	return mkDAVS(owner, ttl, port, target, "path=/.well-known/carddav")
+}
+
+func mkDAVS(owner string, ttl uint32, port uint16, target, pathTXT string) []dns.RR {
 	rr := mkSRV(owner, ttl, port, target)
 	if rr == nil {
 		return nil
 	}
 	out := []dns.RR{rr}
-	if txt := mkTXT(owner, ttl, "path=/.well-known/caldav"); txt != nil {
+	if txt := mkTXT(owner, ttl, pathTXT); txt != nil {
 		out = append(out, txt)
 	}
 	return out

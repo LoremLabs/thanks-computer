@@ -35,6 +35,7 @@ import (
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/cli"
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
@@ -397,6 +398,35 @@ func Run(bi BuildInfo) int {
 			zap.String("personalities", conf.Personalities))
 	}
 
+	// Contacts index — the calendar index's sibling for the `contacts`
+	// personality (CardDAV) and txco://contacts/*. Same posture.
+	var contactsStore *chcon.Store
+	if open, fatal := contactsStoreMode(conf.Personalities, conf.ContactsStore); open {
+		st, cerr := chcon.Open(conf.ContactsStore, chcon.Config{DBPath: conf.ContactsDBPath})
+		switch {
+		case cerr != nil && fatal:
+			logger.Fatal("contacts store open failed",
+				zap.String("store", conf.ContactsStore), zap.String("err", cerr.Error()))
+		case cerr != nil:
+			logger.Warn("contacts store open failed; txco://contacts/* answer txco_contacts_disabled on this node until restart",
+				zap.String("store", conf.ContactsStore), zap.String("err", cerr.Error()))
+		default:
+			defer st.Close()
+			contactsStore = st
+			logger.Info("contacts store opened", zap.String("store", conf.ContactsStore), zap.Bool("head", fatal))
+		}
+	} else {
+		logger.Info("skipping contacts store open — contacts personality not active and --contacts-store=sqlite",
+			zap.String("personalities", conf.Personalities))
+	}
+	// Two DAV heads on one prefix would leave the second unreachable; say so
+	// at boot instead.
+	if conf.HasPersonality("calendar") && conf.HasPersonality("contacts") &&
+		strings.TrimSuffix(strings.TrimSpace(conf.CalendarPathPrefix), "/") == strings.TrimSuffix(strings.TrimSpace(conf.ContactsPathPrefix), "/") {
+		logger.Fatal("--calendar-path-prefix and --contacts-path-prefix must differ",
+			zap.String("prefix", conf.CalendarPathPrefix))
+	}
+
 	logger.Info("db setup") // feedback here proved helpful in debugging file locking for db
 
 	// Setup read-only db cache. The cache dumps THROUGH the chassis's
@@ -526,7 +556,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, imapStore, calendarStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, imapStore, calendarStore, contactsStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)
@@ -943,6 +973,13 @@ func imapStoreMode(personalities, store string) (open, fatal bool) {
 // without the head is not opened at all.
 func calendarStoreMode(personalities, store string) (open, fatal bool) {
 	head := config.Config{Personalities: personalities}.HasPersonality("calendar")
+	shared := store != "" && store != "sqlite"
+	return head || shared, head
+}
+
+// contactsStoreMode is calendarStoreMode for the contacts index.
+func contactsStoreMode(personalities, store string) (open, fatal bool) {
+	head := config.Config{Personalities: personalities}.HasPersonality("contacts")
 	shared := store != "" && store != "sqlite"
 	return head || shared, head
 }

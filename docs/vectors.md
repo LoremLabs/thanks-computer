@@ -99,7 +99,8 @@ OPS/<stack>/
   VECTORS/books.jsonl # a collection ─┐
   KV/config.jsonl     # a namespace   │ data
   BLOBS/faqs/a.md     # named blobs   │  (see advanced/blobs.md)
-  CALENDARS/paris@pony.example.com/events.jsonl  # a calendar ─┘ (see advanced/protocols/calendar.md)
+  CALENDARS/paris@pony.example.com/events.jsonl  # a calendar   │ (see advanced/protocols/calendar.md)
+  CONTACTS/paris@pony.example.com/team.jsonl     # an address book ─┘ (see advanced/protocols/contacts.md)
 ```
 
 **Code and data deploy separately, and data is opt-in:**

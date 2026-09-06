@@ -42,6 +42,7 @@ you'd otherwise hand-maintain:
 | Web | **A/AAAA** for the zone apex and for each active stack (`support.ai.example.com` → your `support` stack) |
 | Mail clients | **SRV** `_imaps._tcp` (RFC 6186) at the apex and each stack host when `--dns-imaps-port` is set, for clients that implement SRV discovery of the [IMAP](./imap.md) server (Thunderbird does not — it fetches the autoconfig XML a stack serves; see the IMAP page) |
 | Calendar clients | **SRV** `_caldavs._tcp` + **TXT** `path=/.well-known/caldav` (RFC 6764) at the apex and each stack host when `--dns-caldavs-port` is set, for clients that discover the [calendar](./calendar.md) server from an address (not on the default-suffix wildcard: one wildcard RRset cannot tell two services apart) |
+| Contacts clients | **SRV** `_carddavs._tcp` + **TXT** `path=/.well-known/carddav` (RFC 6764) at the same owners when `--dns-carddavs-port` is set, for clients that discover the [contacts](./contacts.md) server from an address |
 | TLS | Wildcard certificates for the zone, issued and renewed automatically via ACME DNS-01 against the chassis's own nameserver |
 
 Records follow your state: activate a stack and its hostname resolves; the same
@@ -73,6 +74,7 @@ runtime via `txco dns config set` (hot-reload, no restart):
 | SPF override | `--dns-spf` | Replaces the auto-derived SPF |
 | IMAPS port | `--dns-imaps-port` (default 0 = off) | Publishes `_imaps._tcp` SRV records pointing each name at itself on this port; the default-suffix wildcard zone points at `imap.<suffix>` |
 | CalDAV port | `--dns-caldavs-port` (default 0 = off) | Publishes `_caldavs._tcp` SRV records (and the `path=` TXT) pointing each name at itself on this port; set 443 when the `calendar` personality serves every hostname of the zone |
+| CardDAV port | `--dns-carddavs-port` (default 0 = off) | Publishes `_carddavs._tcp` SRV records (and the `path=` TXT) the same way; set 443 when the `contacts` personality serves every hostname of the zone |
 
 ## Zones
 

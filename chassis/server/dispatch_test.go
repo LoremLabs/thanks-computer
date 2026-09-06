@@ -380,6 +380,28 @@ func TestDetectTenantBodyCalendar(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyContacts: the contacts head's mutation (src=contacts
+// with a trusted _txc.contacts.tenant) routes into _contacts/0 the same way.
+func TestDetectTenantBodyContacts(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"contacts","contacts":{"tenant":"acme","phase":"answer","op":"put","addressbook":{"name":"senders"}}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_contacts/0" {
+		t.Errorf("_txc.route.to = %q, want _contacts/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "contacts" {
+		t.Errorf("_txc.route.ingress = %q, want contacts", got)
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified must be true (chassis-stamped)")
+	}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"contacts","contacts":{"op":"put"}}}`)); body != "{}" {
+		t.Errorf("contacts body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}
+
 // TestDetectTenantBodyLLM: an AI-gateway request (src=llm with a trusted
 // _txc.llm.tenant stamped by the inlet after its own Host resolution)
 // proposes a route into that tenant's _llm/0, carrying the inlet's

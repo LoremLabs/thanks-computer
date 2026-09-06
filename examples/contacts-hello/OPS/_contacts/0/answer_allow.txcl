@@ -1,0 +1,7 @@
+# A card with an address is accepted AS WRITTEN — the client's own rich
+# card (photo, labels, phone numbers) is what its owner wants to keep. An
+# accepting answer MAY carry a rewrite (@contacts.res.card or
+# @contacts.res.vcard) the head commits instead, keeping the client's UID;
+# this demo does not need one.
+WHEN @contacts.phase == "answer" && @contacts.op == "put" && @contacts.card.addresses.0 =~ /./
+  EMIT @contacts.res.ok = true

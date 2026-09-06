@@ -1,0 +1,18 @@
+# POST /contacts/provision — step 4: a hello card, so the contacts app
+# shows something on first open.
+#
+# `card{}` is the structured form: the chassis renders a vCard 3.0, mints
+# the UID from `name` (hello.paris@…, stable across runs), and a second
+# put of the same content is a no-op — re-provisioning does not churn the
+# object's ETag.
+WHEN ._book.name != ""
+  EXEC "txco://contacts/put"
+    WITH username    = ._acct.username,
+         addressbook = "hello",
+         name        = "hello.vcf",
+         card        = &object(
+           "fn",     "Hello from your stack",
+           "org",    "txco",
+           "note",   "This address book is served by a txco stack. Nothing lands here on its own: a rule chooses what to materialize with txco://contacts/put.",
+           "emails", &array(&object("value", "hello@pony.local.thanks.computer"))),
+         into        = "_put"

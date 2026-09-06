@@ -1,0 +1,15 @@
+# The `_contacts` stack is the subscription: while it exists, every
+# committed client mutation in this tenant's address books (put, delete,
+# mkaddressbook, remove, proppatch — where the book's policy says
+# observe) arrives here with @contacts.phase == "observe", after the
+# client already got its reply. Facts ride under @contacts.*: op,
+# addressbook{id,name,display_name}, object{name,uid,etag,…}, the card's
+# vCard text at @contacts.vcard and its parse at @contacts.card (fn,
+# emails[], addresses[], kind, …). This rule just records what it saw; a
+# product would reconcile @contacts.card into its own canonical state.
+WHEN @contacts.phase == "observe"
+  EMIT ._observed = &object(
+         "op", @contacts.op,
+         "addressbook", @contacts.addressbook.name,
+         "uid", @contacts.object.uid,
+         "fn", @contacts.card.fn)

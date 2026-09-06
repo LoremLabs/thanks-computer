@@ -69,5 +69,6 @@ in an opstack's flows into the protocol.
 | [DNS](./dns.md) | authoritative answers for delegated zones; in, post-reply — answered queries flow into `_dns` |
 | [IMAP](./imap.md) | out, read by a mail client — `txco://imap/append` materializes messages into a mailbox the `imap` head serves |
 | [Calendar](./calendar.md) | out, read by a calendar app or a feed subscriber — `txco://calendar/put` materializes events into a calendar the `calendar` head serves over CalDAV and as ICS; client edits can come back as `_calendar` envelopes |
+| [Contacts](./contacts.md) | out, read by a contacts app — `txco://contacts/put` materializes cards into an address book the `contacts` head serves over CardDAV; client edits can come back as `_contacts` envelopes |
 | [WebSocket](./websocket.md) | bidirectional, session — a stack accepts the upgrade, each message is one run of `_websocket`, `txco://websocket/reply` answers on the socket |
 
