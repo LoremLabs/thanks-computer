@@ -281,6 +281,15 @@ func TestAuthAndDiscovery(t *testing.T) {
 	if resp.StatusCode != 207 || !strings.Contains(out, "<D:response><D:href>/dav/paris@pony.example.com/</D:href>") || !strings.Contains(out, "<D:href>/dav/paris@pony.example.com/calendars/</D:href>") {
 		t.Errorf("principal propfind (raw, no slash) = %d\n%s", resp.StatusCode, out)
 	}
+	// A bare local part completes to the request's host (what a person
+	// types into an account dialog); on another host it names nobody.
+	resp, out = h.do(t, req{method: "PROPFIND", path: "/dav/", user: "paris", pass: pw, body: body, headers: map[string]string{"Depth": "0"}})
+	if resp.StatusCode != 207 || !strings.Contains(out, "/dav/paris%40pony.example.com/") {
+		t.Errorf("bare local part = %d\n%s", resp.StatusCode, out)
+	}
+	if resp, _ := h.do(t, req{method: "PROPFIND", path: "/dav/", host: "other.example.com", user: "paris", pass: pw, body: body, headers: map[string]string{"Depth": "0"}}); resp.StatusCode != 401 {
+		t.Errorf("bare local part on another host = %d", resp.StatusCode)
+	}
 	// allprop works too.
 	resp, out = h.do(t, req{method: "PROPFIND", path: "/dav/", user: user, pass: pw, body: `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, headers: map[string]string{"Depth": "0"}})
 	if resp.StatusCode != 207 || !strings.Contains(out, "current-user-principal") {

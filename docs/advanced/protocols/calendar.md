@@ -285,7 +285,8 @@ The head never routes by name: it serves every hostname the web head
 does, so **the server a calendar client should use is the domain of the
 address** — `paris@<stack>.stacks.example` connects to
 `https://<stack>.stacks.example/dav/`, and `/.well-known/caldav` on that
-host does the rest. For clients that discover a server from an address by
+host does the rest. A user name typed without its domain (`paris`)
+completes to the server's host. For clients that discover a server from an address by
 DNS (RFC 6764), the `dns` personality can publish `_caldavs._tcp` SRV +
 TXT records (`--dns-caldavs-port`, see [dns](./dns.md)).
 

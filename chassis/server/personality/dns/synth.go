@@ -202,13 +202,16 @@ func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
 		MXHost:      s.MXHost,
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
-		// dns_settings carries no mail-auth/suffix/IMAPS columns; keep the
-		// flag values so SPF/DMARC, the structured suffix and the IMAPS SRV
-		// stay configured even when an operator sets a settings row.
+		// dns_settings carries no mail-auth/suffix/port columns; keep the
+		// flag values so SPF/DMARC, the structured suffix and the IMAPS /
+		// CalDAV / CardDAV SRVs stay configured even when an operator sets a
+		// settings row. (Prod 2026-09-06: a row existed and the CardDAV port
+		// was not carried here, so no `_carddavs._tcp` was ever synthesized.)
 		SPFOverride:      flagDefaults.SPFOverride,
 		DMARC:            flagDefaults.DMARC,
 		IMAPSPort:        flagDefaults.IMAPSPort,
 		CalDAVSPort:      flagDefaults.CalDAVSPort,
+		CardDAVSPort:     flagDefaults.CardDAVSPort,
 		StructuredSuffix: flagDefaults.StructuredSuffix,
 	}
 }

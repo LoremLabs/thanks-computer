@@ -310,7 +310,8 @@ func seedSettings(t *testing.T, db *sql.DB, ns, edge, mx string) {
 
 func TestEffectiveSynthConfig(t *testing.T) {
 	db := newTestDB(t)
-	flags := SynthConfig{Nameservers: []string{"flag-ns.example."}, EdgeIPs: []string{"192.0.2.1"}, MXHost: "flag-mx."}
+	flags := SynthConfig{Nameservers: []string{"flag-ns.example."}, EdgeIPs: []string{"192.0.2.1"}, MXHost: "flag-mx.",
+		IMAPSPort: 993, CalDAVSPort: 443, CardDAVSPort: 443, StructuredSuffix: "stacks.example.com"}
 
 	// No settings row → flag defaults.
 	if got := EffectiveSynthConfig(db, flags); len(got.Nameservers) != 1 || got.Nameservers[0] != "flag-ns.example." {
@@ -322,6 +323,12 @@ func TestEffectiveSynthConfig(t *testing.T) {
 	got := EffectiveSynthConfig(db, flags)
 	if len(got.Nameservers) != 2 || got.EdgeIPs[0] != "203.0.113.10" || got.MXHost != "mx.txco.io" {
 		t.Fatalf("settings row should win: %+v", got)
+	}
+	// …but the columns the row does not carry keep the flag values: the
+	// three discovery ports and the suffix (prod 2026-09-06: CardDAV was
+	// dropped here and no _carddavs SRV was synthesized).
+	if got.IMAPSPort != 993 || got.CalDAVSPort != 443 || got.CardDAVSPort != 443 || got.StructuredSuffix != "stacks.example.com" {
+		t.Fatalf("settings row must keep the flag ports/suffix: %+v", got)
 	}
 }
 

@@ -278,6 +278,15 @@ func TestAuthAndDiscovery(t *testing.T) {
 	if resp.StatusCode != 207 || !strings.Contains(out, "<D:response><D:href>/carddav/paris@pony.example.com/</D:href>") || !strings.Contains(out, "<D:href>/carddav/paris@pony.example.com/addressbooks/</D:href>") {
 		t.Errorf("principal propfind (raw, no slash) = %d\n%s", resp.StatusCode, out)
 	}
+	// A bare local part completes to the request's host (what a person
+	// types into an account dialog); on another host it names nobody.
+	resp, out = h.do(t, req{method: "PROPFIND", path: "/carddav/", user: "paris", pass: pw, body: body, headers: map[string]string{"Depth": "0"}})
+	if resp.StatusCode != 207 || !strings.Contains(out, "/carddav/paris%40pony.example.com/") {
+		t.Errorf("bare local part = %d\n%s", resp.StatusCode, out)
+	}
+	if resp, _ := h.do(t, req{method: "PROPFIND", path: "/carddav/", host: "other.example.com", user: "paris", pass: pw, body: body, headers: map[string]string{"Depth": "0"}}); resp.StatusCode != 401 {
+		t.Errorf("bare local part on another host = %d", resp.StatusCode)
+	}
 	// The home set (the library): the book with its display name and type.
 	body = `<?xml version="1.0"?><D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav"><D:prop><D:displayname/><D:resourcetype/><C:supported-address-data/></D:prop></D:propfind>`
 	resp, out = h.do(t, req{method: "PROPFIND", path: "/carddav/paris@pony.example.com/addressbooks/", user: user, pass: pw, body: body, headers: map[string]string{"Depth": "1"}})

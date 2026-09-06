@@ -134,6 +134,14 @@ func (c *Controller) resolveHost(host string) (string, bool, error) {
 	return t.Tenant, true, nil
 }
 
+// hostOnly strips a port from a Host header value.
+func hostOnly(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
 func clientIP(r *http.Request) string {
 	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return h
@@ -159,6 +167,14 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		w.Header().Set("WWW-Authenticate", `Basic realm="calendar", charset="UTF-8"`)
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return principal{}, false
+	}
+	// A bare local part completes to the request's host: an account dialog
+	// shows the address's local part as the "user name" and a person types
+	// just that (prod, 2026-09-06: `front-desk` against the pony's own
+	// hostname), and the head serves the address's own domain. A completed
+	// name that names no account fails exactly like any other.
+	if !strings.Contains(user, "@") {
+		user = user + "@" + hostOnly(r.Host)
 	}
 	username := chcal.NormalizeUsername(user)
 	deny := func(outcome string) (principal, bool) {
