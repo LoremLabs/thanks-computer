@@ -48,6 +48,16 @@ All state is local files — back **these** up.
 Roots are configurable (`--db-root-dir`, `--kvstore-addrs`,
 `--secret-master-key`, `--trace-dir`, …).
 
+The request path never reads the runtime DB directly: it reads a SQLite
+*mirror* of it, rebuilt on every `txco apply` and swapped in atomically.
+By default that mirror lives in memory. `--db-mirror-mode=file` keeps it as
+a disposable file under `--db-root-dir` instead (`mirror-<pid>-<gen>.db`),
+which makes its pages reclaimable page cache rather than fixed RAM and
+lets a reload build the next generation on disk instead of holding two
+mirrors at once — the trade is a disk read on a cold page, so it suits a
+small, single-purpose node (a dedicated DNS head) rather than a busy web
+node. Stale files are swept at boot.
+
 ## Dispatch limits
 
 | Flag                      | Default   | Meaning                                            |

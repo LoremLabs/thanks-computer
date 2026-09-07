@@ -3,7 +3,11 @@ package dbcache
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -288,5 +292,167 @@ func TestReloadConcurrentReadersAndReloads(t *testing.T) {
 
 	if !has(t, dbc.Snapshot(), "a") {
 		t.Error("row 'a' lost after concurrent reloads")
+	}
+}
+
+// ---- --db-mirror-mode=file ----
+
+// fileModeConf is a Config that puts the mirror on disk under a temp dir.
+func fileModeConf(t *testing.T) config.Config {
+	t.Helper()
+	return config.Config{DbMirrorMode: MirrorModeFile, DbRoot: t.TempDir()}
+}
+
+func mirrorFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	m, err := filepath.Glob(filepath.Join(dir, mirrorFilePattern))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// TestMirrorModeValidation: the flag is validated at New, and empty means
+// memory (what every zero-Config test relies on).
+func TestMirrorModeValidation(t *testing.T) {
+	src := newTestSource(t)
+	defer src.Close()
+	if _, err := New(config.Config{DbMirrorMode: "bogus"}, zap.NewNop(), context.Background(), src); err == nil {
+		t.Fatal("bogus mode must be refused at New")
+	}
+	dbc, err := New(config.Config{}, zap.NewNop(), context.Background(), src)
+	if err != nil || dbc.mirrorMode != MirrorModeMemory || dbc.mirrorPath != "" {
+		t.Fatalf("empty mode should be memory with no file: mode=%q path=%q err=%v", dbc.mirrorMode, dbc.mirrorPath, err)
+	}
+}
+
+// TestFileMirrorBuildsOnDisk: in file mode the live mirror is a file under
+// --db-root-dir, readers see the loaded rows through the same Snapshot()
+// handle, and the mode changes nothing about what they read.
+func TestFileMirrorBuildsOnDisk(t *testing.T) {
+	src := newTestSource(t)
+	defer src.Close()
+	conf := fileModeConf(t)
+	dbc, err := New(conf, zap.NewNop(), context.Background(), src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := dbc.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !has(t, dbc.Snapshot(), "a") {
+		t.Fatal("file mirror should serve the source's rows")
+	}
+	live := dbc.mirrorPath
+	if !strings.HasPrefix(filepath.Base(live), "mirror-") || filepath.Dir(live) != conf.DbRoot {
+		t.Fatalf("live mirror path %q not under db-root %q", live, conf.DbRoot)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("live mirror file missing: %v", err)
+	}
+	// sql.Open is lazy — SQLite creates a generation's file on first use, so
+	// the never-touched New() placeholder leaves nothing on disk and the
+	// loaded generation is the only file.
+	if files := mirrorFiles(t, conf.DbRoot); len(files) != 1 || files[0] != live {
+		t.Fatalf("want exactly the live generation on disk, got %v", files)
+	}
+}
+
+// TestFileMirrorReloadUnlinksSuperseded: after a reload the previous
+// generation's handle is closed AND its file removed once the grace window
+// passes — a leaked file would fill the disk one reload at a time.
+func TestFileMirrorReloadUnlinksSuperseded(t *testing.T) {
+	prevGrace := supersededDBCloseGrace
+	supersededDBCloseGrace = 50 * time.Millisecond
+	t.Cleanup(func() { supersededDBCloseGrace = prevGrace })
+
+	src := newTestSource(t)
+	defer src.Close()
+	conf := fileModeConf(t)
+	dbc, err := New(conf, zap.NewNop(), context.Background(), src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := dbc.Reload(); err != nil {
+			t.Fatalf("reload %d: %v", i, err)
+		}
+	}
+	live := dbc.mirrorPath
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		files := mirrorFiles(t, conf.DbRoot)
+		if len(files) == 1 && files[0] == live {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("superseded generations not removed: live=%s files=%v", live, files)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !has(t, dbc.Snapshot(), "a") {
+		t.Fatal("live mirror must still serve after the sweep of superseded files")
+	}
+}
+
+// TestFileMirrorSweepsStaleAtBoot: generations (and sidecars) left by a
+// previous process — a crash mid-build, or just the last live one — are
+// removed before this process creates its first.
+func TestFileMirrorSweepsStaleAtBoot(t *testing.T) {
+	src := newTestSource(t)
+	defer src.Close()
+	conf := fileModeConf(t)
+	for _, n := range []string{"mirror-999-1.db", "mirror-999-2.db", "mirror-999-2.db-journal"} {
+		if err := os.WriteFile(filepath.Join(conf.DbRoot, n), []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(conf.DbRoot, "usage.db"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbc, err := New(conf, zap.NewNop(), context.Background(), src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Everything stale is gone; at most this process's own (lazily created)
+	// generation may exist.
+	for _, f := range mirrorFiles(t, conf.DbRoot) {
+		if f != dbc.mirrorPath {
+			t.Fatalf("stale generation survived the boot sweep: %s", f)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(conf.DbRoot, "usage.db")); err != nil {
+		t.Fatal("the sweep must touch only mirror-* files")
+	}
+}
+
+// TestFileMirrorLoaderFailureLeavesNoFile: a failed build keeps the previous
+// generation live (the availability buffer) and removes the half-built file.
+func TestFileMirrorLoaderFailureLeavesNoFile(t *testing.T) {
+	src := newTestSource(t)
+	defer src.Close()
+	conf := fileModeConf(t)
+	dbc, err := New(conf, zap.NewNop(), context.Background(), src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := dbc.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	live := dbc.mirrorPath
+	before := len(mirrorFiles(t, conf.DbRoot))
+
+	RegisterLoader("failing-test-loader", func(context.Context, *sql.DB, *sql.DB, string) error {
+		return errors.New("simulated source outage")
+	})
+	dbc.loaderName = "failing-test-loader"
+	if err := dbc.Reload(); err == nil {
+		t.Fatal("reload should fail")
+	}
+	if dbc.mirrorPath != live || !has(t, dbc.Snapshot(), "a") {
+		t.Fatal("previous generation must stay live after a failed build")
+	}
+	if after := len(mirrorFiles(t, conf.DbRoot)); after != before {
+		t.Fatalf("half-built generation left behind: %d → %d files", before, after)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -40,8 +41,20 @@ mutex lock
 // (the ingress resolver caps its lookup at 250ms; processor/admin
 // snapshot reads are comparably short). 30s is a ~120x margin and also
 // bounds how many superseded mirrors can be alive at once under bursty
-// (debounced) reloads.
-const supersededDBCloseGrace = 30 * time.Second
+// (debounced) reloads. A var so tests can shorten it.
+var supersededDBCloseGrace = 30 * time.Second
+
+// Mirror storage modes (--db-mirror-mode). See openMirror.
+const (
+	MirrorModeMemory = "memory"
+	MirrorModeFile   = "file"
+)
+
+// mirrorFilePattern matches every generation this or a previous process
+// left under --db-root-dir, sidecars included (a -journal from a crash
+// mid-build). Only the CURRENT process's live generations are wanted; the
+// boot sweep removes the rest.
+const mirrorFilePattern = "mirror-*.db*"
 
 // MirrorLoader (re)builds the in-memory read mirror: given a freshly-opened,
 // empty :memory: SQLite handle `dst` and the chassis's authoritative runtime
@@ -195,6 +208,16 @@ type DbCache struct {
 	// for a postgres:// runtime. Resolved once in New from the runtime DSN.
 	loaderName string
 
+	// mirrorMode is where each generation of the mirror lives (MirrorMode*),
+	// resolved once in New from --db-mirror-mode. In file mode mirrorGen
+	// numbers the generations (the file name carries it) and mirrorPath is
+	// the live generation's file — guarded by Mu alongside Db, since the
+	// two are swapped together and the superseded file is removed after
+	// the same grace window that closes its handle.
+	mirrorMode string
+	mirrorGen  atomic.Uint64
+	mirrorPath string
+
 	// reloadDebounce coalesces ReloadDebounced() calls (lazily built under
 	// debounceMu so a zero-value DbCache in tests works too).
 	debounceMu     sync.Mutex
@@ -234,12 +257,32 @@ func New(conf config.Config, logger *zap.Logger, ctx context.Context, source *sq
 
 	var dbc = &DbCache{}
 	dbc.Mu = sync.Mutex{}
+	dbc.Conf = conf
+	dbc.Logger = logger
 
-	db, err := sql.Open("sqlite3", ":memory:")
+	mode, err := resolveMirrorMode(conf.DbMirrorMode)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	dbc.mirrorMode = mode
+	if mode == MirrorModeFile {
+		// A fresh process owns no generation yet: whatever matches the
+		// pattern is a previous process's (a crash mid-build, or a normal
+		// exit — the live generation is never removed by its own process).
+		if err := sweepStaleMirrors(conf.DbRoot, logger); err != nil {
+			return nil, err
+		}
+	}
+
+	db, path, err := dbc.openMirror()
+	if err != nil {
+		return nil, err
+	}
+	dbc.mirrorPath = path
+	if mode == MirrorModeFile {
+		logger.Info("dbcache mirror on disk", zap.String("dir", filepath.Dir(path)),
+			zap.String("why", "reclaimable page cache instead of anonymous RAM; the next generation builds on disk, not beside the live one"))
+	}
 
 	// Pick the mirror loader from the runtime DSN. A file: runtime uses the
 	// built-in "sqlite" online-backup loader; a postgres:// runtime needs
@@ -313,14 +356,11 @@ func (dbc *DbCache) Reload() error {
 	// path — so a slow build never blocks readers. On loader failure the old
 	// mirror stays live (below), which is also the Postgres availability
 	// buffer: a Neon blip fails the reload but keeps serving the last snapshot.
-	dbNew, err := sql.Open("sqlite3", ":memory:")
+	dbNew, newPath, err := dbc.openMirror()
 	if err != nil {
 		dbc.Logger.Warn("reload cachedb open err", zap.String("err", err.Error()))
 		return err
 	}
-	// Pin to one connection: each go-sqlite3 :memory: connection is its OWN db,
-	// so the mirror must live on a single pinned connection (see New()).
-	dbNew.SetMaxOpenConns(1)
 
 	bctx := dbc.Ctx
 	if bctx == nil {
@@ -338,6 +378,7 @@ func (dbc *DbCache) Reload() error {
 		// Guarded at New(); defensive here so a mis-set loaderName surfaces
 		// loudly instead of a nil-call panic.
 		_ = dbNew.Close()
+		removeMirrorFile(newPath)
 		return fmt.Errorf("dbcache: mirror loader %q not registered", name)
 	}
 
@@ -354,6 +395,7 @@ func (dbc *DbCache) Reload() error {
 		dbc.Logger.Warn("reload cachedb load err",
 			zap.String("loader", dbc.loaderName), zap.String("err", berr.Error()))
 		_ = dbNew.Close()
+		removeMirrorFile(newPath) // a half-built generation is disk, not memory: never leave it
 		return berr
 	}
 	loadDur := time.Since(loadStart)
@@ -381,7 +423,9 @@ func (dbc *DbCache) Reload() error {
 	swapStart := time.Now()
 	dbc.Mu.Lock()
 	old := dbc.Db
+	oldPath := dbc.mirrorPath
 	dbc.Db = dbNew
+	dbc.mirrorPath = newPath
 	dbc.Mu.Unlock()
 	swapDur := time.Since(swapStart)
 
@@ -393,8 +437,9 @@ func (dbc *DbCache) Reload() error {
 	// exceed the longest in-memory snapshot query (ingress resolver caps at
 	// 250ms; others are similarly short), or close immediately on shutdown.
 	if old != nil && old != dbNew {
-		go func(prev *sql.DB) {
-			t := time.NewTimer(supersededDBCloseGrace)
+		grace := supersededDBCloseGrace // read here, not in the goroutine (tests shorten it)
+		go func(prev *sql.DB, prevPath string) {
+			t := time.NewTimer(grace)
 			defer t.Stop()
 			var ctxDone <-chan struct{}
 			if dbc.Ctx != nil {
@@ -408,7 +453,11 @@ func (dbc *DbCache) Reload() error {
 				dbc.Logger.Debug("closing superseded dbcache mirror",
 					zap.String("err", cerr.Error()))
 			}
-		}(old)
+			// File mode: the handle is closed, so the generation's file can
+			// go. A leaked :memory: mirror was a memory leak; a leaked file
+			// would fill the disk one reload at a time.
+			removeMirrorFile(prevPath)
+		}(old, oldPath)
 	}
 
 	fields := []zap.Field{
@@ -425,6 +474,93 @@ func (dbc *DbCache) Reload() error {
 	dbc.Logger.Info("reload cachedb complete", fields...)
 
 	return nil
+}
+
+// resolveMirrorMode validates --db-mirror-mode. Empty means memory (the
+// zero-value Config tests build).
+func resolveMirrorMode(sel string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(sel)) {
+	case "", MirrorModeMemory:
+		return MirrorModeMemory, nil
+	case MirrorModeFile:
+		return MirrorModeFile, nil
+	default:
+		return "", fmt.Errorf("--db-mirror-mode=%q: want %s or %s", sel, MirrorModeMemory, MirrorModeFile)
+	}
+}
+
+// openMirror opens an empty SQLite handle for the next mirror generation,
+// pinned to one connection (each go-sqlite3 :memory: connection is its OWN
+// database, and the file mode keeps the same discipline so no reader
+// changes). Returns the file path in file mode, "" otherwise.
+//
+// File mode is the memory-footprint lever for a small node: the mirror's
+// pages become file-backed page cache the kernel can reclaim, instead of
+// anonymous RAM it cannot, and a reload builds the next generation on disk
+// instead of holding two full mirrors in RAM (the boot/reload peak). The
+// file is disposable — rebuilt wholesale every reload, never the source of
+// truth — so it journals to RAM and never fsyncs: `_journal_mode=MEMORY`
+// keeps ROLLBACK working for the loader's transactions at no disk cost (a
+// new, growing file journals only pages that existed at transaction start,
+// i.e. none), and `_synchronous=OFF` skips every fsync. A crash mid-build
+// leaves a corrupt file that the next boot sweeps. SQLite's own page cache
+// is capped small (`_cache_size` in KiB, negative) so the kernel's cache,
+// not SQLite's, holds the working set.
+func (dbc *DbCache) openMirror() (*sql.DB, string, error) {
+	dsn, path := ":memory:", ""
+	if dbc.mirrorMode == MirrorModeFile {
+		dir := strings.TrimSpace(dbc.Conf.DbRoot)
+		if dir == "" {
+			return nil, "", errors.New("dbcache: --db-mirror-mode=file needs --db-root-dir")
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, "", fmt.Errorf("dbcache: mirror dir: %w", err)
+		}
+		gen := dbc.mirrorGen.Add(1)
+		path = filepath.Join(dir, fmt.Sprintf("mirror-%d-%d.db", os.Getpid(), gen))
+		removeMirrorFile(path) // never build on top of a leftover
+		dsn = "file:" + path + "?_journal_mode=MEMORY&_synchronous=OFF&_cache_size=-16384"
+	}
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, "", err
+	}
+	db.SetMaxOpenConns(1)
+	return db, path, nil
+}
+
+// sweepStaleMirrors removes every mirror generation file under dir, plus
+// sidecars. Called once at New, before this process creates its first
+// generation, so everything it finds belongs to a previous process.
+func sweepStaleMirrors(dir string, logger *zap.Logger) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("dbcache: --db-mirror-mode=file needs --db-root-dir")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, mirrorFilePattern))
+	if err != nil {
+		return fmt.Errorf("dbcache: sweep mirrors: %w", err)
+	}
+	for _, m := range matches {
+		if rerr := os.Remove(m); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			return fmt.Errorf("dbcache: sweep stale mirror %s: %w", m, rerr)
+		}
+	}
+	if len(matches) > 0 && logger != nil {
+		logger.Info("dbcache swept stale mirror files", zap.Int("count", len(matches)), zap.String("dir", dir))
+	}
+	return nil
+}
+
+// removeMirrorFile deletes one generation and any sidecar; a "" path (memory
+// mode) or an already-absent file is a no-op.
+func removeMirrorFile(path string) {
+	if path == "" {
+		return
+	}
+	for _, p := range []string{path, path + "-journal", path + "-wal", path + "-shm"} {
+		_ = os.Remove(p)
+	}
 }
 
 // reloadDebounceQuiet is the trailing-edge quiet window for
