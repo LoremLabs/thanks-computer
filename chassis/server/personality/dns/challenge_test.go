@@ -3,57 +3,20 @@ package dns
 import (
 	"net"
 	"testing"
-	"time"
 
 	"github.com/miekg/dns"
 )
 
 const acmeOwner = "_acme-challenge.ops.example.com."
 
-// TestMemChallengeStore covers publish/read/cleanup, dedup-refresh,
-// multiple coexisting values, and the in-memory safety expiry (via an
-// injected clock).
+// TestMemChallengeStore runs the shared semantics table (challenge_kv_test.go)
+// against the in-memory backend: publish/read/cleanup, dedup-refresh,
+// multiple coexisting values, and the safety expiry (via an injected clock).
 func TestMemChallengeStore(t *testing.T) {
 	s := newMemChallengeStore()
-	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	now := base
-	s.now = func() time.Time { return now }
-
-	if got := s.ActiveTXT(acmeOwner); got != nil {
-		t.Fatalf("empty store should yield nil, got %v", got)
-	}
-
-	s.Present(acmeOwner, "tok-A")
-	s.Present(acmeOwner, "tok-B")
-	s.Present(acmeOwner, "tok-A") // dedup: still two values
-	if got := s.ActiveTXT(acmeOwner); len(got) != 2 {
-		t.Fatalf("want 2 values, got %v", got)
-	}
-
-	// Case-insensitive owner match.
-	if got := s.ActiveTXT("_ACME-Challenge.OPS.example.com."); len(got) != 2 {
-		t.Fatalf("owner match should be case-insensitive, got %v", got)
-	}
-
-	// CleanUp one value leaves the other.
-	s.CleanUp(acmeOwner, "tok-A")
-	if got := s.ActiveTXT(acmeOwner); len(got) != 1 || got[0] != "tok-B" {
-		t.Fatalf("after cleanup want [tok-B], got %v", got)
-	}
-
-	// CleanUp is idempotent.
-	s.CleanUp(acmeOwner, "tok-A")
-	s.CleanUp(acmeOwner, "tok-B")
-	if got := s.ActiveTXT(acmeOwner); got != nil {
-		t.Fatalf("after full cleanup want nil, got %v", got)
-	}
-
-	// Safety expiry: a value not explicitly cleaned vanishes past the TTL.
-	s.Present(acmeOwner, "tok-C")
-	now = base.Add(challengeStoreTTL + time.Second)
-	if got := s.ActiveTXT(acmeOwner); got != nil {
-		t.Fatalf("expired value should be gone, got %v", got)
-	}
+	clock := newTestClock()
+	s.now = clock.now
+	challengeStoreSemantics(t, s, clock)
 }
 
 // TestAnswerChallenge covers the dispatch decision in isolation: it

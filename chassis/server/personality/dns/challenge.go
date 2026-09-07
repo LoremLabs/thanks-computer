@@ -4,6 +4,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // ChallengeStore holds the short-lived `_acme-challenge` TXT records the
@@ -20,11 +22,15 @@ import (
 // — but only for the `_acme-challenge.*` name, so normal lookups never
 // touch it.
 //
-// Seam shape mirrors chassis/auth/registry/dialect.go: core ships the
-// interface + an in-memory default; a shared (Postgres) implementation is
-// registered out of tree by the overlay so a challenge written on one
-// chassis is served by another when Let's Encrypt's validator lands there
-// (see ChallengeStoreForDSN).
+// Two backends ship in core: the in-memory default (one process is the
+// only nameserver) and a KV-backed store over the shared --kvstore
+// (challenge_kv.go), so a challenge written on one head is served by every
+// other — Let's Encrypt validates from several vantage points and may ask
+// any nameserver in the NS set. Selected by --dns-challenge-store.
+//
+// Both backends key on challengeKey, so a name written by one and read by
+// the other (or by answerChallenge, which keys with dns.Fqdn) cannot miss
+// on a trailing-dot or case difference.
 type ChallengeStore interface {
 	// Present publishes a challenge value at the given owner FQDN. Idempotent
 	// per (fqdn, value); multiple distinct values may coexist (ACME can
@@ -63,6 +69,46 @@ func isACMEChallengeName(qname string) bool {
 	return strings.HasPrefix(qname, acmeChallengeLabel)
 }
 
+// challengeKeyMax bounds a stored owner name. Mirrors chassis/kv's per-
+// segment cap (segMax) so the KV backend never composes a key the store
+// refuses; the in-memory backend applies the same bound so both agree on
+// which names are storable. A legal wire name is ≤255 bytes, but an escaped
+// presentation form (\DDD) can exceed it — those are rejected, not stored.
+const challengeKeyMax = 256
+
+// challengeKey normalizes an owner name to the form every backend keys on:
+// lowercased, trailing-dot FQDN — the exact form answerChallenge derives
+// from a query (strings.ToLower(dns.Fqdn(q.Name))) — and validated with
+// chassis/kv's segment rules (non-empty, bounded, no '/' and no control
+// characters) so a name that passes here is a legal KV key segment. ok is
+// false for a name no backend will store or serve.
+func challengeKey(fqdn string) (string, bool) {
+	k := strings.ToLower(strings.TrimSpace(fqdn))
+	if k == "" {
+		return "", false
+	}
+	k = dns.Fqdn(k)
+	if len(k) > challengeKeyMax {
+		return "", false
+	}
+	for _, r := range k {
+		if r == '/' || r < 0x20 || r == 0x7f {
+			return "", false
+		}
+	}
+	return k, true
+}
+
+// challengeClearer is an optional extension a backend implements when it
+// can drop every value at an owner in one step. The RFC2136 receiver's
+// "delete RRset" op (update.go) prefers it over enumerate-then-CleanUp:
+// on the shared backend that is one CAS instead of N+1 round trips, and it
+// cannot miss a value a peer published between the enumerate and the
+// deletes. Both in-tree backends implement it.
+type challengeClearer interface {
+	clearAll(fqdn string)
+}
+
 // challengeEntry is one published value with its expiry.
 type challengeEntry struct {
 	value   string
@@ -70,14 +116,14 @@ type challengeEntry struct {
 }
 
 // memChallengeStore is the in-tree default: a single-process, in-memory
-// store. It is the whole story for single-node deployments (the solver
-// and the DNS head share one process, so Present is a direct write the
-// next query sees). A fleet needs a shared backend — that lands in a
-// downstream overlay behind ChallengeStoreForDSN.
+// store. It is the whole story when one process is the only nameserver
+// (the solver and the DNS head share it, so Present is a direct write the
+// next query sees). Two or more nameservers need the shared KV backend
+// (kvChallengeStore, --dns-challenge-store=kv).
 type memChallengeStore struct {
 	mu  sync.RWMutex
 	ttl time.Duration
-	rec map[string][]challengeEntry // key: lowercased FQDN
+	rec map[string][]challengeEntry // key: challengeKey(fqdn)
 	now func() time.Time            // injectable for tests
 }
 
@@ -90,7 +136,10 @@ func newMemChallengeStore() *memChallengeStore {
 }
 
 func (m *memChallengeStore) Present(fqdn, value string) {
-	key := strings.ToLower(fqdn)
+	key, ok := challengeKey(fqdn)
+	if !ok {
+		return
+	}
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -106,7 +155,10 @@ func (m *memChallengeStore) Present(fqdn, value string) {
 }
 
 func (m *memChallengeStore) CleanUp(fqdn, value string) {
-	key := strings.ToLower(fqdn)
+	key, ok := challengeKey(fqdn)
+	if !ok {
+		return
+	}
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -125,18 +177,34 @@ func (m *memChallengeStore) CleanUp(fqdn, value string) {
 }
 
 func (m *memChallengeStore) ActiveTXT(fqdn string) []string {
-	key := strings.ToLower(fqdn)
+	key, ok := challengeKey(fqdn)
+	if !ok {
+		return nil
+	}
 	now := m.now()
+	// Collect under the read lock: prune compacts the backing array in place
+	// under the write lock, so iterating a copied slice header outside the
+	// lock races with a concurrent Present/CleanUp.
 	m.mu.RLock()
-	entries := m.rec[key]
-	m.mu.RUnlock()
 	var out []string
-	for _, e := range entries {
+	for _, e := range m.rec[key] {
 		if e.expires.After(now) {
 			out = append(out, e.value)
 		}
 	}
+	m.mu.RUnlock()
 	return out
+}
+
+// clearAll implements challengeClearer: drop every value at the owner.
+func (m *memChallengeStore) clearAll(fqdn string) {
+	key, ok := challengeKey(fqdn)
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	delete(m.rec, key)
+	m.mu.Unlock()
 }
 
 // prune drops expired entries. Caller holds the write lock.
@@ -150,9 +218,17 @@ func (m *memChallengeStore) prune(entries []challengeEntry, now time.Time) []cha
 	return out
 }
 
-// challengeStoreFactories lets the overlay register a shared backend
-// (e.g. Postgres) by DSN scheme, never compiled into core — the same
-// "driver registered out of tree" rule as the auth Dialect seam.
+// challengeStoreFactories lets an overlay register a backend by DSN scheme,
+// never compiled into core — the same "driver registered out of tree" rule
+// as the auth Dialect seam.
+//
+// NOT WIRED: nothing in core calls ChallengeStoreForDSN (the in-tree
+// backends are selected by --dns-challenge-store, see ChallengeBackend in
+// challenge_kv.go). It stays as an extension point only. Note its
+// fallback: an unregistered scheme silently yields the in-memory store —
+// exactly the one-nameserver-sees-it downgrade the boot guard in
+// server.go exists to refuse. Wire it through ChallengeBackend, not around
+// it, if it is ever used.
 var challengeStoreFactories = map[string]func(dsn string) (ChallengeStore, error){}
 
 // RegisterChallengeStore registers a factory for a DSN scheme (e.g.

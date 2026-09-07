@@ -57,6 +57,7 @@ import (
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
+	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/mail"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
@@ -1625,7 +1626,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// KV store-seed materializer (KV/<namespace>.jsonl packs). kvHandle is
 	// always constructed above, so this is unconditional. redis = fleet-shared
 	// (reconcile once on the origin); boltdb (default) = per-node.
-	kvShared := conf.KVStore == "redis"
+	kvShared := conf.KVStore == redisstore.StoreName
 	storeSeedMaterializers = append(storeSeedMaterializers, kvseed.New(kvHandle, kvShared))
 	// BLOBS/ store-seed materializer: seeds name → sha pointers into the blob
 	// index (in KV, hence kvShared) for bytes the CLI already streamed into
@@ -1813,7 +1814,24 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// The web head mints a session id on every upgrade request and, when the
 	// run recorded an accept, hands the socket to the websocket controller.
 	webCtrl.SetWebSocket(wsCtrl)
+	// --dns-challenge-store: the shared backend needs the shared KV or each
+	// nameserver would serve only the challenges it wrote itself — fail the
+	// boot, on EVERY node (a typo in a fleet-wide env var should not wait
+	// for the dns node to restart), rather than serve a head that answers
+	// half the CA's validations. Same shape as the --websocket-relay guard
+	// above; the selector is the one NewController uses.
+	if _, cerr := dnsp.ChallengeBackend(conf.DNSChallengeStore, kvShared); cerr != nil {
+		cancel()
+		return ctx, nil, cerr
+	}
+	if strings.EqualFold(strings.TrimSpace(conf.DNSChallengeStore), dnsp.ChallengeBackendKV) && kv == nil {
+		cancel()
+		return ctx, nil, fmt.Errorf("--dns-challenge-store=kv: this node opened no KV store")
+	}
 	dnsCtrl := dnsp.NewController(ctx, pu)
+	if strings.Contains(conf.Personalities, "dns") && strings.TrimSpace(conf.DNSChallengeStore) != "" {
+		logger.Info("dns challenge store selected", zap.String("store", conf.DNSChallengeStore))
+	}
 
 	// AI-gateway inlet (POST /v1/messages on the web head): one stack
 	// round-trip, then a byte-transparent proxy to the configured
@@ -1877,6 +1895,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			logger.Warn("bundled TLS requested without the 'dns' personality: ACME DNS-01 has no authoritative server to answer challenges — enable 'dns', terminate TLS at a front proxy, or (imap) pass cert files")
 		}
 		m, mErr := txtls.NewManager(txtls.Options{
+			// Captured as an interface VALUE: the controller's store must
+			// already be final here (NewController selects it), or the
+			// solver writes to one store while the head reads another.
 			Publisher:   dnsCtrl.ChallengeStore(),
 			Email:       conf.ACMEEmail,
 			CA:          conf.ACMECA,

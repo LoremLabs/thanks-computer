@@ -62,8 +62,13 @@ chassis — the [LMTP reference](./lmtp.md) has the wiring.)
 
 Add `dns` to `--personalities`. The txco chassis head then listens on
 `--dns-listen-addrs` (default `:5354`; port 53 needs root or
-`CAP_NET_BIND_SERVICE`). Minimum config, settable by flag or at
-runtime via `txco dns config set` (hot-reload, no restart):
+`CAP_NET_BIND_SERVICE`). A bare `host:port` binds UDP and TCP on that
+address; a `udp:host:port` or `tcp:host:port` entry binds that one
+transport, for a front that delivers the two on different addresses (Fly,
+for one, wants `udp:fly-global-services:53 tcp:0.0.0.0:53`). DNS needs both
+transports to reach the head one way or another — a one-transport bind logs
+a warning. Minimum config, settable by flag or at runtime via
+`txco dns config set` (hot-reload, no restart):
 
 | Setting | Flag / `dns config set` | Meaning |
 |---|---|---|
@@ -267,3 +272,18 @@ in a transient challenge store, never in the zone tables. Certs persist
 under `--cert-storage-path` (default `./chassis/data/certs`). A front
 proxy can instead ask `GET /_txco/tls-ask?domain=<sni>` to gate
 on-demand issuance against verified hostnames.
+
+**More than one nameserver.** The challenge store is in-process by
+default, which is right while one chassis is the only authoritative
+server. The moment a second head shares the NS set, a CA may ask either
+one for the `_acme-challenge` TXT — and the head that did not receive the
+write answers "no such record". `--dns-challenge-store=kv` moves the
+records into the shared `--kvstore` (requires `--kvstore=redis`; the
+chassis refuses the pair otherwise, at boot), so a challenge written on
+any head — by the bundled solver or by an RFC 2136 client — is served by
+every head. Reads on the query path are memoized for a second, bounded in
+concurrency, and cut off by a short deadline, and any failure answers as
+"no challenge" rather than SERVFAIL. Note what this does *not* do: two heads
+now **serve** one challenge; coordinating certificate **issuance** between
+them is the job of shared cert storage (`--cert-storage-dsn`), a different
+store.

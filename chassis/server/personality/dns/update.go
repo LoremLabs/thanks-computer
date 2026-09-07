@@ -142,7 +142,15 @@ func (c *DNSController) handleUpdate(w dns.ResponseWriter, req *dns.Msg) {
 			c.challenges.Present(op.owner, op.value)
 		case op.value != "":
 			c.challenges.CleanUp(op.owner, op.value)
-		default: // delete-all at owner
+		default: // delete-all at owner (§2.5.2 delete RRset)
+			// One step when the backend can (both in-tree backends): on the
+			// shared store, enumerate-then-CleanUp reads through a memo that
+			// can miss a value a peer published moments earlier, and costs
+			// N+1 round trips. The fallback stays for an out-of-tree store.
+			if cl, ok := c.challenges.(challengeClearer); ok {
+				cl.clearAll(op.owner)
+				continue
+			}
 			for _, v := range c.challenges.ActiveTXT(op.owner) {
 				c.challenges.CleanUp(op.owner, v)
 			}

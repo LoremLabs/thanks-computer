@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -16,16 +17,19 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
+	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
+	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
 
 // DNSController owns the authoritative-DNS listeners and the prebuilt
 // zone snapshot they answer from.
 //
-// One controller hosts a UDP and a TCP listener per configured address.
-// The snapshot is rebuilt on every dbcache reload (config-apply,
-// fs-watch) and swapped atomically, so the query hot path does zero DB
-// work and never blocks a reload.
+// One controller hosts a listener per configured address and transport:
+// a bare `host:port` entry binds UDP and TCP, a `udp:`/`tcp:`-prefixed one
+// binds that transport only (parseListenSpec). The snapshot is rebuilt on
+// every dbcache reload (config-apply, fs-watch) and swapped atomically, so
+// the query hot path does zero DB work and never blocks a reload.
 //
 // DNS is OFF by default. Both gates must be flipped:
 //   - `dns` must appear in `--personalities`
@@ -43,7 +47,9 @@ type DNSController struct {
 	// during ACME DNS-01 issuance. Written by the in-process solver
 	// (chassis/tls) and/or the RFC2136 UPDATE receiver; read on the query
 	// path for `_acme-challenge.*` names only. Never goes through the
-	// ZoneSnapshot / dbcache reload cycle. See challenge.go.
+	// ZoneSnapshot / dbcache reload cycle. In-process by default; the
+	// shared KV backend when --dns-challenge-store=kv (challenge_kv.go).
+	// Final once NewController returns — see selectChallengeStore.
 	challenges ChallengeStore
 
 	// tsigKeyName/tsigSecret gate the RFC2136 UPDATE receiver (update.go).
@@ -74,11 +80,11 @@ type DNSController struct {
 // treat them uniformly.
 func NewController(ctx context.Context, pu *processor.Unit) *DNSController {
 	c := &DNSController{ctx: ctx, pu: pu}
-	// Single-node in-memory challenge store by default. A fleet selects a
-	// shared backend by DSN (overlay-registered); that wiring lands with
-	// the cert-storage config.
+	// In-process challenge store unless --dns-challenge-store says
+	// otherwise. Chosen HERE, not by a later setter: see selectChallengeStore.
 	c.challenges = newMemChallengeStore()
 	if pu != nil {
+		c.selectChallengeStore()
 		c.synthCfg = SynthConfigFrom(pu.Conf)
 		if kn := strings.TrimSpace(pu.Conf.DNSUpdateTSIGKeyName); kn != "" && strings.TrimSpace(pu.Conf.DNSUpdateTSIGSecret) != "" {
 			c.tsigKeyName = dns.Fqdn(kn)
@@ -104,10 +110,62 @@ func NewController(ctx context.Context, pu *processor.Unit) *DNSController {
 	return c
 }
 
-// Start binds UDP+TCP listeners on each configured address and serves
-// authoritative DNS from the zone snapshot. The double-gate
-// (personality string AND non-empty listen addrs) means an upgrade
-// can't silently acquire a privileged listener.
+// selectChallengeStore installs the backend --dns-challenge-store names.
+//
+// It runs inside NewController, not as a later wiring step, because
+// server.go hands ChallengeStore() — an interface VALUE — to the bundled
+// ACME solver right after the constructor returns. A store installed any
+// later would leave the solver writing into the in-memory map while the
+// head reads the shared one: no error, no log, just a certificate that
+// never issues. Selecting in the constructor removes that hazard by
+// construction.
+//
+// The boot guard in server.go runs the same ChallengeBackend selector and
+// fails the boot on a misconfiguration, so the fallbacks below (logged at
+// Error, never silent) are reachable only from direct constructors —
+// tests and embedders.
+func (c *DNSController) selectChallengeStore() {
+	log := c.pu.Logger
+	if log == nil {
+		log = zap.NewNop()
+	}
+	backend, err := ChallengeBackend(c.pu.Conf.DNSChallengeStore, c.pu.Conf.KVStore == redisstore.StoreName)
+	if err != nil {
+		log.Error("dns challenge store: invalid selection; keeping the in-process store", zap.Error(err))
+		return
+	}
+	if backend != ChallengeBackendKV {
+		return
+	}
+	if c.pu.Kv == nil {
+		// kvstore.New(nil, …) would degrade every read to "no challenge"
+		// silently; refuse instead.
+		log.Error("dns challenge store: kv selected but this node opened no KV store; keeping the in-process store")
+		return
+	}
+	// A fresh UNCLAMPED handle, as the websocket directory does: --kv-max-ttl
+	// guards authors' keys and must not shorten the challenge safety expiry.
+	c.challenges = newKVChallengeStore(c.ctx, kvstore.New(c.pu.Kv, 0, 0), log)
+	log.Info("dns challenge store: shared kv",
+		zap.String("namespace", ChallengeNamespace),
+		zap.String("effect", "every head serves a challenge written on any head; certificate issuance is coordinated by cert storage, not by this"))
+}
+
+// SetChallengeStore replaces the challenge store. Boot-goroutine only,
+// BEFORE Start() and before anything captures ChallengeStore() (server.go
+// hands it to the bundled ACME solver) — a later swap splits writers from
+// readers. Completes the seam the other personalities' setters follow
+// (SetRelay, SetFileCAS, …); the in-tree backends need no call to it.
+func (c *DNSController) SetChallengeStore(s ChallengeStore) {
+	if s != nil {
+		c.challenges = s
+	}
+}
+
+// Start binds the configured listeners and serves authoritative DNS from
+// the zone snapshot. The double-gate (personality string AND non-empty
+// listen addrs) means an upgrade can't silently acquire a privileged
+// listener.
 func (c *DNSController) Start() {
 	if !strings.Contains(c.pu.Conf.Personalities, "dns") {
 		return
@@ -130,45 +188,71 @@ func (c *DNSController) Start() {
 		c.tap.start(c.ctx)
 	}
 
-	for _, addr := range addrs {
-		bind := bindAddr(addr)
+	seen := map[string]string{} // "<net>|<addr>" → the entry that first bound it
+	for _, entry := range addrs {
+		spec, err := parseListenSpec(entry)
+		if err != nil {
+			c.pu.Logger.Fatal("dns listen address invalid",
+				zap.String("entry", entry), zap.String("err", err.Error()),
+				zap.String("hint", "want host:port, udp:host:port or tcp:host:port"))
+		}
+		// A repeated (transport, address) is the fat-finger this config
+		// invites (`udp:…,udp:…`); say so, rather than a raw EADDRINUSE.
+		for _, n := range spec.nets() {
+			if prev, dup := seen[n+"|"+spec.addr]; dup {
+				c.pu.Logger.Fatal("dns listen address repeated",
+					zap.String("entry", entry), zap.String("net", n),
+					zap.String("bind", spec.addr), zap.String("first", prev))
+			}
+			seen[n+"|"+spec.addr] = entry
+		}
 
 		// Pre-bind BEFORE logging "started" so a port conflict surfaces
 		// with a clear error rather than something resembling "ready",
 		// matching tcp/lmtp pre-bind discipline. :53 needs privileges
 		// (CAP_NET_BIND_SERVICE / front-LB); dev uses a high port.
-		pc, err := net.ListenPacket("udp", bind)
-		if err != nil {
-			c.pu.Logger.Fatal("dns udp socket unbindable",
-				zap.String("bind", bind), zap.String("err", err.Error()),
-				zap.String("hint", "lsof -iUDP"+bind))
+		var pc net.PacketConn
+		var ln net.Listener
+		if spec.udp {
+			pc, err = net.ListenPacket("udp", spec.addr)
+			if err != nil {
+				c.pu.Logger.Fatal("dns udp socket unbindable",
+					zap.String("bind", spec.addr), zap.String("err", err.Error()),
+					zap.String("hint", "lsof -iUDP"+spec.addr))
+			}
 		}
-		ln, err := net.Listen("tcp", bind)
-		if err != nil {
-			_ = pc.Close()
-			c.pu.Logger.Fatal("dns tcp socket unbindable",
-				zap.String("bind", bind), zap.String("err", err.Error()),
-				zap.String("hint", "lsof -iTCP"+bind+" -sTCP:LISTEN"))
+		if spec.tcp {
+			ln, err = net.Listen("tcp", spec.addr)
+			if err != nil {
+				if pc != nil {
+					_ = pc.Close()
+				}
+				c.pu.Logger.Fatal("dns tcp socket unbindable",
+					zap.String("bind", spec.addr), zap.String("err", err.Error()),
+					zap.String("hint", "lsof -iTCP"+spec.addr+" -sTCP:LISTEN"))
+			}
 		}
 
-		usrv := &dns.Server{PacketConn: pc, Net: "udp", Handler: c.makeHandler(true)}
-		tsrv := &dns.Server{Listener: ln, Net: "tcp", Handler: c.makeHandler(false)}
-		// TSIG secret for the RFC2136 UPDATE receiver (update.go). Set on
-		// both transports so the server verifies inbound MACs and can sign
-		// replies; absent key ⇒ the receiver refuses every UPDATE.
-		if c.updatesEnabled() {
-			secrets := map[string]string{c.tsigKeyName: c.tsigSecret}
-			usrv.TsigSecret = secrets
-			tsrv.TsigSecret = secrets
-			// Default accept func NOTIMPs OpcodeUpdate; swap it so the
-			// receiver's UPDATEs reach the handler (queries unaffected).
-			usrv.MsgAcceptFunc = acceptDynamicUpdate
-			tsrv.MsgAcceptFunc = acceptDynamicUpdate
+		var started []*dns.Server
+		if pc != nil {
+			started = append(started, c.newServer(pc, nil))
 		}
-		c.servers = append(c.servers, usrv, tsrv)
-		c.pu.Logger.Info("dns controller started", zap.String("bind", bind))
+		if ln != nil {
+			started = append(started, c.newServer(nil, ln))
+		}
+		if !spec.udp || !spec.tcp {
+			// DNS needs both transports (RFC 7766): a truncated UDP answer
+			// must be retryable over TCP — CA validators follow TC — and a
+			// TSIG-signed UPDATE readily exceeds 512 bytes. Warn, not Fatal:
+			// a front LB may legitimately terminate one transport and hand
+			// the other to a different bind.
+			c.pu.Logger.Warn("dns listener bound on one transport only; DNS requires both UDP and TCP — make sure the other transport reaches this head too",
+				zap.String("bind", spec.addr), zap.Strings("nets", spec.nets()))
+		}
+		c.servers = append(c.servers, started...)
+		c.pu.Logger.Info("dns controller started", zap.String("bind", spec.addr), zap.Strings("nets", spec.nets()))
 
-		for _, srv := range []*dns.Server{usrv, tsrv} {
+		for _, srv := range started {
 			c.wg.Add(1)
 			go func(s *dns.Server) {
 				defer c.wg.Done()
@@ -179,6 +263,29 @@ func (c *DNSController) Start() {
 			}(srv)
 		}
 	}
+}
+
+// newServer builds the miekg server for one bound transport (exactly one
+// of pc/ln set). Per-server construction lives here so the TSIG secret and
+// the UPDATE-accepting MsgAcceptFunc are applied to whichever transports
+// exist and the two cannot drift.
+func (c *DNSController) newServer(pc net.PacketConn, ln net.Listener) *dns.Server {
+	srv := &dns.Server{}
+	if pc != nil {
+		srv.PacketConn, srv.Net, srv.Handler = pc, "udp", c.makeHandler(true)
+	} else {
+		srv.Listener, srv.Net, srv.Handler = ln, "tcp", c.makeHandler(false)
+	}
+	// TSIG secret for the RFC2136 UPDATE receiver (update.go), so the
+	// server verifies inbound MACs and can sign replies; absent key ⇒ the
+	// receiver refuses every UPDATE. The default accept func NOTIMPs
+	// OpcodeUpdate; swap it so UPDATEs reach the handler (queries
+	// unaffected).
+	if c.updatesEnabled() {
+		srv.TsigSecret = map[string]string{c.tsigKeyName: c.tsigSecret}
+		srv.MsgAcceptFunc = acceptDynamicUpdate
+	}
+	return srv
 }
 
 // Stop drains in-flight queries and closes the listeners with a 5s
@@ -508,12 +615,48 @@ func nonEmpty(in []string) []string {
 	return out
 }
 
-// bindAddr normalizes a listen entry to a host:port for net.Listen. DNS
-// always serves both UDP and TCP on the same address, so an optional
-// `udp:`/`tcp:` prefix is just stripped.
-func bindAddr(addr string) string {
-	addr = strings.TrimSpace(addr)
-	addr = strings.TrimPrefix(addr, "udp:")
-	addr = strings.TrimPrefix(addr, "tcp:")
-	return addr
+// listenSpec is one parsed --dns-listen-addrs entry.
+type listenSpec struct {
+	addr string // host:port for net.Listen / net.ListenPacket
+	udp  bool
+	tcp  bool
+}
+
+// nets lists the transports the spec binds, in bind order.
+func (l listenSpec) nets() []string {
+	var out []string
+	if l.udp {
+		out = append(out, "udp")
+	}
+	if l.tcp {
+		out = append(out, "tcp")
+	}
+	return out
+}
+
+// parseListenSpec parses a listen entry. A bare `host:port` (or `:port`)
+// binds both transports — the default and the historical behaviour. An
+// exact `udp:` or `tcp:` head (split on the FIRST colon) binds that
+// transport only, for a front that delivers the two on different
+// addresses: Fly, for one, requires UDP on the `fly-global-services`
+// address and TCP on 0.0.0.0. Anything else before the first colon is a
+// hostname (`example.com:53`), which is also why an unknown prefix cannot
+// be rejected here: `upd:53` is host `upd`, and fails at bind. The
+// remainder must be a valid host:port — `udp:` alone is an error, not a
+// random port on every interface.
+func parseListenSpec(entry string) (listenSpec, error) {
+	raw := strings.TrimSpace(entry)
+	spec := listenSpec{addr: raw, udp: true, tcp: true}
+	if i := strings.Index(raw, ":"); i >= 0 {
+		switch raw[:i] {
+		case "udp":
+			spec.addr, spec.tcp = raw[i+1:], false
+		case "tcp":
+			spec.addr, spec.udp = raw[i+1:], false
+		}
+	}
+	if _, _, err := net.SplitHostPort(spec.addr); err != nil {
+		return listenSpec{}, fmt.Errorf("dns listen entry %q: %w", entry, err)
+	}
+	return spec, nil
 }
