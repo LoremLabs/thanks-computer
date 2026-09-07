@@ -428,6 +428,16 @@ func (c *DNSController) makeHandler(isUDP bool) dns.HandlerFunc {
 		if len(req.Question) == 1 {
 			c.recordQuery(req.Question[0], m.Rcode)
 		}
+		// RFC 8945 §5.3: a TSIG-signed request gets a TSIG-signed response.
+		// Only when the MAC verified (a bad signature answers unsigned, as
+		// the UPDATE path does) and only when this server holds a key at
+		// all — with no TsigSecret the writer has no provider, and an
+		// appended TSIG would leave with an empty MAC. Matters in practice
+		// for `nsupdate`, which signs its zone-discovery SOA query when a
+		// `server` is given and refuses an unsigned answer to it.
+		if t := req.IsTsig(); t != nil && c.updatesEnabled() && w.TsigStatus() == nil {
+			m.SetTsig(t.Hdr.Name, t.Algorithm, tsigFudgeSeconds, time.Now().Unix())
+		}
 		if err := w.WriteMsg(m); err != nil {
 			c.pu.Logger.Debug("dns write reply failed", zap.String("err", err.Error()))
 		}

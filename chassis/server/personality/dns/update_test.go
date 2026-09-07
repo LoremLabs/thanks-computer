@@ -195,3 +195,46 @@ func TestRFC2136UpdateDisabled(t *testing.T) {
 		t.Fatalf("disabled receiver rcode=%d want NOTIMP", resp.Rcode)
 	}
 }
+
+// TestSignedQueryGetsSignedReply: an ordinary QUERY that carries a verified
+// TSIG is answered with a TSIG (RFC 8945 §5.3). This is the SOA query
+// `nsupdate` sends to discover the zone before its UPDATE when a `server`
+// is given — it refuses an unsigned answer with "expected a TSIG or
+// SIG(0)" and never sends the update. Unsigned queries and queries signed
+// with the wrong secret still get an unsigned answer.
+func TestSignedQueryGetsSignedReply(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString([]byte("supersecrettsigkey-0123456789abc"))
+	addr, _, stop := newUpdateServer(t, secret)
+	defer stop()
+
+	ask := func(cl *dns.Client, sign bool) *dns.Msg {
+		t.Helper()
+		q := new(dns.Msg)
+		q.SetQuestion("_acme-challenge.ops.example.com.", dns.TypeSOA)
+		if sign {
+			q.SetTsig(testTSIGKey, dns.HmacSHA256, tsigFudgeSeconds, time.Now().Unix())
+		}
+		// A client with TsigSecret VERIFIES the reply's signature and errors
+		// on a bad one, so err == nil below is the real assertion.
+		resp, _, err := cl.Exchange(q, addr)
+		if err != nil {
+			t.Fatalf("exchange: %v", err)
+		}
+		return resp
+	}
+
+	signed := &dns.Client{Net: "udp", TsigSecret: map[string]string{testTSIGKey: secret}}
+	if resp := ask(signed, true); resp.IsTsig() == nil {
+		t.Fatalf("signed query must get a signed reply, got %v", resp)
+	}
+
+	plain := &dns.Client{Net: "udp"}
+	if resp := ask(plain, false); resp.IsTsig() != nil {
+		t.Fatalf("unsigned query must get an unsigned reply, got %v", resp)
+	}
+
+	wrong := &dns.Client{Net: "udp", TsigSecret: map[string]string{testTSIGKey: base64.StdEncoding.EncodeToString([]byte("not-the-key-000000000000000000000"))}}
+	if resp := ask(wrong, true); resp.IsTsig() != nil {
+		t.Fatalf("badly signed query must get an unsigned reply, got %v", resp)
+	}
+}
