@@ -184,10 +184,9 @@ func (c *Controller) Start() {
 	c.hub.start(parseSyncInterval(c.pu.Conf.IMAPSyncInterval, c.pu.Logger))
 	c.lanes.start()
 
+	// A template: bind() copies it per listener and fills in NewSession,
+	// which is the only field that differs between doors.
 	opts := &imapserver.Options{
-		NewSession: func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return newSession(c, conn), nil, nil
-		},
 		Caps: imap.CapSet{
 			imap.CapIMAP4rev1:        {},
 			imap.CapNamespace:        {},
@@ -233,7 +232,15 @@ func (c *Controller) Start() {
 		if secure {
 			ln = tls.NewListener(ln, c.tlsConfig)
 		}
-		srv := imapserver.New(opts)
+		// One Options value per listener: a single shared NewSession
+		// closure could not tell :993 from :1143, and that is exactly
+		// the distinction the login line has to report. The copy is
+		// safe — Caps is a read-only map and the rest is scalars.
+		o := *opts
+		o.NewSession = func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return newSession(c, conn, addr), nil, nil
+		}
+		srv := imapserver.New(&o)
 		c.servers = append(c.servers, srv)
 		c.listeners = append(c.listeners, ln)
 		c.pu.Logger.Info("imap controller started", zap.String("addr", ln.Addr().String()), zap.Bool("tls", secure))
@@ -327,13 +334,24 @@ func (c *Controller) boundAddrs() []string {
 // noteLogin records a LOGIN outcome: a metric, and one Info line per
 // attempt (what every mail server logs — the first thing to read when a
 // client "can't verify the account").
-func (c *Controller) noteLogin(outcome, user, ip string, tlsOn bool) {
+//
+// Three fields describe the transport and only mean something together.
+// `tls` is THIS hop — the chassis's own socket. `listener` is the
+// configured address that accepted the session. `proxied` says a trusted
+// front proxy presented a PROXY header, i.e. the client's transport ended
+// there. So a client on IMAPS whose TLS an edge terminated logs
+// tls=false proxied=true: the credentials were protected, just not on
+// this hop. tls=false with proxied=false is the one that means what it
+// looks like — LOGIN in the clear, which only --imap-insecure-auth
+// permits. A bare `tls` bool could not tell those two apart.
+func (c *Controller) noteLogin(outcome, user, ip, listener string, tlsOn, proxied bool) {
 	if c.logins != nil {
 		c.logins.Add(c.ctx, 1, metric.WithAttributes(attrOutcome(outcome)))
 	}
 	if c.pu != nil && c.pu.Logger != nil {
 		c.pu.Logger.Info("imap login",
-			zap.String("user", user), zap.String("ip", ip), zap.String("outcome", outcome), zap.Bool("tls", tlsOn))
+			zap.String("user", user), zap.String("ip", ip), zap.String("outcome", outcome),
+			zap.Bool("tls", tlsOn), zap.String("listener", listener), zap.Bool("proxied", proxied))
 	}
 }
 

@@ -30,6 +30,14 @@ type session struct {
 	conn *imapserver.Conn
 	ip   string
 
+	// listener is the configured listen address that accepted this
+	// session; proxied records whether a trusted front proxy fronted
+	// it. With isTLS() they are what the login line reports about the
+	// transport. Both are fixed at accept — a later STARTTLS changes
+	// isTLS(), never these.
+	listener string
+	proxied  bool
+
 	acct   *chimap.Account
 	domain string
 	slot   bool // holds a per-account connection slot
@@ -49,16 +57,34 @@ type selected struct {
 
 var _ imapserver.SessionNamespace = (*session)(nil)
 
-func newSession(c *Controller, conn *imapserver.Conn) *session {
-	s := &session{c: c, conn: conn}
+func newSession(c *Controller, conn *imapserver.Conn, listener string) *session {
+	s := &session{c: c, conn: conn, listener: listener}
 	if conn != nil && conn.NetConn() != nil {
-		if host, _, err := net.SplitHostPort(conn.NetConn().RemoteAddr().String()); err == nil {
+		nc := conn.NetConn()
+		if host, _, err := net.SplitHostPort(nc.RemoteAddr().String()); err == nil {
 			s.ip = host
 		} else {
-			s.ip = conn.NetConn().RemoteAddr().String()
+			s.ip = nc.RemoteAddr().String()
 		}
+		s.proxied = frontedByProxy(nc)
 	}
 	return s
+}
+
+// frontedByProxy reports whether a trusted front proxy presented a PROXY
+// header on this connection. bind() REQUIREs the header from
+// --imap-proxy-protocol sources and SKIPs it for everyone else, so a
+// parsed header is proof the session came through the front door — the
+// same reason s.ip above is the real client's address and not the
+// proxy's. Unwraps one layer of TLS because the IMAPS listeners wrap the
+// proxyproto listener, not the other way round.
+func frontedByProxy(nc net.Conn) bool {
+	if tc, ok := nc.(*tls.Conn); ok {
+		nc = tc.NetConn()
+	}
+	pc, ok := nc.(*proxyproto.Conn)
+	// ProxyHeader parses at most once; RemoteAddr above already did it.
+	return ok && pc != nil && pc.ProxyHeader() != nil
 }
 
 func (s *session) ctx() context.Context {
@@ -92,7 +118,7 @@ func (s *session) Close() error {
 // connection cap.
 func (s *session) Login(username, password string) error {
 	username = chimap.NormalizeUsername(username)
-	note := func(outcome string) { s.c.noteLogin(outcome, username, s.ip, s.isTLS()) }
+	note := func(outcome string) { s.c.noteLogin(outcome, username, s.ip, s.listener, s.isTLS(), s.proxied) }
 	if s.c.loginIP != nil && s.ip != "" {
 		if ok, _ := s.c.loginIP.Allow(s.ip); !ok {
 			note("throttled")
@@ -167,8 +193,10 @@ func (s *session) Login(username, password string) error {
 	return nil
 }
 
-// isTLS reports whether the connection is (now) TLS — implicit or after
-// STARTTLS (go-imap swaps the underlying conn on upgrade).
+// isTLS reports whether THIS hop is (now) TLS — implicit or after
+// STARTTLS (go-imap swaps the underlying conn on upgrade). It says
+// nothing about the client's own transport when a front proxy terminated
+// TLS upstream; noteLogin reads it together with listener and proxied.
 func (s *session) isTLS() bool {
 	if s.conn == nil || s.conn.NetConn() == nil {
 		return false
