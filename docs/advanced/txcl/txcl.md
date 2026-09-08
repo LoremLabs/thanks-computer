@@ -291,6 +291,7 @@ The path argument is a string literal (or any value that evaluates to a string),
 | `&now()`    | () → number             | unix seconds                                                                 |
 | `&now(fmt)` | string → string\|number | formats: `"unix"` (default), `"millis"`, `"nanos"`, `"rfc3339"`, `"iso8601"` |
 | `&tz(zone, "hour"\|"minute", h [, m])` | string, string, int[, int] → number | the UTC **hour** or **minute** of local wall-clock `h:m` (minute `m` defaults 0) in IANA `zone` today (DST-aware) — bridges UTC `@cron.hour`/`@cron.minute` to a local time, incl. fractional offsets like `+05:30` |
+| `&tz_offsets(zone, from, days)` | string, string, int → object | `{zone, offset, changes:[{at, offset}]}` — the zone's UTC offset (minutes east) at RFC3339 `from` and every change over the next `days` (1-400), each `at` exact to the minute. What a sandboxed compute (no tz data, no `Intl`) needs to convert local wall-clock ↔ UTC by arithmetic. `&try_tz_offsets` → null on an unknown zone; gate on `.zone =~ /./` |
 
 #### Strings / hashes
 

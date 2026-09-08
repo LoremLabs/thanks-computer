@@ -271,6 +271,7 @@ Once an envelope is routed into your stack, the LMTP fields are stamped under `_
         "html":        "<p>Hi support…</p>",
         "headers":     { "received": ["…","…"], "authentication-results": ["…"] },
         "attachments": [{"name":"…","type":"…","size":…,"sha256":"…","content":"b64:…"}],
+        "calendar":    {"method":"REPLY","uid":"…","partstat":"ACCEPTED"},   // only when an iTIP part is present
         "raw":         "b64:…"
       }
     }

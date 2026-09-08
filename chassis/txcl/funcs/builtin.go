@@ -35,6 +35,7 @@ func init() {
 	register("uuid", uuidFn)
 	register("now", nowFn)
 	register("tz", tzFn)
+	register("tz_offsets", tzOffsetsFn)
 
 	// codecs
 	register("b64encode", b64encodeFn)
@@ -171,6 +172,85 @@ func tzFn(args []any) (any, error) {
 		return int64(target.Minute()), nil
 	}
 	return int64(target.Hour()), nil
+}
+
+// tzOffsetsFn returns an IANA zone's UTC offset at an instant and every
+// change to it over the following days — enough for a sandboxed compute
+// (which has no tz database and no Intl) to convert local wall-clock times
+// to UTC and back by plain arithmetic:
+//
+//	EMIT ._tzh = &tz_offsets("America/New_York", ._now, 92)
+//	→ {zone, offset: -240, changes: [{at: "2026-11-01T06:00:00Z", offset: -300}]}
+//
+// args: (zone, from RFC3339, days 1-400). `offset` and every `changes[].offset`
+// are minutes EAST of UTC (Go's convention, so the Americas are negative);
+// `changes[].at` is the first minute the new offset is in force, found by a
+// 30-minute walk and a bisection, so a transition is exact to the minute.
+// `zone` is echoed so a rule can gate on its presence (`._tzh.zone =~ /./`)
+// after the try_ form swallowed an unknown zone.
+func tzOffsetsFn(args []any) (any, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("&tz_offsets: expected 3 arguments (zone, from, days), got %d", len(args))
+	}
+	zone, ok := args[0].(string)
+	if !ok || strings.TrimSpace(zone) == "" {
+		return nil, fmt.Errorf("&tz_offsets: zone argument must be a non-empty string, got %T", args[0])
+	}
+	fromS, ok := args[1].(string)
+	if !ok {
+		return nil, fmt.Errorf("&tz_offsets: from argument must be an RFC3339 string, got %T", args[1])
+	}
+	days, err := toInt("&tz_offsets days", args[2])
+	if err != nil {
+		return nil, err
+	}
+	if days < 1 || days > 400 {
+		return nil, fmt.Errorf("&tz_offsets: days must be 1-400, got %d", days)
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return nil, fmt.Errorf("&tz_offsets: unknown time zone %q: %w", zone, err)
+	}
+	from, err := time.Parse(time.RFC3339, fromS)
+	if err != nil {
+		return nil, fmt.Errorf("&tz_offsets: from %q is not RFC3339: %w", fromS, err)
+	}
+	from = from.UTC().Truncate(time.Minute)
+	end := from.Add(time.Duration(days) * 24 * time.Hour)
+	offAt := func(t time.Time) int {
+		_, off := t.In(loc).Zone()
+		return off / 60
+	}
+	const step = 30 * time.Minute
+	base := offAt(from)
+	prev := base
+	changes := make([]any, 0, 2)
+	for t := from.Add(step); !t.After(end); t = t.Add(step) {
+		cur := offAt(t)
+		if cur == prev {
+			continue
+		}
+		// The offset moved somewhere in (t-step, t]: bisect to the minute.
+		lo, hi := t.Add(-step), t
+		for hi.Sub(lo) > time.Minute {
+			mid := lo.Add(hi.Sub(lo) / 2).Truncate(time.Minute)
+			if offAt(mid) == prev {
+				lo = mid
+			} else {
+				hi = mid
+			}
+		}
+		changes = append(changes, map[string]any{
+			"at":     hi.UTC().Format(time.RFC3339),
+			"offset": int64(cur),
+		})
+		prev = cur
+	}
+	return map[string]any{
+		"zone":    zone,
+		"offset":  int64(base),
+		"changes": changes,
+	}, nil
 }
 
 // --- codecs ----------------------------------------------------

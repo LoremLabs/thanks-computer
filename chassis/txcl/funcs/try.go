@@ -39,6 +39,7 @@ func init() {
 	register("try_urldecode", tryURLdecodeFn)
 	register("try_get", tryGetFn)
 	register("try_substr", trySubstrFn)
+	register("try_tz_offsets", tryTzOffsetsFn)
 }
 
 func tryJSONFn(args []any) (any, error) {
@@ -79,6 +80,17 @@ func tryGetFn(args []any) (any, error) {
 
 func trySubstrFn(args []any) (any, error) {
 	v, err := substrFn(args)
+	if err != nil {
+		return nil, nil
+	}
+	return v, nil
+}
+
+// tryTzOffsetsFn wraps tzOffsetsFn. An unknown zone is the recoverable
+// case — it arrives from user input (a settings form, a booking page's
+// browser) — so the rule reads nil and gates on `.zone =~ /./`.
+func tryTzOffsetsFn(args []any) (any, error) {
+	v, err := tzOffsetsFn(args)
 	if err != nil {
 		return nil, nil
 	}

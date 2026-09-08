@@ -371,3 +371,52 @@ func TestParseMessage_Empty(t *testing.T) {
 		t.Errorf("empty parse produced invalid JSON: %q", out)
 	}
 }
+
+const fixtureCalendarReply = `From: Bob <bob@example.com>
+To: paris@core.example
+Subject: Accepted: 30-minute call
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+Bob has accepted.
+--b1
+Content-Type: text/calendar; charset=utf-8; method=REPLY
+
+BEGIN:VCALENDAR
+VERSION:2.0
+METHOD:REPLY
+BEGIN:VEVENT
+UID:0192aa.paris@core.example
+ATTENDEE;CN=Bob;PARTSTAT=ACCEPTED:mailto:bob@example.com
+DTSTAMP:20260910T091244Z
+END:VEVENT
+END:VCALENDAR
+--b1--
+`
+
+func TestParseMessage_CalendarReply(t *testing.T) {
+	out, err := parseMessage([]byte(crlf(fixtureCalendarReply)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := gjson.Get(out, "calendar.method").String(); got != "REPLY" {
+		t.Errorf("calendar.method = %q, want REPLY (out=%s)", got, out)
+	}
+	if got := gjson.Get(out, "calendar.uid").String(); got != "0192aa.paris@core.example" {
+		t.Errorf("calendar.uid = %q", got)
+	}
+	if got := gjson.Get(out, "calendar.partstat").String(); got != "ACCEPTED" {
+		t.Errorf("calendar.partstat = %q", got)
+	}
+	// A message with no calendar part carries no `calendar` key at all — the
+	// rule's `@lmtp.msg.calendar.method == "REPLY"` must not match.
+	out, err = parseMessage([]byte(crlf(fixtureMultipartAlt)))
+	if err != nil {
+		t.Fatalf("parse plain: %v", err)
+	}
+	if gjson.Get(out, "calendar").Exists() {
+		t.Errorf("plain message should have no calendar: %s", out)
+	}
+}

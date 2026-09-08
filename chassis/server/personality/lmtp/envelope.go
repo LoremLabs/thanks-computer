@@ -175,6 +175,7 @@ func parseMailHeaders(msgJSON string, bands spamBands) mailMeta {
 //	html         string                     — text/html body
 //	headers      { name: [values...] }      — multi-value-safe
 //	attachments  [{name, type, size, sha256, content}, ...]
+//	calendar     {method, uid, partstat?}   — only when an iTIP part is present
 //
 // Caller is responsible for `_txc.lmtp.msg.raw` (the b64-encoded
 // original bytes) — kept separately as the always-safe escape hatch
@@ -224,6 +225,9 @@ func parseMessage(raw []byte) (jsonOut string, err error) {
 
 	if atts := attachmentsJSON(env); atts != "" {
 		out.SetRaw("attachments", atts)
+	}
+	if cal := calendarJSON(env); cal != "" {
+		out.SetRaw("calendar", cal)
 	}
 
 	return out.String(), nil
@@ -359,6 +363,60 @@ func attachmentsJSON(env *enmime.Envelope) string {
 		}
 		out.Set("-1", entry)
 		_ = i
+	}
+	return out.String()
+}
+
+// calendarJSON surfaces the iTIP facts of a message that carries a
+// text/calendar (or application/ics) part anywhere in its tree — an
+// invitation, a cancellation, or the Accept / Decline a mail client sends
+// back to the ORGANIZER — as `_txc.lmtp.msg.calendar = {method, uid,
+// partstat?}`. Without it a rule cannot tell an RSVP from a person's mail:
+// enmime files a text/calendar alternative under OtherParts, which
+// attachmentsJSON does not list. A line scan after unfolding, not a parse:
+// METHOD (the Content-Type's `method` parameter wins when present), the
+// first UID, and the first ATTENDEE's PARTSTAT. Empty when no such part.
+func calendarJSON(env *enmime.Envelope) string {
+	if env == nil || env.Root == nil {
+		return ""
+	}
+	part := env.Root.BreadthMatchFirst(func(p *enmime.Part) bool {
+		ct := strings.ToLower(p.ContentType)
+		return ct == "text/calendar" || ct == "application/ics"
+	})
+	if part == nil {
+		return ""
+	}
+	text := strings.ReplaceAll(string(part.Content), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\n ", "")
+	text = strings.ReplaceAll(text, "\n\t", "")
+	method := strings.ToUpper(strings.TrimSpace(part.ContentTypeParams["method"]))
+	var uid, partstat string
+	for _, line := range strings.Split(text, "\n") {
+		upper := strings.ToUpper(line)
+		switch {
+		case method == "" && strings.HasPrefix(upper, "METHOD:"):
+			method = strings.ToUpper(strings.TrimSpace(line[len("METHOD:"):]))
+		case uid == "" && strings.HasPrefix(upper, "UID:"):
+			uid = strings.TrimSpace(line[len("UID:"):])
+		case partstat == "" && strings.HasPrefix(upper, "ATTENDEE"):
+			if i := strings.Index(upper, "PARTSTAT="); i >= 0 {
+				rest := upper[i+len("PARTSTAT="):]
+				if j := strings.IndexAny(rest, ";:"); j >= 0 {
+					rest = rest[:j]
+				}
+				partstat = strings.TrimSpace(rest)
+			}
+		}
+	}
+	if method == "" && uid == "" {
+		return ""
+	}
+	out := jsonx.NewObject()
+	out.Set("method", method)
+	out.Set("uid", uid)
+	if partstat != "" {
+		out.Set("partstat", partstat)
 	}
 	return out.String()
 }

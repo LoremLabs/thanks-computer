@@ -3,7 +3,8 @@
 // template wrapping the body — the bundled default, or a caller-supplied
 // `_sendmail.templates.html`), enforces the per-tenant campaign at-most-once
 // guard, verifies the From domain, submits to a relay, and emits a usage line.
-// The common case is to/subject/body/from; attachments and policy caps are
+// The common case is to/subject/body/from; `calendar` (an iTIP part) and
+// `attachments[]` are the MIME extras (mime.go); policy caps are
 // later phases (see internal docs/todo-sendmail.md).
 package mail
 
@@ -228,6 +229,18 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 	// the structural / signing / loop-guard headers sendmail owns off-limits.
 	replyTo := sanitizeHeaderValue(s.Get("reply_to").String())
 	extraHeaders := parseHeaders(s.Get("headers"))
+	// Optional MIME parts: an iTIP calendar payload (rendered as Accept /
+	// Decline by every major client) and generic attachments. These are the
+	// sanctioned way in — `content-type` stays a denylisted header.
+	calPart, cerr := parseCalendarPart(s.Get("calendar"))
+	if cerr != nil {
+		return errResult("invalid_calendar", cerr.Error()), fmt.Errorf("sendmail: %w", cerr)
+	}
+	atts, aerr := parseAttachments(s.Get("attachments"))
+	if aerr != nil {
+		return errResult("invalid_attachment", aerr.Error()), fmt.Errorf("sendmail: %w", aerr)
+	}
+	extras := mimeExtras{calendar: calPart, attachments: atts}
 	// `retain`: keep each delivered message's exact bytes in the content
 	// store under the tenant and report sha256/size per recipient. Opt-in:
 	// a stack that only sends stores nothing (materialization is explicit).
@@ -325,7 +338,7 @@ func (m *Mailer) Send(ctx context.Context, tenant string, in []byte) (event.Payl
 						text = rendered
 					}
 				}
-				msg, msgID, merr := composeMIME(*fromAddr, r.addr, cc, replyTo, extraHeaders, subj, full, text, fromDomain)
+				msg, msgID, merr := composeMIME(*fromAddr, r.addr, cc, replyTo, extraHeaders, subj, full, text, fromDomain, extras)
 				if merr != nil {
 					rerr = merr
 				} else if rerr == nil {

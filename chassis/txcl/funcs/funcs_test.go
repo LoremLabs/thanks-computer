@@ -29,13 +29,13 @@ func TestRegistryHas(t *testing.T) {
 	// registry is small enough that exhaustive coverage would be
 	// noise; this catches "init dropped a registration" regressions.
 	want := []string{
-		"uuid", "now", "tz",
+		"uuid", "now", "tz", "tz_offsets",
 		"b64encode", "b64decode", "urlencode", "urldecode", "json", "to_json",
 		"get", "set", "has",
 		"object", "array",
 		"concat", "len", "split", "join", "substr", "repeat", "pad", "sha256",
 		"add", "sub", "mul", "div", "mod",
-		"try_json", "try_b64decode", "try_urldecode", "try_get", "try_substr",
+		"try_json", "try_b64decode", "try_urldecode", "try_get", "try_substr", "try_tz_offsets",
 	}
 	for _, name := range want {
 		if !Has(name) {
@@ -1093,5 +1093,71 @@ func TestTrySubstr_OutOfRangeReturnsNil(t *testing.T) {
 	}
 	if v != nil {
 		t.Errorf("got %v, want nil", v)
+	}
+}
+
+// --- &tz_offsets ------------------------------------------------
+
+func TestTzOffsets(t *testing.T) {
+	got, err := Call("tz_offsets", []any{"America/New_York", "2026-10-01T00:00:00Z", int64(60)})
+	if err != nil {
+		t.Fatalf("&tz_offsets: %v", err)
+	}
+	m := got.(map[string]any)
+	if m["zone"] != "America/New_York" || m["offset"] != int64(-240) {
+		t.Fatalf("zone/offset = %v/%v", m["zone"], m["offset"])
+	}
+	ch := m["changes"].([]any)
+	if len(ch) != 1 {
+		t.Fatalf("changes = %v, want exactly the November fall-back", ch)
+	}
+	c := ch[0].(map[string]any)
+	if c["at"] != "2026-11-01T06:00:00Z" || c["offset"] != int64(-300) {
+		t.Fatalf("change = %v", c)
+	}
+
+	// Spring forward (London), JSON-shaped numbers (float64), and the minute
+	// resolution: 01:00Z is the first minute of BST.
+	got, err = Call("tz_offsets", []any{"Europe/London", "2026-03-01T12:00:00Z", float64(45)})
+	if err != nil {
+		t.Fatalf("London: %v", err)
+	}
+	m = got.(map[string]any)
+	ch = m["changes"].([]any)
+	if m["offset"] != int64(0) || len(ch) != 1 {
+		t.Fatalf("London = %v", m)
+	}
+	if c := ch[0].(map[string]any); c["at"] != "2026-03-29T01:00:00Z" || c["offset"] != int64(60) {
+		t.Fatalf("London change = %v", c)
+	}
+
+	// A half-hour zone with no DST: the offset, and an empty changes list
+	// that is still a list.
+	got, err = Call("tz_offsets", []any{"Asia/Kolkata", "2026-01-01T00:00:00Z", int64(400)})
+	if err != nil {
+		t.Fatalf("Kolkata: %v", err)
+	}
+	m = got.(map[string]any)
+	if m["offset"] != int64(330) || len(m["changes"].([]any)) != 0 {
+		t.Fatalf("Kolkata = %v", m)
+	}
+}
+
+func TestTzOffsets_Errors(t *testing.T) {
+	bad := [][]any{
+		{"America/New_York", "2026-10-01T00:00:00Z"},
+		{"Mars/Olympus", "2026-10-01T00:00:00Z", int64(1)},
+		{"", "2026-10-01T00:00:00Z", int64(1)},
+		{"America/New_York", "yesterday", int64(1)},
+		{"America/New_York", "2026-10-01T00:00:00Z", int64(0)},
+		{"America/New_York", "2026-10-01T00:00:00Z", int64(401)},
+	}
+	for _, args := range bad {
+		if _, err := Call("tz_offsets", args); err == nil {
+			t.Errorf("&tz_offsets(%v) should fail", args)
+		}
+		if v, err := Call("try_tz_offsets", args); err != nil || v != nil {
+			t.Errorf("&try_tz_offsets(%v) = %v, %v; want nil, nil", args, v, err)
+		}
 	}
 }

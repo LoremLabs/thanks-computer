@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
@@ -838,5 +839,97 @@ func TestSendRetain(t *testing.T) {
 	p, _ = m2.Send(context.Background(), "acme", in)
 	if r := gjson.Get(p.Raw, "_sendmail.result.recipients.0"); r.Get("status").String() != "sent" || r.Get("sha256").Exists() || r.Get("retain_error").String() == "" {
 		t.Fatalf("no-store retain = %s", r.Raw)
+	}
+}
+
+func TestSendCalendarInvite(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	ical := "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:abc.paris@acme.com\n" +
+		"DTSTART:20260918T140000Z\nORGANIZER:mailto:paris@acme.com\nEND:VEVENT\nEND:VCALENDAR"
+	in := env(t, map[string]any{
+		"to": "matt@example.com", "cc": "host@example.org",
+		"subject": "Invitation", "body": "<p>See you then.</p>", "from": "paris@acme.com",
+		"calendar": map[string]any{"method": "request", "ical": ical},
+	})
+	p, err := m.Send(context.Background(), "acme", in)
+	if err != nil {
+		t.Fatalf("Send: %v (%s)", err, p.Raw)
+	}
+	msg := string(sub.calls[0].msg)
+	for _, want := range []string{
+		"multipart/mixed", "multipart/alternative",
+		"text/calendar; charset=utf-8; method=REQUEST",
+		"application/ics", "invite.ics",
+		"METHOD:REQUEST", "ORGANIZER:mailto:paris@acme.com",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message missing %q:\n%s", want, msg)
+		}
+	}
+	// text, html and the calendar part are all text/* leaves one level below
+	// the root now — each must still be quoted-printable (the fold guard);
+	// the .ics attachment stays base64.
+	if n := strings.Count(msg, "Content-Transfer-Encoding: quoted-printable"); n != 3 {
+		t.Fatalf("quoted-printable leaves = %d, want 3:\n%s", n, msg)
+	}
+	if !strings.Contains(msg, "Content-Transfer-Encoding: base64") {
+		t.Fatalf("the .ics attachment should be base64:\n%s", msg)
+	}
+}
+
+func TestSendAttachments(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	in := env(t, map[string]any{
+		"to": "matt@example.com", "subject": "Notes", "body": "<p>Attached.</p>", "from": "noreply@acme.com",
+		"attachments": []any{map[string]any{
+			"filename": "notes.txt", "content_type": "text/plain",
+			"content_b64": base64.StdEncoding.EncodeToString([]byte("hello attachment")),
+		}},
+	})
+	if _, err := m.Send(context.Background(), "acme", in); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	msg := string(sub.calls[0].msg)
+	if !strings.Contains(msg, "notes.txt") || !strings.Contains(msg, "hello attachment") {
+		t.Fatalf("attachment missing:\n%s", msg)
+	}
+}
+
+func TestSendMIMEExtrasRejected(t *testing.T) {
+	db := newTestDB(t)
+	sub := &fakeSubmit{}
+	m := newTestMailer(t, db, sub, &fakeUsage{})
+	base := map[string]any{"to": "matt@example.com", "subject": "x", "body": "b", "from": "noreply@acme.com"}
+	cases := []struct {
+		field string
+		value any
+		want  string
+	}{
+		{"calendar", map[string]any{"method": "party", "ical": "BEGIN:VCALENDAR"}, "invalid_calendar"},
+		{"calendar", map[string]any{"method": "REQUEST", "ical": "not a calendar"}, "invalid_calendar"},
+		{"attachments", []any{map[string]any{"filename": "a.txt", "content_type": "text/plain", "content_b64": "%%%"}}, "invalid_attachment"},
+		{"attachments", []any{map[string]any{"filename": "../a.txt", "content_type": "text/plain", "content_b64": "aGk="}}, "invalid_attachment"},
+		{"attachments", "not-an-array", "invalid_attachment"},
+	}
+	for _, c := range cases {
+		fields := map[string]any{}
+		for k, v := range base {
+			fields[k] = v
+		}
+		fields[c.field] = c.value
+		p, err := m.Send(context.Background(), "acme", env(t, fields))
+		if err == nil {
+			t.Fatalf("%s=%v: expected an error", c.field, c.value)
+		}
+		if got := gjson.Get(p.Raw, "_sendmail.result.reason").String(); got != c.want {
+			t.Fatalf("%s=%v: reason=%q want %q", c.field, c.value, got, c.want)
+		}
+	}
+	if len(sub.calls) != 0 {
+		t.Fatalf("nothing should have been submitted, got %d", len(sub.calls))
 	}
 }

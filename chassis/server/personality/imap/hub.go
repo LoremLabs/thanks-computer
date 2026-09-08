@@ -82,7 +82,7 @@ type mailboxState struct {
 	suppress map[uint32]*imapserver.SessionTracker // uid → origin of a pending local flag write
 
 	sessions int           // guarded by hub.mu
-	kick     chan struct{} // cap 1; closed by hub.close on the last session
+	kick     chan struct{} // cap 1; guarded by hub.mu, closed by hub.close on the last session
 }
 
 // hub owns the states and the ticker.
@@ -116,6 +116,12 @@ func (h *hub) open(ctx context.Context, mailboxID string) (*mailboxState, *imaps
 	h.mu.Lock()
 	st := h.boxes[mailboxID]
 	fresh := st == nil
+	// kick is the worker's copy of st.kick, taken here under h.mu — the
+	// same lock hub.close nils the field under. The worker must never
+	// read the field itself: close's `st.kick = nil` would race the
+	// `for range` that starts the loop, and closing a channel is
+	// synchronised while assigning over the field is not.
+	var kick chan struct{}
 	if fresh {
 		st = &mailboxState{
 			id:       mailboxID,
@@ -123,6 +129,7 @@ func (h *hub) open(ctx context.Context, mailboxID string) (*mailboxState, *imaps
 			suppress: make(map[uint32]*imapserver.SessionTracker),
 			kick:     make(chan struct{}, 1),
 		}
+		kick = st.kick
 		h.boxes[mailboxID] = st
 	}
 	st.sessions++
@@ -137,7 +144,7 @@ func (h *hub) open(ctx context.Context, mailboxID string) (*mailboxState, *imaps
 			return nil, nil, chimap.Mailbox{}, nil, err
 		}
 		h.wg.Add(1)
-		go st.loop(h)
+		go st.loop(h, kick)
 	} else {
 		if _, _, err := h.syncLocked(ctx, st); err != nil {
 			h.close(st, nil)
@@ -276,10 +283,11 @@ func (st *mailboxState) poke() {
 	}
 }
 
-// loop is the per-mailbox worker: sync on every kick until closed.
-func (st *mailboxState) loop(h *hub) {
+// loop is the per-mailbox worker: sync on every kick until closed. kick is
+// the channel open() captured under h.mu, not st.kick — see open().
+func (st *mailboxState) loop(h *hub, kick chan struct{}) {
 	defer h.wg.Done()
-	for range st.kick {
+	for range kick {
 		st.mu.Lock()
 		_, _, _ = h.syncLocked(h.ctx, st)
 		st.mu.Unlock()

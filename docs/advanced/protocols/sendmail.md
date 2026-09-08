@@ -28,6 +28,8 @@ Required: `subject`, `body` (HTML), `from`.
 | `cc` / `bcc` | Flat address lists added to every message (`cc` visible, `bcc` envelope-only) |
 | `reply_to` | Dedicated Reply-To field |
 | `headers` | Extra headers map — structural/signing/loop-guard headers are denylisted (use `reply_to`, not a raw header) |
+| `calendar` | `{method, ical}` — an iTIP payload (`REQUEST`, `CANCEL`, `REPLY` or `PUBLISH`, and the iCalendar text you authored, ORGANIZER/ATTENDEE lines included). Sent as a `text/calendar; method=…` alternative **and** an `application/ics` attachment named `invite.ics`, the shape Gmail, Outlook and Apple Mail render as Accept / Decline |
+| `attachments` | `[{filename, content_type, content_b64}]`, up to 5 of 1 MiB each — the sanctioned way to add a MIME part (`content-type` stays a denylisted header). A plain file name, a bare media type |
 | `envelope_from` | MAIL FROM / Return-Path override. Defaults to `from`. Set `"<>"` for a null reverse-path — the RFC 3834 posture for auto-replies (no bounce loops) |
 | `campaign` | Label for rate-limit and audit grouping |
 | `retain` | `true` keeps each delivered message's exact bytes (per recipient, as submitted, DKIM-signed) in the content store under this tenant and reports `sha256`/`size` per recipient in the result — the reference a later `txco://imap/append WITH from_sha = …` or `txco://blob/put from_sha` adopts. Off by default; bytes never ride the envelope. Charged per MiB like `blob/put`. Retention never fails a send: a store problem shows as `retain_error` on that recipient. |
