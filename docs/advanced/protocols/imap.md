@@ -271,6 +271,16 @@ Three ways to hold the certificate, all supported:
 `--imap-insecure-auth` permits `LOGIN` on a plaintext connection; keep it
 for `txco dev` and behind-a-proxy deployments only.
 
+**Reading the login line under a front proxy.** `imap login` reports
+`tls=false` in that topology, because `tls` describes the head's own
+socket and the client's TLS ended at the proxy. Two further fields make
+that unambiguous: `listener` — the address that accepted the session —
+and `proxied`, true when a trusted `--imap-proxy-protocol` source
+presented a PROXY header. So `tls=false proxied=true` is the
+terminated-upstream shape and the credentials were protected; `tls=false
+proxied=false` is a genuine cleartext `LOGIN`, which only
+`--imap-insecure-auth` permits.
+
 ## Flags
 
 | Flag | Default | Meaning |

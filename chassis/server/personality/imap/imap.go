@@ -237,8 +237,9 @@ func (c *Controller) Start() {
 		// the distinction the login line has to report. The copy is
 		// safe — Caps is a read-only map and the rest is scalars.
 		o := *opts
+		laddr := ln.Addr().String() // as the startup line below reports it
 		o.NewSession = func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return newSession(c, conn, addr), nil, nil
+			return newSession(c, conn, laddr), nil, nil
 		}
 		srv := imapserver.New(&o)
 		c.servers = append(c.servers, srv)

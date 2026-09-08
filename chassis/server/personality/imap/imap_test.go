@@ -55,6 +55,14 @@ func testDSN(path string) string {
 
 func newHarness(t *testing.T, conf config.Config) *harness {
 	t.Helper()
+	return newHarnessWithLogger(t, conf, zap.NewNop())
+}
+
+// newHarnessWithLogger is newHarness with the controller's logger under
+// the test's control — for the tests that assert on a log line rather
+// than on the wire.
+func newHarnessWithLogger(t *testing.T, conf config.Config, logger *zap.Logger) *harness {
+	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "imap.db")
 	db, err := sql.Open("sqlite3", testDSN(dbPath))
 	if err != nil {
@@ -81,7 +89,7 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	if conf.IMAPRespTimeout == "" {
 		conf.IMAPRespTimeout = "30s"
 	}
-	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), Admission: fakeAdmission{suspended: "suspended"}}
+	pu := &processor.Unit{Conf: conf, Logger: logger, Admission: fakeAdmission{suspended: "suspended"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu, store)
 	ctrl.SetFileCAS(fs)

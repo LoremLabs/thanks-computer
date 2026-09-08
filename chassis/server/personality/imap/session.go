@@ -13,6 +13,7 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
+	"github.com/pires/go-proxyproto"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/apppass"
