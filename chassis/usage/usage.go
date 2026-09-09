@@ -55,6 +55,16 @@ type UsageEvent struct {
 	AdmissionDenied bool
 	AdmissionReason string
 	Billable        bool
+
+	// WebHost is the hostname the CLIENT asked for — the HTTP Host header
+	// (`_txc.web.req.host`), e.g. "www.dripl.it". It answers "which of the
+	// tenant's sites was this?", which tenant+stack alone cannot: one stack
+	// serves many hostnames. Do not confuse it with the logger's base
+	// `host` field, which is the NODE that processed the request
+	// (fly-web-<id>.thanks.computer) — both are useful and they are not the
+	// same question. Empty for sources that have no hostname (mail, imap,
+	// cron, compute), and omitted from the log line in that case.
+	WebHost string
 }
 
 // Sink consumes usage events. WriteEvent must be safe for concurrent
@@ -111,6 +121,12 @@ func (s *ZapSink) WriteEvent(ev UsageEvent) {
 	// aggregate it for billing or quota enforcement.
 	if ev.Fuel > 0 {
 		fields = append(fields, zap.Int64("fuel", ev.Fuel))
+	}
+	// The client's hostname, when the source had one. Named to match the
+	// web access line's "web.host" so one grep follows a hostname across
+	// both; the node that served it is the base "host" field.
+	if ev.WebHost != "" {
+		fields = append(fields, zap.String("web.host", ev.WebHost))
 	}
 	// Admission denials: tag the line so log-based billing/analytics can
 	// exclude rejected traffic. billable is emitted only when false — the

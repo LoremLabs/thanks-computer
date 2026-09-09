@@ -2154,14 +2154,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 								fuel = 0
 							}
 							usageSink.WriteEvent(usage.UsageEvent{
-								RID:             envelope.Rid,
-								Tenant:          tenant,
-								Src:             envelope.Src,
-								Stack:           stack,
-								DurationMS:      resTime,
-								Status:          status,
-								BytesIn:         len(eventRaw),
-								BytesOut:        len(finalPayload),
+								RID:        envelope.Rid,
+								Tenant:     tenant,
+								Src:        envelope.Src,
+								Stack:      stack,
+								DurationMS: resTime,
+								Status:     status,
+								BytesIn:    len(eventRaw),
+								BytesOut:   len(finalPayload),
+								// From eventRaw (what ingress built), not
+								// finalPayload (what the stack returned).
+								WebHost:         processor.WebHostFromEnvelope(eventRaw),
 								Fuel:            fuel,
 								AdmissionDenied: denied,
 								AdmissionReason: gjson.GetBytes(finalPayload, "_txc.admission.reason").String(),

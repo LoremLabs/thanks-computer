@@ -222,6 +222,7 @@ func (g *Gateway) fireCompletion(c completion) {
 			BytesIn:    int(c.bytesIn),
 			BytesOut:   int(c.bytesOut),
 			Billable:   true,
+			WebHost:    c.host, // the gateway hostname the client called
 		})
 	}
 

@@ -340,6 +340,16 @@ func TenantFromEnvelope(raw string) string {
 	return gjson.Get(raw, "_txc.tenant").String()
 }
 
+// WebHostFromEnvelope reads the client's Host header from an envelope's
+// `_txc.web.req.host`, which the web personality stamps at ingress. Read it
+// from the INGRESS envelope, never from a finished payload: the stack can
+// EMIT over `_txc.web.req.*`, and a usage line attributing a request to a
+// hostname of the stack's choosing is worse than no field at all. Empty for
+// every non-HTTP source, which the sinks omit rather than log blank.
+func WebHostFromEnvelope(raw string) string {
+	return gjson.Get(raw, "_txc.web.req.host").String()
+}
+
 // clampTTL implements the IP-TTL idiom for rule writes: a rule may
 // voluntarily lower its sub-budget (`EMIT @ttl = N`) but may not raise it.
 // Called from OverlayResponse when an override targets `_txc.ttl`.

@@ -99,3 +99,32 @@ func TestZapSinkConcurrent(t *testing.T) {
 		t.Fatalf("want %d entries, got %d", n, got)
 	}
 }
+
+// TestZapSinkWebHost: the client's hostname rides web.host, and is ABSENT
+// rather than empty for the sources that have none — an empty web.host on a
+// mail or cron line would read as "we lost it" instead of "there isn't one".
+func TestZapSinkWebHost(t *testing.T) {
+	base := UsageEvent{RID: "hx_abc", Tenant: "acme", Src: "http", Stack: "www", Status: "ok"}
+
+	core, logs := observer.New(zap.InfoLevel)
+	sink := NewZapSink(zap.New(core))
+
+	withHost := base
+	withHost.WebHost = "www.dripl.it"
+	sink.WriteEvent(withHost)
+
+	noHost := base
+	noHost.Src = "mail"
+	sink.WriteEvent(noHost)
+
+	all := logs.All()
+	if len(all) != 2 {
+		t.Fatalf("want 2 log entries, got %d", len(all))
+	}
+	if got := all[0].ContextMap()["web.host"]; got != "www.dripl.it" {
+		t.Errorf("web.host = %v, want %q", got, "www.dripl.it")
+	}
+	if _, ok := all[1].ContextMap()["web.host"]; ok {
+		t.Error("web.host present on a source that has no hostname")
+	}
+}

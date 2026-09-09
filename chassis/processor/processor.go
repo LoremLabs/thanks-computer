@@ -2458,6 +2458,9 @@ func (pu *Unit) emitResumeUsage(ss continuation.StageSuspended, finalRaw []byte,
 		BytesOut:   len(finalRaw),
 		Fuel:       delta,
 		Billable:   true,
+		// The suspended envelope still carries the request that started
+		// the run, so a resumed segment bills against the same hostname.
+		WebHost: WebHostFromEnvelope(ss.ScopeEnvelope),
 	})
 }
 
@@ -2498,6 +2501,7 @@ func (pu *Unit) emitResumeSegmentUsage(ctx context.Context, suspendEnvelope, run
 		BytesOut:   len(suspendEnvelope),
 		Fuel:       delta,
 		Billable:   true,
+		WebHost:    WebHostFromEnvelope(suspendEnvelope),
 	})
 }
 
