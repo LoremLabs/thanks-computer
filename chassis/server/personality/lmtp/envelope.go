@@ -175,7 +175,8 @@ func parseMailHeaders(msgJSON string, bands spamBands) mailMeta {
 //	html         string                     — text/html body
 //	headers      { name: [values...] }      — multi-value-safe
 //	attachments  [{name, type, size, sha256, content}, ...]
-//	calendar     {method, uid, partstat?}   — only when an iTIP part is present
+//	calendar     {method, uid, partstat?, attendee?, start?, end?, sequence?}
+//	             — only when an iTIP part is present
 //
 // Caller is responsible for `_txc.lmtp.msg.raw` (the b64-encoded
 // original bytes) — kept separately as the always-safe escape hatch
@@ -375,7 +376,10 @@ func attachmentsJSON(env *enmime.Envelope) string {
 // enmime files a text/calendar alternative under OtherParts, which
 // attachmentsJSON does not list. A line scan after unfolding, not a parse:
 // METHOD (the Content-Type's `method` parameter wins when present), the
-// first UID, and the first ATTENDEE's PARTSTAT. Empty when no such part.
+// first UID, the first ATTENDEE's PARTSTAT and mailto (who is answering),
+// DTSTART/DTEND as RFC3339 UTC (a COUNTER's proposed time; TZID and all-day
+// forms resolved with the embedded tz data), and SEQUENCE. Empty when no
+// such part.
 func calendarJSON(env *enmime.Envelope) string {
 	if env == nil || env.Root == nil {
 		return ""
@@ -391,7 +395,8 @@ func calendarJSON(env *enmime.Envelope) string {
 	text = strings.ReplaceAll(text, "\n ", "")
 	text = strings.ReplaceAll(text, "\n\t", "")
 	method := strings.ToUpper(strings.TrimSpace(part.ContentTypeParams["method"]))
-	var uid, partstat string
+	var uid, partstat, attendee, start, end string
+	var sequence int64 = -1
 	for _, line := range strings.Split(text, "\n") {
 		upper := strings.ToUpper(line)
 		switch {
@@ -399,13 +404,24 @@ func calendarJSON(env *enmime.Envelope) string {
 			method = strings.ToUpper(strings.TrimSpace(line[len("METHOD:"):]))
 		case uid == "" && strings.HasPrefix(upper, "UID:"):
 			uid = strings.TrimSpace(line[len("UID:"):])
-		case partstat == "" && strings.HasPrefix(upper, "ATTENDEE"):
+		case attendee == "" && strings.HasPrefix(upper, "ATTENDEE"):
 			if i := strings.Index(upper, "PARTSTAT="); i >= 0 {
 				rest := upper[i+len("PARTSTAT="):]
 				if j := strings.IndexAny(rest, ";:"); j >= 0 {
 					rest = rest[:j]
 				}
 				partstat = strings.TrimSpace(rest)
+			}
+			if i := strings.LastIndex(upper, "MAILTO:"); i >= 0 {
+				attendee = strings.ToLower(strings.TrimSpace(line[i+len("MAILTO:"):]))
+			}
+		case start == "" && (strings.HasPrefix(upper, "DTSTART:") || strings.HasPrefix(upper, "DTSTART;")):
+			start = icalWhen(line)
+		case end == "" && (strings.HasPrefix(upper, "DTEND:") || strings.HasPrefix(upper, "DTEND;")):
+			end = icalWhen(line)
+		case sequence < 0 && strings.HasPrefix(upper, "SEQUENCE:"):
+			if n, err := strconv.ParseInt(strings.TrimSpace(line[len("SEQUENCE:"):]), 10, 64); err == nil {
+				sequence = n
 			}
 		}
 	}
@@ -418,5 +434,65 @@ func calendarJSON(env *enmime.Envelope) string {
 	if partstat != "" {
 		out.Set("partstat", partstat)
 	}
+	if attendee != "" {
+		out.Set("attendee", attendee)
+	}
+	if start != "" {
+		out.Set("start", start)
+	}
+	if end != "" {
+		out.Set("end", end)
+	}
+	if sequence >= 0 {
+		out.Set("sequence", sequence)
+	}
 	return out.String()
+}
+
+// icalWhen turns one DTSTART/DTEND property line into RFC3339 UTC, or ""
+// when it cannot: `20260909T120000Z` (UTC), `;TZID=Europe/Paris:20260909T140000`
+// (local, resolved with the embedded tz data), `;VALUE=DATE:20260909`
+// (all-day, midnight UTC). A floating time with no TZID is read as UTC —
+// the least surprising reading of a value the sender left unanchored.
+func icalWhen(line string) string {
+	i := strings.Index(line, ":")
+	if i < 0 {
+		return ""
+	}
+	params, value := strings.ToUpper(line[:i]), strings.TrimSpace(line[i+1:])
+	loc := time.UTC
+	if j := strings.Index(params, "TZID="); j >= 0 {
+		tz := params[j+len("TZID="):]
+		if k := strings.IndexAny(tz, ";:"); k >= 0 {
+			tz = tz[:k]
+		}
+		// The parameter was upper-cased for matching; take the zone from the
+		// original line so its case survives (IANA names are case-sensitive).
+		orig := line[:i]
+		if jj := strings.Index(strings.ToUpper(orig), "TZID="); jj >= 0 {
+			raw := orig[jj+len("TZID="):]
+			if k := strings.IndexAny(raw, ";:"); k >= 0 {
+				raw = raw[:k]
+			}
+			tz = strings.Trim(raw, "\"")
+		}
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
+	}
+	switch {
+	case len(value) == 16 && strings.HasSuffix(value, "Z"):
+		if t, err := time.Parse("20060102T150405Z", value); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	case len(value) == 15:
+		if t, err := time.ParseInLocation("20060102T150405", value, loc); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	case len(value) == 8:
+		if t, err := time.ParseInLocation("20060102", value, loc); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
 }

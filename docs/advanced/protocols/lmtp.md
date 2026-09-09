@@ -271,7 +271,7 @@ Once an envelope is routed into your stack, the LMTP fields are stamped under `_
         "html":        "<p>Hi support…</p>",
         "headers":     { "received": ["…","…"], "authentication-results": ["…"] },
         "attachments": [{"name":"…","type":"…","size":…,"sha256":"…","content":"b64:…"}],
-        "calendar":    {"method":"REPLY","uid":"…","partstat":"ACCEPTED"},   // only when an iTIP part is present
+        "calendar":    {"method":"REPLY","uid":"…","partstat":"ACCEPTED","attendee":"bob@…","start":"2026-09-09T12:00:00Z","end":"…","sequence":0},   // only when an iTIP part is present; start/end are RFC3339 UTC (a COUNTER's proposed time)
         "raw":         "b64:…"
       }
     }

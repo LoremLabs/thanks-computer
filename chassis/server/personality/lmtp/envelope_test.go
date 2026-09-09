@@ -410,6 +410,37 @@ func TestParseMessage_CalendarReply(t *testing.T) {
 	if got := gjson.Get(out, "calendar.partstat").String(); got != "ACCEPTED" {
 		t.Errorf("calendar.partstat = %q", got)
 	}
+	if got := gjson.Get(out, "calendar.attendee").String(); got != "bob@example.com" {
+		t.Errorf("calendar.attendee = %q", got)
+	}
+	// A COUNTER carries the proposed time: UTC, TZID-local and all-day forms
+	// all land as RFC3339 UTC.
+	out, err = parseMessage([]byte(crlf(fixtureCalendarCounter)))
+	if err != nil {
+		t.Fatalf("parse counter: %v", err)
+	}
+	if got := gjson.Get(out, "calendar.method").String(); got != "COUNTER" {
+		t.Errorf("counter method = %q", got)
+	}
+	if got := gjson.Get(out, "calendar.start").String(); got != "2026-09-09T12:00:00Z" {
+		t.Errorf("counter start = %q (want the Paris 14:00 as UTC)", got)
+	}
+	if got := gjson.Get(out, "calendar.end").String(); got != "2026-09-09T12:30:00Z" {
+		t.Errorf("counter end = %q", got)
+	}
+	if got := gjson.Get(out, "calendar.sequence").Int(); got != 2 {
+		t.Errorf("counter sequence = %d", got)
+	}
+	for line, want := range map[string]string{
+		"DTSTART:20260909T120000Z":                    "2026-09-09T12:00:00Z",
+		"DTSTART;VALUE=DATE:20260909":                 "2026-09-09T00:00:00Z",
+		"DTEND;TZID=America/New_York:20260909T080000": "2026-09-09T12:00:00Z",
+		"DTSTART:garbage":                             "",
+	} {
+		if got := icalWhen(line); got != want {
+			t.Errorf("icalWhen(%q) = %q, want %q", line, got, want)
+		}
+	}
 	// A message with no calendar part carries no `calendar` key at all — the
 	// rule's `@lmtp.msg.calendar.method == "REPLY"` must not match.
 	out, err = parseMessage([]byte(crlf(fixtureMultipartAlt)))
@@ -420,3 +451,30 @@ func TestParseMessage_CalendarReply(t *testing.T) {
 		t.Errorf("plain message should have no calendar: %s", out)
 	}
 }
+
+const fixtureCalendarCounter = `From: Matt <matt@example.com>
+To: paris@core.example
+Subject: Proposed new time: 30-minute call
+Content-Type: multipart/mixed; boundary="m1"
+
+--m1
+Content-Type: text/plain; charset=utf-8
+
+Matt proposed a new time.
+--m1
+Content-Type: application/ics; name="invite.ics"
+Content-Disposition: attachment; filename="invite.ics"
+
+BEGIN:VCALENDAR
+VERSION:2.0
+METHOD:COUNTER
+BEGIN:VEVENT
+DTSTART;TZID=Europe/Paris:20260909T140000
+DTEND;TZID=Europe/Paris:20260909T143000
+UID:0192aa.paris@core.example
+SEQUENCE:2
+ATTENDEE;CN=Matt;PARTSTAT=ACCEPTED:mailto:matt@example.com
+END:VEVENT
+END:VCALENDAR
+--m1--
+`
