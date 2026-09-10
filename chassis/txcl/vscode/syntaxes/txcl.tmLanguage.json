@@ -75,7 +75,7 @@
     },
     "keyword": {
       "name": "keyword.control.txcl",
-      "match": "\\b(WHEN|when|SELECT|select|SET|set|WITH|with|PRIORITY|priority|EXEC|exec|EMIT|emit|AS|as|DEFAULT|default|IF|if|ELSE|else|RETURN|return|LET|let|fn)\\b"
+      "match": "\\b(WHEN|when|SELECT|select|SET|set|WITH|with|PRIORITY|priority|EXEC|exec|LOOP|loop|UNTIL|until|EVERY|every|MAX|max|EMIT|emit|AS|as|DEFAULT|default|IF|if|ELSE|else|RETURN|return|LET|let|fn)\\b"
     },
     "constant": {
       "name": "constant.language.txcl",

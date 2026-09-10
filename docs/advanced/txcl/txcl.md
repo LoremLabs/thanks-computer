@@ -65,7 +65,7 @@ The handler receives `{"x": 1, "source": "thanks-computer"}` (plus the standard 
 
 ## Clauses
 
-A resonator has up to seven clauses, all optional, in this order:
+A resonator has up to eight clauses, all optional, in this order:
 
 | Clause     | What it does                                                   |
 | ---------- | -------------------------------------------------------------- |
@@ -75,6 +75,7 @@ A resonator has up to seven clauses, all optional, in this order:
 | `WITH`     | Per-call chassis directives (e.g., `timeout`)                  |
 | `PRIORITY` | Tie-breaker among matches at the same stage (integer)          |
 | `EXEC`     | Dispatch target — `op://`, `http(s)://`, `txco://`, `ai://chat`, `mcp+https://` |
+| `LOOP`     | Repeat the `EXEC` until a predicate holds ([LOOP](#loop--repeat-an-op)) |
 | `EMIT`     | Overlay values onto the response, after `EXEC`                 |
 
 ## Lexical structure
@@ -92,7 +93,7 @@ Spaces, tabs, newlines, and carriage returns are equivalent. A resonator on mult
 
 ### Keywords
 
-Case-insensitive. Both `WHEN` and `when` work; both `SELECT` and `select`; etc.
+Case-insensitive. Both `WHEN` and `when` work; both `SELECT` and `select`; etc. `EVERY` and `MAX` are recognized only inside a `LOOP` clause, so `every` and `max` stay usable as WITH keys.
 
 ### Strings
 
@@ -422,11 +423,11 @@ WITH timeout = "500ms"               # also valid: any time.ParseDuration string
 WITH timeout = 2000, label = "v2"    # free-form key/value pairs
 ```
 
-WITH carries **directives about this op** — metadata beside the payload, not merged into it. The chassis consumes two families itself: `timeout`, and `repeat_until` / `repeat_max` ([repeating an op](#repeating-an-op--repeat_until)). Every other key rides along to the op as its parameters — `txco://` ops read them, `secrets.*` splices credentials, `ai://chat` takes its prompt from them. For `timeout`, numeric values are treated as milliseconds; string values are parsed by Go's `time.ParseDuration` (so `"500ms"`, `"2s"`, etc. all work). Bad parse falls back to the global `--op-timeout` default (5s).
+WITH carries **directives about this op** — metadata beside the payload, not merged into it. The chassis consumes `timeout` itself; every other key rides along to the op as its parameters — `txco://` ops read them, `secrets.*` splices credentials, `ai://chat` takes its prompt from them. For `timeout`, numeric values are treated as milliseconds; string values are parsed by Go's `time.ParseDuration` (so `"500ms"`, `"2s"`, etc. all work). Bad parse falls back to the global `--op-timeout` default (5s), or to `--loop-timeout` (60s) for a rule with a [LOOP](#loop--repeat-an-op) clause.
 
 A per-op `timeout` is capped by `--op-timeout-max` (default `10m`). A resonator asking for more is rejected at dispatch with a chassis-level error log; the op is dropped from the merge for that request.
 
-Keys the op does not know are ignored by it. The `repeat_*` prefix is reserved for the chassis (`repeat_budget` is reserved, not yet supported).
+Keys the op does not know are ignored by it.
 
 ### `redact` and `omit` — trace-log scrubbing
 
@@ -564,44 +565,88 @@ The convention is **transport-agnostic**: an HTTP op signals control flow by inc
 
 Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise. Each inlet stamps its own read-only facts there too (`@web.req.*`, `@lmtp.*`, `@imap.*`, `@dns.*`, `@websocket.*`); see [protocols](../protocols/README.md).
 
-## Repeating an op — `repeat_until`
+## LOOP — repeat an op
 
 An op can re-run its EXEC inside one dispatch until a predicate holds, merging each pass locally and handing the scope **one** payload. The scope does not advance until the loop finishes — the property a `@goto` loop cannot give you, because a goto re-enters the stage and every sibling op fires again.
 
 ```txcl
-WITH prefix       = &concat(._wslug, "/docs/"),
-     after        = ._wbl.next,          # re-resolved every pass
-     limit        = 200,
-     into         = "_wbl",
-     repeat_until = ._wbl.next == "",
-     repeat_max   = 50
-EXEC "txco://blob/list"
+EXEC "https://api.example.com/jobs/42"
+LOOP UNTIL .status == "done"
 ```
 
-- `repeat_until` takes a WHEN-shaped predicate: `.path <op> literal`, composed with `&&`, `||`, `!` and parentheses (`,` separates WITH keys here, so it is not AND). It is evaluated after every pass against the **view** — the envelope plus everything the loop has merged so far. WHEN's rules apply: path-vs-literal only, and a missing path reads as the zero value. `._wbl.next == ""` is exactly the cursor-drain exit; `.more == false` is already true before the op has written anything and exits after the first pass (`txco apply` warns).
-- `repeat_max` is required: a positive integer, the pass ceiling, capped by `--op-repeat-max` (default 1000). A loop without it, or above the cap, is dropped at dispatch with a chassis-level error log; `txco apply` warns first.
-- Every pass re-resolves the WITH values against the view, so a cursor the previous pass wrote (`after = ._wbl.next`) advances. The op's input is frozen for the whole loop; parameters travel by WITH. EMIT is applied per pass, resolving against the view that pass ran in.
-- Passes merge with the scope-merge rules: scalars overwrite, objects deep-merge, **arrays append**. A paged op that returns one page's rows per pass accumulates all of them; an op that returns a cumulative array would double up — return the delta.
-- `WITH timeout` bounds the whole loop, not one pass. Each pass pays the EXEC [fuel](../fuel.md) cost and the loop checks the ceiling between passes.
-- This version repeats `txco://` ops only.
+Call the endpoint, merge its response, check `.status`, call again if it is not `"done"`: at most 10 times, 50 milliseconds apart, inside a minute. Without the second line the rule runs once.
 
-The loop stops for one of five reasons, checked in this order after each pass:
+```
+LOOP [EVERY <duration>] [SET <path> = <value>, …] UNTIL <predicate> [MAX <n>]
+```
 
-| stop      | meaning                                                                                           |
-| --------- | ------------------------------------------------------------------------------------------------- |
-| `error`   | a pass failed, or a WITH value failed to resolve; the earlier passes' output is kept              |
-| `fuel`    | the request crossed `--max-fuel-per-request`                                                      |
-| `timeout` | the op's `WITH timeout` (or the request deadline) ran out; the completed passes are kept          |
-| `done`    | the predicate held                                                                                |
-| `max`     | `repeat_max` passes ran                                                                           |
+| part | meaning | default |
+| --- | --- | --- |
+| `UNTIL <predicate>` | The exit condition, checked after every pass against the **view**: the envelope plus everything the loop has merged so far. WHEN's grammar exactly — `.path <op> literal`, `&&`, `\|\|`, `!`, parentheses, comma as AND. | required |
+| `MAX <n>` | Pass ceiling; capped by `--op-loop-max` (1000). | 10 |
+| `EVERY <duration>` | Pause between passes, paid only when the loop continues (never after the last pass). `"2s"`, `"50ms"`, or a number of milliseconds. Floor 2ms. | 50ms |
+| `SET <path> = <value>, …` | Applied before every repeat, never before the first pass: resolved against the view, written onto the op's input and the view. Same value forms as SET. How a pass feeds a cursor or counter to the next one. | none |
 
-None of them fails the run: the loop truncates and flags. What happened is written to the envelope at `_txc.runtime.repeat.<op name>` as `{"passes": N, "stop": "…", "elapsed_ms": N, "error": "…"}` — chassis-owned (no op can forge it), so a later scope can gate on it:
+The parts may be written in any order; `EVERY` and `MAX` are words the parser recognizes only inside a LOOP, so `max` and `every` remain ordinary WITH keys elsewhere. Write LOOP after EXEC and before EMIT.
+
+**Two rules of thumb.**
+
+- **A missing path reads as the zero value**, as in WHEN. `._page.next == ""` is exactly the cursor-drain exit; `.more == false` is already true before the op has written anything and exits after the first pass. `txco apply` warns.
+- **Passes merge with the scope-merge rules**: scalars overwrite, objects deep-merge, **arrays append**. A paged op that returns one page's rows per pass accumulates all of them; an op that returns a cumulative array would double up — return the delta.
+
+### Feeding the next pass
+
+Three ways a pass learns from the previous one. WITH values are re-resolved before every pass against the view, so a parameter that names the op's own output advances by itself:
 
 ```txcl
-WHEN @runtime.repeat.blobs.stop != "done" EMIT .partial = true
+EXEC "txco://kv/list"
+  WITH after = ._kv.next            # re-read every pass
+LOOP EVERY "2ms" UNTIL ._kv.next == "" MAX 500
+```
+
+`WITH url` is a WITH value too, so a cursor that rides a query string needs nothing else:
+
+```txcl
+EXEC "https://api.example.com/v1/items"
+  WITH method = "GET",
+       url = &concat("https://api.example.com/v1/items?after=", ._items.next),
+       into = "_items"
+LOOP EVERY "2ms" UNTIL ._items.next == "" MAX 100
+```
+
+A cursor that must travel in the request body — the op's input, which is otherwise frozen for the whole loop — goes through `SET`. Pass one posts the input as-is; every later pass posts it with the cursor written in:
+
+```txcl
+SELECT .customer_id
+EXEC "https://api.example.com/v1/items/search"
+  WITH into = "_items"
+LOOP EVERY "2ms" SET .cursor = ._items.next UNTIL ._items.next == "" MAX 100
+```
+
+A `SET` can read its own previous value from the view, so a page number counts up: `SET .page = 1 … LOOP SET .page = &add(.page, 1) UNTIL ._items.has_more != true`.
+
+### How a loop ends
+
+One of six reasons, checked in this order after each pass:
+
+| stop      | meaning                                                                                              |
+| --------- | ---------------------------------------------------------------------------------------------------- |
+| `error`   | a pass failed, or a SET / WITH value failed to resolve; the earlier passes' output is kept            |
+| `fuel`    | the request crossed `--max-fuel-per-request` (each pass pays the EXEC cost)                          |
+| `timeout` | the op's `WITH timeout` (default `--loop-timeout`, 60s) or the request deadline ran out              |
+| `halted`  | a sibling op at the same stage emitted `@halt`; the loop stops at once, mid-pass or mid-pause         |
+| `done`    | the predicate held                                                                                   |
+| `max`     | `MAX` passes ran                                                                                     |
+
+None of them fails the run: the loop truncates and keeps what it has. A sibling's `@goto` does not cut the loop — it is a later part of the stage lifecycle, and the loop's output rides into the target stage. What happened is written to the envelope at `_txc.runtime.loop.<op name>` as `{"passes": N, "stop": "…", "elapsed_ms": N, "error": "…"}` — chassis-owned (no op can forge it), so a later scope can gate on it:
+
+```txcl
+WHEN @runtime.loop.blobs.stop != "done" EMIT .partial = true
 ```
 
 The [trace](../trace.md) shows one step for the loop, spanning every pass, with `passes` and `stop_reason` (`txco trace <rid> --step <name>` prints them); each pass also writes an `op.pass` timeline event to the file sink.
+
+**What cannot loop.** `txco apply` rejects a LOOP with no EXEC, on `txco://noop`, on a stage jump, or combined with `WITH mode = "async"` / `"continuable"`. This version admits `txco://`, `http(s)://` and `mcp+http(s)://` EXECs; `compute://` and `ai://` are held back.
 
 ## Streaming the response body
 
@@ -652,9 +697,7 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 
 | Key | Applies to | Meaning |
 |---|---|---|
-| `timeout` | any EXEC | Per-call wall clock (ms or `"2h"`); capped by `--op-timeout-max`. Bounds a whole `repeat_until` loop |
-| `repeat_until` | txco:// | Re-run the EXEC until this WHEN-shaped predicate holds against the accumulated view; the scope sees one merged payload ([repeating an op](#repeating-an-op--repeat_until)) |
-| `repeat_max` | with `repeat_until` | Pass ceiling, required; capped by `--op-repeat-max` |
+| `timeout` | any EXEC | Per-call wall clock (ms or `"2h"`); capped by `--op-timeout-max`. Bounds a whole [LOOP](#loop--repeat-an-op) |
 | `method` | http(s) | HTTP verb override (default POST) |
 | `secrets.headers.<h>.secret` / `.format` | http(s), builtins | Splice a stored secret into the request; `format = "Bearer {}"` templates it ([runbook](../runbook-secret-store.md)) |
 | `secrets.body.<path>.secret` | http(s) | Same, into the JSON body (the projected body when the rule SELECTs) |

@@ -1,5 +1,5 @@
 {
-  "note": "In-op loop: /drain seeds five KV keys, then ONE op drains the namespace with txco://kv/list at limit 2 under WITH repeat_until / repeat_max — three passes inside a single dispatch, one merged payload. Binds localhost → kv-drain (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "note": "In-op loop: /drain seeds five KV keys, then ONE op drains the namespace with txco://kv/list at limit 2 under a LOOP clause — three passes inside a single dispatch, one merged payload. Binds localhost → kv-drain (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
   "bind": [
     { "host": "localhost", "stack": "kv-drain" }
   ],

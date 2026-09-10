@@ -470,10 +470,10 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
 	}
 
-	// Apply-time lint for the in-op repeat family (WITH repeat_until /
-	// repeat_max): the shapes the chassis would drop at dispatch or that
-	// never iterate. Warnings only, same as above.
-	for _, w := range lintRepeatDirectives(ops) {
+	// Apply-time lint for LOOP clauses: the shapes the chassis would
+	// drop at dispatch or that never iterate. Warnings only, same as
+	// above (the parser already refused the shapes that are errors).
+	for _, w := range lintLoopClause(ops) {
 		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
 	}
 

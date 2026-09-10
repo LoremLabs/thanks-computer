@@ -4,8 +4,10 @@ package parser
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
@@ -49,20 +51,15 @@ type Parser struct {
 	// per token. Reset when a recognized clause keyword is reached.
 	inGarbage bool
 
-	// withPredicate is set while the WHEN-expression parser is
-	// running inside a WITH clause (`repeat_until = <predicate>`).
-	// WHEN treats `,` as AND; WITH uses `,` to separate keys, so the
-	// AND loop must not consume a comma in that context. Authors
-	// compose with `&&` / `||` / `!` / `( )` there.
-	withPredicate bool
+	// predicateKeyword names the clause whose predicate the WHEN
+	// expression parser is currently reading, for diagnostics: ""
+	// (WHEN itself) or "LOOP UNTIL", which borrows WHEN's grammar.
+	predicateKeyword string
 }
 
-// repeatUntilKey is the one WITH key whose RHS is a predicate rather
-// than a value: `WITH repeat_until = ._p.next == ""`. It lands on
-// Resonator.RepeatUntil, not in the With map, so it never reaches the
-// op. Sibling `repeat_*` keys (repeat_max, repeat_budget) stay
-// ordinary values and are consumed by the processor.
-const repeatUntilKey = "repeat_until"
+// stageJumpRE mirrors processor.StagePartsRE: an unschemed EXEC of the
+// form "<stack>/<scope>" is a stage jump, not an op dispatch.
+var stageJumpRE = regexp.MustCompile(`^(.*)/+(\d+)$`)
 
 func New(l *lexer.Lexer) *Parser {
 	p := &Parser{
@@ -120,7 +117,8 @@ func (p *Parser) ParseEvent() *resonator.Resonator {
 				r.Select = phrase.Select
 			case resonator.WITH:
 				r.With = phrase.With
-				r.RepeatUntil = phrase.RepeatUntil
+			case resonator.LOOP:
+				r.Loop = phrase.Loop
 			case resonator.SETPRE:
 				r.SetPre = phrase.SetPre
 			case resonator.SETPOST:
@@ -134,7 +132,33 @@ func (p *Parser) ParseEvent() *resonator.Resonator {
 		p.nextToken()
 	}
 
+	p.checkLoop(r)
 	return r
+}
+
+// checkLoop rejects LOOP shapes that can never make progress or that
+// the chassis cannot run, in BOTH parse modes: LOOP is a new clause, so
+// no deployed rule can be broken by a lenient-mode error here, and an
+// apply-time error beats a dropped op at dispatch.
+func (p *Parser) checkLoop(r *resonator.Resonator) {
+	if r.Loop == nil {
+		return
+	}
+	exec := strings.TrimSpace(r.Exec)
+	switch {
+	case exec == "":
+		p.errors = append(p.errors, "LOOP needs an EXEC to repeat")
+	case exec == "txco://noop":
+		p.errors = append(p.errors, "LOOP cannot repeat txco://noop: it never changes the envelope, so UNTIL can never become true")
+	case strings.HasPrefix(exec, "txco://route"), strings.HasPrefix(exec, "goto://"),
+		!strings.Contains(exec, "://") && stageJumpRE.MatchString(exec):
+		p.errors = append(p.errors, fmt.Sprintf("LOOP cannot repeat a stage jump (EXEC %q); loop the op that does the work instead", exec))
+	}
+	if lit, ok := r.With["mode"].(ast.Literal); ok {
+		if mode, ok := lit.V.(string); ok && (mode == "async" || mode == "continuable") {
+			p.errors = append(p.errors, fmt.Sprintf("LOOP cannot combine with WITH mode = %q: the loop runs inside the request, that mode runs outside it", mode))
+		}
+	}
 }
 
 func (p *Parser) parseEventPhrase() *resonator.Phrase {
@@ -163,6 +187,9 @@ func (p *Parser) parseEventPhrase() *resonator.Phrase {
 	case token.EMIT:
 		p.inGarbage = false
 		return p.parseEmitPhrase()
+	case token.LOOP:
+		p.inGarbage = false
+		return p.parseLoopPhrase()
 	default:
 		// A token reached the top-level clause switch that isn't a
 		// clause keyword. In well-formed TXCL only clause keywords (or
@@ -176,7 +203,7 @@ func (p *Parser) parseEventPhrase() *resonator.Phrase {
 		// trailing token.
 		if p.strict && !p.inGarbage {
 			p.errors = append(p.errors, fmt.Sprintf(
-				"unexpected token %q — expected a clause keyword (WHEN, SET, SELECT, WITH, PRIORITY, EXEC, EMIT)",
+				"unexpected token %q — expected a clause keyword (WHEN, SET, SELECT, WITH, PRIORITY, EXEC, LOOP, EMIT) or a LOOP modifier (EVERY, SET, UNTIL, MAX)",
 				p.curToken.Literal))
 			p.inGarbage = true
 		}
@@ -351,14 +378,9 @@ func (p *Parser) parseArrayLiteral() (interface{}, bool) {
 }
 
 // parse tokens for With Phrase (WITH foo = "bar", moo = 1)
-//
-// One key is special: `repeat_until = <predicate>` parses its RHS with
-// the WHEN grammar (see parseWithPredicate) and lands on the phrase's
-// RepeatUntil field instead of the map.
 func (p *Parser) parseWithPhrase() *resonator.Phrase {
 	withs := make(map[string]ast.Value)
-	var repeatUntil *resonator.WhenExpr
-	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) {
+	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) && !p.peekTokenIs(token.LOOP) {
 
 		if p.curTokenIs(token.WITH) {
 			p.nextToken()
@@ -390,63 +412,178 @@ func (p *Parser) parseWithPhrase() *resonator.Phrase {
 		}
 		p.nextToken()
 
-		if with == repeatUntilKey {
-			expr := p.parseWithPredicate(with)
-			if expr == nil {
-				return nil
-			}
-			if repeatUntil != nil && p.strict {
-				p.errors = append(p.errors, fmt.Sprintf("WITH %s given more than once", with))
-			}
-			repeatUntil = expr
-		} else {
-			withValue, ok := p.parseValueExpr()
-			if !ok {
-				return nil
-			}
-			withs[with] = withValue
+		withValue, ok := p.parseValueExpr()
+		if !ok {
+			return nil
 		}
+
+		withs[with] = withValue
 
 		if p.peekTokenIs(token.COMMA) {
 			p.nextToken()
 		}
-		if !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) {
+		if !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) && !p.peekTokenIs(token.LOOP) {
 			p.nextToken()
 		}
 	}
 
-	phrase := &resonator.Phrase{Type: resonator.WITH, With: withs, RepeatUntil: repeatUntil}
+	phrase := &resonator.Phrase{Type: resonator.WITH, With: withs}
 
 	return phrase
 }
 
-// parseWithPredicate parses the RHS of `WITH repeat_until = …` as a
-// WHEN expression. Called with curToken on the first token of the
-// RHS; on success curToken sits on the last token of the expression,
-// the same postcondition parseValueExpr leaves, so the caller's
-// comma / clause-stop handling is shared with ordinary keys.
+// parseLoopPhrase parses the LOOP clause:
 //
-// Everything WHEN enforces carries over unchanged: path-vs-literal
-// only, literal-only function arguments, missing-path coercion at
-// evaluation time. The one grammar difference is that `,` ends the
-// predicate (it separates WITH keys) instead of acting as AND.
-func (p *Parser) parseWithPredicate(key string) *resonator.WhenExpr {
-	if !p.isWhenPrimaryStart(p.curToken.Type) {
-		p.errors = append(p.errors, fmt.Sprintf(
-			"WITH %s expects a predicate (.path == value, composable with &&, ||, !, parentheses), got '%s'",
-			key, p.curToken.Literal))
-		return nil
+//	LOOP [EVERY <duration>] [SET <path> = <value>, …] UNTIL <predicate> [MAX <n>]
+//
+// The modifiers may appear in any order around UNTIL, each at most once
+// (strict mode reports a repeat; lenient parsing keeps the last). UNTIL
+// is required. EVERY and MAX are contextual words — an identifier in
+// that position, matched case-insensitively — rather than reserved
+// keywords, so `every` and `max` stay usable as WITH keys and paths.
+// The predicate is WHEN's grammar exactly (comma is AND).
+//
+// Called with curToken on LOOP. Postcondition: curToken sits on the
+// last token of the clause (ParseEvent advances once on return).
+func (p *Parser) parseLoopPhrase() *resonator.Phrase {
+	loop := &resonator.Loop{}
+	seen := map[string]bool{}
+	note := func(mod string) {
+		if seen[mod] && p.strict {
+			p.errors = append(p.errors, fmt.Sprintf("LOOP %s given more than once", mod))
+		}
+		seen[mod] = true
 	}
-	p.withPredicate = true
-	defer func() { p.withPredicate = false }()
-	return p.parseWhenOr()
+	for {
+		switch {
+		case p.peekTokenIs(token.UNTIL):
+			p.nextToken() // curToken = UNTIL
+			if !p.isWhenPrimaryStart(p.peekToken.Type) {
+				p.errors = append(p.errors, fmt.Sprintf(
+					"LOOP UNTIL expects a predicate (.path == value, composable with &&, ||, !, parentheses), got '%s'",
+					p.peekToken.Literal))
+				return nil
+			}
+			p.nextToken() // curToken = first token of the predicate
+			p.predicateKeyword = "LOOP UNTIL"
+			expr := p.parseWhenOr()
+			p.predicateKeyword = ""
+			if expr == nil {
+				return nil
+			}
+			note("UNTIL")
+			loop.Until = expr
+		case p.peekTokenIs(token.SET):
+			p.nextToken() // curToken = SET
+			set := p.parseLoopSet()
+			if set == nil {
+				return nil
+			}
+			note("SET")
+			loop.Set = set
+		case p.peekIsWord("every"):
+			p.nextToken() // curToken = EVERY
+			p.nextToken() // curToken = the duration literal
+			d, ok := p.parseLoopEvery()
+			if !ok {
+				return nil
+			}
+			note("EVERY")
+			loop.Every = d
+		case p.peekIsWord("max"):
+			p.nextToken() // curToken = MAX
+			p.nextToken() // curToken = the count
+			if !p.curTokenIs(token.INT) {
+				p.errors = append(p.errors, fmt.Sprintf("LOOP MAX expects a positive integer, got '%s'", p.curToken.Literal))
+				return nil
+			}
+			n, err := strconv.ParseInt(p.curToken.Literal, 0, 64)
+			if err != nil || n <= 0 {
+				p.errors = append(p.errors, fmt.Sprintf("LOOP MAX must be a positive integer, got %s", p.curToken.Literal))
+				return nil
+			}
+			note("MAX")
+			loop.Max = n
+		default:
+			if loop.Until == nil {
+				p.errors = append(p.errors, "LOOP needs UNTIL <predicate>")
+				return nil
+			}
+			return &resonator.Phrase{Type: resonator.LOOP, Loop: loop}
+		}
+	}
+}
+
+// peekIsWord reports whether the next token is the contextual word
+// `word` (an identifier, any letter case).
+func (p *Parser) peekIsWord(word string) bool {
+	return p.peekTokenIs(token.IDENT) && strings.EqualFold(p.peekToken.Literal, word)
+}
+
+// parseLoopSet parses the assignment list after LOOP's SET:
+// `.path = value[, .path = value]*`. Same grammar as SET. Called with
+// curToken on SET; leaves curToken on the last value token.
+func (p *Parser) parseLoopSet() []resonator.BranchValue {
+	var set []resonator.BranchValue
+	for {
+		p.nextToken()
+		if !p.curTokenIs(token.BRANCH) {
+			p.wrongTypeParseError("LOOP SET .branch")
+			return nil
+		}
+		branch := p.curToken.Literal
+		p.nextToken()
+		if !p.curTokenIs(token.ASSIGN) {
+			p.curError(token.ASSIGN)
+			return nil
+		}
+		p.nextToken()
+		value, ok := p.parseValueExpr()
+		if !ok {
+			return nil
+		}
+		set = append(set, resonator.BranchValue{Path: branch, Value: value})
+		if !p.peekTokenIs(token.COMMA) {
+			return set
+		}
+		p.nextToken() // curToken = COMMA; the loop steps onto the next branch
+	}
+}
+
+// parseLoopEvery parses EVERY's argument at curToken: a duration
+// string ("50ms", "2s") or an integer number of milliseconds, matching
+// how WITH timeout reads its value.
+func (p *Parser) parseLoopEvery() (time.Duration, bool) {
+	switch p.curToken.Type {
+	case token.STRING:
+		d, err := time.ParseDuration(p.curToken.Literal)
+		if err != nil {
+			p.errors = append(p.errors, fmt.Sprintf("LOOP EVERY expects a duration such as \"50ms\" or \"2s\", got %q", p.curToken.Literal))
+			return 0, false
+		}
+		if d < 0 {
+			p.errors = append(p.errors, fmt.Sprintf("LOOP EVERY cannot be negative, got %q", p.curToken.Literal))
+			return 0, false
+		}
+		return d, true
+	case token.INT:
+		n, err := strconv.ParseInt(p.curToken.Literal, 0, 64)
+		if err != nil || n < 0 {
+			p.errors = append(p.errors, fmt.Sprintf("LOOP EVERY expects a duration such as \"50ms\" or a number of milliseconds, got %s", p.curToken.Literal))
+			return 0, false
+		}
+		return time.Duration(n) * time.Millisecond, true
+	default:
+		p.errors = append(p.errors, fmt.Sprintf("LOOP EVERY expects a duration such as \"50ms\" or \"2s\", got '%s'", p.curToken.Literal))
+		return 0, false
+	}
 }
 
 // exprKeyword names the clause an expression-parser diagnostic
-// belongs to: WHEN, or the WITH key whose RHS borrows WHEN's grammar.
+// belongs to: WHEN, or LOOP UNTIL, which borrows WHEN's grammar.
 func (p *Parser) exprKeyword() string {
-	if p.withPredicate {
-		return "WITH " + repeatUntilKey
+	if p.predicateKeyword != "" {
+		return p.predicateKeyword
 	}
 	return "WHEN"
 }
@@ -455,7 +592,7 @@ func (p *Parser) exprKeyword() string {
 func (p *Parser) parseSetPrePhrase() *resonator.Phrase {
 	overrides := make([]resonator.BranchValue, 0)
 
-	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) {
+	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) && !p.peekTokenIs(token.LOOP) {
 
 		if p.curTokenIs(token.COMMA) || p.curTokenIs(token.SET) {
 			p.nextToken()
@@ -487,7 +624,7 @@ func (p *Parser) parseSetPrePhrase() *resonator.Phrase {
 		if p.peekTokenIs(token.COMMA) {
 			p.nextToken()
 		}
-		if !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) {
+		if !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) && !p.peekTokenIs(token.LOOP) {
 			p.nextToken()
 		}
 	}
@@ -502,7 +639,7 @@ func (p *Parser) parseSetPrePhrase() *resonator.Phrase {
 func (p *Parser) parseSetPostPhrase() *resonator.Phrase {
 	overrides := make([]resonator.BranchValue, 0)
 
-	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) {
+	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) && !p.peekTokenIs(token.LOOP) {
 
 		if p.curTokenIs(token.COMMA) || p.curTokenIs(token.SET) {
 			p.nextToken()
@@ -534,7 +671,7 @@ func (p *Parser) parseSetPostPhrase() *resonator.Phrase {
 		if p.peekTokenIs(token.COMMA) {
 			p.nextToken()
 		}
-		if !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) {
+		if !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) && !p.peekTokenIs(token.LOOP) {
 			p.nextToken()
 		}
 	}
@@ -554,7 +691,7 @@ func (p *Parser) parseSetPostPhrase() *resonator.Phrase {
 func (p *Parser) parseEmitPhrase() *resonator.Phrase {
 	overrides := make([]resonator.BranchValue, 0)
 
-	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) {
+	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.LOOP) {
 
 		if p.curTokenIs(token.COMMA) || p.curTokenIs(token.EMIT) {
 			p.nextToken()
@@ -584,7 +721,7 @@ func (p *Parser) parseEmitPhrase() *resonator.Phrase {
 		if p.peekTokenIs(token.COMMA) {
 			p.nextToken()
 		}
-		if !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) {
+		if !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.SELECT) && !p.peekTokenIs(token.WITH) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.LOOP) {
 			p.nextToken()
 		}
 	}
@@ -787,7 +924,7 @@ func (p *Parser) parseWhenAnd() *resonator.WhenExpr {
 		return nil
 	}
 	parts := []resonator.WhenExpr{*first}
-	for p.peekTokenIs(token.LAND) || (!p.withPredicate && p.peekTokenIs(token.COMMA)) {
+	for p.peekTokenIs(token.LAND) || p.peekTokenIs(token.COMMA) {
 		opLit := p.peekToken.Literal
 		p.nextToken() // curToken = && or ,
 		if !p.isWhenPrimaryStart(p.peekToken.Type) {
@@ -983,7 +1120,7 @@ func (p *Parser) isWhenPrimaryStart(t token.TokenType) bool {
 func (p *Parser) isStopForWhen(t token.TokenType) bool {
 	switch t {
 	case token.EOF, token.SET, token.SELECT, token.WITH,
-		token.PRIORITY, token.EXEC, token.EMIT:
+		token.PRIORITY, token.EXEC, token.EMIT, token.LOOP:
 		return true
 	}
 	return false

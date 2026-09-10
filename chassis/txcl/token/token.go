@@ -70,6 +70,8 @@ const (
 	PRIORITY = "PRIORITY"
 	EXEC     = "EXEC"
 	EMIT     = "EMIT"
+	LOOP     = "LOOP"
+	UNTIL    = "UNTIL"
 
 	// Filtering
 	BRANCH = "BRANCH"
@@ -112,6 +114,10 @@ var keywords = map[string]TokenType{
 	"EXEC":     EXEC,
 	"emit":     EMIT,
 	"EMIT":     EMIT,
+	"loop":     LOOP,
+	"LOOP":     LOOP,
+	"until":    UNTIL,
+	"UNTIL":    UNTIL,
 	"set":      SET,
 	"SET":      SET,
 	"null":     NULL,

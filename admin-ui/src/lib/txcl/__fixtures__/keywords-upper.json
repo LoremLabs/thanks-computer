@@ -1,6 +1,6 @@
 {
   "name": "keywords-upper",
-  "input": "SELECT AS DEFAULT WITH WHEN PRIORITY EXEC EMIT SET RETURN NULL",
+  "input": "SELECT AS DEFAULT WITH WHEN PRIORITY EXEC EMIT SET LOOP UNTIL RETURN NULL",
   "tokens": [
     {
       "type": "SELECT",
@@ -37,6 +37,14 @@
     {
       "type": "SET",
       "literal": "SET"
+    },
+    {
+      "type": "LOOP",
+      "literal": "LOOP"
+    },
+    {
+      "type": "UNTIL",
+      "literal": "UNTIL"
     },
     {
       "type": "RETURN",

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
@@ -1174,21 +1175,22 @@ func TestParserWhenFunctionCall(t *testing.T) {
 	})
 }
 
-// TestParserWithRepeatUntil covers the one WITH key whose RHS is a
-// predicate: `repeat_until = <WHEN expression>`. It must land on
-// Resonator.RepeatUntil (never in the With map), compose with the
-// WHEN operators, and treat `,` as the WITH key separator rather than
-// AND. Ordinary WITH keys must parse exactly as before.
-func TestParserWithRepeatUntil(t *testing.T) {
+// TestParserLoopClause covers LOOP [EVERY d] [SET …] UNTIL <predicate>
+// [MAX n]: modifiers in any order, contextual EVERY/MAX words, the
+// predicate as WHEN's grammar (comma is AND), placement among the other
+// clauses, and the end-of-rule checks that reject loops which can
+// never make progress.
+func TestParserLoopClause(t *testing.T) {
 	nextEmpty := resonator.WhenExpr{Leaf: resonator.Condition{
 		Branch: &resonator.Branch{Path: "._p.next"}, MatchType: resonator.MatchType("eq"), MatchValue: ""},
 		HasLeaf: true}
 	nGte3 := resonator.WhenExpr{Leaf: resonator.Condition{
 		Branch: &resonator.Branch{Path: "._p.n"}, MatchType: resonator.MatchType("gteq"), MatchValue: int64(3)},
 		HasLeaf: true}
-	moreTrue := resonator.WhenExpr{Leaf: resonator.Condition{
-		Branch: &resonator.Branch{Path: "._p.more"}, MatchType: resonator.MatchType("eq"), MatchValue: true},
+	statusDone := resonator.WhenExpr{Leaf: resonator.Condition{
+		Branch: &resonator.Branch{Path: ".status"}, MatchType: resonator.MatchType("eq"), MatchValue: "done"},
 		HasLeaf: true}
+	cursorSet := []resonator.BranchValue{{Path: ".cursor", Value: ast.PathRef{Path: "_p.next"}}}
 
 	cases := []struct {
 		name    string
@@ -1197,111 +1199,194 @@ func TestParserWithRepeatUntil(t *testing.T) {
 		errmsgs []string
 	}{
 		{
-			name:  "leaf between ordinary keys",
-			input: `WITH after = ._p.next, repeat_until = ._p.next == "", repeat_max = 50 EXEC "txco://pager"`,
+			name:  "minimal: UNTIL only, defaults elsewhere",
+			input: `EXEC "https://api.example.com/jobs/42" LOOP UNTIL .status == "done"`,
 			res: &resonator.Resonator{
-				With: map[string]ast.Value{
-					"after":      ast.PathRef{Path: "_p.next"},
-					"repeat_max": ast.Literal{V: int64(50)},
-				},
-				RepeatUntil: &nextEmpty,
-				Exec:        "txco://pager",
+				Exec: "https://api.example.com/jobs/42",
+				Loop: &resonator.Loop{Until: &statusDone},
 			},
 		},
 		{
-			name:  "predicate first",
-			input: `WITH repeat_until = ._p.next == "", repeat_max = 2`,
+			name:  "every string, max",
+			input: `EXEC "txco://pager" LOOP EVERY "2s" UNTIL ._p.next == "" MAX 30`,
 			res: &resonator.Resonator{
-				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(2)}},
-				RepeatUntil: &nextEmpty,
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Every: 2 * time.Second, Max: 30},
 			},
 		},
 		{
-			name:  "predicate last before EXEC",
-			input: `WITH repeat_max = 2, repeat_until = ._p.next == "" EXEC "txco://pager"`,
+			name:  "every as milliseconds",
+			input: `EXEC "txco://pager" LOOP EVERY 250 UNTIL ._p.next == ""`,
 			res: &resonator.Resonator{
-				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(2)}},
-				RepeatUntil: &nextEmpty,
-				Exec:        "txco://pager",
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Every: 250 * time.Millisecond},
 			},
 		},
 		{
-			name:  "predicate last at EOF",
-			input: `WITH repeat_max = 2, repeat_until = ._p.next == ""`,
+			name:  "set feeds the next pass",
+			input: `EXEC "txco://pager" LOOP EVERY "2ms" SET .cursor = ._p.next UNTIL ._p.next == "" MAX 100`,
 			res: &resonator.Resonator{
-				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(2)}},
-				RepeatUntil: &nextEmpty,
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Every: 2 * time.Millisecond, Max: 100, Set: cursorSet},
 			},
 		},
 		{
-			name:  "or composition then another key",
-			input: `WITH repeat_until = ._p.next == "" || ._p.n >= 3, limit = 1`,
+			name:  "set list with a literal and a function",
+			input: `EXEC "txco://pager" LOOP SET .cursor = ._p.next, .extra = 2, .page = &add(.page, 1) UNTIL ._p.next == ""`,
 			res: &resonator.Resonator{
-				With:        map[string]ast.Value{"limit": ast.Literal{V: int64(1)}},
-				RepeatUntil: &resonator.WhenExpr{Or: []resonator.WhenExpr{nextEmpty, nGte3}},
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Set: []resonator.BranchValue{
+					{Path: ".cursor", Value: ast.PathRef{Path: "_p.next"}},
+					{Path: ".extra", Value: ast.Literal{V: int64(2)}},
+					{Path: ".page", Value: ast.FunctionCall{Name: "add", Args: []ast.Value{ast.PathRef{Path: "page"}, ast.Literal{V: int64(1)}}}},
+				}},
 			},
 		},
 		{
-			name:  "and composition",
-			input: `WITH repeat_until = ._p.next == "" && ._p.n >= 3, limit = 1`,
+			name:  "modifiers in any order, lower-case words",
+			input: `EXEC "txco://pager" LOOP max 5 until ._p.next == "" every "2ms" set .cursor = ._p.next`,
 			res: &resonator.Resonator{
-				With:        map[string]ast.Value{"limit": ast.Literal{V: int64(1)}},
-				RepeatUntil: &resonator.WhenExpr{And: []resonator.WhenExpr{nextEmpty, nGte3}},
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Every: 2 * time.Millisecond, Max: 5, Set: cursorSet},
 			},
 		},
 		{
-			name:  "not and parentheses",
-			input: `WITH repeat_until = !(._p.more == true), repeat_max = 5`,
+			name:  "comma is AND inside UNTIL",
+			input: `EXEC "txco://pager" LOOP UNTIL ._p.next == "", ._p.n >= 3 MAX 5`,
 			res: &resonator.Resonator{
-				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(5)}},
-				RepeatUntil: &resonator.WhenExpr{Not: &moreTrue},
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &resonator.WhenExpr{And: []resonator.WhenExpr{nextEmpty, nGte3}}, Max: 5},
 			},
 		},
 		{
-			name:  "at sugar in predicate",
-			input: `WITH repeat_until = @cursor == ""`,
+			name:  "or, not, parentheses",
+			input: `EXEC "txco://pager" LOOP UNTIL !(._p.next == "") || ._p.n >= 3`,
 			res: &resonator.Resonator{
-				With: map[string]ast.Value{},
-				RepeatUntil: &resonator.WhenExpr{Leaf: resonator.Condition{
-					Branch: &resonator.Branch{Path: "._txc.cursor"}, MatchType: resonator.MatchType("eq"), MatchValue: ""},
-					HasLeaf: true},
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &resonator.WhenExpr{Or: []resonator.WhenExpr{
+					{Not: &nextEmpty}, nGte3,
+				}}},
 			},
 		},
 		{
-			name:  "comma ends the predicate; next key still parses",
-			input: `WITH repeat_until = ._p.next == "", after = ._p.next`,
+			name:  "LOOP before EXEC",
+			input: `LOOP UNTIL ._p.next == "" MAX 5 EXEC "txco://pager"`,
 			res: &resonator.Resonator{
-				With:        map[string]ast.Value{"after": ast.PathRef{Path: "_p.next"}},
-				RepeatUntil: &nextEmpty,
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Max: 5},
 			},
 		},
 		{
-			name:  "ordinary WITH is unchanged",
-			input: `WITH timeout = 1000, mode = "async"`,
+			name:  "between WITH and EMIT, in the canonical order",
+			input: `WHEN .go == true WITH into = "_p", max = 7 EXEC "txco://pager" LOOP UNTIL ._p.next == "" MAX 5 EMIT .source = "pager"`,
 			res: &resonator.Resonator{
-				With: map[string]ast.Value{
-					"timeout": ast.Literal{V: int64(1000)},
-					"mode":    ast.Literal{V: "async"},
-				},
+				When: leafWhen(resonator.Condition{Branch: &resonator.Branch{Path: ".go"}, MatchType: resonator.MatchType("eq"), MatchValue: true}),
+				With: map[string]ast.Value{"into": ast.Literal{V: "_p"}, "max": ast.Literal{V: int64(7)}},
+				Exec: "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Max: 5},
+				Emit: &resonator.Set{Overrides: []resonator.BranchValue{{Path: ".source", Value: ast.Literal{V: "pager"}}}},
 			},
 		},
 		{
-			name:    "literal RHS is not a predicate",
-			input:   `WITH repeat_until = true, repeat_max = 5`,
-			res:     &resonator.Resonator{},
-			errmsgs: []string{`WITH repeat_until expects a predicate (.path == value, composable with &&, ||, !, parentheses), got 'true'`},
+			name:  "after a SET clause",
+			input: `SET .page = 1 EXEC "txco://pager" LOOP SET .page = 2 UNTIL ._p.next == ""`,
+			res: &resonator.Resonator{
+				SetPre: &resonator.Set{Overrides: []resonator.BranchValue{{Path: ".page", Value: ast.Literal{V: int64(1)}}}},
+				Exec:   "txco://pager",
+				Loop: &resonator.Loop{Until: &nextEmpty, Set: []resonator.BranchValue{
+					{Path: ".page", Value: ast.Literal{V: int64(2)}},
+				}},
+			},
+		},
+		{
+			name:  "every and max stay ordinary WITH keys",
+			input: `WITH every = "1s", max = 3 EXEC "txco://schedule"`,
+			res: &resonator.Resonator{
+				With: map[string]ast.Value{"every": ast.Literal{V: "1s"}, "max": ast.Literal{V: int64(3)}},
+				Exec: "txco://schedule",
+			},
+		},
+		// --- errors ---
+		{
+			name:    "UNTIL is required",
+			input:   `EXEC "txco://pager" LOOP MAX 5`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
+			errmsgs: []string{`LOOP needs UNTIL <predicate>`},
+		},
+		{
+			name:    "MAX must be positive",
+			input:   `EXEC "txco://pager" LOOP UNTIL ._p.next == "" MAX 0`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
+			errmsgs: []string{`LOOP MAX must be a positive integer, got 0`},
+		},
+		{
+			name:    "MAX must be an integer literal",
+			input:   `EXEC "txco://pager" LOOP UNTIL ._p.next == "" MAX "5"`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
+			errmsgs: []string{`LOOP MAX expects a positive integer, got '5'`},
+		},
+		{
+			name:    "EVERY must parse as a duration",
+			input:   `EXEC "txco://pager" LOOP EVERY "soon" UNTIL ._p.next == ""`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
+			errmsgs: []string{`LOOP EVERY expects a duration such as "50ms" or "2s", got "soon"`},
+		},
+		{
+			name:    "predicate must be a predicate",
+			input:   `EXEC "txco://pager" LOOP UNTIL true`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
+			errmsgs: []string{`LOOP UNTIL expects a predicate (.path == value, composable with &&, ||, !, parentheses), got 'true'`},
 		},
 		{
 			name:    "path-vs-path is rejected like WHEN",
-			input:   `WITH repeat_until = ._p.a == ._p.b`,
-			res:     &resonator.Resonator{},
+			input:   `EXEC "txco://pager" LOOP UNTIL ._p.a == ._p.b`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
 			errmsgs: []string{`Expecting bool, int, float, string, null, regex, or &function(...), received ._p.b`},
 		},
 		{
-			name:    "missing comparison names the WITH key",
-			input:   `WITH repeat_until = ._p.a`,
-			res:     &resonator.Resonator{},
-			errmsgs: []string{`WITH repeat_until expected =~, !~, ==, !=, >, <, >=, or <= (EOF)`},
+			name:    "missing comparison names the clause",
+			input:   `EXEC "txco://pager" LOOP UNTIL ._p.a`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
+			errmsgs: []string{`LOOP UNTIL expected =~, !~, ==, !=, >, <, >=, or <= (EOF)`},
+		},
+		{
+			name:    "SET needs an assignment",
+			input:   `EXEC "txco://pager" LOOP SET UNTIL ._p.next == ""`,
+			res:     &resonator.Resonator{Exec: "txco://pager"},
+			errmsgs: []string{`Expecting LOOP SET .branch, received UNTIL`},
+		},
+		{
+			name:    "no EXEC to repeat",
+			input:   `LOOP UNTIL ._p.next == ""`,
+			res:     &resonator.Resonator{Loop: &resonator.Loop{Until: &nextEmpty}},
+			errmsgs: []string{`LOOP needs an EXEC to repeat`},
+		},
+		{
+			name:    "noop can never progress",
+			input:   `EXEC "txco://noop" LOOP UNTIL ._p.next == ""`,
+			res:     &resonator.Resonator{Exec: "txco://noop", Loop: &resonator.Loop{Until: &nextEmpty}},
+			errmsgs: []string{`LOOP cannot repeat txco://noop: it never changes the envelope, so UNTIL can never become true`},
+		},
+		{
+			name:    "stage jump is not an op",
+			input:   `EXEC "boot/0" LOOP UNTIL ._p.next == ""`,
+			res:     &resonator.Resonator{Exec: "boot/0", Loop: &resonator.Loop{Until: &nextEmpty}},
+			errmsgs: []string{`LOOP cannot repeat a stage jump (EXEC "boot/0"); loop the op that does the work instead`},
+		},
+		{
+			name:    "route is a stage jump too",
+			input:   `EXEC "txco://route" LOOP UNTIL ._p.next == ""`,
+			res:     &resonator.Resonator{Exec: "txco://route", Loop: &resonator.Loop{Until: &nextEmpty}},
+			errmsgs: []string{`LOOP cannot repeat a stage jump (EXEC "txco://route"); loop the op that does the work instead`},
+		},
+		{
+			name:  "async mode runs outside the request",
+			input: `WITH mode = "async" EXEC "https://x.example/job" LOOP UNTIL .status == "done"`,
+			res: &resonator.Resonator{
+				With: map[string]ast.Value{"mode": ast.Literal{V: "async"}},
+				Exec: "https://x.example/job", Loop: &resonator.Loop{Until: &statusDone},
+			},
+			errmsgs: []string{`LOOP cannot combine with WITH mode = "async": the loop runs inside the request, that mode runs outside it`},
 		},
 	}
 
@@ -1315,28 +1400,29 @@ func TestParserWithRepeatUntil(t *testing.T) {
 		})
 	}
 
-	t.Run("WHEN comma is still AND", func(t *testing.T) {
-		// The comma gate applies only inside the WITH predicate; a WHEN
-		// clause on the same rule keeps its legacy flat-AND spelling.
-		res, err := parseOK(t, `WHEN ._p.next == "", ._p.n >= 3 WITH repeat_until = ._p.next == "", repeat_max = 5`)
-		test.Ok(t, err)
-		test.Equals(t, &resonator.When{Expr: &resonator.WhenExpr{And: []resonator.WhenExpr{nextEmpty, nGte3}}}, res.When)
-		test.Equals(t, &nextEmpty, res.RepeatUntil)
-	})
-
-	t.Run("strict rejects a duplicate predicate", func(t *testing.T) {
-		l := lexer.New(`WITH repeat_until = ._p.a == 1, repeat_until = ._p.b == 2`)
+	t.Run("strict rejects a repeated modifier; lenient keeps the last", func(t *testing.T) {
+		src := `EXEC "txco://pager" LOOP MAX 3 UNTIL ._p.next == "" MAX 9`
+		l := lexer.New(src)
 		p := parser.New(l)
 		p.SetStrict(true)
 		p.ParseEvent()
-		test.Equals(t, []string{`WITH repeat_until given more than once`}, p.Errors())
+		test.Equals(t, []string{`LOOP MAX given more than once`}, p.Errors())
 
-		// Lenient parsing keeps the last one, like any repeated key.
-		l = lexer.New(`WITH repeat_until = ._p.a == 1, repeat_until = ._p.b == 2`)
+		l = lexer.New(src)
 		p = parser.New(l)
 		res := p.ParseEvent()
 		test.Equals(t, 0, len(p.Errors()))
-		test.Equals(t, "._p.b", res.RepeatUntil.Leaf.Branch.Path)
+		test.Equals(t, int64(9), res.Loop.Max)
+	})
+
+	t.Run("strict names a misspelled modifier", func(t *testing.T) {
+		l := lexer.New(`EXEC "txco://pager" LOOP UNTIL ._p.next == "" MAXX 5`)
+		p := parser.New(l)
+		p.SetStrict(true)
+		p.ParseEvent()
+		test.Equals(t, 1, len(p.Errors()))
+		test.Assert(t, strings.Contains(p.Errors()[0], `unexpected token "MAXX"`), "got %q", p.Errors()[0])
+		test.Assert(t, strings.Contains(p.Errors()[0], "LOOP modifier"), "got %q", p.Errors()[0])
 	})
 }
 
@@ -1345,15 +1431,4 @@ func orEmpty(errs []string) []string {
 		return []string{}
 	}
 	return errs
-}
-
-func parseOK(t *testing.T, input string) (*resonator.Resonator, error) {
-	t.Helper()
-	l := lexer.New(input)
-	p := parser.New(l)
-	res := p.ParseEvent()
-	if len(p.Errors()) != 0 {
-		return res, fmt.Errorf("%s", strings.Join(p.Errors(), " : "))
-	}
-	return res, nil
 }

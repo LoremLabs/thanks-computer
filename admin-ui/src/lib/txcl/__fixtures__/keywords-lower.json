@@ -1,6 +1,6 @@
 {
   "name": "keywords-lower",
-  "input": "select as default with when priority exec emit set return null fn let if else true false",
+  "input": "select as default with when priority exec emit set loop until return null fn let if else true false",
   "tokens": [
     {
       "type": "SELECT",
@@ -37,6 +37,14 @@
     {
       "type": "SET",
       "literal": "set"
+    },
+    {
+      "type": "LOOP",
+      "literal": "loop"
+    },
+    {
+      "type": "UNTIL",
+      "literal": "until"
     },
     {
       "type": "RETURN",

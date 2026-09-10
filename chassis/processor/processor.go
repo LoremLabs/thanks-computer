@@ -655,6 +655,11 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	// would need lazy "promote all in flight" semantics that aren't yet
 	// needed. Checked BEFORE scopeHasAsync because a continuable op is
 	// not classified as async (different mode value).
+	// A looping op belongs to the in-request path below; one whose
+	// resolved mode would send it through the async or continuable paths
+	// is dropped here, loudly, before classification.
+	ops = pu.dropLoopsOutsideRequest(ctx, ops)
+
 	if pu.Runs != nil && len(ops) > 0 {
 		var continuableCount int
 		for i := range ops {
@@ -693,6 +698,13 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	// run them
 	var wg sync.WaitGroup
 	responses := make(chan *operation.Operation)
+	// loopHalt is closed when a merged response at this stage carries
+	// _txc.halt: looping ops (LOOP clause) watch it and stop at once
+	// rather than finishing their passes — the stage's outcome is
+	// decided. Single-shot ops are untouched, and a sibling's goto does
+	// not close it (a goto is a later part of the stage lifecycle).
+	loopHalt := make(chan struct{})
+	var loopHaltOnce sync.Once
 	// errCh carries a fatal op error that must HALT the request (currently
 	// compute:// ops — a thrown compute is a bug, not best-effort). Buffered
 	// so the first failer never blocks; later failers drop (first error wins).
@@ -778,6 +790,14 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					timeout = aiTimeout
 				}
 			}
+			// A LOOP clause bounds its whole loop with this one timeout,
+			// so the 5s general default is too tight for a poll; same
+			// boring extension as the ai:// default. WITH timeout wins.
+			if op.Resonator != nil && op.Resonator.Loop != nil {
+				if loopTimeout, err := time.ParseDuration(pu.Conf.LoopTimeout); err == nil {
+					timeout = loopTimeout
+				}
+			}
 			if val := gjson.Get(op.Meta, "timeout"); val.Exists() {
 				switch val.Type {
 				case gjson.Number:
@@ -831,25 +851,18 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 
 			// exec function
 			if op.Resonator != nil {
-				// The repeat_* WITH keys are chassis directives, never op
-				// parameters: strip them before any dispatch so a stray
-				// repeat_max on an ordinary op never reaches a handler.
-				var repeatMax int64
-				var hasRepeatMax, hasRepeatBudget bool
-				op.Meta, repeatMax, hasRepeatMax, hasRepeatBudget = repeatDirectives(op.Meta)
-
-				// Repeating op (WITH repeat_until). The loop runner owns
-				// dispatch, accumulation and the single trace step, and
-				// hands back ONE payload — the scope merge sees this op
-				// exactly once, so the scope cannot advance mid-loop. A
-				// rejected loop (no usable repeat_max, non-txco EXEC) is
-				// dropped from the merge like the timeout ceiling above.
-				if op.Resonator.RepeatUntil != nil {
-					if !pu.repeatAdmit(op, repeatMax, hasRepeatMax, hasRepeatBudget) {
+				// Looping op (LOOP clause). The loop runner owns dispatch,
+				// accumulation and the single trace step, and hands back
+				// ONE payload — the scope merge sees this op exactly once,
+				// so the scope cannot advance mid-loop. A rejected loop
+				// is dropped from the merge like the timeout ceiling above.
+				if op.Resonator.Loop != nil {
+					max, ok := pu.loopAdmit(op)
+					if !ok {
 						wg.Done()
 						return
 					}
-					pu.runRepeat(ctx, &op, repeatMax)
+					pu.runLoop(ctx, &op, max, loopHalt)
 					responses <- &op
 					return
 				}
@@ -964,6 +977,12 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 
 				if err != nil {
 					pu.Logger.Warn("merge-err", zap.String("err", err.Error()))
+				}
+				// Same truthiness test advanceAfterScope applies to the
+				// merged envelope, applied per response so a loop still
+				// running learns the stage is decided.
+				if gjson.Get(op.Output, "_txc.halt").Bool() {
+					loopHaltOnce.Do(func() { close(loopHalt) })
 				}
 			}
 			// fmt.Println("merged\n" + resp + "\n")
@@ -2660,7 +2679,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 	// returns are swallowed; the next Run entry catches the overshoot
 	// and emits a structured exhaustion error there. (A repeating op
 	// probes the ceiling between passes — fuelExceeded — so a loop
-	// stops at the overshoot instead of running to repeat_max.)
+	// stops at the overshoot instead of running to MAX.)
 	if opName != "" {
 		_ = addFuel(ctx, fuelCostExec, op.Stack+"/"+strconv.Itoa(op.Scope))
 	}

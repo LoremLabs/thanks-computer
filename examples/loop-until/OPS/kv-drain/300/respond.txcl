@@ -4,6 +4,6 @@
 # the web inlet renders the envelope minus `_`-keys as JSON.
 WHEN ._page.count != null
   EMIT .keys = ._page.keys,
-       .loop = @runtime.repeat.drain,
+       .loop = @runtime.loop.drain,
        @web.res.status = 200,
        @halt = true

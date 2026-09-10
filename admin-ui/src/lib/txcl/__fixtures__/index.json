@@ -4,6 +4,7 @@
   "comments-only.json",
   "keywords-upper.json",
   "keywords-lower.json",
+  "loop-clause.json",
   "operators.json",
   "match-and-regex.json",
   "when-star.json",

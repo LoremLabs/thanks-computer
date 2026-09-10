@@ -62,6 +62,8 @@ export const TokenType = {
     PRIORITY: 'PRIORITY',
     EXEC: 'EXEC',
     EMIT: 'EMIT',
+    LOOP: 'LOOP',
+    UNTIL: 'UNTIL',
 
     // Filtering / context-sensitive
     BRANCH: 'BRANCH',
@@ -114,6 +116,10 @@ export const keywords: Record<string, TokenType> = {
     EXEC: TokenType.EXEC,
     emit: TokenType.EMIT,
     EMIT: TokenType.EMIT,
+    loop: TokenType.LOOP,
+    LOOP: TokenType.LOOP,
+    until: TokenType.UNTIL,
+    UNTIL: TokenType.UNTIL,
     set: TokenType.SET,
     SET: TokenType.SET,
     null: TokenType.NULL,

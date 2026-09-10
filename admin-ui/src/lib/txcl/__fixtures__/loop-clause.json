@@ -1,0 +1,70 @@
+{
+  "name": "loop-clause",
+  "input": "EXEC \"txco://kv/list\" LOOP EVERY \"2ms\" SET .cursor = ._p.next UNTIL ._p.next == \"\" MAX 50",
+  "tokens": [
+    {
+      "type": "EXEC",
+      "literal": "EXEC"
+    },
+    {
+      "type": "STRING",
+      "literal": "txco://kv/list"
+    },
+    {
+      "type": "LOOP",
+      "literal": "LOOP"
+    },
+    {
+      "type": "IDENT",
+      "literal": "EVERY"
+    },
+    {
+      "type": "STRING",
+      "literal": "2ms"
+    },
+    {
+      "type": "SET",
+      "literal": "SET"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".cursor"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "BRANCH",
+      "literal": "._p.next"
+    },
+    {
+      "type": "UNTIL",
+      "literal": "UNTIL"
+    },
+    {
+      "type": "BRANCH",
+      "literal": "._p.next"
+    },
+    {
+      "type": "==",
+      "literal": "=="
+    },
+    {
+      "type": "STRING",
+      "literal": ""
+    },
+    {
+      "type": "IDENT",
+      "literal": "MAX"
+    },
+    {
+      "type": "INT",
+      "literal": "50"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

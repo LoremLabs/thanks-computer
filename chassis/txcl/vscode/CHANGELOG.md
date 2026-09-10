@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- `LOOP` clause: `LOOP` and `UNTIL` keywords, plus `EVERY` and `MAX`
+  highlighted as keywords (they are contextual words inside a LOOP in
+  the chassis parser, so a `WITH max = …` key is unaffected by the
+  language, but the grammar colors them everywhere for simplicity).
+- Snippets: `loop` (drain a cursor inside one op) and `poll` (call an
+  endpoint until it says done).
+
 ## 0.1.2
 
 - Marketplace listing polish: concise README, marketplace icon, Snippets

@@ -52,5 +52,25 @@
       "$0"
     ],
     "description": "Match an inbound LMTP delivery (recipient + subject) and accept it"
+  },
+  "LOOP drain (cursor inside one op)": {
+    "prefix": "loop",
+    "body": [
+      "EXEC \"${1:txco://kv/list}\"",
+      "  WITH after = ${2:._page.next}, into = \"${3:_page}\"",
+      "LOOP EVERY \"${4:2ms}\" UNTIL ${5:._page.next == \"\"} MAX ${6:50}",
+      "$0"
+    ],
+    "description": "Re-run one op until a predicate holds, merging every pass into one payload"
+  },
+  "LOOP poll (until an endpoint says done)": {
+    "prefix": "poll",
+    "body": [
+      "EXEC \"${1:https://api.example.com/jobs/42}\"",
+      "  WITH method = \"GET\", timeout = \"${2:60s}\"",
+      "LOOP EVERY \"${3:2s}\" UNTIL ${4:.status == \"done\"} MAX ${5:30}",
+      "$0"
+    ],
+    "description": "Call an endpoint every few seconds until its response satisfies UNTIL"
   }
 }

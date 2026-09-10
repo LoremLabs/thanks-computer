@@ -37,18 +37,31 @@ import { keywords, TokenType } from './tokens'
 //  - `inString`: a `"..."` literal that wasn't closed before EOL. The
 //    Go lexer's readString consumes raw newlines until the closing
 //    quote, so multi-line strings are legal. We mirror that.
+//  - `inLoop`: true from a LOOP keyword until the next clause keyword.
+//    EVERY and MAX are contextual words in the Go parser (identifiers
+//    that mean something only inside a LOOP clause), so they are
+//    highlighted as keywords only there — `WITH max = 5` stays a plain
+//    key.
 interface State {
     lastType: string | null
     inString: boolean
+    inLoop: boolean
 }
 
 function startState(): State {
-    return { lastType: null, inString: false }
+    return { lastType: null, inString: false, inLoop: false }
 }
 
 function copyState(s: State): State {
-    return { lastType: s.lastType, inString: s.inString }
+    return { lastType: s.lastType, inString: s.inString, inLoop: s.inLoop }
 }
+
+// Clause keywords that end a LOOP clause's contextual-word window. SET
+// is deliberately absent: after LOOP it is the loop's own SET modifier.
+const LOOP_ENDERS = new Set<string>([
+    TokenType.WHEN, TokenType.SELECT, TokenType.WITH, TokenType.PRIORITY,
+    TokenType.EXEC, TokenType.EMIT,
+])
 
 // Tag names map directly to @lezer/highlight tags via the theme's
 // HighlightStyle (see ./theme.ts). Keeping the names as opaque
@@ -329,7 +342,16 @@ function readIdentifier(stream: StringStream, state: State, first: string): stri
             state.lastType = kw
             return TAG.null
         }
+        if (kw === TokenType.LOOP) {
+            state.inLoop = true
+        } else if (LOOP_ENDERS.has(kw)) {
+            state.inLoop = false
+        }
         state.lastType = kw
+        return TAG.keyword
+    }
+    if (state.inLoop && /^(every|max)$/i.test(lit)) {
+        state.lastType = TokenType.IDENT
         return TAG.keyword
     }
     state.lastType = TokenType.IDENT

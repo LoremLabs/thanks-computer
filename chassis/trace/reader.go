@@ -64,7 +64,7 @@ type Step struct {
 	Out             any
 
 	// Passes / StopReason: set only for a step that repeated inside its
-	// dispatch (WITH repeat_until); see StepInfo.
+	// dispatch (a LOOP clause); see StepInfo.
 	Passes     int
 	StopReason string
 }

@@ -118,7 +118,7 @@ type StepInfo struct {
 	OutputBytes int
 
 	// Passes / StopReason describe an op that repeated inside its
-	// dispatch (`WITH repeat_until`). The step spans every pass —
+	// dispatch (a LOOP clause). The step spans every pass —
 	// StartedAt is the first dispatch, FinishedAt the last, Output the
 	// accumulated contribution — and Passes counts them. StopReason is
 	// why the loop ended: done, max, fuel, timeout, or error. Zero /

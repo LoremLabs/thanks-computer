@@ -84,11 +84,17 @@ EXEC "mcp+https://mcp.deepwiki.com/mcp#ask_question" WITH timeout = "60s", debug
 	},
 	{
 		name:  "keywords-upper",
-		input: "SELECT AS DEFAULT WITH WHEN PRIORITY EXEC EMIT SET RETURN NULL",
+		input: "SELECT AS DEFAULT WITH WHEN PRIORITY EXEC EMIT SET LOOP UNTIL RETURN NULL",
 	},
 	{
 		name:  "keywords-lower",
-		input: "select as default with when priority exec emit set return null fn let if else true false",
+		input: "select as default with when priority exec emit set loop until return null fn let if else true false",
+	},
+	{
+		// EVERY and MAX are contextual words inside LOOP, not keywords:
+		// they must lex as identifiers so `WITH max = 5` keeps working.
+		name:  "loop-clause",
+		input: `EXEC "txco://kv/list" LOOP EVERY "2ms" SET .cursor = ._p.next UNTIL ._p.next == "" MAX 50`,
 	},
 	{
 		name:  "operators",

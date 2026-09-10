@@ -508,7 +508,7 @@ export interface TraceStep {
     output_truncated?: boolean
     error?: string
     // Set only for an op that repeated inside its dispatch (WITH
-    // repeat_until): the pass count and why the loop stopped
+    // LOOP clause): the pass count and why the loop stopped
     // (done | max | fuel | timeout | error).
     passes?: number
     stop_reason?: string

@@ -8,6 +8,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/runtime"
+	"time"
 )
 
 type MatchType string
@@ -124,12 +125,32 @@ type Resonator struct {
 	// real HTTP/handler call: pair with EXEC for "enrich the
 	// response", or write EMIT alone for a "synthetic emitter".
 	Emit *Set `json:"emit,omitempty"`
-	// RepeatUntil is the `WITH repeat_until = <predicate>` directive:
-	// a WHEN-shaped expression the processor evaluates after each
-	// pass of a repeating op against the accumulated view. nil means
-	// the op runs once. The predicate is parsed by the WHEN grammar
-	// (path-vs-literal only) and is never forwarded to the op.
-	RepeatUntil *WhenExpr `json:"repeatUntil,omitempty"`
+	// Loop is the LOOP clause: re-run this rule's EXEC inside one
+	// dispatch until Until holds. nil means the op runs once.
+	Loop *Loop `json:"loop,omitempty"`
+}
+
+// Loop is the parsed `LOOP [EVERY <duration>] [SET …] UNTIL <predicate>
+// [MAX <n>]` clause. The processor re-executes the rule's EXEC inside
+// its dispatch goroutine, merging each pass locally and handing the
+// scope one payload, until Until holds against the accumulated view
+// or a budget runs out.
+type Loop struct {
+	// Until is the exit predicate, WHEN's grammar exactly (path-vs-
+	// literal only, comma is AND), evaluated after every pass.
+	Until *WhenExpr `json:"until,omitempty"`
+	// Max is the pass ceiling. 0 means the chassis default (10); the
+	// chassis also caps it with --op-loop-max.
+	Max int64 `json:"max,omitempty"`
+	// Every is the pause between passes. 0 means the chassis default
+	// (50ms); the chassis floors it at 2ms. Checked after Until, so
+	// the last pass never pays it.
+	Every time.Duration `json:"every,omitempty"`
+	// Set is applied before every repeat (never before the first
+	// pass): resolved against the accumulated view and written onto
+	// the op's input and the view. Same value forms as SET. This is
+	// how a pass feeds a cursor or counter to the next one.
+	Set []BranchValue `json:"set,omitempty"`
 }
 
 const (
@@ -141,6 +162,7 @@ const (
 	PRIORITY PhraseType = "PRIORITY"
 	EXEC     PhraseType = "EXEC"
 	EMIT     PhraseType = "EMIT"
+	LOOP     PhraseType = "LOOP"
 )
 
 type Phrase struct {
@@ -153,8 +175,7 @@ type Phrase struct {
 	Priority int64                `json:"priority"`
 	Exec     string               `json:"exec,omitempty"`
 	Emit     *Set                 `json:"emit,omitempty"`
-	// RepeatUntil rides the WITH phrase (see Resonator.RepeatUntil).
-	RepeatUntil *WhenExpr `json:"repeatUntil,omitempty"`
+	Loop     *Loop                `json:"loop,omitempty"`
 }
 
 func New() *Resonator {
@@ -212,9 +233,9 @@ func (res Resonator) WhenMatches(input string) bool {
 // Matches evaluates a standalone expression tree against the input
 // envelope. Unlike WhenMatches it carries none of the WHEN-clause
 // conveniences (empty input never matches, nil When matches all):
-// the caller owns those decisions. Used for `WITH repeat_until`,
-// where the processor evaluates the predicate against the view it
-// accumulated across passes.
+// the caller owns those decisions. Used for LOOP … UNTIL, where the
+// processor evaluates the predicate against the view it accumulated
+// across passes.
 func (e *WhenExpr) Matches(input string) bool {
 	return evalExpr(e, input)
 }
