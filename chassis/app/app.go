@@ -45,6 +45,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/server"
 	"github.com/loremlabs/thanks-computer/chassis/snapshot"
+	chsource "github.com/loremlabs/thanks-computer/chassis/source"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
 	dbschemas "github.com/loremlabs/thanks-computer/db"
 )
@@ -344,6 +345,14 @@ func Run(bi BuildInfo) int {
 			zap.String("personalities", conf.Personalities))
 	}
 
+	// Source-watcher store: the tenant_sources table lives IN the shared
+	// runtime DB (its cursor/claim must go where the authoritative writes go),
+	// so this is just a façade over runtimeDB — no separate DSN, no backend
+	// registry. Built unconditionally: the SOURCES/ materializer reconciles it
+	// on the admin (activation-origin) node even where the 'source' poller
+	// personality is not running.
+	sourceStore := chsource.NewStore(runtimeDB, runtimeDialect)
+
 	// IMAP mailbox index — the durable store the `imap` personality serves
 	// and txco://imap/* write to. Own file (never the runtime DB: the
 	// dbcache watcher reloads the mirror on every runtime-file write, and a
@@ -556,7 +565,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, imapStore, calendarStore, contactsStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)

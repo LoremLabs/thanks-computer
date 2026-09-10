@@ -1,0 +1,40 @@
+{
+  "note": "Remote-source inlet: a SOURCES/ pack declares an IMAP mailbox to watch; each new message becomes a run of watch-mailbox/_source/0, which records it (deduped by @source.key), and the poller then moves it to Processed. The full poll loop needs the source personality AND a mailbox password in the secret store, so it is a MANUAL run (see the README) — like inbound-support-mailbox, whose real exercise is also out-of-band. The automated checks here cover the HTTP surface that stands on its own: POST /seed provisions the local watched account (via --imap) and drops a message in, and GET /received lists what the source has pulled (0 until you run --source with the secret set). Baseline `apply --dry-run` proves the SOURCES/ pack, the _source stack, and the seed/received ops all parse and carry through apply.",
+  "dev_flags": [
+    "--imap"
+  ],
+  "bind": [
+    {
+      "host": "pony.local.thanks.computer",
+      "stack": "watch-mailbox"
+    }
+  ],
+  "checks": [
+    {
+      "name": "seed provisions the watched account and appends a message",
+      "method": "POST",
+      "host": "pony.local.thanks.computer",
+      "path": "/seed",
+      "status": 200,
+      "contains": "\"seeded\":true",
+      "body": "{\"password\":\"correct-horse-battery\"}"
+    },
+    {
+      "name": "seed without a password is a 400 before any op runs",
+      "method": "POST",
+      "host": "pony.local.thanks.computer",
+      "path": "/seed",
+      "status": 400,
+      "contains": "missing_password",
+      "body": "{}"
+    },
+    {
+      "name": "received lists what the source has pulled (empty without --source)",
+      "method": "GET",
+      "host": "pony.local.thanks.computer",
+      "path": "/received",
+      "status": 200,
+      "contains": "\"received\":"
+    }
+  ]
+}

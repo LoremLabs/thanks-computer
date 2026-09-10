@@ -1,0 +1,384 @@
+package mail
+
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+
+	"github.com/tidwall/gjson"
+)
+
+// crlf normalizes the LF line endings of a Go raw-string literal to
+// the CRLF that RFC 5322 + MIME parsers expect. Headers in particular
+// are sensitive — a parser may discard a header that follows a bare
+// LF or refuse to split a multipart body that lacks CRLF before the
+// boundary marker.
+func crlf(s string) string {
+	return strings.ReplaceAll(s, "\n", "\r\n")
+}
+
+const fixturePlainText = `From: Alice <alice@example.com>
+To: support@your.tenant
+Subject: wifi keeps dropping
+Date: Mon, 25 May 2026 14:00:00 +0000
+Message-ID: <pt-1@mail.example.com>
+Content-Type: text/plain; charset=utf-8
+
+Hi support,
+
+My wifi keeps dropping every ~10 minutes. Help!
+
+— Alice
+`
+
+const fixtureMultipartAlt = `From: Bob <bob@example.com>
+To: support@your.tenant
+Subject: =?UTF-8?B?cMOhc3N3b3JkIHJlc2V0?=
+Date: Mon, 25 May 2026 15:00:00 +0000
+Message-ID: <ma-1@mail.example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="bdy42"
+
+--bdy42
+Content-Type: text/plain; charset=utf-8
+
+Please reset my password.
+
+--bdy42
+Content-Type: text/html; charset=utf-8
+
+<p>Please reset my <b>password</b>.</p>
+
+--bdy42--
+`
+
+const fixtureWithAttachment = `From: Carol <carol@example.com>
+To: support@your.tenant
+Subject: log file attached
+Date: Mon, 25 May 2026 16:00:00 +0000
+Message-ID: <wa-1@mail.example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mxd99"
+
+--mxd99
+Content-Type: text/plain; charset=utf-8
+
+See attached.
+
+--mxd99
+Content-Type: text/plain; charset=utf-8; name="error.log"
+Content-Disposition: attachment; filename="error.log"
+Content-Transfer-Encoding: base64
+
+aGVsbG8gd29ybGQK
+
+--mxd99--
+`
+
+const fixtureNoSubject = `From: Dan <dan@example.com>
+To: support@your.tenant
+Date: Mon, 25 May 2026 17:00:00 +0000
+Message-ID: <ns-1@mail.example.com>
+Content-Type: text/plain; charset=utf-8
+
+(no subject — happens with some clients)
+`
+
+const fixtureMultiReceived = `From: Eve <eve@example.com>
+To: support@your.tenant
+Subject: hello
+Date: Mon, 25 May 2026 18:00:00 +0000
+Message-ID: <mr-1@mail.example.com>
+Received: from a.example.com (a.example.com [10.0.0.1]) by mx.your.tenant; Mon, 25 May 2026 18:00:01 +0000
+Received: from b.example.com (b.example.com [10.0.0.2]) by a.example.com; Mon, 25 May 2026 18:00:00 +0000
+Authentication-Results: mx.your.tenant; spf=pass; dkim=pass
+Content-Type: text/plain; charset=utf-8
+
+hi
+`
+
+func TestParseMessage_PlainText(t *testing.T) {
+	out, err := ParseMessage([]byte(crlf(fixturePlainText)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := gjson.Get(out, "subject").String(); got != "wifi keeps dropping" {
+		t.Errorf("subject = %q", got)
+	}
+	if got := gjson.Get(out, "id").String(); got != "<pt-1@mail.example.com>" {
+		t.Errorf("id = %q", got)
+	}
+	if got := gjson.Get(out, "date").String(); got != "2026-05-25T14:00:00Z" {
+		t.Errorf("date = %q (want RFC3339 UTC)", got)
+	}
+	if got := gjson.Get(out, "from.0.addr").String(); got != "alice@example.com" {
+		t.Errorf("from.0.addr = %q", got)
+	}
+	if got := gjson.Get(out, "from.0.name").String(); got != "Alice" {
+		t.Errorf("from.0.name = %q", got)
+	}
+	if got := gjson.Get(out, "to.0.addr").String(); got != "support@your.tenant" {
+		t.Errorf("to.0.addr = %q", got)
+	}
+	if got := gjson.Get(out, "text").String(); !strings.Contains(got, "My wifi keeps dropping") {
+		t.Errorf("text missing body: %q", got)
+	}
+	// No HTML part on a plain-text message.
+	if got := gjson.Get(out, "html").String(); got != "" {
+		t.Errorf("html unexpectedly populated: %q", got)
+	}
+	// Headers always present.
+	if got := gjson.Get(out, "headers.subject.0").String(); got == "" {
+		t.Errorf("headers.subject.0 missing")
+	}
+	// No attachments — field omitted entirely.
+	if gjson.Get(out, "attachments").Exists() {
+		t.Errorf("attachments unexpectedly present")
+	}
+}
+
+func TestParseMessage_MultipartAlt(t *testing.T) {
+	out, err := ParseMessage([]byte(crlf(fixtureMultipartAlt)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// RFC 2047 encoded Subject decodes to "pássword reset".
+	if got := gjson.Get(out, "subject").String(); got != "pássword reset" {
+		t.Errorf("subject = %q (want decoded UTF-8)", got)
+	}
+	if got := gjson.Get(out, "text").String(); !strings.Contains(got, "Please reset my password") {
+		t.Errorf("text part missing: %q", got)
+	}
+	if got := gjson.Get(out, "html").String(); !strings.Contains(got, "<b>password</b>") {
+		t.Errorf("html part missing: %q", got)
+	}
+}
+
+func TestParseMessage_WithAttachment(t *testing.T) {
+	out, err := ParseMessage([]byte(crlf(fixtureWithAttachment)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	atts := gjson.Get(out, "attachments").Array()
+	if len(atts) != 1 {
+		t.Fatalf("attachments len = %d, want 1", len(atts))
+	}
+	a := atts[0]
+	if got := a.Get("name").String(); got != "error.log" {
+		t.Errorf("attachment name = %q", got)
+	}
+	if got := a.Get("type").String(); !strings.HasPrefix(got, "text/plain") {
+		t.Errorf("attachment type = %q", got)
+	}
+	if got := a.Get("size").Int(); got == 0 {
+		t.Errorf("attachment size = 0")
+	}
+	if got := a.Get("sha256").String(); len(got) != 64 {
+		t.Errorf("attachment sha256 = %q (want 64 hex chars)", got)
+	}
+	// Content is b64 — decode and verify it round-trips to the
+	// original "hello world\n".
+	enc := a.Get("content").String()
+	dec, derr := base64.StdEncoding.DecodeString(enc)
+	if derr != nil {
+		t.Fatalf("attachment content b64 decode: %v", derr)
+	}
+	if string(dec) != "hello world\n" {
+		t.Errorf("attachment content = %q, want %q", string(dec), "hello world\n")
+	}
+}
+
+func TestParseMessage_NoSubject(t *testing.T) {
+	out, err := ParseMessage([]byte(crlf(fixtureNoSubject)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// Subject is absent — field omitted entirely (NOT set to "").
+	// Rules that test `.lmtp.msg.subject != ""` need this to be
+	// distinguishable from the present-but-empty case.
+	if gjson.Get(out, "subject").Exists() {
+		t.Errorf("subject unexpectedly present on no-subject message")
+	}
+	// But other parsed fields still work.
+	if got := gjson.Get(out, "from.0.name").String(); got != "Dan" {
+		t.Errorf("from.0.name = %q", got)
+	}
+	if got := gjson.Get(out, "text").String(); !strings.Contains(got, "no subject") {
+		t.Errorf("text body missing: %q", got)
+	}
+}
+
+func TestParseMessage_MultiValuedHeaders(t *testing.T) {
+	out, err := ParseMessage([]byte(crlf(fixtureMultiReceived)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	rcv := gjson.Get(out, "headers.received").Array()
+	if len(rcv) != 2 {
+		t.Fatalf("headers.received len = %d, want 2", len(rcv))
+	}
+	if !strings.Contains(rcv[0].String(), "a.example.com") {
+		t.Errorf("received[0] = %q", rcv[0].String())
+	}
+	if !strings.Contains(rcv[1].String(), "b.example.com") {
+		t.Errorf("received[1] = %q", rcv[1].String())
+	}
+	if got := gjson.Get(out, "headers.authentication-results.0").String(); got == "" {
+		t.Errorf("authentication-results header missing")
+	}
+}
+
+// TestParseMessage_Roundtrip exercises the always-safe-escape-hatch
+// contract: the structured `msg.*` fields are derived from
+// `msg.raw`, so re-parsing raw must yield equal structured output.
+// Detects accidental mutation in the parse pipeline.
+func TestParseMessage_Roundtrip(t *testing.T) {
+	for _, fx := range []struct {
+		name string
+		body string
+	}{
+		{"plain", fixturePlainText},
+		{"multipart", fixtureMultipartAlt},
+		{"attachment", fixtureWithAttachment},
+		{"no_subject", fixtureNoSubject},
+		{"multi_received", fixtureMultiReceived},
+	} {
+		t.Run(fx.name, func(t *testing.T) {
+			raw := []byte(crlf(fx.body))
+			first, err := ParseMessage(raw)
+			if err != nil {
+				t.Fatalf("first parse: %v", err)
+			}
+			second, err := ParseMessage(raw)
+			if err != nil {
+				t.Fatalf("second parse: %v", err)
+			}
+			if first != second {
+				t.Errorf("non-deterministic parse:\nfirst:  %s\nsecond: %s", first, second)
+			}
+		})
+	}
+}
+
+// TestParseMessage_Empty asserts the degenerate case doesn't panic
+// and returns an empty-ish JSON object that the caller can SetRaw
+// safely.
+func TestParseMessage_Empty(t *testing.T) {
+	out, err := ParseMessage([]byte{})
+	if err != nil {
+		// enmime accepts an empty reader; this branch exists to
+		// document the alternative rather than to require it.
+		t.Logf("empty parse returned err (acceptable): %v", err)
+		return
+	}
+	if !gjson.Valid(out) {
+		t.Errorf("empty parse produced invalid JSON: %q", out)
+	}
+}
+
+const fixtureCalendarReply = `From: Bob <bob@example.com>
+To: paris@core.example
+Subject: Accepted: 30-minute call
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+Bob has accepted.
+--b1
+Content-Type: text/calendar; charset=utf-8; method=REPLY
+
+BEGIN:VCALENDAR
+VERSION:2.0
+METHOD:REPLY
+BEGIN:VEVENT
+UID:0192aa.paris@core.example
+ATTENDEE;CN=Bob;PARTSTAT=ACCEPTED:mailto:bob@example.com
+DTSTAMP:20260910T091244Z
+END:VEVENT
+END:VCALENDAR
+--b1--
+`
+
+func TestParseMessage_CalendarReply(t *testing.T) {
+	out, err := ParseMessage([]byte(crlf(fixtureCalendarReply)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := gjson.Get(out, "calendar.method").String(); got != "REPLY" {
+		t.Errorf("calendar.method = %q, want REPLY (out=%s)", got, out)
+	}
+	if got := gjson.Get(out, "calendar.uid").String(); got != "0192aa.paris@core.example" {
+		t.Errorf("calendar.uid = %q", got)
+	}
+	if got := gjson.Get(out, "calendar.partstat").String(); got != "ACCEPTED" {
+		t.Errorf("calendar.partstat = %q", got)
+	}
+	if got := gjson.Get(out, "calendar.attendee").String(); got != "bob@example.com" {
+		t.Errorf("calendar.attendee = %q", got)
+	}
+	// A COUNTER carries the proposed time: UTC, TZID-local and all-day forms
+	// all land as RFC3339 UTC.
+	out, err = ParseMessage([]byte(crlf(fixtureCalendarCounter)))
+	if err != nil {
+		t.Fatalf("parse counter: %v", err)
+	}
+	if got := gjson.Get(out, "calendar.method").String(); got != "COUNTER" {
+		t.Errorf("counter method = %q", got)
+	}
+	if got := gjson.Get(out, "calendar.start").String(); got != "2026-09-09T12:00:00Z" {
+		t.Errorf("counter start = %q (want the Paris 14:00 as UTC)", got)
+	}
+	if got := gjson.Get(out, "calendar.end").String(); got != "2026-09-09T12:30:00Z" {
+		t.Errorf("counter end = %q", got)
+	}
+	if got := gjson.Get(out, "calendar.sequence").Int(); got != 2 {
+		t.Errorf("counter sequence = %d", got)
+	}
+	for line, want := range map[string]string{
+		"DTSTART:20260909T120000Z":                    "2026-09-09T12:00:00Z",
+		"DTSTART;VALUE=DATE:20260909":                 "2026-09-09T00:00:00Z",
+		"DTEND;TZID=America/New_York:20260909T080000": "2026-09-09T12:00:00Z",
+		"DTSTART:garbage":                             "",
+	} {
+		if got := icalWhen(line); got != want {
+			t.Errorf("icalWhen(%q) = %q, want %q", line, got, want)
+		}
+	}
+	// A message with no calendar part carries no `calendar` key at all — the
+	// rule's `@lmtp.msg.calendar.method == "REPLY"` must not match.
+	out, err = ParseMessage([]byte(crlf(fixtureMultipartAlt)))
+	if err != nil {
+		t.Fatalf("parse plain: %v", err)
+	}
+	if gjson.Get(out, "calendar").Exists() {
+		t.Errorf("plain message should have no calendar: %s", out)
+	}
+}
+
+const fixtureCalendarCounter = `From: Matt <matt@example.com>
+To: paris@core.example
+Subject: Proposed new time: 30-minute call
+Content-Type: multipart/mixed; boundary="m1"
+
+--m1
+Content-Type: text/plain; charset=utf-8
+
+Matt proposed a new time.
+--m1
+Content-Type: application/ics; name="invite.ics"
+Content-Disposition: attachment; filename="invite.ics"
+
+BEGIN:VCALENDAR
+VERSION:2.0
+METHOD:COUNTER
+BEGIN:VEVENT
+DTSTART;TZID=Europe/Paris:20260909T140000
+DTEND;TZID=Europe/Paris:20260909T143000
+UID:0192aa.paris@core.example
+SEQUENCE:2
+ATTENDEE;CN=Matt;PARTSTAT=ACCEPTED:mailto:matt@example.com
+END:VEVENT
+END:VCALENDAR
+--m1--
+`

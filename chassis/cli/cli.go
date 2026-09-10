@@ -180,6 +180,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// `txco kv list subscribers`). Lives in the auth package to reuse
 		// its signed-target/profile/tenant resolution.
 		return auth.RunKV(rest, stdout, stderr), true
+	case "source", "sources":
+		// Read-only status of remote-source watchers (`txco source status`).
+		// Declaration lives in OPS SOURCES/ packs; this only reports state.
+		return auth.RunSources(rest, stdout, stderr), true
 	case "data":
 		return runData(rest, stdout, stderr), true
 	case "cron":

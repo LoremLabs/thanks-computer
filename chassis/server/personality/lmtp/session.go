@@ -16,6 +16,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
+	"github.com/loremlabs/thanks-computer/chassis/mail"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
 
@@ -330,7 +331,7 @@ func (s *lmtpSession) dispatchGroup(
 	lb.Set("_txc.route.to", key.stack+"/0")
 
 	// Best-effort MIME parse — same as Phase 1.
-	msgJSON, perr := parseMessage(body)
+	msgJSON, perr := mail.ParseMessage(body)
 	if perr != nil {
 		s.ctrl.pu.Logger.Warn("lmtp mime parse failed",
 			zap.String("rid", rid),

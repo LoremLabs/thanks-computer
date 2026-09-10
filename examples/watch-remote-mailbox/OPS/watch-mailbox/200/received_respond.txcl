@@ -1,0 +1,14 @@
+# GET /received — done: report the messages the source has pulled.
+#
+# ._recv is set only by the kv/list at scope 080 (GET /received), so its
+# presence distinguishes this from the /seed path sharing scope 200.
+# `received` is the count on this page; `keys` are the @source.key ids
+# ("<uidvalidity>:<uid>") of the messages recorded so far.
+WHEN ._recv.count != null
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "received", ._recv.count,
+         "keys", ._recv.keys,
+         "next_cursor", ._recv.next))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

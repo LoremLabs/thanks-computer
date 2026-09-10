@@ -1,0 +1,10 @@
+# GET /received — step 1: list what the source has pulled so far.
+#
+# The `received` namespace holds one key per message the _source stack
+# recorded (keyed by @source.key). kv/list returns that namespace's
+# keys, a page at a time — the KV namespace IS the prefix, so there is
+# no per-key scan. count + keys are the proof the watch loop ran.
+WHEN @src == "http" && @web.req.method == "GET" && @web.req.url.path == "/received"
+  EXEC "txco://kv/list"
+    WITH namespace = "received",
+         into = "._recv"

@@ -1,0 +1,31 @@
+# watch-mailbox/_source/0 — receive one pulled message.
+#
+# The source poller fires ONE run of this stack per new message it read
+# from the watched mailbox. The parsed message is at @source.msg (the
+# same shape an LMTP delivery lands at @lmtp.msg); @source.key is a
+# stable dedup id, "<uidvalidity>:<uid>".
+#
+# Delivery is AT-LEAST-ONCE: a crash between this run succeeding and the
+# poller's move re-delivers the message next poll. So record it with a
+# check-and-set keyed by @source.key and NO `expected` — a plain write
+# that lands only when the key is absent. A redelivery finds the key
+# already there (._rec.swapped == false) and changes nothing. The
+# `received` namespace buckets these so GET /received can list them
+# (kv/list returns the keys of a namespace; the key IS @source.key).
+#
+# We emit nothing to @source.res.action, so the source's declared
+# on_processed applies — the message is MOVEd to "Processed" once this
+# run reaches a successful terminal. (To send a handled and a rejected
+# message to different folders, a rule here would
+# `EMIT @source.res.action = "move:Rejected"`; valid actions are
+# move:<folder>, seen, none.)
+WHEN @source.key != ""
+  EXEC "txco://kv/cas"
+    WITH namespace = "received",
+         key = @source.key,
+         value = &object(
+           "key", @source.key,
+           "subject", @source.msg.subject,
+           "from", @source.msg.from.0.addr,
+           "fetched_at", @source.fetched_at),
+         into = "._rec"

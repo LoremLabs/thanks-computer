@@ -14,7 +14,8 @@ import (
 // help text doesn't list either. Update this allowlist (with rationale)
 // when adding a new hidden alias.
 var hiddenTopLevelCases = map[string]string{
-	// (none currently — `push` is now a first-class deploy verb)
+	// "sources" is a plural alias of the "source" command (in the tree).
+	"sources": "alias of `source`",
 }
 
 // TestCompletionTopLevelMatchesDispatchSwitch parses chassis/cli/cli.go

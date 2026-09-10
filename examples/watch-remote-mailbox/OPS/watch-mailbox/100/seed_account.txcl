@@ -1,0 +1,13 @@
+# POST /seed — step 2: provision (or update) the local account we watch.
+#
+# `desk@pony.local.thanks.computer` — the domain is dev-local and
+# auto-verified once bound to this stack (see the README's hostname
+# add), which is why txco://imap/account accepts it. Re-seeding with the
+# same password is a no-op update; a different password resets the
+# login. Creating the account creates its INBOX. This is the SAME
+# username the source's `user` field names.
+WHEN ._seed.password != ""
+  EXEC "txco://imap/account"
+    WITH username = "desk@pony.local.thanks.computer",
+         password = ._seed.password,
+         into = "_acct"

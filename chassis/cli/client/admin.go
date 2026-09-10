@@ -224,6 +224,53 @@ type KVListResponse struct {
 	Count     int      `json:"count"`
 }
 
+// SourceStatus is one row of GET /v1/tenants/{tenant}/sources — a declared
+// source watcher and its runtime poll state. No secret is ever included.
+type SourceStatus struct {
+	SourceID   string `json:"source_id"`
+	Stack      string `json:"stack"`
+	Pack       string `json:"pack"`
+	DeclaredID string `json:"declared_id"`
+	Kind       string `json:"kind"`
+	Enabled    bool   `json:"enabled"`
+	Retired    bool   `json:"retired"`
+	Status     string `json:"status"`
+	ClaimedBy  string `json:"claimed_by,omitempty"`
+	Cursor     string `json:"cursor,omitempty"`
+	NextPollAt string `json:"next_poll_at,omitempty"`
+	LastPollAt string `json:"last_poll_at,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+	Attempts   int    `json:"attempts"`
+}
+
+// ListSources returns the URL tenant's declared source watchers with runtime
+// state (read-only). Backs `txco source status`.
+func (c *Client) ListSources(ctx context.Context) ([]SourceStatus, error) {
+	endpoint := c.scopedURL("/sources")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out struct {
+		Sources []SourceStatus `json:"sources"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode sources response: %w", err)
+	}
+	return out.Sources, nil
+}
+
 // ListKV returns a windowed page of user keys under (tenant, namespace) in the
 // op-writable KV store. `after` is the resume cursor (empty = first page);
 // `limit` caps the page (0 = server default). The response's Next is the cursor

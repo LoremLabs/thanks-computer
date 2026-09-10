@@ -1,0 +1,11 @@
+target: dev
+
+# No `apps:` and no `operations:` — this example is pure txcl over
+# chassis built-ins (txco://imap/*, txco://kv/*) plus the SOURCES/ inlet
+# declaration. The IMAP head and the source poller are chassis heads,
+# turned on with `txco dev --imap --source` (see the README).
+
+targets:
+  dev:
+    chassis: http://localhost:8081
+    mock: allow

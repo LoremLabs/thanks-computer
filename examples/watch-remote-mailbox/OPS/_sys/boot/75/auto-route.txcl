@@ -1,0 +1,24 @@
+# _sys/boot scope 75 — auto-route hook (single-stack dev).
+#
+# This workspace has one app stack, `watch-mailbox`, so any HTTP request
+# that didn't already match a hostname binding routes to it. That covers
+# the two demo routes, POST /seed and GET /received, on a bare
+# `curl localhost:8080/...` with no Host header.
+#
+# The mailbox the source watches is provisioned under the domain
+# `pony.local.thanks.computer` (see the README): that hostname is bound
+# to this stack too, which is what auto-verifies the domain so
+# txco://imap/account will accept `desk@pony.local.thanks.computer`.
+# When a request DOES carry that Host, detect-tenant@0 promotes the
+# binding and this hook is a no-op (it only fires on an unrouted req).
+#
+# Production note: delete this file once you have real hostname
+# bindings; path/host gating belongs in per-tenant routing, not the
+# system bootstrap.
+WHEN @route.to == ""
+  && @src == "http"
+  EMIT @route.tenant = "default",
+       @route.stack = "watch-mailbox",
+       @route.to = "watch-mailbox/0",
+       @route.ingress = "auto-route",
+       @route.hostname_verified = true

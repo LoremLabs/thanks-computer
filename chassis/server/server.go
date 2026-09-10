@@ -78,16 +78,20 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
 	mailmapp "github.com/loremlabs/thanks-computer/chassis/server/personality/mailmap"
 	scheduledp "github.com/loremlabs/thanks-computer/chassis/server/personality/scheduled"
+	sourcep "github.com/loremlabs/thanks-computer/chassis/server/personality/source"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
 	websocketp "github.com/loremlabs/thanks-computer/chassis/server/personality/websocket"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
+	chsource "github.com/loremlabs/thanks-computer/chassis/source"
+	_ "github.com/loremlabs/thanks-computer/chassis/source/imapsource" // registers the "imap" source kind
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/blobseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/calseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/conseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/kvseed"
+	"github.com/loremlabs/thanks-computer/chassis/storeseed/srcseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/vecseed"
 	"github.com/loremlabs/thanks-computer/chassis/telemetry"
 	_ "github.com/loremlabs/thanks-computer/chassis/telemetry/log"  // registers the "log" telemetry exporter
@@ -158,11 +162,13 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.route.to", "_txc.continuation", "_txc.src",
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
-		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant")
+		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant",
+		"_txc.source.tenant", "_txc.source.stack")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
 	dnsTenant, imapTenant, calendarTenant, contactsTenant := fields[9], fields[10], fields[11], fields[12]
+	sourceTenant, sourceStack := fields[13], fields[14]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -238,6 +244,27 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "scheduled")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_scheduled/0")
+			return b.String()
+		}
+	}
+	// Remote source item. The source poller fires a fetched item, stamping the
+	// target slug in `_txc.source.tenant` and the declaring app stack in
+	// `_txc.source.stack` (both trusted: from the tenant_sources row, pinned by
+	// the SOURCES/ materializer at apply, never client input). Propose a route
+	// into that app stack's `<stack>/_source/0` — a nested channel stack like
+	// `<stack>/_mail`, so a source's handler lives beside its declaration and
+	// shares the app stack's KV namespace. Same sanctioned _sys→tenant pin as
+	// cron/scheduled; a tenant with no `_source` stack falls through to 404.
+	if src.String() == "source" {
+		st, ss := sourceTenant.String(), sourceStack.String()
+		if st != "" && ss != "" {
+			to := ss + "/_source"
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", st)
+			b.Set("_txc.route.stack", to)
+			b.Set("_txc.route.ingress", "source")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", to+"/0")
 			return b.String()
 		}
 	}
@@ -918,7 +945,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1642,6 +1669,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	if contactsStore != nil {
 		storeSeedMaterializers = append(storeSeedMaterializers, conseed.New(contactsStore, conf.ContactsStore != "sqlite"))
 	}
+	// SOURCES/ packs declare remote-source watchers into the tenant_sources
+	// runtime table. Always registered (the store is the shared runtime DB, so
+	// Shared()==true reconciles once on the activation origin — the admin
+	// node); the poller that acts on the rows is a separate personality.
+	if sourceStore != nil {
+		storeSeedMaterializers = append(storeSeedMaterializers, srcseed.New(sourceStore))
+	}
 
 	// Computed-secret core ops. These consume cleartext from
 	// op.Secrets (plumbed onto ctx by processor.ExecCore) and emit
@@ -1790,6 +1824,8 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	if verr == nil {
 		adminCtrl.SetVectorStore(vstore)
 	}
+	// Read-only `txco source status` window over the runtime source store.
+	adminCtrl.SetSourceStore(sourceStore)
 	// Cross-node room fan-out (fleet). Empty --room-relay keeps rooms in-process
 	// (single node). A relay-open failure degrades to in-process rather than
 	// crashing — room chat is best-effort, unlike trace/control.
@@ -1927,6 +1963,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	controllers := []controller{
 		cronp.NewController(ctx, pu, cq),
 		scheduledp.NewController(ctx, pu, scheduledStore),
+		// source: polls remote mailboxes (the 'source' personality). Off unless
+		// 'source' is in --personalities; shares the egress guard so a source
+		// can't be pointed at private space.
+		sourcep.NewController(ctx, pu, sourceStore, guard),
 		tcp.NewController(ctx, pu),
 		webCtrl,
 		// websocket: no listener of its own — sessions arrive through the web

@@ -51,7 +51,7 @@ const (
 // empty/whitespace names are impossible.
 //
 // '_' IS permitted, and is load-bearing: the channel convention (`_mail`,
-// `_cron`, `_llm`, `_room`, `_inspect`, `_scheduled`) and the reserved
+// `_cron`, `_llm`, `_room`, `_inspect`, `_scheduled`, `_source`) and the reserved
 // `_sys/*` namespace are built on it. But '_' is ALSO a SQL LIKE
 // single-character wildcard, so any query matching a stack name with LIKE
 // must escape it — otherwise a lookup for `_mail` also returns `email`.

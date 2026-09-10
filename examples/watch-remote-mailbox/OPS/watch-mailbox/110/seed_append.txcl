@@ -1,0 +1,19 @@
+# POST /seed — step 3: drop one fresh message into the watched INBOX.
+#
+# object_key is the request id (@rid), unique per call, so each POST
+# /seed adds a NEW message for the source to discover — while an append
+# is still idempotent within one request (a retry of the same @rid is a
+# no-op). This is a RECORD append: the chassis keeps the canonical form
+# and renders RFC 5322 when a client — here, the source — FETCHes it, so
+# the source pulls exactly the bytes any mail client would.
+# ._acct.username is set only when the account op succeeded.
+WHEN ._acct.username != ""
+  EXEC "txco://imap/append"
+    WITH username = ._acct.username,
+         object_key = @rid,
+         message = &object(
+           "from", "A correspondent <someone@example.com>",
+           "to", ._acct.username,
+           "subject", &concat("Watch me — ", @rid),
+           "text", "Dropped into the watched mailbox by POST /seed.\n\nThe source inlet dials in over IMAP, reads this past its durable cursor, fires a watch-mailbox/_source/0 run, and — once that run succeeds — moves this message to the Processed folder.\n"),
+         into = "_msg"

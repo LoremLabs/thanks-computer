@@ -1,0 +1,18 @@
+# POST /seed — step 1: parse the request.
+#
+# /seed exists ONLY to make this example self-contained: it provisions a
+# LOCAL IMAP account (served by `txco dev --imap` on 127.0.0.1:1143) and
+# drops a message into its INBOX, so the source has a real mailbox to
+# watch without a third-party provider. In a real deployment the mailbox
+# is Fastmail/Gmail/Dovecot and there is no /seed — you only declare the
+# source and store its password.
+#
+# Body is JSON {"password": "..."}. That password becomes the account's
+# login, so it MUST equal the value you stored in the secret the source
+# references (PONY_MAILBOX) — that is the whole point: the source logs in
+# with the secret, so the account it logs into must share the password.
+# The web inlet base64-encodes the body at @web.req.body; decode + parse
+# it, and mark that a seed request is in flight.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/seed"
+  EMIT ._seed = &try_json(&b64decode(@web.req.body)),
+       ._seed_req = true

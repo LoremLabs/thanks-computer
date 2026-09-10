@@ -1,0 +1,1 @@
+{"id":"watched","kind":"imap","host":"127.0.0.1","port":1143,"tls":"none","user":"desk@pony.local.thanks.computer","secret":"PONY_MAILBOX","mailbox":"INBOX","every":"10s","on_processed":"move:Processed"}

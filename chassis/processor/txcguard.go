@@ -30,6 +30,7 @@ var authorWritableTxcPaths = []string{
 	"lmtp.res",     // the SMTP verdict
 	"dns.res",      // the DNS answer for a stack-answered zone (rcode/answer/authority)
 	"imap.res",     // the IMAP answer-lane verdict (ok/msg/code/flags/object_key)
+	"source.res",   // the source inlet verdict: a per-item action override (none/seen/move:<dest>)
 	"calendar.res", // the calendar answer-lane verdict (ok/msg/code/event/ical)
 	"contacts.res", // the contacts answer-lane verdict (ok/msg/code/card/vcard)
 	"goto",         // flow control: jump to another stage

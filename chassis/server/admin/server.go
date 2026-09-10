@@ -31,6 +31,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/room"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
 	"github.com/loremlabs/thanks-computer/chassis/serverext"
+	chsource "github.com/loremlabs/thanks-computer/chassis/source"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
@@ -99,6 +100,10 @@ type Controller struct {
 	// ls/show/diff/rm`). Set by SetVectorStore from chassis/server/server.go.
 	// Nil-safe: when unset, those routes report the store as disabled.
 	vstore vector.Store
+
+	// srcStore backs the read-only source-watcher endpoint (`txco source
+	// status`). Set by SetSourceStore. Nil-safe.
+	srcStore *chsource.Store
 
 	// unsignedThrottle gates /auth/dev/enroll + /auth/invitations/consume
 	// against brute-force probing. Single shared instance so the
@@ -180,6 +185,9 @@ func (c *Controller) SetStoreReconciler(r *storeseed.Reconciler) { c.storeReconc
 // SetVectorStore wires the vector store the inspect/teardown admin endpoints
 // read (`txco vector ls/show/diff/rm`). Nil-safe.
 func (c *Controller) SetVectorStore(v vector.Store) { c.vstore = v }
+
+// SetSourceStore wires the read-only source-watcher status endpoint.
+func (c *Controller) SetSourceStore(s *chsource.Store) { c.srcStore = s }
 
 // EnableRoomRelay opens the named cross-node room relay and attaches it to the
 // hub so room messages fan out across fleet nodes (the relay's inbound feed is
@@ -573,6 +581,10 @@ func (c *Controller) Start() {
 	// operator see/export the set an op accumulates (e.g. blog_subscribers).
 	// See chassis/server/admin/kv_endpoints.go.
 	tenantR.HandleFunc("/kv/{namespace}", c.handleListKV).Methods(http.MethodGet)
+
+	// Read-only source-watcher status (cursor, claim, last error). Declaration
+	// lives in OPS SOURCES/ packs, so there is no create/delete verb.
+	tenantR.HandleFunc("/sources", c.handleListSources).Methods(http.MethodGet)
 
 	// Browse the trace dir written by chassis/trace's FileSink.
 	// Mounted only when trace-mode != off — otherwise the path returns

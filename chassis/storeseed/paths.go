@@ -10,12 +10,14 @@ const (
 	DirBlobs     = "BLOBS"
 	DirCalendars = "CALENDARS"
 	DirContacts  = "CONTACTS"
+	DirSources   = "SOURCES"
 
 	KindVector   = "vector"
 	KindKV       = "kv"
 	KindBlob     = "blob"
 	KindCalendar = "calendar"
 	KindContact  = "contact"
+	KindSource   = "source"
 
 	PackExt = ".jsonl"
 )
@@ -26,6 +28,7 @@ var packDirs = map[string]string{
 	DirBlobs + "/":     KindBlob,
 	DirCalendars + "/": KindCalendar,
 	DirContacts + "/":  KindContact,
+	DirSources + "/":   KindSource,
 }
 
 // IsPackPath reports whether p lives in a store-seed tree.

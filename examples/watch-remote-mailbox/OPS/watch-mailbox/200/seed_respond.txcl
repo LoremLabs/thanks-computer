@@ -1,0 +1,15 @@
+# POST /seed — done: the account exists and a message is in its INBOX.
+#
+# Both ops answered (an account, and an appended uid). Report what to
+# watch and where. The password is never echoed — it came in on the
+# request and is stored only as an argon2id hash.
+WHEN ._acct.username != "" && ._msg.uid != null
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "seeded", true,
+         "mailbox", ._acct.username,
+         "created", ._acct.created,
+         "appended_uid", ._msg.uid,
+         "next", "the source polls INBOX and fires watch-mailbox/_source/0; then GET /received"))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

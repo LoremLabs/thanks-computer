@@ -88,6 +88,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
+	sourceHead := fs.Bool("source", false, "start the source personality (the remote-mailbox poller: dials OUT to each SOURCES/-declared IMAP mailbox, reads past a durable cursor, and fires every new message into the source's _source stack). Disabled by default. Needs a mailbox password in the tenant secret store; egress is open in dev, so a source may point at loopback (e.g. this chassis's own --imap head).")
 	imapHead := fs.Bool("imap", false, "start the IMAP head with dev defaults: binds "+devIMAPListenAddr+" (plaintext + STARTTLS, LOGIN allowed over loopback) and "+devIMAPTLSAddr+" (IMAPS) with a self-signed certificate minted at boot, index at .txco/dev/imap.db — so a stack can provision an account with txco://imap/account and a mail client can open it (server <dev host>, port 1993, SSL on, trust the certificate). Disabled by default. Override TXCO_IMAP_LISTEN_ADDRS/IMAP_TLS_ADDRS/IMAP_DB_PATH.")
 	calendarHead := fs.Bool("calendar", false, "start the calendar personality (CalDAV + ICS feeds) on the web head with dev defaults: served under http://<dev host>:<web port>/dav/ with Basic auth allowed over plaintext, index at .txco/dev/calendar.db — so a stack can provision an account with txco://calendar/account and a calendar app can open it (server <bound-host>, port = the web port, SSL off, path /dav/). Disabled by default. Override TXCO_CALENDAR_DB_PATH/CALENDAR_PATH_PREFIX.")
 	contactsHead := fs.Bool("contacts", false, "start the contacts personality (CardDAV) on the web head with dev defaults: served under http://<dev host>:<web port>/carddav/ with Basic auth allowed over plaintext, index at .txco/dev/contacts.db — so a stack can provision an account with txco://contacts/account and a contacts app can open it (server <bound-host>, port = the web port, SSL off, path /carddav/). Disabled by default. Override TXCO_CONTACTS_DB_PATH/CONTACTS_PATH_PREFIX.")
@@ -270,7 +271,7 @@ Flags:
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *imapHead, *calendarHead, *contactsHead, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *sourceHead, *imapHead, *calendarHead, *contactsHead, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -1021,7 +1022,7 @@ func isVersionNotDraftErr(err error) bool {
 // included. Off by default — most dev workflows use only web + cron +
 // admin, and the extra binds otherwise cause spurious "port in use"
 // failures on machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, imapHead, calendarHead, contactsHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, sourceHead, imapHead, calendarHead, contactsHead, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
@@ -1150,6 +1151,14 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	if scheduledHead {
 		heads = append(heads, "scheduled")
 		env = append(env, "TXCO_SCHEDULED_DB_PATH="+filepath.Join(devDir, "scheduled.db"))
+	}
+	if sourceHead {
+		// The source poller reads declared sources from the shared runtime DB
+		// (the dev SQLite runtime, always open), materializes each mailbox
+		// password from the secret store, and dials out through the egress
+		// guard — all already wired in dev. No extra env: the personality is
+		// the whole switch.
+		heads = append(heads, "source")
 	}
 	if imapHead {
 		heads = append(heads, "imap")

@@ -3188,7 +3188,26 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 			for k, v := range op.Resonator.With {
 				resolved, rerr := runtime.Resolve(v, envForWith)
 				if rerr != nil {
-					pu.Logger.Debug("with resolve", zap.String("key", k), zap.String("err", rerr.Error()))
+					// WITH resolution failed for this op. Strict-by-default,
+					// matching SET PRE above and SET POST / EMIT elsewhere:
+					// the op's Input becomes a failure payload so the failure
+					// is visible. Previously this dropped the whole clause and
+					// dispatched with Meta "{}" — the op ran with NO directives
+					// at all: default timeout, no `mode`, no `redact`, and no
+					// `secrets.*`, so a rule whose credential rode a WITH ref
+					// would send an UNAUTHENTICATED request upstream and look
+					// like it merely got a bad response. Only a FunctionCall
+					// can reach here: a missing path resolves to nil without
+					// error (runtime.Resolve, PathRef case), so this fires on
+					// the documented strict-function contract — `&json` on a
+					// malformed body, `&substr` past the end — which
+					// docs/advanced/txcl/txcl.md says halts the resonator.
+					// The key is named because one bad key voids the clause.
+					pu.Logger.Debug("with resolve",
+						zap.String("op", op.Name),
+						zap.String("key", k),
+						zap.String("err", rerr.Error()))
+					op.Input = string(failPayload("WITH " + k + ": " + rerr.Error()))
 					withErr = true
 					break
 				}
@@ -3610,7 +3629,7 @@ const likeEscapeChar = `\`
 //
 // `_` is a SQL LIKE single-character wildcard, and opname.seg PERMITS it in
 // every stack-name segment — the channel convention (`_mail`, `_cron`, `_llm`,
-// `_room`, `_inspect`, `_scheduled`, nested `<stack>/_mail`) is built on it,
+// `_room`, `_inspect`, `_scheduled`, `_source`, nested `<stack>/_mail`) is built on it,
 // and tenants may pick names like `my_book`. Unescaped, a lookup for `_mail`
 // also returns every same-length stack ending in "mail" (`email`, `gmail`),
 // merged into the same scope — an unrelated stack's rules executing on the

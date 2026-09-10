@@ -61,6 +61,7 @@ in an opstack's flows into the protocol.
 | [HTTP](./web.md) | bidirectional, with streaming |
 | [Email — receiving](./lmtp.md) | in |
 | [Email — sending](./sendmail.md) | out |
+| [Remote sources](./source.md) | in, pulled — the chassis watches an IMAP mailbox you already own and each new message is one run of `_source` |
 | [Cron](./cron.md) | in |
 | [Scheduled](./scheduled.md) | in, time shifted — `txco://schedule` enqueues, fires later into `_scheduled` |
 | [TCP](./tcp.md) | bidirectional |

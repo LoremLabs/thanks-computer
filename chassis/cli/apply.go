@@ -592,6 +592,19 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, assets...)
+		// SOURCES/ inlet packs are CODE, not data: a source declaration is small,
+		// human-authored config that belongs with the ops it feeds (the `_source`
+		// stack), so it deploys on `txco apply` alongside DATASETS — unlike the
+		// data store-seed trees (VECTORS/, KV/, …) that move through `txco data
+		// apply`. The server maps the "SOURCES/" prefix to the srcseed
+		// materializer and upserts only the DECLARED columns of tenant_sources;
+		// the runtime cursor/claim are shadow columns a re-deploy never touches.
+		srcPacks, serr := collectSourcePacks(filepath.Join(dir, "OPS", stack))
+		if serr != nil {
+			fmt.Fprintf(stderr, "%s: %s: collect SOURCES/: %v\n", cmd, stack, serr)
+			return 1
+		}
+		files = append(files, srcPacks...)
 		// Datasets are CODE (the manifest names queries the rules call; a query
 		// and schema change deploy atomically), so they join the code manifest
 		// here — unlike store-seed packs, which are data (`txco data apply`).
@@ -987,6 +1000,17 @@ func opsToFiles(ops []bundle.Op) []client.StackFile {
 // should become BYTEA — not yet live.)
 func collectFileAssets(stackDir string) ([]client.StackFile, error) {
 	return collectTreeAssets(stackDir, "FILES")
+}
+
+// collectSourcePacks walks <stackDir>/SOURCES/** and returns the declarative
+// source-inlet packs as StackFiles ("SOURCES/<pack>.jsonl"). Each line declares
+// one remote source (a watched IMAP mailbox today); the credential is a secret
+// NAME, never a value, so the packs are plain UTF-8 JSONL and collectTreeAssets
+// handles them like FILES. These are CODE, not data (see the call site): the
+// server maps the "SOURCES/" prefix to the srcseed materializer. An absent
+// SOURCES/ dir yields nil, no error.
+func collectSourcePacks(stackDir string) ([]client.StackFile, error) {
+	return collectTreeAssets(stackDir, storeseed.DirSources)
 }
 
 // collectStorePacks walks <stackDir>/{VECTORS,KV,CALENDARS,CONTACTS,BLOBS}/** and returns the

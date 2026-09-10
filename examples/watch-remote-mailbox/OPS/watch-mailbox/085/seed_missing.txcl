@@ -1,0 +1,11 @@
+# POST /seed — a request without a password is a 400 before any op runs.
+#
+# The account login must equal the source's secret value, so there is no
+# sensible default; refuse rather than provision an account the source
+# can never open. Gated on the request marker, not the mere absence of a
+# path (a missing path is not the same as an empty password).
+WHEN ._seed_req == true && ._seed.password !~ /./
+  EMIT @web.res.body = b64"{\"error\":\"missing_password\",\"message\":\"body must be JSON {\\\"password\\\": \\\"<the same value you stored as the PONY_MAILBOX secret>\\\"}\"}\n",
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true
