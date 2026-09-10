@@ -248,6 +248,12 @@ func readSteps(reqDir string, d *RequestDetail, full bool) {
 		if v, ok := m["error"].(string); ok {
 			st.Error = v
 		}
+		if v, ok := m["passes"].(float64); ok {
+			st.Passes = int(v)
+		}
+		if v, ok := m["stop_reason"].(string); ok {
+			st.StopReason = v
+		}
 		if full {
 			if b, err := os.ReadFile(filepath.Join(stepDir, "in.json")); err == nil {
 				var v any

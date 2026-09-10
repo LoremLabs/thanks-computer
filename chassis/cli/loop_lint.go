@@ -205,6 +205,135 @@ func lintCrossStackGoto(ops []bundle.Op) []string {
 	return warnings
 }
 
+// lintRepeatDirectives checks the in-op repeat family — `WITH
+// repeat_until = <predicate>, repeat_max = N` — for the mistakes the
+// runtime turns into a silently dropped op or a loop that never
+// iterates. Warnings only, same convention as lintStackLoops.
+//
+//   - repeat_until without a positive integer literal repeat_max: the
+//     chassis rejects the op at dispatch (dropped from the merge).
+//   - repeat_max without repeat_until: ignored, the op runs once.
+//   - repeat_until on a non-txco:// EXEC: rejected at dispatch (v1).
+//   - a predicate that is TRUE when its path is missing (`== false`,
+//     `!= true`): the loop exits after the first pass before the op has
+//     written anything worth testing — the missing-path polarity trap.
+//   - repeat_until plus an unconditional EMIT @goto back into its own
+//     stage: two independent loops stacked, each with its own budget.
+//   - repeat_budget: reserved, not yet supported.
+func lintRepeatDirectives(ops []bundle.Op) []string {
+	var warnings []string
+
+	for _, op := range ops {
+		r, perr := txcl.Resonator(op.Txcl)
+		if perr != nil || r == nil {
+			continue
+		}
+		where := fmt.Sprintf("%s (%s/%d/%s)", op.SourcePath, op.Stack, op.Scope, op.Name)
+		maxVal, hasMax := r.With["repeat_max"]
+		_, hasBudget := r.With["repeat_budget"]
+
+		if r.RepeatUntil == nil {
+			if hasMax {
+				warnings = append(warnings, fmt.Sprintf(
+					"lint: %s has repeat_max without repeat_until — it is ignored; the op runs once", where))
+			}
+			if hasBudget {
+				warnings = append(warnings, fmt.Sprintf(
+					"lint: %s sets repeat_budget, which is reserved and not yet supported; use WITH timeout to bound the loop", where))
+			}
+			continue
+		}
+
+		if !hasMax {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s has repeat_until without repeat_max — the op is dropped at dispatch; add repeat_max = <passes>", where))
+		} else if n, ok := literalInt(maxVal); !ok || n <= 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s repeat_max must be a positive integer literal (the per-op pass ceiling); the op is dropped at dispatch otherwise", where))
+		}
+		if !strings.HasPrefix(r.Exec, "txco://") {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s uses repeat_until with EXEC %q — this version repeats txco:// ops only; the op is dropped at dispatch", where, r.Exec))
+		}
+		if leaf := repeatPolarityTrap(r.RepeatUntil, false); leaf != "" {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s repeat_until compares %s — a missing path reads as false, so the loop exits after the first pass; compare `== true`, `!= \"\"`, or a value the op always writes", where, leaf))
+		}
+		if r.When == nil && !ruleHalts(r) && r.Emit != nil {
+			self := stageRef{Stack: op.Stack, Scope: op.Scope}
+			for _, ov := range r.Emit.Overrides {
+				if !isGotoPath(ov.Path) {
+					continue
+				}
+				lit, ok := literalString(ov.Value)
+				if !ok {
+					continue
+				}
+				if target, ok := resolveStageRef(lit, op.Stack); ok && target == self {
+					warnings = append(warnings, fmt.Sprintf(
+						"lint: %s combines repeat_until with an unconditional @goto back into its own stage — two loops stacked, each with its own budget; keep one", where))
+				}
+			}
+		}
+		if hasBudget {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s sets repeat_budget, which is reserved and not yet supported; use WITH timeout to bound the loop", where))
+		}
+	}
+
+	return warnings
+}
+
+// repeatPolarityTrap walks a repeat_until expression and returns the
+// spelling of the first leaf that is TRUE when its path is missing —
+// `.x == false` / `.x != true`, or their negated forms under `!` — since
+// WHEN coerces a missing path to the zero value. Empty when none.
+func repeatPolarityTrap(e *resonator.WhenExpr, negated bool) string {
+	if e == nil {
+		return ""
+	}
+	switch {
+	case e.HasLeaf:
+		b, ok := e.Leaf.MatchValue.(bool)
+		if !ok || e.Leaf.Branch == nil {
+			return ""
+		}
+		eq := e.Leaf.MatchType == resonator.MatchType("eq")
+		ne := e.Leaf.MatchType == resonator.MatchType("ne")
+		// Missing path → false. `== false` and `!= true` hold; under a
+		// `!` the other two do.
+		trap := (eq && !b) || (ne && b)
+		if negated {
+			trap = (eq && b) || (ne && !b)
+		}
+		if !trap {
+			return ""
+		}
+		op := "=="
+		if ne {
+			op = "!="
+		}
+		spelled := fmt.Sprintf("`%s %s %t`", e.Leaf.Branch.Path, op, b)
+		if negated {
+			spelled = "`!(" + strings.Trim(spelled, "`") + ")`"
+		}
+		return spelled
+	case e.Not != nil:
+		return repeatPolarityTrap(e.Not, !negated)
+	}
+	for i := range e.And {
+		if s := repeatPolarityTrap(&e.And[i], negated); s != "" {
+			return s
+		}
+	}
+	for i := range e.Or {
+		if s := repeatPolarityTrap(&e.Or[i], negated); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // ruleHalts reports whether the rule emits a terminating `@halt = true`.
 // A halt EMIT terminates the pipeline after this scope's merge, so any
 // goto/EXEC the rule also carries cannot loop.
@@ -250,6 +379,17 @@ func literalString(v ast.Value) (string, bool) {
 	}
 	s, ok := lit.V.(string)
 	return s, ok
+}
+
+// literalInt extracts the underlying integer from an ast.Literal (the
+// parser produces int64 for INT tokens).
+func literalInt(v ast.Value) (int64, bool) {
+	lit, ok := v.(ast.Literal)
+	if !ok {
+		return 0, false
+	}
+	n, ok := lit.V.(int64)
+	return n, ok
 }
 
 // literalBool extracts the underlying bool from an ast.Literal.

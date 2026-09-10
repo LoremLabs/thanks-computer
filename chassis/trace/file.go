@@ -182,6 +182,10 @@ func (t *fileTracer) Step(info StepInfo) {
 	if info.Error != "" {
 		meta["error"] = info.Error
 	}
+	if info.Passes > 0 {
+		meta["passes"] = info.Passes
+		meta["stop_reason"] = info.StopReason
+	}
 	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
 		_ = writeFile(filepath.Join(stepDir, "meta.json"), data)
 	}

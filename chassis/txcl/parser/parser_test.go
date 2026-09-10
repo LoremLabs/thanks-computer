@@ -1173,3 +1173,187 @@ func TestParserWhenFunctionCall(t *testing.T) {
 		test.Equals(t, []string{}, errs)
 	})
 }
+
+// TestParserWithRepeatUntil covers the one WITH key whose RHS is a
+// predicate: `repeat_until = <WHEN expression>`. It must land on
+// Resonator.RepeatUntil (never in the With map), compose with the
+// WHEN operators, and treat `,` as the WITH key separator rather than
+// AND. Ordinary WITH keys must parse exactly as before.
+func TestParserWithRepeatUntil(t *testing.T) {
+	nextEmpty := resonator.WhenExpr{Leaf: resonator.Condition{
+		Branch: &resonator.Branch{Path: "._p.next"}, MatchType: resonator.MatchType("eq"), MatchValue: ""},
+		HasLeaf: true}
+	nGte3 := resonator.WhenExpr{Leaf: resonator.Condition{
+		Branch: &resonator.Branch{Path: "._p.n"}, MatchType: resonator.MatchType("gteq"), MatchValue: int64(3)},
+		HasLeaf: true}
+	moreTrue := resonator.WhenExpr{Leaf: resonator.Condition{
+		Branch: &resonator.Branch{Path: "._p.more"}, MatchType: resonator.MatchType("eq"), MatchValue: true},
+		HasLeaf: true}
+
+	cases := []struct {
+		name    string
+		input   string
+		res     *resonator.Resonator
+		errmsgs []string
+	}{
+		{
+			name:  "leaf between ordinary keys",
+			input: `WITH after = ._p.next, repeat_until = ._p.next == "", repeat_max = 50 EXEC "txco://pager"`,
+			res: &resonator.Resonator{
+				With: map[string]ast.Value{
+					"after":      ast.PathRef{Path: "_p.next"},
+					"repeat_max": ast.Literal{V: int64(50)},
+				},
+				RepeatUntil: &nextEmpty,
+				Exec:        "txco://pager",
+			},
+		},
+		{
+			name:  "predicate first",
+			input: `WITH repeat_until = ._p.next == "", repeat_max = 2`,
+			res: &resonator.Resonator{
+				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(2)}},
+				RepeatUntil: &nextEmpty,
+			},
+		},
+		{
+			name:  "predicate last before EXEC",
+			input: `WITH repeat_max = 2, repeat_until = ._p.next == "" EXEC "txco://pager"`,
+			res: &resonator.Resonator{
+				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(2)}},
+				RepeatUntil: &nextEmpty,
+				Exec:        "txco://pager",
+			},
+		},
+		{
+			name:  "predicate last at EOF",
+			input: `WITH repeat_max = 2, repeat_until = ._p.next == ""`,
+			res: &resonator.Resonator{
+				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(2)}},
+				RepeatUntil: &nextEmpty,
+			},
+		},
+		{
+			name:  "or composition then another key",
+			input: `WITH repeat_until = ._p.next == "" || ._p.n >= 3, limit = 1`,
+			res: &resonator.Resonator{
+				With:        map[string]ast.Value{"limit": ast.Literal{V: int64(1)}},
+				RepeatUntil: &resonator.WhenExpr{Or: []resonator.WhenExpr{nextEmpty, nGte3}},
+			},
+		},
+		{
+			name:  "and composition",
+			input: `WITH repeat_until = ._p.next == "" && ._p.n >= 3, limit = 1`,
+			res: &resonator.Resonator{
+				With:        map[string]ast.Value{"limit": ast.Literal{V: int64(1)}},
+				RepeatUntil: &resonator.WhenExpr{And: []resonator.WhenExpr{nextEmpty, nGte3}},
+			},
+		},
+		{
+			name:  "not and parentheses",
+			input: `WITH repeat_until = !(._p.more == true), repeat_max = 5`,
+			res: &resonator.Resonator{
+				With:        map[string]ast.Value{"repeat_max": ast.Literal{V: int64(5)}},
+				RepeatUntil: &resonator.WhenExpr{Not: &moreTrue},
+			},
+		},
+		{
+			name:  "at sugar in predicate",
+			input: `WITH repeat_until = @cursor == ""`,
+			res: &resonator.Resonator{
+				With: map[string]ast.Value{},
+				RepeatUntil: &resonator.WhenExpr{Leaf: resonator.Condition{
+					Branch: &resonator.Branch{Path: "._txc.cursor"}, MatchType: resonator.MatchType("eq"), MatchValue: ""},
+					HasLeaf: true},
+			},
+		},
+		{
+			name:  "comma ends the predicate; next key still parses",
+			input: `WITH repeat_until = ._p.next == "", after = ._p.next`,
+			res: &resonator.Resonator{
+				With:        map[string]ast.Value{"after": ast.PathRef{Path: "_p.next"}},
+				RepeatUntil: &nextEmpty,
+			},
+		},
+		{
+			name:  "ordinary WITH is unchanged",
+			input: `WITH timeout = 1000, mode = "async"`,
+			res: &resonator.Resonator{
+				With: map[string]ast.Value{
+					"timeout": ast.Literal{V: int64(1000)},
+					"mode":    ast.Literal{V: "async"},
+				},
+			},
+		},
+		{
+			name:    "literal RHS is not a predicate",
+			input:   `WITH repeat_until = true, repeat_max = 5`,
+			res:     &resonator.Resonator{},
+			errmsgs: []string{`WITH repeat_until expects a predicate (.path == value, composable with &&, ||, !, parentheses), got 'true'`},
+		},
+		{
+			name:    "path-vs-path is rejected like WHEN",
+			input:   `WITH repeat_until = ._p.a == ._p.b`,
+			res:     &resonator.Resonator{},
+			errmsgs: []string{`Expecting bool, int, float, string, null, regex, or &function(...), received ._p.b`},
+		},
+		{
+			name:    "missing comparison names the WITH key",
+			input:   `WITH repeat_until = ._p.a`,
+			res:     &resonator.Resonator{},
+			errmsgs: []string{`WITH repeat_until expected =~, !~, ==, !=, >, <, >=, or <= (EOF)`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := lexer.New(tc.input)
+			p := parser.New(l)
+			res := p.ParseEvent()
+			test.Equals(t, orEmpty(tc.errmsgs), orEmpty(p.Errors()))
+			test.Equals(t, tc.res, res)
+		})
+	}
+
+	t.Run("WHEN comma is still AND", func(t *testing.T) {
+		// The comma gate applies only inside the WITH predicate; a WHEN
+		// clause on the same rule keeps its legacy flat-AND spelling.
+		res, err := parseOK(t, `WHEN ._p.next == "", ._p.n >= 3 WITH repeat_until = ._p.next == "", repeat_max = 5`)
+		test.Ok(t, err)
+		test.Equals(t, &resonator.When{Expr: &resonator.WhenExpr{And: []resonator.WhenExpr{nextEmpty, nGte3}}}, res.When)
+		test.Equals(t, &nextEmpty, res.RepeatUntil)
+	})
+
+	t.Run("strict rejects a duplicate predicate", func(t *testing.T) {
+		l := lexer.New(`WITH repeat_until = ._p.a == 1, repeat_until = ._p.b == 2`)
+		p := parser.New(l)
+		p.SetStrict(true)
+		p.ParseEvent()
+		test.Equals(t, []string{`WITH repeat_until given more than once`}, p.Errors())
+
+		// Lenient parsing keeps the last one, like any repeated key.
+		l = lexer.New(`WITH repeat_until = ._p.a == 1, repeat_until = ._p.b == 2`)
+		p = parser.New(l)
+		res := p.ParseEvent()
+		test.Equals(t, 0, len(p.Errors()))
+		test.Equals(t, "._p.b", res.RepeatUntil.Leaf.Branch.Path)
+	})
+}
+
+func orEmpty(errs []string) []string {
+	if errs == nil {
+		return []string{}
+	}
+	return errs
+}
+
+func parseOK(t *testing.T, input string) (*resonator.Resonator, error) {
+	t.Helper()
+	l := lexer.New(input)
+	p := parser.New(l)
+	res := p.ParseEvent()
+	if len(p.Errors()) != 0 {
+		return res, fmt.Errorf("%s", strings.Join(p.Errors(), " : "))
+	}
+	return res, nil
+}

@@ -1589,6 +1589,8 @@ type TraceStep struct {
 	Error           string `json:"error,omitempty"`
 	In              any    `json:"in,omitempty"`
 	Out             any    `json:"out,omitempty"`
+	Passes          int    `json:"passes,omitempty"`
+	StopReason      string `json:"stop_reason,omitempty"`
 }
 
 // TraceNotFoundError marks a 404 from the trace endpoint so the caller

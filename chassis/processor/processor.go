@@ -831,6 +831,29 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 
 			// exec function
 			if op.Resonator != nil {
+				// The repeat_* WITH keys are chassis directives, never op
+				// parameters: strip them before any dispatch so a stray
+				// repeat_max on an ordinary op never reaches a handler.
+				var repeatMax int64
+				var hasRepeatMax, hasRepeatBudget bool
+				op.Meta, repeatMax, hasRepeatMax, hasRepeatBudget = repeatDirectives(op.Meta)
+
+				// Repeating op (WITH repeat_until). The loop runner owns
+				// dispatch, accumulation and the single trace step, and
+				// hands back ONE payload — the scope merge sees this op
+				// exactly once, so the scope cannot advance mid-loop. A
+				// rejected loop (no usable repeat_max, non-txco EXEC) is
+				// dropped from the merge like the timeout ceiling above.
+				if op.Resonator.RepeatUntil != nil {
+					if !pu.repeatAdmit(op, repeatMax, hasRepeatMax, hasRepeatBudget) {
+						wg.Done()
+						return
+					}
+					pu.runRepeat(ctx, &op, repeatMax)
+					responses <- &op
+					return
+				}
+
 				var output event.Payload
 				var transport string
 				var err error
@@ -842,29 +865,10 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 				// pattern-mocking an op shouldn't require the rule
 				// author to add a dummy EXEC.
 				output, transport, err = pu.Exec(ctx, op)
-				authorControlled := transportAuthorControlled(transport)
 				if err != nil {
 					pu.Logger.Debug("outerr", zap.String("err", err.Error()))
 				} else {
 					pu.Logger.Debug("out", zap.String("out", output.String()))
-				}
-
-				// Chassis-wide op-debug strip. Any handler that stamps
-				// `_txc_op_debug` on its response gets the field
-				// captured by the pre-strip step-output trace (the
-				// `payload.Raw` trace.Step.Output recorded inside
-				// pu.Exec at processor.go:2417-2425 fires BEFORE this
-				// line). We then strip the field from `output.Raw` so
-				// it never reaches the envelope merge — rules cannot
-				// read debug content and cannot accidentally come to
-				// depend on it. No separate timeline event needed:
-				// debug content lives in the per-step `out.json`
-				// trace file, grep-friendly across step files. Same
-				// shape as `_txc.goto` / `_txc.halt` extraction in
-				// advanceAfterScope: handler-stamped fields the chassis
-				// owns and consumes before propagation.
-				if stripped, present := extractOpDebug(output.Raw); present {
-					output.Raw = stripped
 				}
 
 				// Outbound op control flow (halt, goto, ...) lives in `_txc.*`
@@ -880,42 +884,9 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 				}
 
 				if err == nil {
-					if output.Type == event.JSON {
-						raw := output.Raw
-						if authorControlled {
-							// Untrusted producer (remote HTTP, compute, MCP,
-							// or a rule-author mock): strip reserved _txc.*
-							// control fields before EMIT + merge so it cannot
-							// forge tenant/computed-auth/budget. Trusted core/
-							// ai output (e.g. _txc.computed.*, _txc.chat.*)
-							// passes through untouched.
-							raw = sanitizeAuthorOutput(raw)
-						}
-						op.Output = raw
-					}
-					if output.Type == event.Null {
-						op.Output = `{}`
-					}
-
-					// EMIT overlays values onto THIS op's response
-					// before it reaches the per-scope merge. Overwrite
-					// semantics (not the set-if-absent behavior of
-					// SET POST on the merged response). Lets a rule
-					// contribute literal fields without needing a real
-					// handler — pair with EXEC for "enrich the
-					// response", or write EMIT alone for a synthetic
-					// emitter (no EXEC needed; we synthesized "{}"
-					// above).
-					if op.Resonator.Emit != nil {
-						out, oerr := pu.OverlayResponseFor(ctx, op.EnvelopeView(), op.Output, op.Resonator.Emit.Overrides)
-						if oerr != nil {
-							pu.Logger.Debug("emit overlay", zap.String("err", oerr.Error()))
-							op.Output = string(failPayload(oerr.Error()))
-						} else {
-							op.Output = out
-						}
-					}
-
+					// op-debug strip, author-output sanitize, Null → {},
+					// EMIT overlay: the shared post-exec tail.
+					pu.finishOutput(ctx, &op, output, transport)
 					responses <- &op
 				} else if strings.HasPrefix(op.Resonator.Exec, "compute://") {
 					// A compute throwing is a bug, not best-effort: be loud and
@@ -2653,6 +2624,29 @@ func injectRuntimeIdentity(body, stack, name string, scope int) string {
 // terminals) persist the transport with it so the later resume merge can
 // make the same decision.
 func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload, string, error) {
+	r := pu.dispatch(ctx, op)
+	pu.recordStep(ctx, op, r, trace.StepInfo{})
+	return r.payload, r.transport, r.err
+}
+
+// execResult is what one dispatch of an op produced, before its trace
+// step is recorded. input is the envelope exactly as the handler saw it
+// (after the runtime-identity stamp) so the step records the same bytes.
+type execResult struct {
+	payload    event.Payload
+	transport  string
+	err        error
+	input      string
+	startedAt  time.Time
+	finishedAt time.Time
+}
+
+// dispatch runs the op ONCE: fuel charge, OTel span, identity stamp,
+// mock interception, the transport switch, op logging and metrics. It
+// records no trace step — Exec pairs it with recordStep for the
+// single-shot case; the repeat loop (repeat.go) calls it once per pass
+// and records one step for the whole loop.
+func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult {
 
 	execStart := time.Now()
 
@@ -2664,7 +2658,9 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 	// they pay only the scope-enter floor). Errors are intentionally
 	// ignored at this site: ops fire in parallel goroutines whose error
 	// returns are swallowed; the next Run entry catches the overshoot
-	// and emits a structured exhaustion error there.
+	// and emits a structured exhaustion error there. (A repeating op
+	// probes the ceiling between passes — fuelExceeded — so a loop
+	// stops at the overshoot instead of running to repeat_max.)
 	if opName != "" {
 		_ = addFuel(ctx, fuelCostExec, op.Stack+"/"+strconv.Itoa(op.Scope))
 	}
@@ -2808,52 +2804,166 @@ func (pu *Unit) Exec(ctx context.Context, op operation.Operation) (event.Payload
 		pu.Logger.Debug("Exec error", zap.String("err", err.Error()))
 	}
 
-	// Record this step to the trace sink. Same chokepoint as the
-	// _txc.op/_txc.step injection (per feedback_http_local_symmetry):
-	// HTTP, txco://, stage-jump, and unsupported branches all produce
-	// identical trace shape. NoopTracer makes this a no-op when
-	// tracing is disabled.
-	finishedAt := time.Now()
-	stepStatus := "ok"
-	stepErr := ""
-	if err != nil {
-		stepStatus = "error"
-		stepErr = err.Error()
+	return execResult{
+		payload:    payload,
+		transport:  transport,
+		err:        err,
+		input:      op.Input,
+		startedAt:  execStart,
+		finishedAt: time.Now(),
 	}
-	// Trace the op's output AS THE OP PRODUCED IT — i.e. with any EMIT
-	// overlay applied. The caller (Run / the deferred paths) applies the
-	// same OverlayResponse to op.Output before the per-scope merge; we
-	// mirror it here so the step shows the op's actual contribution. An
-	// EMIT-only op returns `{}` from exec, so without this the step's
-	// output would be empty and hide the emitted fields. Trace-only: the
-	// returned `payload` is unchanged — the caller still owns the overlay
-	// that feeds the merge.
-	tracedOutput := payload.Raw
-	if err == nil && op.Resonator != nil && op.Resonator.Emit != nil {
-		base := payload.Raw
-		if payload.Type == event.Null || base == "" {
-			base = "{}"
-		}
-		if ov, oerr := pu.OverlayResponseFor(ctx, op.EnvelopeView(), base, op.Resonator.Emit.Overrides); oerr == nil {
-			tracedOutput = ov
-		}
-	}
-	trace.FromContext(ctx).Step(trace.StepInfo{
-		Stack:      op.Stack,
-		Scope:      op.Scope,
-		Name:       op.Name,
-		Operation:  opName,
-		Transport:  transport,
-		Txcl:       op.Txcl,
-		Input:      []byte(op.Input),
-		Output:     []byte(tracedOutput),
-		StartedAt:  execStart,
-		FinishedAt: finishedAt,
-		Status:     stepStatus,
-		Error:      stepErr,
-	})
+}
 
-	return payload, transport, err
+// recordStep writes the trace step for a dispatch. Same chokepoint as
+// the _txc.op/_txc.step injection (per feedback_http_local_symmetry):
+// HTTP, txco://, stage-jump, and unsupported branches all produce
+// identical trace shape. NoopTracer makes this a no-op when tracing is
+// disabled.
+//
+// info carries the caller's overrides — the repeat loop passes the
+// accumulated Output, its own span of time, Passes and StopReason —
+// and every field left zero is filled from op and r exactly as the
+// single-shot path always has.
+func (pu *Unit) recordStep(ctx context.Context, op operation.Operation, r execResult, info trace.StepInfo) {
+	opName := op.Resonator.Exec
+	info.Stack = op.Stack
+	info.Scope = op.Scope
+	info.Name = op.Name
+	info.Operation = opName
+	info.Transport = r.transport
+	info.Txcl = op.Txcl
+	info.Input = []byte(r.input)
+	if info.StartedAt.IsZero() {
+		info.StartedAt = r.startedAt
+	}
+	if info.FinishedAt.IsZero() {
+		info.FinishedAt = r.finishedAt
+	}
+	if info.Status == "" {
+		info.Status = "ok"
+		if r.err != nil {
+			info.Status = "error"
+			info.Error = r.err.Error()
+		}
+	}
+	if info.Output == nil {
+		// Trace the op's output AS THE OP PRODUCED IT — i.e. with any EMIT
+		// overlay applied. The caller (Run / the deferred paths) applies the
+		// same OverlayResponse to op.Output before the per-scope merge; we
+		// mirror it here so the step shows the op's actual contribution. An
+		// EMIT-only op returns `{}` from exec, so without this the step's
+		// output would be empty and hide the emitted fields. Trace-only: the
+		// returned `payload` is unchanged — the caller still owns the overlay
+		// that feeds the merge.
+		tracedOutput := r.payload.Raw
+		if r.err == nil && op.Resonator != nil && op.Resonator.Emit != nil {
+			base := r.payload.Raw
+			if r.payload.Type == event.Null || base == "" {
+				base = "{}"
+			}
+			// The envelope view the dispatch saw: the pre-projection
+			// envelope when SELECT projected, else the stamped input.
+			env := op.FullInput
+			if env == "" {
+				env = r.input
+			}
+			if ov, oerr := pu.OverlayResponseFor(ctx, env, base, op.Resonator.Emit.Overrides); oerr == nil {
+				tracedOutput = ov
+			}
+		}
+		info.Output = []byte(tracedOutput)
+	}
+	trace.FromContext(ctx).Step(info)
+}
+
+// finishOutput is the post-exec tail shared by the single-shot dispatch
+// and the repeat loop. It turns a successful dispatch's payload into the
+// op's contribution to the merge, on op.Output: chassis-wide op-debug
+// strip, author-output sanitize, Null → `{}`, then the EMIT overlay.
+func (pu *Unit) finishOutput(ctx context.Context, op *operation.Operation, output event.Payload, transport string) {
+	// Chassis-wide op-debug strip. Any handler that stamps
+	// `_txc_op_debug` on its response gets the field captured by the
+	// pre-strip step-output trace (recordStep fires BEFORE this line).
+	// We then strip the field from `output.Raw` so it never reaches
+	// the envelope merge — rules cannot read debug content and cannot
+	// accidentally come to depend on it. No separate timeline event
+	// needed: debug content lives in the per-step `out.json` trace
+	// file, grep-friendly across step files. Same shape as `_txc.goto`
+	// / `_txc.halt` extraction in advanceAfterScope: handler-stamped
+	// fields the chassis owns and consumes before propagation.
+	if stripped, present := extractOpDebug(output.Raw); present {
+		output.Raw = stripped
+	}
+
+	if output.Type == event.JSON {
+		raw := output.Raw
+		if transportAuthorControlled(transport) {
+			// Untrusted producer (remote HTTP, compute, MCP,
+			// or a rule-author mock): strip reserved _txc.*
+			// control fields before EMIT + merge so it cannot
+			// forge tenant/computed-auth/budget. Trusted core/
+			// ai output (e.g. _txc.computed.*, _txc.chat.*)
+			// passes through untouched.
+			raw = sanitizeAuthorOutput(raw)
+		}
+		op.Output = raw
+	}
+	if output.Type == event.Null {
+		op.Output = `{}`
+	}
+
+	// EMIT overlays values onto THIS op's response before it reaches
+	// the per-scope merge. Overwrite semantics (not the set-if-absent
+	// behavior of SET POST on the merged response). Lets a rule
+	// contribute literal fields without needing a real handler — pair
+	// with EXEC for "enrich the response", or write EMIT alone for a
+	// synthetic emitter (no EXEC needed; dispatch synthesized "{}").
+	if op.Resonator.Emit != nil {
+		out, oerr := pu.OverlayResponseFor(ctx, op.EnvelopeView(), op.Output, op.Resonator.Emit.Overrides)
+		if oerr != nil {
+			pu.Logger.Debug("emit overlay", zap.String("err", oerr.Error()))
+			op.Output = string(failPayload(oerr.Error()))
+		} else {
+			op.Output = out
+		}
+	}
+}
+
+// resolveWith materializes a rule's WITH clause into the op's Meta
+// document against env. Built via sjson.Set so dotted keys
+// (`secrets.headers.authorization.secret`) explode into nested objects,
+// matching what gjson reads on the consumer side. A plain json.Marshal
+// would produce a flat map with literal-dot keys — breaking gjson path
+// navigation and the secrets walker (see chassis/secrets/refs.go and
+// internal docs/todo-secret-store.md §4). Flat keys (`timeout = 1000`)
+// round-trip byte-for-byte; only dotted keys differ in shape.
+//
+// The first key that fails to resolve fails the clause: the error names
+// it and Meta comes back as "{}". Called once per op by ResonatingOps
+// and once per pass by the repeat loop (against the accumulated view).
+func (pu *Unit) resolveWith(res *resonator.Resonator, env runtime.Env) (string, error) {
+	meta := "{}"
+	unwrappedWith := make(map[string]interface{}, len(res.With))
+	for k, v := range res.With {
+		resolved, rerr := runtime.Resolve(v, env)
+		if rerr != nil {
+			return meta, fmt.Errorf("WITH %s: %w", k, rerr)
+		}
+		unwrappedWith[k] = resolved
+	}
+	for k, v := range unwrappedWith {
+		var serr error
+		meta, serr = sjson.Set(meta, k, v)
+		if serr != nil {
+			// Fall back to flat marshal for this op so
+			// existing semantics aren't worse than before.
+			if withData, jerr := json.Marshal(unwrappedWith); jerr == nil {
+				meta = string(withData)
+			}
+			break
+		}
+	}
+	return meta, nil
 }
 
 // computeLogWriter routes a sandboxed compute's diagnostic output (console.*,
@@ -3168,64 +3278,28 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 		}
 
 		if op.Resonator.With != nil {
-			// Build op.Meta via sjson.Set so dotted keys
-			// (`secrets.headers.authorization.secret`) explode into
-			// nested objects, matching what gjson reads on the
-			// consumer side. A plain json.Marshal would produce a
-			// flat map with literal-dot keys — breaking gjson path
-			// navigation and the secrets walker (see
-			// chassis/secrets/refs.go and internal docs/todo-secret-store.md
-			// §4). Flat keys (`timeout = 1000`) round-trip
-			// byte-for-byte; only dotted keys differ in shape.
-			meta := "{}"
 			// Resolve every WITH value against the current op.Input
-			// envelope. PR 2 only handles ast.Literal; PR 3 wires
-			// FunctionCall so e.g. `WITH timeout = &concat(@a,@b)`
-			// flows through the same code path.
-			envForWith := runtime.JSONEnv(op.Input)
-			unwrappedWith := make(map[string]interface{}, len(op.Resonator.With))
-			withErr := false
-			for k, v := range op.Resonator.With {
-				resolved, rerr := runtime.Resolve(v, envForWith)
-				if rerr != nil {
-					// WITH resolution failed for this op. Strict-by-default,
-					// matching SET PRE above and SET POST / EMIT elsewhere:
-					// the op's Input becomes a failure payload so the failure
-					// is visible. Previously this dropped the whole clause and
-					// dispatched with Meta "{}" — the op ran with NO directives
-					// at all: default timeout, no `mode`, no `redact`, and no
-					// `secrets.*`, so a rule whose credential rode a WITH ref
-					// would send an UNAUTHENTICATED request upstream and look
-					// like it merely got a bad response. Only a FunctionCall
-					// can reach here: a missing path resolves to nil without
-					// error (runtime.Resolve, PathRef case), so this fires on
-					// the documented strict-function contract — `&json` on a
-					// malformed body, `&substr` past the end — which
-					// docs/advanced/txcl/txcl.md says halts the resonator.
-					// The key is named because one bad key voids the clause.
-					pu.Logger.Debug("with resolve",
-						zap.String("op", op.Name),
-						zap.String("key", k),
-						zap.String("err", rerr.Error()))
-					op.Input = string(failPayload("WITH " + k + ": " + rerr.Error()))
-					withErr = true
-					break
-				}
-				unwrappedWith[k] = resolved
-			}
-			if !withErr {
-				for k, v := range unwrappedWith {
-					var serr error
-					meta, serr = sjson.Set(meta, k, v)
-					if serr != nil {
-						// Fall back to flat marshal for this op so
-						// existing semantics aren't worse than before.
-						if withData, jerr := json.Marshal(unwrappedWith); jerr == nil {
-							meta = string(withData)
-						}
-						break
-					}
-				}
+			// envelope into the Meta document (see resolveWith for the
+			// sjson shaping). A resolution failure is strict-by-default,
+			// matching SET PRE above and SET POST / EMIT elsewhere: the
+			// op's Input becomes a failure payload so the failure is
+			// visible. Previously this dropped the whole clause and
+			// dispatched with Meta "{}" — the op ran with NO directives
+			// at all: default timeout, no `mode`, no `redact`, and no
+			// `secrets.*`, so a rule whose credential rode a WITH ref
+			// would send an UNAUTHENTICATED request upstream and look
+			// like it merely got a bad response. Only a FunctionCall
+			// can fail: a missing path resolves to nil without error
+			// (runtime.Resolve, PathRef case), so this fires on the
+			// documented strict-function contract — `&json` on a
+			// malformed body, `&substr` past the end — which
+			// docs/advanced/txcl/txcl.md says halts the resonator.
+			meta, werr := pu.resolveWith(op.Resonator, runtime.JSONEnv(op.Input))
+			if werr != nil {
+				pu.Logger.Debug("with resolve",
+					zap.String("op", op.Name),
+					zap.Error(werr))
+				op.Input = string(failPayload(werr.Error()))
 			}
 			op.Meta = meta
 		}

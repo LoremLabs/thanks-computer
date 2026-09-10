@@ -124,6 +124,12 @@ type Resonator struct {
 	// real HTTP/handler call: pair with EXEC for "enrich the
 	// response", or write EMIT alone for a "synthetic emitter".
 	Emit *Set `json:"emit,omitempty"`
+	// RepeatUntil is the `WITH repeat_until = <predicate>` directive:
+	// a WHEN-shaped expression the processor evaluates after each
+	// pass of a repeating op against the accumulated view. nil means
+	// the op runs once. The predicate is parsed by the WHEN grammar
+	// (path-vs-literal only) and is never forwarded to the op.
+	RepeatUntil *WhenExpr `json:"repeatUntil,omitempty"`
 }
 
 const (
@@ -147,6 +153,8 @@ type Phrase struct {
 	Priority int64                `json:"priority"`
 	Exec     string               `json:"exec,omitempty"`
 	Emit     *Set                 `json:"emit,omitempty"`
+	// RepeatUntil rides the WITH phrase (see Resonator.RepeatUntil).
+	RepeatUntil *WhenExpr `json:"repeatUntil,omitempty"`
 }
 
 func New() *Resonator {
@@ -199,6 +207,16 @@ func (res Resonator) WhenMatches(input string) bool {
 	}
 
 	return evalExpr(expr, input)
+}
+
+// Matches evaluates a standalone expression tree against the input
+// envelope. Unlike WhenMatches it carries none of the WHEN-clause
+// conveniences (empty input never matches, nil When matches all):
+// the caller owns those decisions. Used for `WITH repeat_until`,
+// where the processor evaluates the predicate against the view it
+// accumulated across passes.
+func (e *WhenExpr) Matches(input string) bool {
+	return evalExpr(e, input)
 }
 
 // evalExpr walks the WhenExpr tree. Short-circuit semantics fall out

@@ -225,6 +225,33 @@ func addFuel(ctx context.Context, cost int64, stage string) error {
 	return nil
 }
 
+// fuelExceeded reports whether the request is already over its fuel
+// ceiling, without charging anything. The in-op repeat loop probes it
+// after every pass: each pass paid the EXEC cost inside dispatch, where
+// the overshoot is deliberately swallowed (see Exec), so this is the
+// point at which a looping op notices and stops instead of spinning
+// until the next Run entry catches it. Same *FuelExhaustedError shape
+// as addFuel so callers can treat the two alike.
+func fuelExceeded(ctx context.Context, stage string) error {
+	s := budgetFromCtx(ctx)
+	if s == nil {
+		return nil
+	}
+	used := s.fuel.Load()
+	if s.maxFuel > 0 && used > s.maxFuel {
+		s.mu.Lock()
+		recent := append([]string(nil), s.recent...)
+		s.mu.Unlock()
+		return &FuelExhaustedError{
+			MaxFuel:         s.maxFuel,
+			FuelUsed:        used,
+			LastStage:       stage,
+			LastTransitions: recent,
+		}
+	}
+	return nil
+}
+
 // decrementTTL decrements the request's hop counter by 1. Returns a
 // *TTLExhaustedError if the result <= 0 and the cap is enabled (> 0).
 // A cap of 0 means "disabled"; loadBudget stored 0 in that case, so this

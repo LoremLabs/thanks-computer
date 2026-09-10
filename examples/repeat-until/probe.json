@@ -1,0 +1,29 @@
+{
+  "note": "In-op loop: /drain seeds five KV keys, then ONE op drains the namespace with txco://kv/list at limit 2 under WITH repeat_until / repeat_max — three passes inside a single dispatch, one merged payload. Binds localhost → kv-drain (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "bind": [
+    { "host": "localhost", "stack": "kv-drain" }
+  ],
+  "checks": [
+    {
+      "name": "five keys drain in three passes of two",
+      "method": "GET",
+      "path": "/drain",
+      "status": 200,
+      "contains": "\"passes\":3"
+    },
+    {
+      "name": "the loop stopped because the predicate held",
+      "method": "GET",
+      "path": "/drain",
+      "status": 200,
+      "contains": "\"stop\":\"done\""
+    },
+    {
+      "name": "the last page's key accumulated with the first",
+      "method": "GET",
+      "path": "/drain",
+      "status": 200,
+      "contains": "\"key-e\""
+    }
+  ]
+}

@@ -292,6 +292,9 @@ func printStep(stdout, stderr io.Writer, r *client.TraceResponse, sel string, ve
 	if step.Error != "" {
 		fmt.Fprintf(stdout, "  error       %s\n", step.Error)
 	}
+	if step.Passes > 0 {
+		fmt.Fprintf(stdout, "  passes      %d (stopped: %s)\n", step.Passes, step.StopReason)
+	}
 
 	if verbose {
 		if r.TraceMode != "full" {

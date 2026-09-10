@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — the KV store is a chassis built-in
+# (txco://kv/*); the workspace ships operations only.

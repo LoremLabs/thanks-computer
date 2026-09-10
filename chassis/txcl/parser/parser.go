@@ -48,7 +48,21 @@ type Parser struct {
 	// .y` after a typo'd verb) reports a single diagnostic, not one
 	// per token. Reset when a recognized clause keyword is reached.
 	inGarbage bool
+
+	// withPredicate is set while the WHEN-expression parser is
+	// running inside a WITH clause (`repeat_until = <predicate>`).
+	// WHEN treats `,` as AND; WITH uses `,` to separate keys, so the
+	// AND loop must not consume a comma in that context. Authors
+	// compose with `&&` / `||` / `!` / `( )` there.
+	withPredicate bool
 }
+
+// repeatUntilKey is the one WITH key whose RHS is a predicate rather
+// than a value: `WITH repeat_until = ._p.next == ""`. It lands on
+// Resonator.RepeatUntil, not in the With map, so it never reaches the
+// op. Sibling `repeat_*` keys (repeat_max, repeat_budget) stay
+// ordinary values and are consumed by the processor.
+const repeatUntilKey = "repeat_until"
 
 func New(l *lexer.Lexer) *Parser {
 	p := &Parser{
@@ -106,6 +120,7 @@ func (p *Parser) ParseEvent() *resonator.Resonator {
 				r.Select = phrase.Select
 			case resonator.WITH:
 				r.With = phrase.With
+				r.RepeatUntil = phrase.RepeatUntil
 			case resonator.SETPRE:
 				r.SetPre = phrase.SetPre
 			case resonator.SETPOST:
@@ -336,8 +351,13 @@ func (p *Parser) parseArrayLiteral() (interface{}, bool) {
 }
 
 // parse tokens for With Phrase (WITH foo = "bar", moo = 1)
+//
+// One key is special: `repeat_until = <predicate>` parses its RHS with
+// the WHEN grammar (see parseWithPredicate) and lands on the phrase's
+// RepeatUntil field instead of the map.
 func (p *Parser) parseWithPhrase() *resonator.Phrase {
 	withs := make(map[string]ast.Value)
+	var repeatUntil *resonator.WhenExpr
 	for !p.curTokenIs(token.EOF) && !p.peekTokenIs(token.SET) && !p.peekTokenIs(token.PRIORITY) && !p.peekTokenIs(token.EXEC) && !p.peekTokenIs(token.EMIT) {
 
 		if p.curTokenIs(token.WITH) {
@@ -370,12 +390,22 @@ func (p *Parser) parseWithPhrase() *resonator.Phrase {
 		}
 		p.nextToken()
 
-		withValue, ok := p.parseValueExpr()
-		if !ok {
-			return nil
+		if with == repeatUntilKey {
+			expr := p.parseWithPredicate(with)
+			if expr == nil {
+				return nil
+			}
+			if repeatUntil != nil && p.strict {
+				p.errors = append(p.errors, fmt.Sprintf("WITH %s given more than once", with))
+			}
+			repeatUntil = expr
+		} else {
+			withValue, ok := p.parseValueExpr()
+			if !ok {
+				return nil
+			}
+			withs[with] = withValue
 		}
-
-		withs[with] = withValue
 
 		if p.peekTokenIs(token.COMMA) {
 			p.nextToken()
@@ -385,9 +415,40 @@ func (p *Parser) parseWithPhrase() *resonator.Phrase {
 		}
 	}
 
-	phrase := &resonator.Phrase{Type: resonator.WITH, With: withs}
+	phrase := &resonator.Phrase{Type: resonator.WITH, With: withs, RepeatUntil: repeatUntil}
 
 	return phrase
+}
+
+// parseWithPredicate parses the RHS of `WITH repeat_until = …` as a
+// WHEN expression. Called with curToken on the first token of the
+// RHS; on success curToken sits on the last token of the expression,
+// the same postcondition parseValueExpr leaves, so the caller's
+// comma / clause-stop handling is shared with ordinary keys.
+//
+// Everything WHEN enforces carries over unchanged: path-vs-literal
+// only, literal-only function arguments, missing-path coercion at
+// evaluation time. The one grammar difference is that `,` ends the
+// predicate (it separates WITH keys) instead of acting as AND.
+func (p *Parser) parseWithPredicate(key string) *resonator.WhenExpr {
+	if !p.isWhenPrimaryStart(p.curToken.Type) {
+		p.errors = append(p.errors, fmt.Sprintf(
+			"WITH %s expects a predicate (.path == value, composable with &&, ||, !, parentheses), got '%s'",
+			key, p.curToken.Literal))
+		return nil
+	}
+	p.withPredicate = true
+	defer func() { p.withPredicate = false }()
+	return p.parseWhenOr()
+}
+
+// exprKeyword names the clause an expression-parser diagnostic
+// belongs to: WHEN, or the WITH key whose RHS borrows WHEN's grammar.
+func (p *Parser) exprKeyword() string {
+	if p.withPredicate {
+		return "WITH " + repeatUntilKey
+	}
+	return "WHEN"
 }
 
 // parse tokens for (pre SET) Phrase (SET .foo = "bar", .moo = 1)
@@ -703,7 +764,7 @@ func (p *Parser) parseWhenOr() *resonator.WhenExpr {
 	for p.peekTokenIs(token.LOR) {
 		p.nextToken() // curToken = ||
 		if !p.isWhenPrimaryStart(p.peekToken.Type) {
-			p.errors = append(p.errors, "WHEN expected expression after '||'")
+			p.errors = append(p.errors, p.exprKeyword()+" expected expression after '||'")
 			return nil
 		}
 		p.nextToken() // curToken = first token of right operand
@@ -726,12 +787,12 @@ func (p *Parser) parseWhenAnd() *resonator.WhenExpr {
 		return nil
 	}
 	parts := []resonator.WhenExpr{*first}
-	for p.peekTokenIs(token.LAND) || p.peekTokenIs(token.COMMA) {
+	for p.peekTokenIs(token.LAND) || (!p.withPredicate && p.peekTokenIs(token.COMMA)) {
 		opLit := p.peekToken.Literal
 		p.nextToken() // curToken = && or ,
 		if !p.isWhenPrimaryStart(p.peekToken.Type) {
 			p.errors = append(p.errors,
-				fmt.Sprintf("WHEN expected expression after '%s'", opLit))
+				fmt.Sprintf("%s expected expression after '%s'", p.exprKeyword(), opLit))
 			return nil
 		}
 		p.nextToken() // curToken = first token of right operand
@@ -751,7 +812,7 @@ func (p *Parser) parseWhenAnd() *resonator.WhenExpr {
 func (p *Parser) parseWhenNot() *resonator.WhenExpr {
 	if p.curTokenIs(token.BANG) {
 		if !p.isWhenPrimaryStart(p.peekToken.Type) {
-			p.errors = append(p.errors, "WHEN expected expression after '!'")
+			p.errors = append(p.errors, p.exprKeyword()+" expected expression after '!'")
 			return nil
 		}
 		p.nextToken()
@@ -768,7 +829,7 @@ func (p *Parser) parseWhenNot() *resonator.WhenExpr {
 func (p *Parser) parseWhenPrimary() *resonator.WhenExpr {
 	if p.curTokenIs(token.LPAREN) {
 		if p.peekTokenIs(token.RPAREN) {
-			p.errors = append(p.errors, "WHEN expected expression inside '()'")
+			p.errors = append(p.errors, p.exprKeyword()+" expected expression inside '()'")
 			return nil
 		}
 		p.nextToken() // step past (
@@ -777,7 +838,7 @@ func (p *Parser) parseWhenPrimary() *resonator.WhenExpr {
 			return nil
 		}
 		if !p.peekTokenIs(token.RPAREN) {
-			p.errors = append(p.errors, "WHEN expected ')' to close group")
+			p.errors = append(p.errors, p.exprKeyword()+" expected ')' to close group")
 			return nil
 		}
 		p.nextToken() // consume )
@@ -790,8 +851,8 @@ func (p *Parser) parseWhenPrimary() *resonator.WhenExpr {
 // leaf-parsing logic lifted unchanged from the flat-AND parseWhenPhrase.
 func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 	if !p.curTokenIs(token.BRANCH) {
-		msg := fmt.Sprintf("WHEN expected branch or '(', got '%s'",
-			p.curToken.Literal)
+		msg := fmt.Sprintf("%s expected branch or '(', got '%s'",
+			p.exprKeyword(), p.curToken.Literal)
 		p.errors = append(p.errors, msg)
 		return nil
 	}
@@ -799,8 +860,8 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 	p.nextToken()
 
 	if !p.curTokenIsComparison() {
-		msg := fmt.Sprintf("WHEN expected =~, !~, ==, !=, >, <, >=, or <= (%s)",
-			p.curToken.Type)
+		msg := fmt.Sprintf("%s expected =~, !~, ==, !=, >, <, >=, or <= (%s)",
+			p.exprKeyword(), p.curToken.Type)
 		p.errors = append(p.errors, msg)
 		return nil
 	}
@@ -837,7 +898,7 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 	// earlier scope and compare it here as a path-vs-literal.
 	if p.curTokenIs(token.AMP_IDENT) {
 		if matchtype == "=~" || matchtype == "!~" {
-			p.errors = append(p.errors, "WHEN regex comparisons (=~, !~) take a regex literal, not a function call")
+			p.errors = append(p.errors, p.exprKeyword()+" regex comparisons (=~, !~) take a regex literal, not a function call")
 			return nil
 		}
 		call, ok := p.parseFunctionCall()
@@ -846,7 +907,7 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 		}
 		fc := call.(ast.FunctionCall)
 		if path, found := firstPathArg(fc); found {
-			p.errors = append(p.errors, fmt.Sprintf("WHEN function arguments must be literals, but &%s references path %q — EMIT the computed value in an earlier scope and compare it here instead", fc.Name, "."+path))
+			p.errors = append(p.errors, fmt.Sprintf("%s function arguments must be literals, but &%s references path %q — EMIT the computed value in an earlier scope and compare it here instead", p.exprKeyword(), fc.Name, "."+path))
 			return nil
 		}
 		if p.strict && !funcs.Has(fc.Name) {
@@ -854,7 +915,7 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 			// for a newer chassis must not fail to load on an older
 			// one); at runtime an unknown name evaluates to no-match.
 			// Strict mode surfaces the silent-false at authoring time.
-			p.errors = append(p.errors, fmt.Sprintf("unknown function &%s in WHEN (would evaluate to no-match at runtime)", fc.Name))
+			p.errors = append(p.errors, fmt.Sprintf("unknown function &%s in %s (would evaluate to no-match at runtime)", fc.Name, p.exprKeyword()))
 		}
 		leaf := resonator.Condition{
 			Branch:    branch,

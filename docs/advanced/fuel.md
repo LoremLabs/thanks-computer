@@ -36,6 +36,7 @@ the chassis-wide cap.
 | ---------------------------- | ----------- |
 | Entering a scope             | 10          |
 | `EXEC` dispatch              | 25          |
+| `repeat_until` pass          | 25 (the EXEC cost, once per pass) |
 | Nano-op compute, per ms      | 10          |
 | Secret materialization       | 100         |
 | Repeated stage transition    | 50          |
@@ -58,6 +59,15 @@ happens it's free; every repeat charges 50 fuel **and** sleeps
 proceeding. A tight loop therefore degrades gracefully — it slows
 down, burns fuel measurably, and shows up in traces — rather than
 spinning the CPU until the hard cap lands.
+
+An in-op loop (`WITH repeat_until`, see
+[txcl](./txcl/txcl.md#repeating-an-op--repeat_until)) is not a stage
+transition: no TTL tick, no repeat charge, no penalty sleep. Each pass
+pays the EXEC cost, and the loop checks the fuel ceiling between
+passes and stops with `stop: "fuel"` instead of running to
+`repeat_max` — the accumulated output is kept and the next scope entry
+raises the exhaustion as usual. Its governors are `repeat_max`,
+`--op-repeat-max`, and the op's `WITH timeout`.
 
 ## Envelope mechanics
 
@@ -100,6 +110,11 @@ lints the assembled stack for the unambiguous mistakes
   `"self/1"`.
 - **Unconditional 2-stack ping-pong** — stage A unconditionally points
   to B, and B unconditionally back to A.
+- **`repeat_until` mistakes** — a loop without a positive integer
+  `repeat_max` or on a non-`txco://` EXEC (both dropped at dispatch), a
+  predicate that already holds before the op has run (`== false`,
+  `!= true` — a missing path reads as false), or a loop stacked with an
+  unconditional `@goto` back into its own stage.
 
 Warnings only (printed to stderr; `apply` proceeds). The lint is
 deliberately conservative: conditional state-machine loops and
@@ -112,3 +127,4 @@ intentional polling pass unflagged — those are the runtime guards' job.
 | `--max-fuel-per-request` | `100000` | Fuel cap; `0` = unlimited                |
 | `--op-scope-ttl-max`     | `500`    | Starting hop budget; `0` = disabled      |
 | `--op-repeat-penalty-ms` | `20`     | Sleep per repeated transition; `0` = off |
+| `--op-repeat-max`        | `1000`   | Ceiling on `WITH repeat_max`; `0` = none |

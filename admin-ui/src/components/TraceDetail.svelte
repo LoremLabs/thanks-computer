@@ -331,6 +331,12 @@
                                 </td>
                                 <td class="px-3 py-2 align-top font-mono text-xs text-neutral-600">
                                     {formatDuration(s.duration_ms)}
+                                    {#if s.passes}
+                                        <span class="ml-1 rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-700"
+                                              title="repeated {s.passes} pass(es); stopped: {s.stop_reason ?? '?'}">
+                                            ×{s.passes} {s.stop_reason ?? ''}
+                                        </span>
+                                    {/if}
                                 </td>
                                 <td class="px-3 py-2 align-top">
                                     <span class="rounded px-1.5 py-0.5 text-[11px] font-medium {statusBadgeClass(s.status)}">

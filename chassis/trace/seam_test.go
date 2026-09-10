@@ -30,6 +30,14 @@ func TestSeamWriteThenRead(t *testing.T) {
 		Transport: "txcl", StartedAt: time.Now(), FinishedAt: time.Now(),
 		Status: "ok", Input: []byte(`{"in":1}`), Output: []byte(`{"out":1}`),
 	})
+	// A repeating op: one step for the whole loop, carrying the pass
+	// count and why it stopped.
+	tr.Step(StepInfo{
+		Stack: "default", Scope: 200, Name: "pager", Operation: "txco://pager",
+		Transport: "txco", StartedAt: time.Now(), FinishedAt: time.Now(),
+		Status: "ok", Input: []byte(`{"in":2}`), Output: []byte(`{"rows":[1,2,3]}`),
+		Passes: 3, StopReason: "done",
+	})
 	tr.End("ok", "", []byte(`{"done":true}`))
 	if err := sink.Close(ctx); err != nil {
 		t.Fatalf("sink close: %v", err)
@@ -71,13 +79,21 @@ func TestSeamWriteThenRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if d.RID != rid || d.Status != "ok" || len(d.Steps) != 1 {
-		t.Fatalf("detail rid/status/steps = %q/%q/%d; want %s/ok/1",
+	if d.RID != rid || d.Status != "ok" || len(d.Steps) != 2 {
+		t.Fatalf("detail rid/status/steps = %q/%q/%d; want %s/ok/2",
 			d.RID, d.Status, len(d.Steps), rid)
 	}
 	if d.Steps[0].Name != "parse" || d.In == nil || d.Out == nil {
 		t.Errorf("detail step/in/out wrong: step=%q in=%v out=%v",
 			d.Steps[0].Name, d.In, d.Out)
+	}
+	if d.Steps[0].Passes != 0 || d.Steps[0].StopReason != "" {
+		t.Errorf("single-shot step carries passes/stop_reason: %d/%q",
+			d.Steps[0].Passes, d.Steps[0].StopReason)
+	}
+	if d.Steps[1].Name != "pager" || d.Steps[1].Passes != 3 || d.Steps[1].StopReason != "done" {
+		t.Errorf("repeat step = %q passes %d stop %q; want pager/3/done",
+			d.Steps[1].Name, d.Steps[1].Passes, d.Steps[1].StopReason)
 	}
 
 	// Missing rid ⇒ ErrNotFound.

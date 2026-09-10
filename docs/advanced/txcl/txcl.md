@@ -422,11 +422,11 @@ WITH timeout = "500ms"               # also valid: any time.ParseDuration string
 WITH timeout = 2000, label = "v2"    # free-form key/value pairs
 ```
 
-WITH carries **chassis directives about this op** — they tell the chassis how to run the op, but they don't reach the op target. `timeout` is the only key the chassis currently consumes: numeric values are treated as milliseconds; string values are parsed by Go's `time.ParseDuration` (so `"500ms"`, `"2s"`, etc. all work). Bad parse falls back to the global `--op-timeout` default (5s).
+WITH carries **directives about this op** — metadata beside the payload, not merged into it. The chassis consumes two families itself: `timeout`, and `repeat_until` / `repeat_max` ([repeating an op](#repeating-an-op--repeat_until)). Every other key rides along to the op as its parameters — `txco://` ops read them, `secrets.*` splices credentials, `ai://chat` takes its prompt from them. For `timeout`, numeric values are treated as milliseconds; string values are parsed by Go's `time.ParseDuration` (so `"500ms"`, `"2s"`, etc. all work). Bad parse falls back to the global `--op-timeout` default (5s).
 
 A per-op `timeout` is capped by `--op-timeout-max` (default `10m`). A resonator asking for more is rejected at dispatch with a chassis-level error log; the op is dropped from the merge for that request.
 
-Other keys are accepted by the parser but currently unused at runtime. Reserved for future per-op config.
+Keys the op does not know are ignored by it. The `repeat_*` prefix is reserved for the chassis (`repeat_budget` is reserved, not yet supported).
 
 ### `redact` and `omit` — trace-log scrubbing
 
@@ -564,6 +564,45 @@ The convention is **transport-agnostic**: an HTTP op signals control flow by inc
 
 Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise. Each inlet stamps its own read-only facts there too (`@web.req.*`, `@lmtp.*`, `@imap.*`, `@dns.*`, `@websocket.*`); see [protocols](../protocols/README.md).
 
+## Repeating an op — `repeat_until`
+
+An op can re-run its EXEC inside one dispatch until a predicate holds, merging each pass locally and handing the scope **one** payload. The scope does not advance until the loop finishes — the property a `@goto` loop cannot give you, because a goto re-enters the stage and every sibling op fires again.
+
+```txcl
+WITH prefix       = &concat(._wslug, "/docs/"),
+     after        = ._wbl.next,          # re-resolved every pass
+     limit        = 200,
+     into         = "_wbl",
+     repeat_until = ._wbl.next == "",
+     repeat_max   = 50
+EXEC "txco://blob/list"
+```
+
+- `repeat_until` takes a WHEN-shaped predicate: `.path <op> literal`, composed with `&&`, `||`, `!` and parentheses (`,` separates WITH keys here, so it is not AND). It is evaluated after every pass against the **view** — the envelope plus everything the loop has merged so far. WHEN's rules apply: path-vs-literal only, and a missing path reads as the zero value. `._wbl.next == ""` is exactly the cursor-drain exit; `.more == false` is already true before the op has written anything and exits after the first pass (`txco apply` warns).
+- `repeat_max` is required: a positive integer, the pass ceiling, capped by `--op-repeat-max` (default 1000). A loop without it, or above the cap, is dropped at dispatch with a chassis-level error log; `txco apply` warns first.
+- Every pass re-resolves the WITH values against the view, so a cursor the previous pass wrote (`after = ._wbl.next`) advances. The op's input is frozen for the whole loop; parameters travel by WITH. EMIT is applied per pass, resolving against the view that pass ran in.
+- Passes merge with the scope-merge rules: scalars overwrite, objects deep-merge, **arrays append**. A paged op that returns one page's rows per pass accumulates all of them; an op that returns a cumulative array would double up — return the delta.
+- `WITH timeout` bounds the whole loop, not one pass. Each pass pays the EXEC [fuel](../fuel.md) cost and the loop checks the ceiling between passes.
+- This version repeats `txco://` ops only.
+
+The loop stops for one of five reasons, checked in this order after each pass:
+
+| stop      | meaning                                                                                           |
+| --------- | ------------------------------------------------------------------------------------------------- |
+| `error`   | a pass failed, or a WITH value failed to resolve; the earlier passes' output is kept              |
+| `fuel`    | the request crossed `--max-fuel-per-request`                                                      |
+| `timeout` | the op's `WITH timeout` (or the request deadline) ran out; the completed passes are kept          |
+| `done`    | the predicate held                                                                                |
+| `max`     | `repeat_max` passes ran                                                                           |
+
+None of them fails the run: the loop truncates and flags. What happened is written to the envelope at `_txc.runtime.repeat.<op name>` as `{"passes": N, "stop": "…", "elapsed_ms": N, "error": "…"}` — chassis-owned (no op can forge it), so a later scope can gate on it:
+
+```txcl
+WHEN @runtime.repeat.blobs.stop != "done" EMIT .partial = true
+```
+
+The [trace](../trace.md) shows one step for the loop, spanning every pass, with `passes` and `stop_reason` (`txco trace <rid> --step <name>` prints them); each pass also writes an `op.pass` timeline event to the file sink.
+
 ## Streaming the response body
 
 For an HTTP response the chassis normally buffers the whole body and writes it once, at the end of the pipeline. To stream instead — flushing bytes to the client as the pipeline produces them — write `@web.res.body` in a **non-terminal** scope (one the pipeline continues past). Each such write is flushed to the client immediately and then cleared, so the next scope starts fresh:
@@ -613,7 +652,9 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 
 | Key | Applies to | Meaning |
 |---|---|---|
-| `timeout` | any EXEC | Per-call wall clock (ms or `"2h"`); capped by `--op-timeout-max` |
+| `timeout` | any EXEC | Per-call wall clock (ms or `"2h"`); capped by `--op-timeout-max`. Bounds a whole `repeat_until` loop |
+| `repeat_until` | txco:// | Re-run the EXEC until this WHEN-shaped predicate holds against the accumulated view; the scope sees one merged payload ([repeating an op](#repeating-an-op--repeat_until)) |
+| `repeat_max` | with `repeat_until` | Pass ceiling, required; capped by `--op-repeat-max` |
 | `method` | http(s) | HTTP verb override (default POST) |
 | `secrets.headers.<h>.secret` / `.format` | http(s), builtins | Splice a stored secret into the request; `format = "Bearer {}"` templates it ([runbook](../runbook-secret-store.md)) |
 | `secrets.body.<path>.secret` | http(s) | Same, into the JSON body (the projected body when the rule SELECTs) |

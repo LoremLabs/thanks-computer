@@ -1,0 +1,8 @@
+# GET /drain — step 1: seed the namespace. Five sibling ops at scope 100
+# each write one key (parallel, independent); re-running just rewrites
+# the same keys, so the demo is idempotent.
+WHEN @src == "http" && @web.req.url.path == "/drain"
+  EXEC "txco://kv/set"
+    WITH namespace = "drain-demo",
+         key = "key-d",
+         value = "d"

@@ -507,6 +507,11 @@ export interface TraceStep {
     input_truncated?: boolean
     output_truncated?: boolean
     error?: string
+    // Set only for an op that repeated inside its dispatch (WITH
+    // repeat_until): the pass count and why the loop stopped
+    // (done | max | fuel | timeout | error).
+    passes?: number
+    stop_reason?: string
     // Only present when the trace is fetched with ?include=full.
     // Payloads are arbitrary JSON; UI treats them as opaque.
     in?: unknown

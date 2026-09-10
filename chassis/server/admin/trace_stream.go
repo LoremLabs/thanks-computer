@@ -245,6 +245,8 @@ func closedTraceToWire(t trace.ClosedTrace) traceStreamEvent {
 			Error:           s.Error,
 			In:              s.In,
 			Out:             s.Out,
+			Passes:          s.Passes,
+			StopReason:      s.StopReason,
 		})
 	}
 	return ev

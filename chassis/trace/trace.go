@@ -116,6 +116,15 @@ type StepInfo struct {
 	// we kept on disk.
 	InputBytes  int
 	OutputBytes int
+
+	// Passes / StopReason describe an op that repeated inside its
+	// dispatch (`WITH repeat_until`). The step spans every pass —
+	// StartedAt is the first dispatch, FinishedAt the last, Output the
+	// accumulated contribution — and Passes counts them. StopReason is
+	// why the loop ended: done, max, fuel, timeout, or error. Zero /
+	// empty for an ordinary single-shot step.
+	Passes     int
+	StopReason string
 }
 
 // TimelineEvent is a single line in timeline.jsonl. Event values are

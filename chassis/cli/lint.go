@@ -73,6 +73,7 @@ Flags:
 	// 2-stack ping-pongs). Warnings only, same conservative semantics as
 	// apply (see loop_lint.go) — they don't flip the exit code.
 	loopWarns := lintStackLoops(ops)
+	loopWarns = append(loopWarns, lintRepeatDirectives(ops)...)
 
 	// Stable order for the listing and the report.
 	sort.Slice(ops, func(i, j int) bool {

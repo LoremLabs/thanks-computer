@@ -189,3 +189,126 @@ func TestLintIgnoresPathValuedGoto(t *testing.T) {
 		t.Errorf("path-valued goto must not warn, got: %v", got)
 	}
 }
+
+// --- WITH repeat_until / repeat_max lint ---
+
+func repeatOp(txcl string) []bundle.Op {
+	return []bundle.Op{{
+		Stack: "loop", Scope: 0, Name: "pager",
+		SourcePath: "/tmp/pager.txcl",
+		Txcl:       txcl,
+	}}
+}
+
+func TestLintRepeatCleanLoopIsSilent(t *testing.T) {
+	got := lintRepeatDirectives(repeatOp(
+		`WITH after = ._p.next, repeat_until = ._p.next == "", repeat_max = 50 EXEC "txco://blob/list"`))
+	if len(got) != 0 {
+		t.Errorf("expected no warnings for a well-formed loop, got: %v", got)
+	}
+}
+
+func TestLintRepeatMissingMax(t *testing.T) {
+	got := lintRepeatDirectives(repeatOp(
+		`WITH repeat_until = ._p.next == "" EXEC "txco://blob/list"`))
+	if !containsSubstring(got, "without repeat_max") {
+		t.Errorf("expected missing repeat_max warning, got: %v", got)
+	}
+}
+
+func TestLintRepeatMaxNotPositiveLiteral(t *testing.T) {
+	for _, txcl := range []string{
+		`WITH repeat_until = ._p.next == "", repeat_max = 0 EXEC "txco://blob/list"`,
+		`WITH repeat_until = ._p.next == "", repeat_max = ._n EXEC "txco://blob/list"`,
+		`WITH repeat_until = ._p.next == "", repeat_max = "50" EXEC "txco://blob/list"`,
+	} {
+		got := lintRepeatDirectives(repeatOp(txcl))
+		if !containsSubstring(got, "positive integer literal") {
+			t.Errorf("%s: expected repeat_max literal warning, got: %v", txcl, got)
+		}
+	}
+}
+
+func TestLintRepeatMaxWithoutUntil(t *testing.T) {
+	got := lintRepeatDirectives(repeatOp(`WITH repeat_max = 5 EXEC "txco://blob/list"`))
+	if !containsSubstring(got, "repeat_max without repeat_until") {
+		t.Errorf("expected ignored repeat_max warning, got: %v", got)
+	}
+}
+
+func TestLintRepeatNonTxcoExec(t *testing.T) {
+	for _, txcl := range []string{
+		`WITH repeat_until = ._p.next == "", repeat_max = 5 EXEC "https://example.com/page"`,
+		`WITH repeat_until = ._p.next == "", repeat_max = 5`,
+	} {
+		got := lintRepeatDirectives(repeatOp(txcl))
+		if !containsSubstring(got, "repeats txco:// ops only") {
+			t.Errorf("%s: expected non-txco warning, got: %v", txcl, got)
+		}
+	}
+}
+
+func TestLintRepeatPolarityTrap(t *testing.T) {
+	traps := []string{
+		`WITH repeat_until = ._p.more == false, repeat_max = 5 EXEC "txco://x"`,
+		`WITH repeat_until = ._p.more != true, repeat_max = 5 EXEC "txco://x"`,
+		`WITH repeat_until = !(._p.more == true), repeat_max = 5 EXEC "txco://x"`,
+		`WITH repeat_until = ._p.next == "" || ._p.more == false, repeat_max = 5 EXEC "txco://x"`,
+	}
+	for _, txcl := range traps {
+		got := lintRepeatDirectives(repeatOp(txcl))
+		if !containsSubstring(got, "exits after the first pass") {
+			t.Errorf("%s: expected polarity warning, got: %v", txcl, got)
+		}
+	}
+	safe := []string{
+		`WITH repeat_until = ._p.done == true, repeat_max = 5 EXEC "txco://x"`,
+		`WITH repeat_until = ._p.more != false, repeat_max = 5 EXEC "txco://x"`,
+		`WITH repeat_until = !(._p.more != true), repeat_max = 5 EXEC "txco://x"`,
+		`WITH repeat_until = ._p.next == "", repeat_max = 5 EXEC "txco://x"`,
+	}
+	for _, txcl := range safe {
+		got := lintRepeatDirectives(repeatOp(txcl))
+		if containsSubstring(got, "exits after the first pass") {
+			t.Errorf("%s: unexpected polarity warning: %v", txcl, got)
+		}
+	}
+}
+
+func TestLintRepeatStackedWithSelfGoto(t *testing.T) {
+	got := lintRepeatDirectives(repeatOp(
+		`WITH repeat_until = ._p.next == "", repeat_max = 5 EXEC "txco://x" EMIT @goto = "loop/0"`))
+	if !containsSubstring(got, "two loops stacked") {
+		t.Errorf("expected stacked-loop warning, got: %v", got)
+	}
+	guarded := lintRepeatDirectives(repeatOp(
+		`WHEN .again == true WITH repeat_until = ._p.next == "", repeat_max = 5 EXEC "txco://x" EMIT @goto = "loop/0"`))
+	if containsSubstring(guarded, "two loops stacked") {
+		t.Errorf("guarded goto should not be flagged: %v", guarded)
+	}
+}
+
+func TestLintRepeatBudgetReserved(t *testing.T) {
+	for _, txcl := range []string{
+		`WITH repeat_until = ._p.next == "", repeat_max = 5, repeat_budget = "5s" EXEC "txco://x"`,
+		`WITH repeat_budget = "5s" EXEC "txco://x"`,
+	} {
+		got := lintRepeatDirectives(repeatOp(txcl))
+		if !containsSubstring(got, "repeat_budget, which is reserved") {
+			t.Errorf("%s: expected reserved warning, got: %v", txcl, got)
+		}
+	}
+}
+
+// TestLintRepeatIgnoresOrdinaryOps: the fixtures the loop lint already
+// accepts stay silent under the repeat lint too.
+func TestLintRepeatIgnoresOrdinaryOps(t *testing.T) {
+	ops := []bundle.Op{
+		{Stack: "boot", Scope: 0, Name: "poll", SourcePath: "/tmp/poll.txcl", Txcl: `WHEN .ready != true EMIT @goto = "boot/0"`},
+		{Stack: "boot", Scope: 0, Name: "http", SourcePath: "/tmp/http.txcl", Txcl: `WITH timeout = 1000, mode = "async" EXEC "http://example.com/api/0"`},
+		{Stack: "boot", Scope: 0, Name: "once", SourcePath: "/tmp/once.txcl", Txcl: `EMIT @goto = "boot/0", @halt = true`},
+	}
+	if got := lintRepeatDirectives(ops); len(got) != 0 {
+		t.Errorf("expected no warnings for ordinary ops, got: %v", got)
+	}
+}

@@ -1,0 +1,27 @@
+# GET /drain — step 2: drain the namespace inside ONE op.
+#
+# kv/list is windowed: at most `limit` keys per call, sorted after the
+# `after` cursor, with `next` = the cursor for the following call ("" when
+# the namespace is exhausted). Without repeat_until you would need a
+# @goto loop — a full stage hop per page, with every sibling op at the
+# target scope re-evaluated each time. With it, this op re-runs itself:
+#
+#   - `after = ._page.next` is re-resolved every pass against the view
+#     (envelope + everything merged so far), so the cursor advances;
+#   - passes merge with the scope-merge rules — `keys` (an array)
+#     appends, `next` and `count` (scalars) take the last pass's value;
+#   - the loop stops when `._page.next == ""` holds (done), at
+#     repeat_max passes (max), on a pass error, on fuel, or on the op's
+#     WITH timeout — and the scope sees ONE merged payload either way.
+#
+# Five seeded keys at limit 2 → three passes: [a,b] [c,d] [e].
+# What happened is written to @runtime.repeat.drain = {passes, stop,
+# elapsed_ms}; the responder at 300 copies it into the body.
+WHEN @src == "http" && @web.req.url.path == "/drain"
+  EXEC "txco://kv/list"
+    WITH namespace = "drain-demo",
+         limit = 2,
+         after = ._page.next,
+         into = "_page",
+         repeat_until = ._page.next == "",
+         repeat_max = 10

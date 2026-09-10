@@ -62,6 +62,11 @@ type Step struct {
 	Error           string
 	In              any
 	Out             any
+
+	// Passes / StopReason: set only for a step that repeated inside its
+	// dispatch (WITH repeat_until); see StepInfo.
+	Passes     int
+	StopReason string
 }
 
 // RequestDetail is the aggregated per-request document (everything the

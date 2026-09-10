@@ -1,0 +1,9 @@
+# GET /drain — step 3: answer with the accumulated page and the loop's
+# bookkeeping. `_page` and `_txc` are `_`-prefixed and never reach the
+# body on their own, so copy what the reader should see onto plain keys;
+# the web inlet renders the envelope minus `_`-keys as JSON.
+WHEN ._page.count != null
+  EMIT .keys = ._page.keys,
+       .loop = @runtime.repeat.drain,
+       @web.res.status = 200,
+       @halt = true

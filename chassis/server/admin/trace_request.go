@@ -152,6 +152,8 @@ type traceStep struct {
 	Error           string `json:"error,omitempty"`
 	In              any    `json:"in,omitempty"`
 	Out             any    `json:"out,omitempty"`
+	Passes          int    `json:"passes,omitempty"`
+	StopReason      string `json:"stop_reason,omitempty"`
 }
 
 // traceRdr returns the trace reader, lazily building it from config if
@@ -262,6 +264,8 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 			Error:           s.Error,
 			In:              s.In,
 			Out:             s.Out,
+			Passes:          s.Passes,
+			StopReason:      s.StopReason,
 		})
 	}
 
