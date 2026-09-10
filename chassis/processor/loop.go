@@ -176,25 +176,33 @@ passes:
 				break passes
 			}
 			if len(loop.Set) > 0 {
-				// Resolve every assignment against the view (so a
-				// counter reads the value the previous pass wrote), write
-				// them into the view, then copy the accepted paths onto
-				// the frozen base input for this pass. Reserved _txc.*
-				// writes are dropped by the overlay, same as SET.
-				newView, err := pu.OverlayResponseFor(lctx, view, view, loop.Set)
-				if err != nil {
-					stop, errText = loopStopError, "LOOP SET: "+err.Error()
-					break passes
-				}
-				view = newView
+				// Resolve every assignment against the view IN ORDER, each
+				// one seeing the writes before it — so `._n = &add(._n, 1),
+				// ._cell = &get(._cells, &concat("", ._n))` advances a
+				// counter and then looks up by the NEW counter in one SET.
+				// (OverlayResponseFor resolves all of a clause's values
+				// against the pre-overlay view, which is right for EMIT and
+				// wrong here.) Each accepted write lands on the view and on
+				// the frozen base input for this pass; reserved _txc.*
+				// paths are dropped, same as SET.
 				in := baseInput
 				for _, bv := range loop.Set {
 					path := strings.TrimPrefix(bv.Path, ".")
+					val, err := runtime.Resolve(bv.Value, runtime.JSONEnv(view))
+					if err != nil {
+						stop, errText = loopStopError, "LOOP SET "+bv.Path+": "+err.Error()
+						break passes
+					}
 					if !authorMayWriteTxc(path) {
+						pu.Logger.Debug("loop set: dropped reserved control write",
+							zap.String("name", op.Name), zap.String("path", path))
 						continue
 					}
-					if v := gjson.Get(view, path); v.Exists() {
-						in, _ = sjson.SetRaw(in, path, v.Raw)
+					if nv, serr := sjson.Set(view, path, val); serr == nil {
+						view = nv
+					}
+					if ni, serr := sjson.Set(in, path, val); serr == nil {
+						in = ni
 					}
 				}
 				op.Input = in

@@ -585,7 +585,7 @@ LOOP [EVERY <duration>] [SET <path> = <value>, …] UNTIL <predicate> [MAX <n>]
 | `UNTIL <predicate>` | The exit condition, checked after every pass against the **view**: the envelope plus everything the loop has merged so far. WHEN's grammar exactly — `.path <op> literal`, `&&`, `\|\|`, `!`, parentheses, comma as AND. | required |
 | `MAX <n>` | Pass ceiling; capped by `--op-loop-max` (1000). | 10 |
 | `EVERY <duration>` | Pause between passes, paid only when the loop continues (never after the last pass). `"2s"`, `"50ms"`, or a number of milliseconds. Floor 2ms. | 50ms |
-| `SET <path> = <value>, …` | Applied before every repeat, never before the first pass: resolved against the view, written onto the op's input and the view. Same value forms as SET. How a pass feeds a cursor or counter to the next one. | none |
+| `SET <path> = <value>, …` | Applied before every repeat, never before the first pass: resolved against the view, written onto the op's input and the view. Same value forms as SET. Assignments apply in order and each sees the writes before it, so a counter can drive a lookup (`SET ._n = &add(._n, 1), ._cell = &get(._cells, &concat("", ._n))`). How a pass feeds a cursor or counter to the next one. | none |
 
 The parts may be written in any order; `EVERY` and `MAX` are words the parser recognizes only inside a LOOP, so `max` and `every` remain ordinary WITH keys elsewhere. Write LOOP after EXEC and before EMIT.
 

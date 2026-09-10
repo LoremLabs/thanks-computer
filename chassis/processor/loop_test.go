@@ -454,6 +454,41 @@ func TestLoopSetCounter(t *testing.T) {
 	}
 }
 
+// TestLoopSetSequential: LOOP SET assignments apply in order, each
+// seeing the writes before it — the worklist-walk idiom: advance a
+// counter, then look the next element up by the NEW counter. Before this
+// held, the lookup read the previous counter and every cell ran twice.
+func TestLoopSetSequential(t *testing.T) {
+	pu := newLoopUnit(t)
+	p := &pager{}
+	pu.Handle([]byte("txco://pager"), p.handler())
+	seedNamedOp(t, pu, "loop", 0, "walk",
+		`SET ._n = 0, ._cell = ._cells.0
+		 EXEC "txco://pager"
+		   WITH tag = ._cell.tag
+		 LOOP EVERY "2ms" SET ._n = &add(._n, 1), ._cell = &get(._cells, &concat("", ._n)) UNTIL ._cell.last == true MAX 5`)
+
+	out := runStage(t, context.Background(), pu, `{"_cells":[{"tag":"a","last":false},{"tag":"b","last":false},{"tag":"c","last":true}]}`, "loop/0")
+
+	if got := p.hitCount(); got != 3 {
+		t.Fatalf("hits = %d, want 3 — one pass per cell (out=%s)", got, out)
+	}
+	for i, want := range []string{"a", "b", "c"} {
+		if got := gjson.Get(p.meta(i), "tag").String(); got != want {
+			t.Errorf("pass %d tag = %q, want %q — the lookup did not see the counter's new value", i+1, got, want)
+		}
+		if got := gjson.Get(p.input(i), "_cell.tag").String(); got != want {
+			t.Errorf("pass %d input _cell.tag = %q, want %q", i+1, got, want)
+		}
+	}
+	if b := book(out, "walk"); b.Get("passes").Int() != 3 || b.Get("stop").String() != "done" {
+		t.Errorf("bookkeeping = %s, want passes 3 / stop done", b.Raw)
+	}
+	if gjson.Get(out, "_cell").Exists() || gjson.Get(out, "_n").Exists() {
+		t.Errorf("LOOP SET scratch leaked into the output: %s", out)
+	}
+}
+
 // TestLoopURLCursor: the other HTTP cursor style — WITH url re-resolves
 // every pass, so the cursor rides the query string with no SET.
 func TestLoopURLCursor(t *testing.T) {
