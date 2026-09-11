@@ -117,6 +117,7 @@ func TestSortedEnvAndCappedWriter(t *testing.T) {
 type fakeProvider struct {
 	created, woken, destroyed int
 	wakeErr                   error
+	vanishOnce                bool // the next Wake reports not_found, then clears
 	execErr                   error
 	warm                      time.Duration // WarmThreshold when > 0
 	newRun                    bool          // what the woken computer reports
@@ -138,6 +139,10 @@ func (f *fakeProvider) Create(_ context.Context, spec Spec) (Handle, error) {
 }
 func (f *fakeProvider) Wake(context.Context, Handle) (Computer, error) {
 	f.woken++
+	if f.vanishOnce {
+		f.vanishOnce = false
+		return nil, &Error{Code: CodeNotFound, Message: "gone"}
+	}
 	if f.wakeErr != nil {
 		return nil, f.wakeErr
 	}
@@ -327,5 +332,78 @@ func TestManagerCheckpointUnsupported(t *testing.T) {
 func TestOpenUnknownProvider(t *testing.T) {
 	if _, err := Open("no-such-provider", Config{}); err == nil {
 		t.Fatal("Open(unknown) = nil error")
+	}
+}
+
+// TestManagerHealsVanishedWorkspace: a workspace deleted OUT OF BAND — an
+// operator removed it at the provider, another node reaped it, the machine
+// was lost — must not wedge the identity row on a dead reference. The first
+// exec after that recreates and runs, and says so; the row is rewritten.
+func TestManagerHealsVanishedWorkspace(t *testing.T) {
+	s := newTestStore(t)
+	f := &fakeProvider{}
+	m := NewManager(f, Limits{}, s)
+	spec := Spec{Tenant: "acme", Stack: "agents", Name: "tools"}
+	ctx := context.Background()
+
+	if _, _, _, err := m.Exec(ctx, spec, ExecRequest{Command: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	// Someone deletes the workspace behind our back: the provider now says
+	// it is gone, and a fresh Manager (another node) holds no cache.
+	f.vanishOnce = true
+	m2 := NewManager(f, Limits{}, s)
+	m2.now = m.now
+	created := f.created
+
+	res, _, _, err := m2.Exec(ctx, spec, ExecRequest{Command: "two"})
+	if err != nil {
+		t.Fatalf("a vanished workspace did not heal: %v", err)
+	}
+	if !res.Recreated {
+		t.Error("result does not report that the workspace was recreated")
+	}
+	if f.created != created+1 {
+		t.Errorf("Create called %d times, want one more than %d", f.created, created)
+	}
+	row, _ := s.Get(ctx, "acme", "agents", "tools")
+	if row == nil || row.Status == StatusDestroyed || row.DestroyedAt != nil {
+		t.Errorf("row not rewritten after the heal: %+v", row)
+	}
+}
+
+// TestManagerDoesNotRecreateOnTransientWakeFailure is the other half: a wake
+// that failed for any OTHER reason must never be healed by recreating —
+// that would silently replace a workspace's files with an empty one.
+func TestManagerDoesNotRecreateOnTransientWakeFailure(t *testing.T) {
+	s := newTestStore(t)
+	f := &fakeProvider{}
+	m := NewManager(f, Limits{}, s)
+	spec := Spec{Tenant: "acme", Stack: "agents", Name: "tools"}
+	ctx := context.Background()
+
+	if _, _, _, err := m.Exec(ctx, spec, ExecRequest{Command: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	created := f.created
+	f.wakeErr = errors.New("provider had a bad day")
+
+	if _, _, _, err := m.Exec(ctx, spec, ExecRequest{Command: "two"}); err == nil {
+		t.Fatal("a transient wake failure was swallowed")
+	}
+	if f.created != created {
+		t.Errorf("Create called %d times, want %d — a transient failure must not recreate", f.created, created)
+	}
+	row, _ := s.Get(ctx, "acme", "agents", "tools")
+	if row.Status == StatusDestroyed {
+		t.Error("a transient wake failure marked the row destroyed")
+	}
+	// Once the provider recovers, the same workspace is used again.
+	f.wakeErr = nil
+	if _, h, _, err := m.Exec(ctx, spec, ExecRequest{Command: "three"}); err != nil || h.Ref != "ref/tools" {
+		t.Errorf("did not recover onto the SAME workspace: %+v %v", h, err)
+	}
+	if f.created != created {
+		t.Errorf("recovery recreated the workspace (%d creates)", f.created)
 	}
 }

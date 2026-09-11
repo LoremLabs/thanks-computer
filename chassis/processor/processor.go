@@ -1371,7 +1371,20 @@ func (pu *Unit) advanceAfterScope(
 						pu.Logger.Warn("stream chunk decode", zap.String("err", derr.Error()))
 					}
 				}
-				resCh <- event.Payload{Type: event.StreamEnd}
+				// The terminator carries the FINAL envelope. Every outlet
+				// ignores a StreamEnd's Raw (the body was the chunks), but
+				// the dispatch tee captures it — and without it a streamed
+				// request accounts for nothing: the tee's last payload
+				// would be empty, so the usage line records zero fuel and
+				// zero bytes and, worse, `_txc.tenant` reads empty, which
+				// drops the request out of its tenant's trace list
+				// entirely. Seen in production on the first streamed day.
+				// Sync the live budget first, for the same reason the
+				// buffered emit below does: the tee reads _txc.fuel_used
+				// off this envelope, and the final scope's charges (the
+				// workspace exec's own wall-clock among them) land after
+				// the last hop-time sync.
+				resCh <- event.Payload{Raw: syncBudgetToEnvelope(ctx, resp), Type: event.StreamEnd}
 				if sink != nil {
 					// A late write from an op goroutine that outlived its
 					// dispatch must not race bytes onto a finished response.

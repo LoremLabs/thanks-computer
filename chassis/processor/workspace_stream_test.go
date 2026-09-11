@@ -276,6 +276,21 @@ collected:
 	if got[4].Type != event.StreamEnd {
 		t.Errorf("last payload = %v, want StreamEnd", got[4].Type)
 	}
+	// The terminator carries the final envelope so the request still
+	// accounts for itself: without it the dispatch tee captures nothing and
+	// the usage line records no tenant, no fuel and no bytes.
+	if got[4].Raw == "" {
+		t.Fatal("StreamEnd carries no envelope: a streamed request would account for nothing")
+	}
+	if got[4].Raw == "" || gjson.Get(got[4].Raw, "_txc.tenant").String() != "acme" {
+		t.Errorf("StreamEnd envelope lost the tenant: %s", got[4].Raw)
+	}
+	if FuelUsedFromEnvelope(got[4].Raw) <= 0 {
+		t.Errorf("StreamEnd envelope carries no fuel: %s", got[4].Raw)
+	}
+	if gjson.Get(got[4].Raw, "_ws.exit").Int() != 0 {
+		t.Errorf("StreamEnd envelope is not the merged result: %s", got[4].Raw)
+	}
 }
 
 // TestWorkspaceStreamSilentCommandKeepsJSON: a streamed exec that produces

@@ -344,6 +344,12 @@ func workspaceStamp(raw, provider, computer, run string, wallMS int64) string {
 func workspaceSuccess(into, provider, computer, run string, res workspace.ExecResult, wallMS int64, streamed bool) event.Payload {
 	b := jsonx.NewObject()
 	b.Set("exit", res.Exit)
+	if res.Recreated {
+		// The workspace was gone at the provider (deleted out of band) and
+		// this command ran in a fresh one — say so, because the files from
+		// before are not there.
+		b.Set("recreated", true)
+	}
 	if streamed {
 		// The bytes went to the client, not into the envelope. Report how
 		// many so a rule can still gate on "did it produce anything", and

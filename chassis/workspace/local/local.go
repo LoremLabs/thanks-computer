@@ -104,7 +104,8 @@ func (p *Provider) Wake(_ context.Context, h workspace.Handle) (workspace.Comput
 	}
 	st, err := os.Stat(h.Ref)
 	if err != nil || !st.IsDir() {
-		return nil, &workspace.Error{Code: "provider", Message: "workspace directory missing: " + h.Ref}
+		// Gone: the Manager recreates rather than wedging on a dead ref.
+		return nil, &workspace.Error{Code: workspace.CodeNotFound, Message: "workspace directory missing: " + h.Ref}
 	}
 	return &computer{dir: h.Ref}, nil
 }

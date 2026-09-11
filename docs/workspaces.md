@@ -270,6 +270,17 @@ while before it sleeps, execs closer together than that window share a run
 id; `_txc.workspace.run` is how a trace tells them apart, and a task that
 spans a sleep simply sees a new run id on its next exec.
 
+**If a workspace disappears, the next exec makes a new one.** An operator
+deletes it at the provider, another node reaps it, the machine is lost:
+the identity row still points at something that no longer exists. Rather
+than failing every later command on a dead reference, the chassis drops
+the identity and provisions a fresh workspace for that exec, and the
+result carries `recreated: true` so a rule can tell that the files from
+before are gone. Only a genuine "not found" heals this way. A provider
+that fails for any other reason is reported as-is and the workspace is
+left alone, because recreating on a transient error would quietly replace
+your files with an empty environment.
+
 **The reaper destroys.** Where the `workspace-reaper` background service
 runs, a workspace idle longer than `--workspace-reap` (30 days by default)
 is deleted at the provider and its row marked destroyed. Its files are

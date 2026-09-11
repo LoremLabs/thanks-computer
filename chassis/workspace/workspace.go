@@ -97,6 +97,11 @@ type ExecResult struct {
 	StderrTruncated bool
 	WallMS          int64
 
+	// Recreated is set when the workspace was gone at the provider and the
+	// Manager made a fresh one to run this command in — the files from
+	// before are lost, and a rule may want to say so.
+	Recreated bool
+
 	// StdoutBytes counts the stdout bytes the command produced. It equals
 	// len(Stdout) on the buffered path; on the streaming path
 	// (ExecRequest.StdoutTo) Stdout is nil and this is how much reached
@@ -208,6 +213,20 @@ func Open(name string, cfg Config) (Provider, error) {
 // ErrNotAllowed is returned when the configured provider is refused on this
 // chassis (the local provider without --workspace-allow-local).
 var ErrNotAllowed = errors.New("workspace: provider not enabled on this chassis")
+
+// CodeNotFound is the Error code a provider returns when the workspace it
+// was asked for does not exist on its side — reaped by another node,
+// deleted by an operator, or lost with the machine. It is the ONE failure
+// the Manager is allowed to heal by recreating (see Exec): every other
+// error might be transient, and recreating on a transient error would
+// silently replace a pony's files with an empty environment.
+const CodeNotFound = "not_found"
+
+// IsNotFound reports whether err says the workspace is gone.
+func IsNotFound(err error) bool {
+	var we *Error
+	return errors.As(err, &we) && we.Code == CodeNotFound
+}
 
 // ErrTimeout is returned by a Computer when the op's context ended before
 // the command did. The processor reports it in-band as
@@ -510,6 +529,38 @@ func (m *Manager) runIDFor(e entry, comp Computer) string {
 // transport or provider failure — never a non-zero exit, which is data in
 // ExecResult.
 func (m *Manager) Exec(ctx context.Context, spec Spec, req ExecRequest) (ExecResult, Handle, string, error) {
+	res, h, runID, err := m.execOnce(ctx, spec, req)
+	if err != nil && IsNotFound(err) {
+		// The workspace is gone at the provider but the identity row still
+		// points at it — an operator deleted it, another node reaped it, or
+		// the machine was lost. Without this the row would wedge every
+		// later exec on a dead reference. Drop the identity and run the
+		// command in a fresh workspace: the same outcome the reaper
+		// documents ("destroyed → the next exec starts fresh"), reached in
+		// one request instead of failing until someone intervenes.
+		//
+		// Only ever ONE retry, and only for not_found: a wake that failed
+		// for any other reason may be transient, and recreating there would
+		// quietly throw away the workspace's files.
+		m.dropIdentity(ctx, spec)
+		res, h, runID, err = m.execOnce(ctx, spec, req)
+		if err == nil {
+			res.Recreated = true
+		}
+	}
+	return res, h, runID, err
+}
+
+// dropIdentity forgets a workspace whose provider-side environment is gone,
+// so the next lookup provisions a new one.
+func (m *Manager) dropIdentity(ctx context.Context, spec Spec) {
+	m.forget(spec)
+	if m.store != nil {
+		_ = m.store.MarkDestroyed(ctx, ID(spec.Tenant, spec.Stack, spec.Name), m.now())
+	}
+}
+
+func (m *Manager) execOnce(ctx context.Context, spec Spec, req ExecRequest) (ExecResult, Handle, string, error) {
 	e, err := m.lookup(ctx, spec)
 	if err != nil {
 		return ExecResult{Exit: -1}, Handle{}, "", err
@@ -549,6 +600,14 @@ func (m *Manager) Wake(ctx context.Context, spec Spec) (Handle, string, error) {
 		return Handle{}, "", err
 	}
 	comp, err := m.prov.Wake(ctx, e.h)
+	if err != nil && IsNotFound(err) {
+		// Gone at the provider: drop the stale identity and provision a
+		// fresh workspace (see Exec).
+		m.dropIdentity(ctx, spec)
+		if e, err = m.lookup(ctx, spec); err == nil {
+			comp, err = m.prov.Wake(ctx, e.h)
+		}
+	}
 	if err != nil {
 		m.forget(spec)
 		return e.h, "", err
