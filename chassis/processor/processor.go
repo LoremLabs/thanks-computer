@@ -811,8 +811,13 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// A LOOP clause bounds its whole loop with this one timeout,
 			// so the 5s general default is too tight for a poll; same
 			// boring extension as the ai:// default. WITH timeout wins.
+			// A looping workspace exec keeps whichever default is longer:
+			// a loop of tool runs must not be cut shorter than a single
+			// tool run would be.
 			if op.Resonator != nil && op.Resonator.Loop != nil {
-				if loopTimeout, err := time.ParseDuration(pu.Conf.LoopTimeout); err == nil {
+				if loopTimeout, err := time.ParseDuration(pu.Conf.LoopTimeout); err == nil && loopTimeout > timeout {
+					timeout = loopTimeout
+				} else if err == nil && !strings.HasPrefix(op.Resonator.Exec, "workspace://") {
 					timeout = loopTimeout
 				}
 			}

@@ -563,3 +563,24 @@ func TestScrubSecretsShortValuesLeftAlone(t *testing.T) {
 		t.Errorf("scrub(nil) = %q", got)
 	}
 }
+
+// TestWorkspaceLoopKeepsLongerDefault: a looping workspace exec is bounded
+// by the longer of --loop-timeout and --workspace-default-timeout, so a
+// loop of tool runs is never cut shorter than one tool run would be.
+func TestWorkspaceLoopKeepsLongerDefault(t *testing.T) {
+	stub := &stubProvider{res: workspace.ExecResult{Exit: 0}}
+	pu, _ := newWorkspaceUnit(t, stub)
+	pu.Conf.OpTimeout = "1s"
+	pu.Conf.LoopTimeout = "3s"
+	pu.Conf.WorkspaceDefaultTimeout = "8s"
+	pu.Conf.OpLoopMax = 5
+	seedWorkspaceOp(t, pu, "site", 100, "ws", `EXEC "workspace://tools/exec" WITH command = "true", into = "_ws" LOOP EVERY "1ms" UNTIL ._ws.never == true MAX 1`)
+	before := time.Now()
+	runTenanted(t, pu, "site/100")
+	stub.mu.Lock()
+	d := stub.deadline
+	stub.mu.Unlock()
+	if got := d.Sub(before); got < 6*time.Second || got > 9*time.Second {
+		t.Errorf("loop deadline %v from dispatch, want ≈8s (the longer workspace default), not the 3s loop default", got)
+	}
+}

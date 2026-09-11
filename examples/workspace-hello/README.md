@@ -61,8 +61,9 @@ What the responder sees:
 = ._in.slug`); names are 1–4 `/`-separated DNS-label segments. `WITH
 args = [...]` runs an argv without a shell; `stdin`, `cwd` (relative,
 inside the workspace) and `env` (an object) round out the request. The
-per-op default timeout is `--workspace-default-timeout` (60s); `WITH
-timeout` overrides it, `--op-timeout-max` caps it.
+per-exec default timeout is `--workspace-default-timeout` (5m); `WITH
+timeout` overrides it, `--op-timeout-max` (10m) caps it. The workspace
+itself is never affected by a timeout — only the command is killed.
 
 The trace shows one step per dispatch with `transport=workspace`, and
 the usage log an event with `src=workspace`:

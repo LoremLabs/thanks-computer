@@ -79,7 +79,7 @@ reports `code = "unsupported"`.
 | `cwd` | Working directory, relative to the workspace and inside it |
 | `env` | An object of extra environment variables |
 | `into` | Where the result lands (default `_workspace`) |
-| `timeout` | Per-call wall clock; default `--workspace-default-timeout` (60s), capped by `--op-timeout-max` |
+| `timeout` | Wall clock for the whole exec — create/wake, the command, output capture; the command is killed when it expires. Default `--workspace-default-timeout` (5m), capped by `--op-timeout-max` (10m) |
 | `secrets.env.<NAME>.secret` / `.format` / `.optional` | A stored secret, materialized into the environment as `NAME` (`format = "Bearer {}"` templates it). The only place a workspace op takes a secret — `secrets.headers.*` / `.body.*` are refused |
 | `checkpoint = true`, `comment` | Snapshot after a successful exec (see the verbs) |
 
@@ -183,7 +183,7 @@ name; the stack's txcl does not change.
 | `--workspace-provider` | _(unset)_ | `local`, or an overlay provider |
 | `--workspace-allow-local` | `false` | Required for `local`; see above |
 | `--workspace-local-root` | `./chassis/data/workspaces` | Root for `local` |
-| `--workspace-default-timeout` | `60s` | Per-op default when `WITH timeout` is absent |
+| `--workspace-default-timeout` | `5m` | Per-exec default when `WITH timeout` is absent (sized for builds, tests, tool runs) |
 | `--workspace-max-output-bytes` | `1048576` | stdout/stderr capture cap, each |
 | `--workspace-reap` | `720h` | Idle window before the reaper destroys a workspace (fleet background service) |
 
