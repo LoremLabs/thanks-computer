@@ -524,25 +524,26 @@ func (m *Manager) Sleep(ctx context.Context, spec Spec) error {
 }
 
 // Checkpoint snapshots the workspace through the provider's Checkpointer
-// and records the returned reference. Providers without the capability
-// report unsupported.
-func (m *Manager) Checkpoint(ctx context.Context, spec Spec, comment string) (string, error) {
+// and records the returned reference; the handle comes back too so the
+// caller can stamp which computer was snapshotted. Providers without the
+// capability report unsupported.
+func (m *Manager) Checkpoint(ctx context.Context, spec Spec, comment string) (string, Handle, error) {
 	cp, ok := m.prov.(Checkpointer)
 	if !ok {
-		return "", &Error{Code: "unsupported", Message: "provider " + m.prov.Name() + " has no checkpoint capability"}
+		return "", Handle{}, &Error{Code: "unsupported", Message: "provider " + m.prov.Name() + " has no checkpoint capability"}
 	}
 	e, err := m.lookup(ctx, spec)
 	if err != nil {
-		return "", err
+		return "", Handle{}, err
 	}
 	ref, err := cp.Checkpoint(ctx, e.h, comment)
 	if err != nil {
-		return "", err
+		return "", e.h, err
 	}
 	if m.store != nil {
 		_ = m.store.SetCheckpoint(ctx, ID(spec.Tenant, spec.Stack, spec.Name), ref)
 	}
-	return ref, nil
+	return ref, e.h, nil
 }
 
 // Destroy removes the workspace, marks its row, and forgets its handle;

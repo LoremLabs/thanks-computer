@@ -425,7 +425,7 @@ func runTenanted(t *testing.T, pu *Unit, stage string) string {
 // sanitizer, an EMIT on the same rule drives a `_txc.goto` through the
 // ordinary machinery, and the wall-clock fuel is charged.
 func TestWorkspaceDispatchMergesAndGoto(t *testing.T) {
-	stub := &stubProvider{res: workspace.ExecResult{Exit: 0, Stdout: []byte("hi\n"), WallMS: 5}}
+	stub := &stubProvider{res: workspace.ExecResult{Exit: 0, Stdout: []byte("hi\n"), WallMS: 1500}}
 	pu, _ := newWorkspaceUnit(t, stub)
 	pu.Conf.WorkspaceDefaultTimeout = "60s"
 
@@ -442,9 +442,8 @@ func TestWorkspaceDispatchMergesAndGoto(t *testing.T) {
 	if gjson.Get(out, "_txc.workspace.run").String() == "" || gjson.Get(out, "_txc.workspace.provider").String() != "stub" {
 		t.Errorf("chassis stamp did not survive the sanitizer: %s", out)
 	}
-	// scope-enter (10) + EXEC (25) + 5 ms × 10 = 85, plus the second scope.
-	if fuel := FuelUsedFromEnvelope(out); fuel < 85 {
-		t.Errorf("fuel_used = %d, want >= 85 (wall-clock charge missing): %s", fuel, out)
+	if fuel := FuelUsedFromEnvelope(out); fuel < 36 {
+		t.Errorf("fuel_used = %d, want >= 36 (scope 10 + exec 25 + 1.5 s → one 30 s period = 1): %s", fuel, out)
 	}
 	stub.mu.Lock()
 	spec := stub.seenSpec
@@ -582,5 +581,22 @@ func TestWorkspaceLoopKeepsLongerDefault(t *testing.T) {
 	stub.mu.Unlock()
 	if got := d.Sub(before); got < 6*time.Second || got > 9*time.Second {
 		t.Errorf("loop deadline %v from dispatch, want ≈8s (the longer workspace default), not the 3s loop default", got)
+	}
+}
+
+func TestWorkspaceFuelRate(t *testing.T) {
+	for wall, want := range map[int64]int64{
+		0:       1, // minimum: every accounted op pays at least 1
+		1:       1,
+		29_999:  1,
+		30_000:  1,
+		30_001:  2,
+		60_000:  2, // 2 per minute
+		300_000: 10,
+		301_000: 11,
+	} {
+		if got := workspaceFuel(wall); got != want {
+			t.Errorf("workspaceFuel(%d ms) = %d, want %d", wall, got, want)
+		}
 	}
 }

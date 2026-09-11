@@ -150,10 +150,13 @@ untenanted request, or a malformed `secrets` block.
 
 `workspace://` may [LOOP](./advanced/txcl/txcl.md#loop--repeat-an-op):
 its failures are in-band data and its wall-clock is fuel-metered, which
-is what a loop needs. Each exec pays the flat EXEC dispatch plus
-wall-clock fuel at the compute rate (10 per ms). Every dispatch writes a
-usage event with `src=workspace` (duration, bytes in/out, status) and a
-trace step with `transport=workspace`.
+is what a loop needs. Each exec pays the flat EXEC dispatch plus 1 fuel
+per started 30 seconds of wall clock (2 per minute), minimum 1 — a
+5 minute exec is 10 fuel. (Not the nano-op rate of 10 per millisecond:
+while a command runs, the provider's machine does the work and the
+chassis only waits.) The machine time itself is reported on the usage
+event with `src=workspace` (duration, bytes in/out, status), and every
+dispatch writes a trace step with `transport=workspace`.
 
 ## Providers
 

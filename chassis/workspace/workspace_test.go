@@ -273,7 +273,7 @@ func TestManagerWithStore(t *testing.T) {
 	}
 
 	// Checkpoint records the ref.
-	if ref, err := m2.Checkpoint(ctx, spec, "after install"); err != nil || ref != "v1" {
+	if ref, _, err := m2.Checkpoint(ctx, spec, "after install"); err != nil || ref != "v1" {
 		t.Fatalf("Checkpoint = %q, %v", ref, err)
 	}
 	row, _ = s.Get(ctx, "acme", "agents", "tools")
@@ -317,7 +317,7 @@ func TestManagerCheckpointUnsupported(t *testing.T) {
 	var p Provider = struct{ Provider }{&fakeProvider{}}
 	_ = plain{}
 	m := NewManager(p, Limits{}, nil)
-	_, err := m.Checkpoint(context.Background(), Spec{Tenant: "t", Stack: "s", Name: "n"}, "")
+	_, _, err := m.Checkpoint(context.Background(), Spec{Tenant: "t", Stack: "s", Name: "n"}, "")
 	var we *Error
 	if !errors.As(err, &we) || we.Code != "unsupported" {
 		t.Errorf("Checkpoint on a plain provider: %v", err)

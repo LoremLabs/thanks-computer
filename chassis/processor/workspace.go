@@ -126,7 +126,7 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		// name. A failed checkpoint does not fail the exec: the result
 		// stands and `<into>.checkpoint_error` says why.
 		if gjson.Get(op.Meta, "checkpoint").Bool() && res.Exit == 0 {
-			ref, cerr := pu.Workspaces.Checkpoint(ctx, spec, gjson.Get(op.Meta, "comment").String())
+			ref, _, cerr := pu.Workspaces.Checkpoint(ctx, spec, gjson.Get(op.Meta, "comment").String())
 			if cerr != nil {
 				payload.Raw, _ = sjson.Set(payload.Raw, into+".checkpoint_error.code", workspaceErrorCode(cerr))
 				payload.Raw, _ = sjson.Set(payload.Raw, into+".checkpoint_error.message", scrub(cerr.Error()))
@@ -161,14 +161,15 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 
 	case "checkpoint":
 		start := time.Now()
-		ref, err := pu.Workspaces.Checkpoint(ctx, spec, gjson.Get(op.Meta, "comment").String())
+		ref, h, err := pu.Workspaces.Checkpoint(ctx, spec, gjson.Get(op.Meta, "comment").String())
 		wall := time.Since(start).Milliseconds()
 		pu.workspaceAccount(ctx, rid, tenant, opID, wall, err, 0, 0)
 		if err != nil {
-			return workspaceFailure(into, prov, "", workspaceErrorCode(err), scrub(err.Error()), wall), nil
+			return workspaceFailure(into, prov, h.Ref, workspaceErrorCode(err), scrub(err.Error()), wall), nil
 		}
 		p := workspaceVerbDone(into, prov, "checkpointed", wall)
 		p.Raw, _ = sjson.Set(p.Raw, into+".checkpoint_ref", ref)
+		p.Raw, _ = sjson.Set(p.Raw, "_txc.workspace.computer", h.Ref)
 		return p, nil
 
 	case "destroy":
@@ -368,7 +369,19 @@ func (pu *Unit) workspaceAccount(ctx context.Context, rid, tenant, opID string, 
 			BytesOut:   bytesOut,
 		})
 	}
-	if wallMS > 0 {
-		_ = addFuel(ctx, wallMS*fuelCostWorkspacePerMs, opID)
+	_ = addFuel(ctx, workspaceFuel(wallMS), opID)
+}
+
+// workspaceFuel is the wall-clock charge for one accounted workspace op:
+// 1 fuel per started 30 s period (2 per minute), never less than 1 —
+// 0 ms → 1, 30 000 ms → 1, 30 001 ms → 2, 5 minutes → 10.
+func workspaceFuel(wallMS int64) int64 {
+	if wallMS <= 0 {
+		return fuelCostWorkspacePerPeriod
 	}
+	periods := (wallMS + workspaceFuelPeriodMS - 1) / workspaceFuelPeriodMS
+	if periods < 1 {
+		periods = 1
+	}
+	return periods * fuelCostWorkspacePerPeriod
 }
