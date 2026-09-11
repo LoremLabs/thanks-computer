@@ -1,0 +1,10 @@
+# GET /loop — step 2: workspace:// may LOOP. One op, three passes, one
+# merged payload: each pass increments a file and prints the value;
+# `_ws.stdout` is a scalar so the last pass wins; the loop stops when
+# the predicate holds (stop = "done") — or at MAX 5 if it never does.
+# What happened lands at @runtime.loop.count = {passes, stop, elapsed_ms}.
+WHEN @src == "http" && @web.req.url.path == "/loop"
+  EXEC "workspace://tools/exec"
+    WITH command = "n=$(cat loop 2>/dev/null || echo 0); n=$((n+1)); printf %s $n > loop; printf %s $n",
+         into = "_ws"
+  LOOP EVERY "1ms" UNTIL ._ws.stdout == "3" MAX 5

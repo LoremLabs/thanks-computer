@@ -47,6 +47,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/snapshot"
 	chsource "github.com/loremlabs/thanks-computer/chassis/source"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
+	"github.com/loremlabs/thanks-computer/chassis/workspace"
 	dbschemas "github.com/loremlabs/thanks-computer/db"
 )
 
@@ -353,6 +354,12 @@ func Run(bi BuildInfo) int {
 	// personality is not running.
 	sourceStore := chsource.NewStore(runtimeDB, runtimeDialect)
 
+	// Workspace identity store: the workspaces table lives IN the shared
+	// runtime DB for the same reason (identity is runtime state). A façade
+	// over runtimeDB; the processor's workspace Manager consults it on first
+	// use of a (tenant, stack, name) and the overlay reaper scans it.
+	workspaceStore := workspace.NewStore(runtimeDB, runtimeDialect)
+
 	// IMAP mailbox index — the durable store the `imap` personality serves
 	// and txco://imap/* write to. Own file (never the runtime DB: the
 	// dbcache watcher reloads the mirror on every runtime-file write, and a
@@ -565,7 +572,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)

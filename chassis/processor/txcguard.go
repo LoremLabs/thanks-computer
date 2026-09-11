@@ -139,8 +139,11 @@ func systemMayWriteTxc(path string) bool {
 // synthesized control outputs (`goto` stage jumps, `noop`) — may write reserved
 // control fields (e.g. txco://hmac-verify writes `_txc.computed.sig_valid`,
 // ai:// writes `_txc.chat.tokens.*`). Everything else — remote HTTP, sandboxed
-// compute, MCP tools, and rule-author mocks (note: `txco://mock` reports
-// transport "mock", NOT "txco") — is untrusted.
+// compute, MCP tools, workspaces, and rule-author mocks (note: `txco://mock`
+// reports transport "mock", NOT "txco") — is untrusted. The workspace
+// transport is untrusted like the rest but carries a chassis-authored
+// provenance stamp; sanitizeAuthorOutputFor widens its allowlist by exactly
+// that subtree rather than trusting the transport.
 //
 // Trust is keyed off the transport the dispatch switch actually took (see
 // Exec), so it can never drift from the routing decision the way a re-derived
@@ -189,6 +192,29 @@ func sanitizeAuthorOutput(raw string) string {
 	return projectTxcAllowed(raw, authorWritableTxcPaths, nil)
 }
 
+// workspaceWritableTxcPaths is the one subtree the workspace transport may
+// carry past the author-output sanitizer: the provenance stamp
+// (`_txc.workspace.{provider,computer,run,exit,duration_ms}`) that
+// ExecWorkspace itself authors. The sandbox never produces envelope JSON —
+// its stdout is a string under `WITH into` — so nothing author-controlled
+// can reach this path; the allowance is keyed on the transport the dispatch
+// switch took, never on the output's own claims. Deliberately NOT added to
+// the trusted set: workspace stays an untrusted transport for every other
+// reserved path.
+var workspaceWritableTxcPaths = []string{
+	"workspace", // chassis-authored provenance for a workspace:// dispatch
+}
+
+// sanitizeAuthorOutputFor is sanitizeAuthorOutput with the per-transport
+// allowance: transport "workspace" keeps `_txc.workspace.*`; every other
+// author-controlled transport gets the plain projection.
+func sanitizeAuthorOutputFor(transport, raw string) string {
+	if transport == "workspace" {
+		return projectTxcAllowed(raw, authorWritableTxcPaths, workspaceWritableTxcPaths)
+	}
+	return sanitizeAuthorOutput(raw)
+}
+
 // sanitizeTrustedOutput is the resume-merge projection for terminals a
 // trusted transport produced: author-writable paths plus the trusted set.
 func sanitizeTrustedOutput(raw string) string {
@@ -201,7 +227,7 @@ func sanitizeTrustedOutput(raw string) string {
 // author-controlled per transportAuthorControlled's fail-closed default.
 func sanitizeTerminalOutput(transport, raw string) string {
 	if transportAuthorControlled(transport) {
-		return sanitizeAuthorOutput(raw)
+		return sanitizeAuthorOutputFor(transport, raw)
 	}
 	return sanitizeTrustedOutput(raw)
 }

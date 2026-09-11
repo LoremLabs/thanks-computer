@@ -1,0 +1,10 @@
+# GET /count — step 1: state persists between calls.
+#
+# Reads a counter file, increments it, writes it back. There is no
+# database here: the file lives in the workspace and is still there on
+# the next request (and the next `txco dev`). `_ws.stdout` is the new
+# value; scope 200 reads the file again to prove it landed.
+WHEN @src == "http" && @web.req.url.path == "/count"
+  EXEC "workspace://tools/exec"
+    WITH command = "n=$(cat n 2>/dev/null || echo 0); n=$((n+1)); printf %s $n > n; printf %s $n",
+         into = "_ws"

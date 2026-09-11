@@ -108,6 +108,7 @@ func TestTransportAuthorControlled(t *testing.T) {
 		{"https", true},
 		{"compute", true},
 		{"mcp+http", true},
+		{"workspace", true}, // untrusted; only its own _txc.workspace.* stamp is let through
 		{"unsupported", true},
 		{"", true}, // goto:// TODO leaves transport empty — fail closed
 	}

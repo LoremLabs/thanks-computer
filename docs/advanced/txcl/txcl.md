@@ -12,7 +12,7 @@ Every clause is optional. When present, clauses appear in this order:
 [SELECT   * | <branch> [AS <path>] [DEFAULT <v>] … ] # project the op's input
 [WITH     <key> = <value> [, …] ]                    # per-call chassis directives
 [PRIORITY <int> ]                                    # tie-breaker among matches
-[EXEC     "op:// | http(s):// | txco:// | ai://chat | mcp+https://" ]                 # dispatch to an operation
+[EXEC     "op:// | http(s):// | txco:// | ai://chat | mcp+https:// | workspace://" ]  # dispatch to an operation
 [EMIT     <path> = <value> [, …] ]                   # overlay onto the response (after EXEC)
 ```
 
@@ -460,9 +460,10 @@ EXEC "https://api.example.com/op"   # your HTTP service (POST)
 EXEC "txco://sendmail"              # chassis builtin
 EXEC "ai://chat"                    # a model, via the AI registry
 EXEC "mcp+https://mcp.example.com"  # a tool on an external MCP server
+EXEC "workspace://pony/paris/exec"  # a command in a persistent workspace
 ```
 
-Five schemes are supported:
+Six schemes are supported:
 
 | Scheme | Dispatch path |
 | --- | --- |
@@ -471,6 +472,7 @@ Five schemes are supported:
 | `txco://NAME` | In-process chassis [builtin](../builtins.md) via `ExecCore`; the name after `txco://` is looked up in the registry (`noop`, `static`, `sendmail`, …). |
 | `ai://chat` | A chat model via the chassis's AI registry — see [ai](../../ai.md). |
 | `mcp+http://` / `mcp+https://` | Calls a tool on an external [MCP](../protocols/mcp.md) server (egress). |
+| `workspace://NAME/VERB` | A command in an owned, stateful [workspace](../../workspaces.md) — files persist between calls; exit codes are data, not errors. The verb is the last segment (`exec`, `destroy`, `sleep`). |
 
 
 ## EMIT — response overlay
@@ -646,7 +648,7 @@ WHEN @runtime.loop.blobs.stop != "done" EMIT .partial = true
 
 The [trace](../trace.md) shows one step for the loop, spanning every pass, with `passes` and `stop_reason` (`txco trace <rid> --step <name>` prints them); each pass also writes an `op.pass` timeline event to the file sink.
 
-**What cannot loop.** `txco apply` rejects a LOOP with no EXEC, on `txco://noop`, on a stage jump, or combined with `WITH mode = "async"` / `"continuable"`. This version admits `txco://`, `http(s)://` and `mcp+http(s)://` EXECs; `compute://` and `ai://` are held back.
+**What cannot loop.** `txco apply` rejects a LOOP with no EXEC, on `txco://noop`, on a stage jump, or combined with `WITH mode = "async"` / `"continuable"`. This version admits `txco://`, `http(s)://`, `mcp+http(s)://` and `workspace://` EXECs; `compute://` and `ai://` are held back.
 
 ## Streaming the response body
 
@@ -707,6 +709,12 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `redact` / `omit` | any | Scrub paths from [trace](../trace.md) artifacts (runtime data untouched) |
 | `debug = true` | any | Surface extra op debug detail to the trace |
 | `prompt`, `system`, `messages`, `model`, `provider`, `schema`, `intent`, `limits.*` | ai://chat | The chat request — see [ai](../../ai.md) |
+| `workspace` | workspace:// | Pick the workspace from data (`WITH workspace = ._in.slug`); replaces the ref's name — see [workspaces](../../workspaces.md) |
+| `command` / `args` | workspace:// | The command: a shell line, or an argv array (no shell). One or the other |
+| `stdin`, `cwd`, `env` | workspace:// | Bytes fed to the process; working directory (relative, inside the workspace); extra environment (an object) |
+| `secrets.env.<NAME>.secret` / `.format` | workspace:// | A stored secret materialized into the command's environment; its value is scrubbed from stdout/stderr afterwards |
+| `checkpoint = true`, `comment` | workspace:// | Snapshot the workspace after an exec that exits 0 (`comment` labels it; also the `checkpoint` verb's label) |
+| `into` | workspace://, builtins | Where the result lands (workspace default `_workspace`) |
 
 ## `SET` vs `SET PRE`
 

@@ -60,8 +60,10 @@ const (
 // compute:// and ai:// are held back deliberately: a compute error is
 // fatal on the single-shot path while a loop truncates, and fuel does
 // not meter model time — both need a decision before they loop.
+// workspace:// is admitted: its failures are in-band data (never a
+// fatal single-shot error) and its wall-clock is fuel-metered.
 func loopTransportAdmitted(exec string) bool {
-	for _, prefix := range []string{"txco://", "http://", "https://", "mcp+http://", "mcp+https://"} {
+	for _, prefix := range []string{"txco://", "http://", "https://", "mcp+http://", "mcp+https://", "workspace://"} {
 		if strings.HasPrefix(exec, prefix) {
 			return true
 		}

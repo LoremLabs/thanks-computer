@@ -49,6 +49,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/txcl/runtime"
 	"github.com/loremlabs/thanks-computer/chassis/usage"
 	"github.com/loremlabs/thanks-computer/chassis/utils/filematch"
+	"github.com/loremlabs/thanks-computer/chassis/workspace"
 )
 
 // normalizeSelectPath converts a txcl-style envelope path into the
@@ -125,8 +126,17 @@ type Unit struct {
 	// a compute runtime.
 	Computes compute.Runner
 
-	// Usage is the usage sink. nil-safe. When set, each compute invocation
-	// emits a usage event (src="compute") alongside the per-request one.
+	// Workspaces runs workspace://<name>/<verb> ops: an owned, stateful
+	// execution environment per (tenant, stack, name), backed by the
+	// provider named by --workspace-provider. nil-safe: ExecWorkspace
+	// fails loudly if a workspace:// op fires while this is unset (no
+	// provider configured, or the local provider refused without
+	// --workspace-allow-local).
+	Workspaces *workspace.Manager
+
+	// Usage is the usage sink. nil-safe. When set, each compute or
+	// workspace invocation emits a usage event (src="compute" /
+	// src="workspace") alongside the per-request one.
 	Usage usage.Sink
 
 	// Secrets is the per-tenant secret-store Resolver. Non-nil when
@@ -790,6 +800,14 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					timeout = aiTimeout
 				}
 			}
+			// workspace:// runs a real command in a real runtime (a build,
+			// a test suite), so it gets its own default the same way ai://
+			// does. WITH timeout still wins; op-timeout-max still caps.
+			if op.Resonator != nil && strings.HasPrefix(op.Resonator.Exec, "workspace://") {
+				if wsTimeout, err := time.ParseDuration(pu.Conf.WorkspaceDefaultTimeout); err == nil {
+					timeout = wsTimeout
+				}
+			}
 			// A LOOP clause bounds its whole loop with this one timeout,
 			// so the 5s general default is too tight for a poll; same
 			// boring extension as the ai:// default. WITH timeout wins.
@@ -913,6 +931,17 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					case errCh <- err:
 					default:
 					}
+					wg.Done()
+				} else if strings.HasPrefix(op.Resonator.Exec, "workspace://") {
+					// A workspace:// error is an AUTHORING error (no provider
+					// configured, bad name, malformed ref, untenanted) — every
+					// runtime failure is in-band data. Best-effort like the
+					// other transports (drop the op, continue), but loud: a
+					// silently dropped exec is the "why did nothing happen"
+					// support ticket.
+					pu.Logger.Error("workspace op dropped",
+						zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
+						zap.String("op_name", op.Name), zap.String("err", err.Error()))
 					wg.Done()
 				} else {
 					// Other transports stay best-effort: drop this op's output
@@ -2769,6 +2798,16 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// processor/aichat.go.
 		payload, err = pu.ExecAI(ctx, op)
 		transport = "ai"
+	case strings.HasPrefix(opName, "workspace://"):
+		// An owned, stateful execution environment (a directory on this
+		// host in dev; a fleet machine in production) addressed by name;
+		// the verb after the last "/" says what to do in it. Exit codes
+		// are data: the result merges under `WITH into` and transport
+		// failures merge as `workspace.error`, so the op is dropped only
+		// on authoring errors. See chassis/workspace and processor/
+		// workspace.go.
+		payload, err = pu.ExecWorkspace(ctx, op)
+		transport = "workspace"
 	case strings.HasPrefix(opName, "goto://"): // TODO
 	case StagePartsRE.MatchString(opName):
 		// Unschemed `EXEC "<stack>/<scope>"` is a stage jump. We
@@ -2787,7 +2826,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// gRPC was removed in this revision. Any non-recognized scheme is a
 		// rule authoring error — fail loudly so it's spotted at first match
 		// rather than silently dispatched somewhere.
-		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", or a stage like "stack/scope"`)
+		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", or a stage like "stack/scope"`)
 		payload = pu.MakeMockResponse(op, "unsupported-scheme")
 		transport = "unsupported"
 	}
@@ -2922,8 +2961,9 @@ func (pu *Unit) finishOutput(ctx context.Context, op *operation.Operation, outpu
 			// control fields before EMIT + merge so it cannot
 			// forge tenant/computed-auth/budget. Trusted core/
 			// ai output (e.g. _txc.computed.*, _txc.chat.*)
-			// passes through untouched.
-			raw = sanitizeAuthorOutput(raw)
+			// passes through untouched. The workspace transport
+			// keeps its chassis-authored `_txc.workspace.*` stamp.
+			raw = sanitizeAuthorOutputFor(transport, raw)
 		}
 		op.Output = raw
 	}

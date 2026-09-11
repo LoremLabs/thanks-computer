@@ -156,6 +156,12 @@ type Config struct {
 	DeferredJoinSlack            string   `id:"deferred-join-slack" default:"60s" desc:"Flat pad added to a deferred-join op's runtime budget when computing the run's reap deadline, covering downstream synchronous scopes. (60s)"`
 	ComputeMaxMemoryMB           int      `id:"compute-max-memory-mb" default:"32" desc:"Per-invocation memory cap for a sandboxed compute (op://) in MB. (32)"`
 	ComputeMaxWall               string   `id:"compute-max-wall" default:"250ms" desc:"Per-invocation wall-clock cap for a sandboxed compute (op://); the guest is killed if it exceeds this. (250ms)"`
+	WorkspaceProvider            string   `id:"workspace-provider" default:"" desc:"Backend for workspace:// ops: {local, <overlay providers>}. Empty = workspace:// disabled (ops fail loudly). ()"`
+	WorkspaceAllowLocal          bool     `id:"workspace-allow-local" default:"false" desc:"Permit the local workspace provider (commands run as the chassis uid on this host, no isolation). Never implied by --env; must be set explicitly. (false)"`
+	WorkspaceLocalRoot           string   `id:"workspace-local-root" default:"./chassis/data/workspaces" desc:"Root directory for local workspaces: <root>/<tenant>/<stack>/<name>. (./chassis/data/workspaces)"`
+	WorkspaceDefaultTimeout      string   `id:"workspace-default-timeout" default:"60s" desc:"Default per-op timeout for workspace:// dispatches when WITH timeout is absent; capped by op-timeout-max. (60s)"`
+	WorkspaceMaxOutputBytes      int      `id:"workspace-max-output-bytes" default:"1048576" desc:"Cap on captured stdout and stderr (each) per workspace exec; excess is dropped and flagged *_truncated. (1048576 = 1 MiB)"`
+	WorkspaceReap                string   `id:"workspace-reap" default:"720h" desc:"Idle window after which the workspace reaper (a background service, where enabled) destroys a workspace: its files are gone and the next exec starts fresh. (720h = 30 days)"`
 	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns,mailmap,scheduled,imap,websocket,calendar,contacts,source} (cron,tcp,web,admin)"`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
 	PromNamespace                string   `id:"prom-namespace" default:"txco" desc:"Set the Prometheus namespace (txco)"`
@@ -519,6 +525,20 @@ func Load() (Config, error) {
 	}
 	if loopTimeoutDur > opTimeoutMaxDur {
 		log.Fatalf("loop-timeout (%s) must be <= op-timeout-max (%s)", config.LoopTimeout, config.OpTimeoutMax)
+	}
+
+	// workspace-default-timeout: same contract as loop-timeout — a
+	// workspace:// rule with no WITH timeout inherits it, so it must fit
+	// under the dispatch ceiling or every such rule would be rejected.
+	wsTimeoutDur, err := time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceDefaultTimeout))
+	if err != nil {
+		log.Fatalf("unable to parse workspace-default-timeout %s", config.WorkspaceDefaultTimeout)
+	}
+	if wsTimeoutDur > opTimeoutMaxDur {
+		log.Fatalf("workspace-default-timeout (%s) must be <= op-timeout-max (%s)", config.WorkspaceDefaultTimeout, config.OpTimeoutMax)
+	}
+	if _, err = time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceReap)); err != nil {
+		log.Fatalf("unable to parse workspace-reap %s", config.WorkspaceReap)
 	}
 
 	// async-runtime-default and async-ack-timeout must parse. They are

@@ -1,0 +1,11 @@
+# GET /hello — run a command in the workspace named "tools".
+#
+# The workspace is created on first use (a directory under
+# .txco/dev/workspaces/default/ws-hello/tools with the local provider; a
+# machine in the fleet). The command runs there with HOME = the
+# workspace; its exit code, stdout and stderr land under `into`. The
+# responder at 300 copies them onto the body.
+WHEN @src == "http" && @web.req.url.path == "/hello"
+  EXEC "workspace://tools/exec"
+    WITH command = "echo hello && pwd",
+         into = "_ws"

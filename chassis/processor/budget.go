@@ -53,6 +53,11 @@ const (
 	// LLM-wrapping op pays ~10K. Anchors to the §2 calibration in the
 	// fuel doc (1 unit ≈ 100 µs of typical chassis work).
 	fuelCostComputePerMs int64 = 10
+	// fuelCostWorkspacePerMs charges workspace:// exec wall-clock at the
+	// same rate as compute: the chassis is blocked on the command either
+	// way. The command's own CPU (on a fleet machine) is metered by the
+	// provider's usage event, not by fuel.
+	fuelCostWorkspacePerMs int64 = 10
 	// FuelCostBlobPerMiB charges txco://blob/put and blob/get per MiB of
 	// bytes moved (rounded up), on top of the flat dispatch fuel every
 	// EXEC pays. A 1 MiB artifact pays 100 ≈ 10 ms of chassis work —

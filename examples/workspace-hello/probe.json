@@ -1,0 +1,51 @@
+{
+  "note": "workspace:// end to end on the local provider: /hello runs a command in a persistent workspace, /count writes a file one exec and reads it the next, /loop runs three passes inside one dispatch, /exit shows a non-zero exit merging as data. Needs --allow-local-workspace (the local provider is opt-in: commands run as your uid).",
+  "dev_flags": ["--allow-local-workspace"],
+  "bind": [
+    { "host": "localhost", "stack": "ws-hello" }
+  ],
+  "checks": [
+    {
+      "name": "a command runs in the workspace and its stdout merges",
+      "method": "GET",
+      "path": "/hello",
+      "status": 200,
+      "contains": "\"stdout\":\"hello\\n"
+    },
+    {
+      "name": "the chassis stamps provenance the command cannot forge",
+      "method": "GET",
+      "path": "/hello",
+      "status": 200,
+      "contains": "\"provider\":\"local\""
+    },
+    {
+      "name": "a file written by one exec is read by the next",
+      "method": "GET",
+      "path": "/count",
+      "status": 200,
+      "contains": "\"exit\":0"
+    },
+    {
+      "name": "workspace:// loops: three passes inside one dispatch",
+      "method": "GET",
+      "path": "/loop",
+      "status": 200,
+      "contains": "\"passes\":3"
+    },
+    {
+      "name": "the loop stopped because the predicate held",
+      "method": "GET",
+      "path": "/loop",
+      "status": 200,
+      "contains": "\"stop\":\"done\""
+    },
+    {
+      "name": "a non-zero exit is data, not a dropped op",
+      "method": "GET",
+      "path": "/exit",
+      "status": 200,
+      "contains": "\"exit\":3"
+    }
+  ]
+}

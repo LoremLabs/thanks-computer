@@ -26,6 +26,7 @@ Operation execution takes a few different shapes, allowing you to run with or wi
 | -------------- | ------------- | ------------------------------- | --------------------------------------------------- |
 | Resonator-only | _(none)_      | on chassis, quickest            | routing, defaults, synthetic responses              |
 | Nano-op        | `op://NAME`   | on chassis, nano-op, JS sandbox | logic runs in sandbox environment, no external libs needed         |
+| Workspace      | `workspace://NAME/exec` | an owned, stateful environment: files persist, real runtime | builds, tests, tools and agents that need state between calls ([workspaces](./workspaces.md)) |
 | HTTP service   | `http(s)://…` | your service, any language      | existing services, heavy or stateful work, scale    |
 
 ## Resonator-only — no code at all

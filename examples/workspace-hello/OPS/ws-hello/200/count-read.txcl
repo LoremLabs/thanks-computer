@@ -1,0 +1,6 @@
+# GET /count — step 2: a second exec, same workspace, reads the file the
+# first one wrote. Separate dispatch (a new run), same files.
+WHEN @src == "http" && @web.req.url.path == "/count"
+  EXEC "workspace://tools/exec"
+    WITH command = "cat n",
+         into = "_read"

@@ -104,7 +104,7 @@ func (pu *Unit) runScopeContinuable(
 		// Trusted transports (ai://, txco://) pass through — their reserved
 		// stamps (_txc.chat.*, _txc.computed.*) are the point.
 		if eerr == nil && transportAuthorControlled(transport) && out.Type == event.JSON {
-			out.Raw = sanitizeAuthorOutput(out.Raw)
+			out.Raw = sanitizeAuthorOutputFor(transport, out.Raw)
 		}
 		done <- continuableResult{payload: out, transport: transport, err: eerr}
 	}()

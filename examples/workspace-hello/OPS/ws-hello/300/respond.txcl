@@ -1,0 +1,17 @@
+# Answer with what the workspace produced. `_ws`, `_read` and `_txc` are
+# `_`-prefixed and never reach the body on their own, so copy what the
+# reader should see onto plain keys; the web inlet renders the envelope
+# minus `_`-keys as JSON. (Under `txco dev` you will see them anyway: the
+# dev posture sets TXCO_DEBUG_PRIVATE=true so envelopes are inspectable.)
+# `_txc.workspace.*` is the chassis's provenance stamp (provider,
+# computer, run id, duration) — chassis-authored, so a command can never
+# forge it.
+WHEN ._ws.exit != null
+  EMIT .exit = ._ws.exit,
+       .stdout = ._ws.stdout,
+       .stderr = ._ws.stderr,
+       .read = ._read.stdout,
+       .loop = @runtime.loop.loop,
+       .workspace = @workspace,
+       @web.res.status = 200,
+       @halt = true

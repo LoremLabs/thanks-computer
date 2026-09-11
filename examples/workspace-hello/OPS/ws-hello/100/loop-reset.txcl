@@ -1,0 +1,7 @@
+# GET /loop — step 1: reset the loop's counter file so the demo is
+# idempotent across requests (the workspace persists; a stale counter
+# would make the loop below run to MAX instead of stopping at 3).
+WHEN @src == "http" && @web.req.url.path == "/loop"
+  EXEC "workspace://tools/exec"
+    WITH command = "rm -f loop",
+         into = "_reset"

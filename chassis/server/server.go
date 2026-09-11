@@ -102,6 +102,8 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/usage"
 	"github.com/loremlabs/thanks-computer/chassis/vector"
 	_ "github.com/loremlabs/thanks-computer/chassis/vector/sqlitevec" // registers the bundled "sqlite" vector backend
+	"github.com/loremlabs/thanks-computer/chassis/workspace"
+	_ "github.com/loremlabs/thanks-computer/chassis/workspace/local" // registers the "local" workspace provider
 )
 
 // defaultEntryStage is where every request enters the chassis: the
@@ -945,7 +947,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1366,6 +1368,44 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	logger.Info("compute runtime loaded",
 		zap.Int("max_memory_mb", conf.ComputeMaxMemoryMB),
 		zap.Duration("max_wall", computeWall))
+
+	// Workspace runtime (workspace://<name>/<verb>): an owned, stateful
+	// execution environment per (tenant, stack, name). Off unless
+	// --workspace-provider names a backend; the `local` backend runs
+	// commands as THIS process's uid with no isolation, so it additionally
+	// demands --workspace-allow-local and announces itself loudly. On any
+	// refusal pu.Workspaces stays nil and a workspace:// op fails loudly at
+	// dispatch (vector idiom: warn, don't crash).
+	if conf.WorkspaceProvider != "" {
+		switch {
+		case conf.WorkspaceProvider == "local" && !conf.WorkspaceAllowLocal:
+			logger.Warn("workspace:// disabled: local provider requires --workspace-allow-local")
+		default:
+			wsProv, werr := workspace.Open(conf.WorkspaceProvider, workspace.Config{
+				LocalRoot:      conf.WorkspaceLocalRoot,
+				MaxOutputBytes: int64(conf.WorkspaceMaxOutputBytes),
+			})
+			if werr != nil {
+				logger.Warn("workspace:// disabled: " + werr.Error())
+			} else {
+				// The identity table (workspaces, in the runtime DB) makes
+				// (tenant, stack, name) → provider ref durable across
+				// restarts and shared across nodes; nil falls back to a
+				// per-process cache (tests, non-server contexts).
+				pu.Workspaces = workspace.NewManager(wsProv, workspace.Limits{MaxOutputBytes: int64(conf.WorkspaceMaxOutputBytes)}, workspaceStore)
+				if conf.WorkspaceProvider == "local" {
+					logger.Warn("workspace: LOCAL provider ENABLED — commands run as the chassis uid on this host; dev/self-host only",
+						zap.String("root", conf.WorkspaceLocalRoot))
+					logger.Warn("workspace: a rule author on this chassis can run any command this process can; never expose this chassis to untrusted tenants")
+				}
+				logger.Info("workspace runtime loaded",
+					zap.String("provider", wsProv.Name()),
+					zap.Strings("capabilities", wsProv.Capabilities()),
+					zap.String("default_timeout", conf.WorkspaceDefaultTimeout),
+					zap.Int("max_output_bytes", conf.WorkspaceMaxOutputBytes))
+			}
+		}
+	}
 
 	// Register built-in core ops. `txco://noop` is the no-op handler:
 	// rule authors use it as a placeholder EXEC when their rule's

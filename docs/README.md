@@ -43,17 +43,20 @@ Read in order, or jump to what you need:
    operations, and deploying a catalog declaratively with `txco data`.
 10. **[Datasets](./datasets.md)** — bundle read-only lookup data (SQLite,
     FTS5) with a stack and query it locally through named queries.
-11. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
+11. **[Workspaces](./workspaces.md)** — `workspace://`: run commands in an
+    owned, stateful environment; files persist between calls, exit codes
+    are data.
+12. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
     fact.
-12. **[Telemetry](./telemetry.md)** — emit your application's metrics from
+13. **[Telemetry](./telemetry.md)** — emit your application's metrics from
     a stack; the chassis ships them to the backend you configure.
-13. **[Schemas](./schemas.md)** — optionally write down the shape a
+14. **[Schemas](./schemas.md)** — optionally write down the shape a
     stack reads and writes, for humans and machines.
-14. **[Packages](./packages.md)** — share a working department; install
+15. **[Packages](./packages.md)** — share a working department; install
     someone else's.
-15. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
+16. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
     runs its DNS: mail records, reputation keys, TLS, handled.
-16. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
+17. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
     stacks, domains, secrets, people, and usage, walled per tenant.
 17. **[Running a chassis](./running.md)** — `txco serve` and the
     author–apply loop, on your own machine.

@@ -1,0 +1,9 @@
+# GET /exit — exit codes are data. A command that exits 3 is a
+# successful dispatch whose result says exit = 3; the op is not dropped
+# and the pipeline continues. (A transport failure — the workspace would
+# not wake, the command timed out — merges as `workspace.error` instead,
+# and the op is still not dropped: `WHEN .workspace.error.code == "timeout"`.)
+WHEN @src == "http" && @web.req.url.path == "/exit"
+  EXEC "workspace://tools/exec"
+    WITH command = "echo nope >&2; exit 3",
+         into = "_ws"

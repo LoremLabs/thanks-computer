@@ -1,0 +1,7 @@
+target: dev
+
+# No `operations:` block — workspace:// is a chassis transport, like
+# txco://; the workspace ships operations only. Run with
+#   txco dev --allow-local-workspace
+# (the local provider is off unless you say so: it runs commands as YOUR
+# uid under .txco/dev/workspaces/).
