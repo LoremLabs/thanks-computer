@@ -257,6 +257,13 @@ name; the stack's txcl does not change.
 
 ## Identity, runs, and the reaper
 
+**One app, one workspace, whichever inlet.** A stack owns its hostname
+across inlets: a web request runs as `<stack>`, a WebSocket session as
+`<stack>/_websocket`, a mail delivery as `<stack>/_mail`. All of them
+address the same workspace, because the identity uses the app stack — the
+same rule `txco://kv` follows for its namespace. So a browser request and
+a socket message reach the same machine and see the same files.
+
 Each `(tenant, stack, name)` has a row in the `workspaces` table of the
 runtime DB: the provider's reference for it, when it was last used, the
 current run id, the latest checkpoint. The row makes the identity durable

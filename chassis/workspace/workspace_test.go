@@ -407,3 +407,44 @@ func TestManagerDoesNotRecreateOnTransientWakeFailure(t *testing.T) {
 		t.Errorf("recovery recreated the workspace (%d creates)", f.created)
 	}
 }
+
+func TestAppStack(t *testing.T) {
+	for in, want := range map[string]string{
+		"ws-hello":              "ws-hello",
+		"ws-hello/_websocket":   "ws-hello",
+		"ws-hello/_mail":        "ws-hello",
+		"ws-hello/_websocket/x": "ws-hello",
+		"site/canary":           "site/canary", // a nested stack with no _ segment is left alone
+		"":                      "",
+		"_sys/boot":             "_sys/boot",
+	} {
+		if got := AppStack(in); got != want {
+			t.Errorf("AppStack(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestProviderNameSanitizesEveryComponent: a provider-side identifier has to
+// be a DNS-label-shaped token. The workspace NAME is validated, but the
+// tenant and stack are not — an inlet sub-stack (`app/_websocket`) or a
+// dotted tenant slug would otherwise produce a name the provider rejects
+// (seen in production: "create: API error (status 400)").
+func TestProviderNameSanitizesEveryComponent(t *testing.T) {
+	got := ProviderName("onepony", "ws-hello/_websocket", "tools")
+	for _, bad := range []string{"/", "_", ".", " "} {
+		if strings.Contains(got, bad) {
+			t.Errorf("ProviderName = %q, contains %q", got, bad)
+		}
+	}
+	if !segmentRE.MatchString(got) {
+		t.Errorf("ProviderName = %q, which is not a DNS label", got)
+	}
+	// Identity still separates: the hash covers the raw components.
+	if ProviderName("onepony", "ws-hello/_websocket", "tools") == ProviderName("onepony", "ws-hello", "tools") {
+		t.Error("two different identities produced the same provider name")
+	}
+	// A dotted tenant slug is fine too.
+	if d := ProviderName("acme.example", "site", "a_b"); !segmentRE.MatchString(d) {
+		t.Errorf("ProviderName = %q, which is not a DNS label", d)
+	}
+}

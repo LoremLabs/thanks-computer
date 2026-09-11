@@ -310,6 +310,47 @@ func ValidateName(name string) error {
 	return nil
 }
 
+// AppStack maps a routed stack name to the stack that OWNS the workspace.
+// A stack is one app across inlets: a web request runs as `<stack>`, a mail
+// delivery as `<stack>/_mail`, a WebSocket session as `<stack>/_websocket`.
+// Those `_`-nested inlet sub-stacks share the app's workspace rather than
+// each getting one of their own — the same rule `txco://kv` follows for its
+// namespace (chassis/server/kv.go appStackNamespace), and for the same two
+// reasons: an app's machine should be the same machine whichever inlet the
+// request came in on, and a `/` cannot be spelled in a provider-side
+// identifier anyway.
+func AppStack(stack string) string {
+	for i := 0; i < len(stack); i++ {
+		if stack[i] == '/' && i+1 < len(stack) && stack[i+1] == '_' {
+			return stack[:i]
+		}
+	}
+	return stack
+}
+
+// sanitizeSegment reduces one identity component to what a provider-side
+// name may contain: lowercase letters, digits and single hyphens. Every
+// other byte (a `/` from a nested stack, a `_` from an inlet sub-stack, a
+// dot from a hostname-shaped slug) becomes a hyphen. Uniqueness does not
+// rest on this — the hash suffix in ProviderName does — so collapsing is
+// safe.
+func sanitizeSegment(s string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			dash = false
+			continue
+		}
+		if !dash && b.Len() > 0 {
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
 // ProviderName derives a provider-side identifier for (tenant, stack,
 // name): a readable prefix `<tenant>-<stack>-<name with / → ->` truncated
 // to 40 characters, then "-" and the first 8 hex of
@@ -318,7 +359,7 @@ func ValidateName(name string) error {
 // provider suffix.
 func ProviderName(tenant, stack, name string) string {
 	sum := sha256.Sum256([]byte(tenant + "\x00" + stack + "\x00" + name))
-	prefix := tenant + "-" + stack + "-" + strings.ReplaceAll(name, "/", "-")
+	prefix := sanitizeSegment(tenant) + "-" + sanitizeSegment(stack) + "-" + sanitizeSegment(name)
 	if len(prefix) > 40 {
 		prefix = prefix[:40]
 	}

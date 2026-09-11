@@ -80,7 +80,11 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 	if into == "" {
 		into = workspaceDefaultInto
 	}
-	spec := workspace.Spec{Tenant: tenant, Stack: op.Stack, Name: name, Network: "public"}
+	// The workspace belongs to the APP stack, so a web request, a WebSocket
+	// session (`<stack>/_websocket`) and a mail delivery (`<stack>/_mail`)
+	// all reach the same machine — the rule txco://kv already follows for
+	// its namespace.
+	spec := workspace.Spec{Tenant: tenant, Stack: workspace.AppStack(op.Stack), Name: name, Network: "public"}
 	opID := fmt.Sprintf("%s/%d/%s", op.Stack, op.Scope, op.Name)
 	rid, _ := ctx.Value(config.CtxKeyRid).(string)
 	prov := pu.Workspaces.Provider().Name()
