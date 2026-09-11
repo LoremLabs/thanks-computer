@@ -1,0 +1,11 @@
+# POST /log/append?nb=<name> — step 2: the append itself. `at` is assigned
+# by the chassis; `seq` is the notebook's own order. object_key makes a
+# retry a no-op: the same key answers the ORIGINAL {seq, at} with
+# existed=true and writes nothing — so redelivering the same event is safe.
+WHEN ._req.type != ""
+  EXEC "txco://notebook/append"
+    WITH notebook   = @web.req.url.query.nb.0,
+         type       = ._req.type,
+         data       = ._req.data,
+         object_key = ._req.object_key,
+         into       = "_nb"

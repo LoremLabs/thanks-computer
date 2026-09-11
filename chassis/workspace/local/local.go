@@ -236,7 +236,13 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
+	// Streaming (WITH stream): stdout goes straight to the caller's writer
+	// as os/exec's copy goroutine reads the pipe, so the client sees output
+	// while the command is still running. Otherwise it is captured + capped.
 	stdout := workspace.NewCappedWriter(lim.MaxOutputBytes)
+	if req.StdoutTo != nil {
+		stdout = workspace.NewStreamWriter(req.StdoutTo)
+	}
 	stderr := workspace.NewCappedWriter(lim.MaxOutputBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -253,6 +259,7 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 		Stderr:          stderr.Bytes(),
 		StdoutTruncated: stdout.Truncated(),
 		StderrTruncated: stderr.Truncated(),
+		StdoutBytes:     stdout.Count(),
 		WallMS:          time.Since(start).Milliseconds(),
 	}
 	switch {

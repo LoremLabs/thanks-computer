@@ -40,6 +40,7 @@ import (
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
+	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
 	"github.com/loremlabs/thanks-computer/chassis/repl"
 	"github.com/loremlabs/thanks-computer/chassis/scheduled"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
@@ -435,6 +436,33 @@ func Run(bi BuildInfo) int {
 		logger.Info("skipping contacts store open — contacts personality not active and --contacts-store=sqlite",
 			zap.String("personalities", conf.Personalities))
 	}
+	// Notebook store — the append-only record behind txco://notebook/*.
+	// Own file (never the runtime DB: the dbcache watcher reloads the
+	// mirror on every runtime-file write, and a notebook is written on
+	// every append). Opened on every node — the ops are the product; there
+	// is no head personality to gate on. The bundled sqlite file failing to
+	// open is fatal (a local path problem); a shared backend failing is
+	// warn-and-continue, and txco://notebook/* answer
+	// txco_notebook_disabled on this node until restart — the vector
+	// store's posture.
+	var notebookStore *chnotebook.Store
+	if st, nerr := chnotebook.Open(conf.NotebookStore, chnotebook.Config{DBPath: conf.NotebookDBPath}); nerr != nil {
+		if conf.NotebookStore == "sqlite" {
+			logger.Fatal("notebook store open failed",
+				zap.String("store", conf.NotebookStore), zap.String("err", nerr.Error()))
+		}
+		logger.Warn("notebook store open failed; txco://notebook/* answer txco_notebook_disabled on this node until restart",
+			zap.String("store", conf.NotebookStore), zap.String("err", nerr.Error()))
+	} else {
+		defer st.Close()
+		st.SetLimits(chnotebook.Limits{
+			MaxDataBytes: conf.NotebookMaxEntryBytes,
+			MaxReadLimit: conf.NotebookMaxReadRows,
+			MaxTTL:       time.Duration(conf.NotebookMaxTTL) * time.Second,
+		})
+		notebookStore = st
+		logger.Info("notebook store opened", zap.String("store", conf.NotebookStore))
+	}
 	// Two DAV heads on one prefix would leave the second unreachable; say so
 	// at boot instead.
 	if conf.HasPersonality("calendar") && conf.HasPersonality("contacts") &&
@@ -572,7 +600,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)

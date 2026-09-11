@@ -1,8 +1,13 @@
 {
   "note": "workspace:// end to end on the local provider: /hello runs a command in a persistent workspace, /count writes a file one exec and reads it the next, /loop runs three passes inside one dispatch, /exit shows a non-zero exit merging as data. Needs --allow-local-workspace (the local provider is opt-in: commands run as your uid).",
-  "dev_flags": ["--allow-local-workspace"],
+  "dev_flags": [
+    "--allow-local-workspace"
+  ],
   "bind": [
-    { "host": "localhost", "stack": "ws-hello" }
+    {
+      "host": "localhost",
+      "stack": "ws-hello"
+    }
   ],
   "checks": [
     {
@@ -46,6 +51,13 @@
       "path": "/exit",
       "status": 200,
       "contains": "\"exit\":3"
+    },
+    {
+      "name": "stdout streams to the client as the command produces it",
+      "method": "GET",
+      "path": "/stream",
+      "status": 200,
+      "contains": "line 3\ndone"
     }
   ]
 }

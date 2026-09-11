@@ -476,6 +476,23 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		if ctx.Value(ctxKeySource) == nil {
 			ctx = WithSource(ctx, gjson.Get(raw, "_txc.src").String())
 		}
+
+		// Per-request stream sink (see stream.go): lets an op push
+		// response-body chunks to the client mid-dispatch — today a
+		// `workspace://` exec with `WITH stream = true` forwarding a
+		// command's stdout as it is produced.
+		//
+		// Installed only for a LIVE HTTP request: a resumed continuation,
+		// a deferred-join finalize and the async capture path all drive
+		// the pipeline with nobody on the other end of resCh, so they keep
+		// the buffered single-payload contract. Nil sink = "this run
+		// cannot stream", which is what op code checks.
+		_, resuming := resumeRunFrom(ctx)
+		_, deferred := deferredRunFrom(ctx)
+		if !resuming && !deferred && streamSinkFrom(ctx) == nil &&
+			gjson.Get(raw, "_txc.src").String() == "http" {
+			ctx = withStreamSink(ctx, &streamSink{resCh: resCh})
+		}
 	}
 
 	pu.Logger.Debug("RUN!", zap.String("stage", stage), zap.String("in", raw))
@@ -1314,6 +1331,15 @@ func (pu *Unit) advanceAfterScope(
 	sf := gjson.GetMany(resp, "_txc.flag_breakpoint", "_txc.runtime.http_stream_open", "_txc.web.res.body")
 	streamingAllowed := !sf[0].Bool()
 	streamOpen := sf[1].Bool()
+	// An op may have opened the stream itself mid-dispatch (stream.go): a
+	// `workspace://` exec forwarding stdout as the command produces it.
+	// From here on that is indistinguishable from a scope-flushed body —
+	// same head already sent, same obligation to close with a StreamEnd
+	// instead of a buffered JSON response.
+	sink := streamSinkFrom(ctx)
+	if sink != nil && sink.Opened() {
+		streamOpen = true
+	}
 	isContinuing := !(halt || breakHere) && ((len(gotoStage) > 0) || (len(nextOps) > 0))
 	if streamingAllowed && (streamOpen || isContinuing) {
 		body := sf[2].String()
@@ -1346,6 +1372,11 @@ func (pu *Unit) advanceAfterScope(
 					}
 				}
 				resCh <- event.Payload{Type: event.StreamEnd}
+				if sink != nil {
+					// A late write from an op goroutine that outlived its
+					// dispatch must not race bytes onto a finished response.
+					sink.markClosed()
+				}
 				*opsDone = true
 				// Deferred-join in-request finalize (mirrors the halt branch).
 				if di, ok := deferredRunFrom(ctx); ok {

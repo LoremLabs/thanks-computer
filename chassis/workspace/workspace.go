@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -69,6 +70,19 @@ type ExecRequest struct {
 	Cwd     string
 	Env     map[string]string
 	Timeout time.Duration
+
+	// StdoutTo, when set, receives the command's stdout AS IT IS PRODUCED
+	// instead of it being captured into ExecResult.Stdout — the streaming
+	// path (`WITH stream = true`). Providers write to it directly, so each
+	// write carries the provider's own chunking: a pipe read for the local
+	// provider, one WebSocket frame for a fleet provider. The result then
+	// reports StdoutBytes and leaves Stdout nil, so a large build log never
+	// lands in the envelope, the trace, or a continuation.
+	//
+	// A write error stops the copy and surfaces as a transport failure. The
+	// output cap does not apply (nothing accumulates); stderr is unaffected
+	// — still captured and still capped.
+	StdoutTo io.Writer
 }
 
 // ExecResult is what a command produced. Exit is the process exit code
@@ -82,6 +96,12 @@ type ExecResult struct {
 	StdoutTruncated bool
 	StderrTruncated bool
 	WallMS          int64
+
+	// StdoutBytes counts the stdout bytes the command produced. It equals
+	// len(Stdout) on the buffered path; on the streaming path
+	// (ExecRequest.StdoutTo) Stdout is nil and this is how much reached
+	// the client.
+	StdoutBytes int64
 }
 
 // Limits are per-exec caps the Manager hands every Computer.
@@ -303,13 +323,22 @@ func SortedEnv(env map[string]string) []string {
 	return out
 }
 
-// CappedWriter keeps the first Max bytes written to it and flags the rest
-// as dropped. Writes never fail, so a child process never sees EPIPE from
-// the cap — it just loses the tail of its output.
+// CappedWriter is the output sink every provider hands its command. In its
+// default (buffered) form it keeps the first max bytes and flags the rest as
+// dropped; writes never fail, so a child process never sees EPIPE from the
+// cap — it just loses the tail of its output. In its streaming form
+// (NewStreamWriter) it retains nothing and forwards every write to the
+// caller's writer, where a write error IS propagated: the client is gone,
+// so the command should stop.
+//
+// Count() is the produced-byte total either way, so a provider reports the
+// same figure whether the bytes were kept or streamed.
 type CappedWriter struct {
 	buf       bytes.Buffer
 	max       int64
 	truncated bool
+	n         int64
+	out       io.Writer // non-nil: streaming form, nothing is retained
 }
 
 // NewCappedWriter returns a writer that keeps at most max bytes (≤ 0 means
@@ -321,7 +350,18 @@ func NewCappedWriter(max int64) *CappedWriter {
 	return &CappedWriter{max: max}
 }
 
+// NewStreamWriter returns a writer that forwards every write to out and
+// retains nothing — the `WITH stream = true` path, where the bytes are
+// already on their way to the client and must not also accumulate here.
+func NewStreamWriter(out io.Writer) *CappedWriter {
+	return &CappedWriter{out: out}
+}
+
 func (c *CappedWriter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	if c.out != nil {
+		return c.out.Write(p)
+	}
 	room := c.max - int64(c.buf.Len())
 	switch {
 	case room <= 0:
@@ -335,11 +375,21 @@ func (c *CappedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Bytes returns what was kept.
-func (c *CappedWriter) Bytes() []byte { return c.buf.Bytes() }
+// Bytes returns what was kept — nil for a stream writer, which keeps
+// nothing.
+func (c *CappedWriter) Bytes() []byte {
+	if c.out != nil {
+		return nil
+	}
+	return c.buf.Bytes()
+}
 
-// Truncated reports whether any byte was dropped.
+// Truncated reports whether any byte was dropped (never true while
+// streaming: nothing is capped).
 func (c *CappedWriter) Truncated() bool { return c.truncated }
+
+// Count is how many bytes the command wrote, kept or not.
+func (c *CappedWriter) Count() int64 { return c.n }
 
 // entry is what the Manager remembers per identity between execs: the
 // provider handle and the run bookkeeping the run-id policy needs.

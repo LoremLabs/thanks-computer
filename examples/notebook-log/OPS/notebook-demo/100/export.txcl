@@ -1,0 +1,9 @@
+# GET /log.ndjson?nb=<name> — the notebook as newline-delimited JSON. The
+# op writes @web.res.body + content-type application/x-ndjson and halts,
+# so nothing in scope 200 runs for this path. A capped export answers
+# x-notebook-next; resume with ?after=.
+WHEN @src == "http" && @web.req.url.path == "/log.ndjson"
+  EXEC "txco://notebook/export"
+    WITH notebook = @web.req.url.query.nb.0,
+         after    = @web.req.url.query.after.0,
+         into     = "_nb"

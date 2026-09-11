@@ -27,6 +27,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
+	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/room"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
@@ -88,6 +89,10 @@ type Controller struct {
 	// blobIndex backs the stack-blobs inspect endpoint (`txco data apply`
 	// drift check, `txco data pull`). Set by SetBlobIndex; nil ⇒ 503.
 	blobIndex blob.Index
+
+	// notebookStore backs the read-only notebook endpoints (`txco notebook
+	// list/read/tail/export`). Set by SetNotebookStore; nil ⇒ 503.
+	notebookStore *chnotebook.Store
 
 	// dsCache materialises + opens DATASETS/ artifacts (chassis/dataset):
 	// the deep activation gate validates through it and the fleet applier
@@ -581,6 +586,12 @@ func (c *Controller) Start() {
 	// operator see/export the set an op accumulates (e.g. blog_subscribers).
 	// See chassis/server/admin/kv_endpoints.go.
 	tenantR.HandleFunc("/kv/{namespace}", c.handleListKV).Methods(http.MethodGet)
+
+	// Read-only listing + reading of the notebook store (txco://notebook/*):
+	// heads by namespace, entries by cursor / time window / tail, NDJSON
+	// export. See chassis/server/admin/notebook_endpoints.go.
+	tenantR.HandleFunc("/notebooks/{namespace}", c.handleListNotebooks).Methods(http.MethodGet)
+	tenantR.HandleFunc("/notebooks/{namespace}/{name:.+}", c.handleReadNotebook).Methods(http.MethodGet)
 
 	// Read-only source-watcher status (cursor, claim, last error). Declaration
 	// lives in OPS SOURCES/ packs, so there is no create/delete verb.

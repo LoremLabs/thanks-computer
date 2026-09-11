@@ -1,0 +1,10 @@
+# A notebook error (bad name, bad cursor, too large, stale cursor) answers
+# 400 with the structured code, so the probe — and a human — see what broke.
+# The run itself never failed: notebook errors are branch-visible.
+WHEN ._nb.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error", ._nb.error.code,
+         "message", ._nb.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

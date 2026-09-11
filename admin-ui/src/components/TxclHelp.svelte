@@ -123,6 +123,8 @@
                 <span class="text-neutral-500">shape a stored field into the HTTP response (optionally markdown&rarr;HTML) and halt — pages without a backend</span>
                 <code class="text-purple-700">txco://kv/get &nbsp;set &nbsp;delete &nbsp;incr &nbsp;cas</code>
                 <span class="text-neutral-500">durable state across requests — counters, flags, locks, caches</span>
+                <code class="text-purple-700">txco://notebook/append &nbsp;read &nbsp;export &nbsp;list &nbsp;delete</code>
+                <span class="text-neutral-500">an append-only record per name (task history, a conversation, an audit trail) — read by cursor / time window / tail, always oldest first; export as NDJSON</span>
                 <code class="text-purple-700">txco://hmac-sign &nbsp;·&nbsp; hmac-verify &nbsp;·&nbsp; basic-auth-encode</code>
                 <span class="text-neutral-500">crypto helpers — keys via <code class="text-neutral-700">WITH secrets.*</code> (never in the rule); verify's boolean lands under <code class="text-neutral-700">@computed.*</code></span>
                 <code class="text-purple-700">txco://sendmail &nbsp;·&nbsp; relay</code>

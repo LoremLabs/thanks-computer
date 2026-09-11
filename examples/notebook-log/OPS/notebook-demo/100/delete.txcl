@@ -1,0 +1,8 @@
+# POST /log/delete?nb=<name> — removes the notebook and its entries. A later
+# append starts it again from seq 1 under a new generation, so a cursor
+# taken before the delete answers txco_notebook_stale_cursor instead of
+# reading the new entries as old ones.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/log/delete"
+  EXEC "txco://notebook/delete"
+    WITH notebook = @web.req.url.query.nb.0,
+         into     = "_nb"

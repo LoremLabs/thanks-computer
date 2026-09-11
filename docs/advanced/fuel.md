@@ -40,6 +40,8 @@ the chassis-wide cap.
 | Nano-op compute, per ms      | 10          |
 | Secret materialization       | 100         |
 | Repeated stage transition    | 50          |
+| Blob put / get, per MiB moved | 100        |
+| Notebook read / export, per MiB returned | 100 |
 
 Calibration: 1 fuel ≈ 100 µs of typical chassis work. So a 1 ms
 nano-op costs 35 total (25 dispatch + 10 compute); an op wrapping a

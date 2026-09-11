@@ -488,6 +488,46 @@ EMIT .hello = "world"                  # no EXEC — emit a value directly
 
 `EMIT` also drives streaming and HTTP response control — see [Streaming the response body](#streaming-the-response-body).
 
+### `EMIT @delete` — prune the envelope
+
+The envelope only ever grows: every op's output merges in and is carried
+to the next scope, into the trace, and into a continuation if the request
+suspends. `@delete` takes paths back out.
+
+```txcl
+EMIT @delete = ["london", "tokyo"]        # drop two branches
+EMIT @delete = "raw.big_blob"             # a single path is fine too
+EMIT @delete = ["@web.req.body"]          # `@` is sugar for `_txc.`
+```
+
+Paths are ordinary dotted envelope paths (`london.year` works), and a
+leading `@` expands to `_txc.` exactly as it does elsewhere.
+
+**When it applies.** After the scope merges, not at the moment the rule
+runs. So a later op in the *same* scope still sees the value, and a rule
+at scope 200 can read `.london.time` before a rule at scope 300 deletes
+`.london`. The directive is stripped once applied, so it neither reaches
+the client nor re-fires on the next scope.
+
+**What it affects.** The merged envelope itself — so the deletion is
+visible to every transport and to the trace's final output, not just the
+web projection. That is the point: use it to drop a big value before it
+rides the rest of the pipeline.
+
+```txcl
+# The upload has been stored; don't carry 30 MB of base64 any further.
+EXEC "txco://blob/put"
+EMIT @delete = ["@web.req.body"]
+```
+
+**What you may delete.** Anything you may write, plus the inbound facts
+the chassis stamped that an op has consumed: `@web.req.body`,
+`@imap.msg.{text,html,headers}`, `@calendar.{ical,event,prior}`,
+`@contacts.{vcard,card,prior}`, `@websocket.msg.{text,data}`. Any other
+reserved `_txc.*` target is refused (logged, not fatal) — deleting a
+stamped identity or budget field would be a control-plane bypass, so the
+same guard that stops you writing `@tenant` stops you deleting it.
+
 ## Worked examples
 
 ### Filter and forward
@@ -712,6 +752,7 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `workspace` | workspace:// | Pick the workspace from data (`WITH workspace = ._in.slug`); replaces the ref's name — see [workspaces](../../workspaces.md) |
 | `command` / `args` | workspace:// | The command: a shell line, or an argv array (no shell). One or the other |
 | `stdin`, `cwd`, `env` | workspace:// | Bytes fed to the process; working directory (relative, inside the workspace); extra environment (an object) |
+| `stream = true` | workspace:// | Send the command's stdout to the client as it is produced, instead of returning it in the envelope ([workspaces](../../workspaces.md#streaming-output)) |
 | `secrets.env.<NAME>.secret` / `.format` | workspace:// | A stored secret materialized into the command's environment; its value is scrubbed from stdout/stderr afterwards |
 | `checkpoint = true`, `comment` | workspace:// | Snapshot the workspace after an exec that exits 0 (`comment` labels it; also the `checkpoint` verb's label) |
 | `into` | workspace://, builtins | Where the result lands (workspace default `_workspace`) |

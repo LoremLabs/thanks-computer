@@ -75,6 +75,14 @@ var KnownCapabilities = map[string]bool{
 	"dns:*:read":  true,
 	"dns:*:write": true,
 	"dns:*:*":     true,
+
+	// Notebook store (append-only records per tenant/namespace/name).
+	// `read` lists notebooks and reads entries via the admin API; `write`
+	// is reserved for a future operator write surface (today only ops
+	// append). The ops themselves are tenant-pinned, not capability-gated.
+	"notebook:*:read":  true,
+	"notebook:*:write": true,
+	"notebook:*:*":     true,
 }
 
 // ErrUnknownCapability is returned by ValidateCapabilities and

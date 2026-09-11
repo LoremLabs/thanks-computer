@@ -25,7 +25,8 @@ import (
 type stubProvider struct {
 	res     workspace.ExecResult
 	err     error
-	echoEnv bool // when set, stdout = the request env as KEY=VAL lines, stderr = "err:" + env["PLAIN"]
+	echoEnv bool     // when set, stdout = the request env as KEY=VAL lines, stderr = "err:" + env["PLAIN"]
+	stream  []string // when set and the request streams, written to StdoutTo in order
 
 	mu       sync.Mutex
 	seen     workspace.ExecRequest
@@ -65,6 +66,19 @@ func (s *stubProvider) Exec(ctx context.Context, req workspace.ExecRequest, _ wo
 	s.mu.Unlock()
 	if s.err != nil {
 		return workspace.ExecResult{Exit: -1}, s.err
+	}
+	if req.StdoutTo != nil {
+		for _, chunk := range s.stream {
+			if _, err := req.StdoutTo.Write([]byte(chunk)); err != nil {
+				return workspace.ExecResult{Exit: -1}, err
+			}
+		}
+		out := s.res
+		for _, chunk := range s.stream {
+			out.StdoutBytes += int64(len(chunk))
+		}
+		out.Stdout = nil
+		return out, nil
 	}
 	if s.echoEnv {
 		return workspace.ExecResult{Exit: 0, Stdout: []byte(strings.Join(workspace.SortedEnv(req.Env), "\n")), Stderr: []byte("err:" + req.Env["PLAIN"])}, nil

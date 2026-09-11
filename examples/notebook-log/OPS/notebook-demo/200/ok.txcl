@@ -1,0 +1,7 @@
+# Any notebook result (append / read / list / delete) answers 200 with the
+# op's own object. Export never reaches here: it halts with the NDJSON body.
+WHEN ._nb.error.code == "" && (._nb.seq != null || ._nb.count != null || ._nb.deleted != null)
+  EMIT @web.res.body = &b64encode(&to_json(._nb)),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

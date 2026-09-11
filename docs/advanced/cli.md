@@ -154,6 +154,8 @@ establish one.
 |---|---|
 | `txco trace [rid\|last]` | Step-by-step trace explorer ([trace](./trace.md)); bare `txco trace` is interactive |
 | `txco mcp doctor <url>` | Probe an MCP server: handshake + tool list ([mcp](./protocols/mcp.md)) |
+| `txco kv list <namespace>` | List the keys an op accumulated in the KV store ([kv](./kv.md)) |
+| `txco notebook {list,read,tail,export}` | Read the append-only notebooks a stack writes, oldest first ([notebooks](./notebooks.md)) |
 
 ## Operator & misc
 

@@ -79,8 +79,9 @@ reports `code = "unsupported"`.
 | `cwd` | Working directory, relative to the workspace and inside it |
 | `env` | An object of extra environment variables |
 | `into` | Where the result lands (default `_workspace`) |
-| `timeout` | Wall clock for the whole exec — create/wake, the command, output capture; the command is killed when it expires. Default `--workspace-default-timeout` (5m), capped by `--op-timeout-max` (10m) |
+| `timeout` | Wall clock for the whole exec — create/wake, the command, output capture; the command is killed when it expires. Default `--workspace-default-timeout` (5m), capped by `--op-timeout-max` (10m). A **synchronous HTTP request** is also bounded by whatever fronts the chassis — the hosted edge allows 20 s for response headers — so anything longer must use `WITH mode = "continuable"` (202 + poll); when the client gives up, the request is cancelled and the command is killed |
 | `secrets.env.<NAME>.secret` / `.format` / `.optional` | A stored secret, materialized into the environment as `NAME` (`format = "Bearer {}"` templates it). The only place a workspace op takes a secret — `secrets.headers.*` / `.body.*` are refused |
+| `stream = true` | Send stdout to the client as it is produced (see [Streaming output](#streaming-output)) |
 | `checkpoint = true`, `comment` | Snapshot after a successful exec (see the verbs) |
 
 The command sees a scrubbed environment — `PATH`, `HOME` (= the
@@ -145,6 +146,70 @@ Codes: `timeout`, `provider`, `capacity`, `bad_request`, `not_allowed`,
 The op is dropped — logged at ERROR, nothing merged — only on authoring
 errors: a malformed ref, a bad name, no provider configured, an
 untenanted request, or a malformed `secrets` block.
+
+## Streaming output
+
+A build or a test suite is worth watching while it runs. `WITH stream =
+true` sends the command's stdout to the client **as it is produced**,
+instead of collecting it and returning it in the envelope:
+
+```txcl
+WHEN @web.req.url.path == "/build"
+  EXEC "workspace://builder/exec"
+    WITH command = "make -j8",
+         stream = true,
+         into = "_build"
+```
+
+The client gets a chunked response: the first bytes arrive as soon as the
+command produces them, and the connection stays open until it exits.
+
+What changes in the result:
+
+```json
+{ "_build": { "exit": 0, "stdout_streamed": true, "stdout_bytes": 184320, "stderr": "" } }
+```
+
+`stdout` is absent by design — the bytes went to the client, not into the
+envelope, so a 2 MB log never rides the envelope, the trace step, or a
+continuation. `stdout_bytes` is there so a rule can still gate on whether
+anything was produced. stderr is unaffected: still captured, still capped.
+
+Three consequences worth knowing before you use it:
+
+- **Once bytes flow, the response is the stream.** The status and headers
+  go out with the first chunk, so a later scope can no longer change them
+  and the envelope's JSON rendering never reaches the client. Set
+  `@web.res.status` and any headers *before* the EXEC if you need
+  something other than `200 text/plain`. A command that produces no output
+  never opens the stream, so the request renders its normal JSON response.
+- **It outruns proxy timeouts.** A front proxy typically limits how long it
+  waits for response *headers*, not how long a body may take. Streaming
+  sends the head immediately, so a long command survives a limit that
+  would kill the same command run synchronously. (On the hosted service
+  that limit is 20 seconds.)
+- **Backpressure is real.** Chunks block until the client takes them, so a
+  command that outruns a slow reader is throttled rather than buffered. If
+  the client disconnects, the request is cancelled and the command is
+  killed, exactly as on any other timeout.
+
+`stream` is refused, in band, in four cases where it would be a lie: with
+`LOOP` (each pass would reopen one response), with `mode` (a promoted
+request has no client left), with `secrets` (a value split across two
+chunks could not be redacted), and on a run with no live HTTP client
+(cron, a resumed continuation). Each returns
+`workspace.error.code = "bad_request"` with the reason.
+
+**Testing it locally:** `txco dev` turns debug breakpoints on by default,
+and breakpoints deliberately disable streaming (they dump the whole
+envelope instead). Run `TXCO_DEBUG_BREAKPOINTS=false txco dev
+--allow-local-workspace` to see a stream in dev, and use `curl -N` so curl
+doesn't buffer it back up.
+
+Not streaming, but large? Capture as usual and drop the value once you are
+done with it, so it stops riding the envelope:
+`EMIT @delete = ["_build.stdout"]` — see
+[`EMIT @delete`](./advanced/txcl/txcl.md#emit-delete--prune-the-envelope).
 
 ## Loops, fuel, usage, trace
 

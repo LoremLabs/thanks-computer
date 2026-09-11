@@ -1,0 +1,13 @@
+# GET /log/read?nb=<name>[&tail=N][&after=<cursor>][&since=<rfc3339>][&limit=N]
+# Rows come back as data — a WHEN can act on them — ALWAYS oldest first,
+# even for tail. `next` is set only when the page was full (the
+# LOOP … UNTIL ._nb.next == "" drain); `cursor` is where the page ended
+# (poll with after=cursor). Cursors are opaque: a bare number is refused.
+WHEN @src == "http" && @web.req.url.path == "/log/read"
+  EXEC "txco://notebook/read"
+    WITH notebook = @web.req.url.query.nb.0,
+         tail     = @web.req.url.query.tail.0,
+         after    = @web.req.url.query.after.0,
+         since    = @web.req.url.query.since.0,
+         limit    = @web.req.url.query.limit.0,
+         into     = "_nb"

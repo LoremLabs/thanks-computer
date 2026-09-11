@@ -123,6 +123,8 @@ Tenant-scoped, under `/v1/tenants/{tenant}`:
 | `GET·POST /auth/members` · `DELETE /auth/members/{actor}` | Tenant membership |
 | `GET /auth/actors` · `POST /auth/actors/{id}/revoke` | Actor list / revoke |
 | `GET /traces/requests.json` · `/requests/{rid}.json` · `/traces/stream` | Trace list / detail / live stream ([trace.md](./trace.md)) |
+| `GET /kv/{namespace}` | Keys an op accumulated in the KV store (`kv:*:read`) |
+| `GET /notebooks/{namespace}` · `/notebooks/{namespace}/{name}` | Notebooks in a namespace / a notebook's entries — `?after&since&until&tail&type&limit`, `?format=ndjson` streams (`notebook:*:read`, [notebooks.md](./notebooks.md)) |
 
 Also present: `POST /v1/cli` (the admin UI's command bridge),
 `POST /v1/fleet/resync`, `GET·PUT /v1/dns/config`, and the delegated-zone

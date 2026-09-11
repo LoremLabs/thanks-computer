@@ -10,7 +10,7 @@
 # system bootstrap.
 WHEN @route.to == ""
   && @src == "http"
-  && @web.req.url.path =~ /^\/(hello|count|loop|exit)(\/.*)?$/
+  && @web.req.url.path =~ /^\/(hello|count|loop|exit|stream)(\/.*)?$/
   EMIT @route.tenant = "default",
        @route.stack = "ws-hello",
        @route.to = "ws-hello/0",

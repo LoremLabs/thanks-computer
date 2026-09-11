@@ -309,6 +309,166 @@ func (c *Client) ListKV(ctx context.Context, namespace, after string, limit int)
 	return &out, nil
 }
 
+// NotebookHead mirrors admin.notebookHeadRow (one notebook in a namespace).
+type NotebookHead struct {
+	Name      string `json:"name"`
+	HighSeq   int64  `json:"high_seq"`
+	TTLSecs   int64  `json:"ttl_secs"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// NotebookListResponse mirrors admin.notebookListResponse
+// (GET /notebooks/{namespace}).
+type NotebookListResponse struct {
+	Namespace string         `json:"namespace"`
+	Notebooks []NotebookHead `json:"notebooks"`
+	Next      string         `json:"next,omitempty"`
+	Count     int            `json:"count"`
+}
+
+// NotebookReadResponse mirrors admin.notebookReadResponse
+// (GET /notebooks/{namespace}/{name}). Entries are kept raw: each is one
+// JSON object {seq, at, type, data, object_key?} — the same line an
+// NDJSON export writes — so the CLI prints them verbatim.
+type NotebookReadResponse struct {
+	Namespace string            `json:"namespace"`
+	Name      string            `json:"name"`
+	Entries   []json.RawMessage `json:"entries"`
+	Next      string            `json:"next,omitempty"`
+	Cursor    string            `json:"cursor,omitempty"`
+	Count     int               `json:"count"`
+	Truncated bool              `json:"truncated"`
+}
+
+// NotebookReadOptions is the read selection: After is an opaque cursor
+// from a previous response (never a sequence number); Since/Until are
+// RFC 3339; Tail selects the newest N (returned oldest first).
+type NotebookReadOptions struct {
+	After string
+	Since string
+	Until string
+	Type  string
+	Tail  int
+	Limit int
+}
+
+func (o NotebookReadOptions) query() url.Values {
+	q := url.Values{}
+	if o.After != "" {
+		q.Set("after", o.After)
+	}
+	if o.Since != "" {
+		q.Set("since", o.Since)
+	}
+	if o.Until != "" {
+		q.Set("until", o.Until)
+	}
+	if o.Type != "" {
+		q.Set("type", o.Type)
+	}
+	if o.Tail > 0 {
+		q.Set("tail", strconv.Itoa(o.Tail))
+	}
+	if o.Limit > 0 {
+		q.Set("limit", strconv.Itoa(o.Limit))
+	}
+	return q
+}
+
+// notebookPath escapes a notebook name segment by segment so a
+// hierarchical name (task/42) keeps its slashes on the wire.
+func notebookPath(namespace, name string) string {
+	p := "/notebooks/" + url.PathEscape(namespace)
+	if name != "" {
+		segs := strings.Split(name, "/")
+		for i, s := range segs {
+			segs[i] = url.PathEscape(s)
+		}
+		p += "/" + strings.Join(segs, "/")
+	}
+	return p
+}
+
+func (c *Client) notebookGet(ctx context.Context, endpoint string, q url.Values, accept string) (*http.Response, error) {
+	if enc := q.Encode(); enc != "" {
+		endpoint += "?" + enc
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, decodeError(resp)
+	}
+	return resp, nil
+}
+
+// ListNotebooks returns a windowed page of the notebooks under
+// (tenant, namespace) whose names start with prefix. `after` is the last
+// name of the previous page ("" = first page).
+func (c *Client) ListNotebooks(ctx context.Context, namespace, prefix, after string, limit int) (*NotebookListResponse, error) {
+	q := url.Values{}
+	if prefix != "" {
+		q.Set("prefix", prefix)
+	}
+	if after != "" {
+		q.Set("after", after)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	resp, err := c.notebookGet(ctx, c.scopedURL(notebookPath(namespace, "")), q, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out NotebookListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode notebook list response: %w", err)
+	}
+	return &out, nil
+}
+
+// ReadNotebook returns one page of entries, always oldest first. Next is
+// the cursor for the following page ("" when the selection is exhausted).
+func (c *Client) ReadNotebook(ctx context.Context, namespace, name string, opt NotebookReadOptions) (*NotebookReadResponse, error) {
+	resp, err := c.notebookGet(ctx, c.scopedURL(notebookPath(namespace, name)), opt.query(), "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out NotebookReadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode notebook read response: %w", err)
+	}
+	return &out, nil
+}
+
+// ExportNotebook streams the selection as NDJSON into w and returns the
+// byte count.
+func (c *Client) ExportNotebook(ctx context.Context, namespace, name string, opt NotebookReadOptions, w io.Writer) (int64, error) {
+	q := opt.query()
+	q.Set("format", "ndjson")
+	resp, err := c.notebookGet(ctx, c.scopedURL(notebookPath(namespace, name)), q, "application/x-ndjson")
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return io.Copy(w, resp.Body)
+}
+
 // (ImportOps removed — the legacy /ops/import endpoint is retired.
 // CLI callers push via CreateDraft + PutDraftFiles + Activate.)
 

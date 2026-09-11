@@ -211,8 +211,8 @@ func TestOAuthEnrollFirstWithSlug(t *testing.T) {
 		t.Fatalf("actor_id = %v", body["actor_id"])
 	}
 	caps, _ := body["capabilities"].([]any)
-	if len(caps) != 6 {
-		t.Fatalf("capabilities = %v, want 6 owner caps", body["capabilities"])
+	if len(caps) != 7 {
+		t.Fatalf("capabilities = %v, want 7 owner caps", body["capabilities"])
 	}
 	// A tenant owner must be able to manage their own tenant's secrets, read
 	// their own tenant's KV (e.g. list a namespace via the admin API), and use

@@ -61,6 +61,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/mail"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
+	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
 	"github.com/loremlabs/thanks-computer/chassis/ops"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
@@ -947,7 +948,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1559,6 +1560,39 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			return blobDelete(ctx, blobD, in)
 		}))
 
+	// Notebook store ops (txco://notebook/{append,read,export,list,delete}):
+	// an append-only record per (tenant, namespace, name) — task history,
+	// conversation history, audit breadcrumbs — read back by cursor, time
+	// window or tail, always ascending, and exported as NDJSON. Registered
+	// unconditionally so a node without the store answers
+	// `_notebook.error txco_notebook_disabled` and a stack can branch. See
+	// chassis/server/notebook.go + chassis/notebook + docs/advanced/notebooks.md.
+	notebookD := notebookDeps{store: notebookStore, maxExportBytes: int64(conf.NotebookMaxExportBytes)}
+	for name, fn := range map[string]func(context.Context, notebookDeps, []byte) (event.Payload, error){
+		"txco://notebook/append": notebookAppend,
+		"txco://notebook/read":   notebookRead,
+		"txco://notebook/export": notebookExport,
+		"txco://notebook/list":   notebookList,
+		"txco://notebook/delete": notebookDelete,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, notebookD, in)
+			}))
+	}
+	// Expired entries are invisible to reads from the moment they expire;
+	// the per-node sweep only reclaims their rows. Every node runs it — the
+	// batched DELETE is idempotent, so overlap is harmless.
+	if notebookStore != nil {
+		if period, perr := time.ParseDuration(strings.TrimSpace(conf.NotebookSweepPeriod)); perr == nil && period > 0 {
+			go notebookSweeper(ctx, logger, notebookStore, period, conf.NotebookSweepBatch)
+		} else if perr != nil && strings.TrimSpace(conf.NotebookSweepPeriod) != "0" {
+			logger.Warn("invalid --notebook-sweep-period; expired notebook entries stay invisible but are not reclaimed",
+				zap.String("value", conf.NotebookSweepPeriod))
+		}
+	}
+
 	// IMAP mailbox store ops (txco://imap/{account,append}): provisioning
 	// for the `imap` personality — an argon2id account with its INBOX, and
 	// a message RECORD materialized into a mailbox (CAS by sha + index row;
@@ -1853,6 +1887,8 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Blob name index for the stack-blobs inspect endpoint (drift check +
 	// `txco data pull`). Same index the runtime ops write.
 	adminCtrl.SetBlobIndex(blobIndex)
+	// Read-only `txco notebook …` window over the notebook store. Nil-safe.
+	adminCtrl.SetNotebookStore(notebookStore)
 	// Wire the declarative store-seed reconciler so activation materialises
 	// VECTORS/ (+ later KV/) packs into the runtime stores. Built from whatever
 	// seedable stores opened above; nil-safe when none did.

@@ -1,0 +1,114 @@
+{
+  "note": "Notebook store: three appends to task/1 (one with an object_key, repeated to show existed=true), reads by tail and by page, the NDJSON export, listing, a bad name and a bare-number cursor (400 with the structured code), then delete. Binds localhost → notebook-demo (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "notebook-demo"
+    }
+  ],
+  "checks": [
+    {
+      "name": "first append allocates seq 1",
+      "method": "POST",
+      "path": "/log/append?nb=task/1",
+      "status": 200,
+      "contains": "\"seq\":1",
+      "body": "{\"type\":\"task.created\",\"data\":{\"who\":\"probe\"},\"object_key\":\"created\"}"
+    },
+    {
+      "name": "second append allocates seq 2",
+      "method": "POST",
+      "path": "/log/append?nb=task/1",
+      "status": 200,
+      "contains": "\"seq\":2",
+      "body": "{\"type\":\"task.note_added\",\"data\":{\"note\":\"hello\"}}"
+    },
+    {
+      "name": "third append allocates seq 3",
+      "method": "POST",
+      "path": "/log/append?nb=task/1",
+      "status": 200,
+      "contains": "\"seq\":3",
+      "body": "{\"type\":\"task.completed\",\"data\":{\"exit\":0},\"object_key\":\"done\"}"
+    },
+    {
+      "name": "a duplicate object_key returns the original",
+      "method": "POST",
+      "path": "/log/append?nb=task/1",
+      "status": 200,
+      "contains": "\"existed\":true",
+      "body": "{\"type\":\"task.completed\",\"data\":{\"exit\":0},\"object_key\":\"done\"}"
+    },
+    {
+      "name": "read returns every entry",
+      "method": "GET",
+      "path": "/log/read?nb=task/1",
+      "status": 200,
+      "contains": "\"count\":3"
+    },
+    {
+      "name": "tail returns the newest two, oldest first",
+      "method": "GET",
+      "path": "/log/read?nb=task/1&tail=2",
+      "status": 200,
+      "contains": "\"count\":2"
+    },
+    {
+      "name": "a full page carries a next cursor",
+      "method": "GET",
+      "path": "/log/read?nb=task/1&limit=2",
+      "status": 200,
+      "contains": "\"truncated\":true"
+    },
+    {
+      "name": "export streams NDJSON",
+      "method": "GET",
+      "path": "/log.ndjson?nb=task/1",
+      "status": 200,
+      "contains": "\"seq\":3"
+    },
+    {
+      "name": "list by prefix",
+      "method": "GET",
+      "path": "/log/list?prefix=task/",
+      "status": 200,
+      "contains": "\"name\":\"task/1\""
+    },
+    {
+      "name": "list without a prefix",
+      "method": "GET",
+      "path": "/log/list",
+      "status": 200,
+      "contains": "\"count\":1"
+    },
+    {
+      "name": "a reserved name is refused with the structured code",
+      "method": "POST",
+      "path": "/log/append?nb=_secret/x",
+      "status": 400,
+      "contains": "txco_notebook_invalid_name",
+      "body": "{\"type\":\"t\",\"data\":{}}"
+    },
+    {
+      "name": "a bare number is not a cursor",
+      "method": "GET",
+      "path": "/log/read?nb=task/1&after=2",
+      "status": 400,
+      "contains": "txco_notebook_invalid_arg"
+    },
+    {
+      "name": "delete removes the notebook",
+      "method": "POST",
+      "path": "/log/delete?nb=task/1",
+      "status": 200,
+      "contains": "\"deleted\":true"
+    },
+    {
+      "name": "a deleted notebook reads as empty",
+      "method": "GET",
+      "path": "/log/read?nb=task/1",
+      "status": 200,
+      "contains": "\"count\":0"
+    }
+  ]
+}

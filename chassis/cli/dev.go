@@ -1124,6 +1124,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		"TXCO_FEED_SOURCE_FILE_DIR=" + feedDir,
 		"TXCO_SECRET_MASTER_KEY=" + secretKeyPath,
 		"TXCO_VECTOR_DB_PATH=" + vectorDBPath,
+		"TXCO_NOTEBOOK_DB_PATH=" + filepath.Join(devDir, "notebook.db"),
 	}
 
 	// Personality set. We pin it to cron+web+admin and add the heavier

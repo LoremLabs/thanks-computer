@@ -102,6 +102,36 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		if err != nil {
 			return workspaceFailure(into, prov, "", "bad_request", err.Error(), 0), nil
 		}
+		// `WITH stream = true`: forward stdout to the client as the command
+		// produces it (chassis/processor/stream.go) instead of returning it
+		// in the envelope. For a build or a test suite that is the whole
+		// point — output arrives live, and megabytes of log never ride the
+		// envelope, the trace step or a continuation.
+		//
+		// The four refusals are each a case where streaming would be a lie:
+		// a LOOP would reopen one response per pass; a promoted (async /
+		// continuable) request has no client left; a secret could be split
+		// across two chunks where the value scrubber cannot see it; and a
+		// run with no live HTTP client has nowhere to stream to.
+		streamed := gjson.Get(op.Meta, "stream").Bool()
+		if streamed {
+			sink := streamSinkFrom(ctx)
+			switch {
+			case op.Resonator.Loop != nil:
+				return workspaceFailure(into, prov, "", "bad_request",
+					"WITH stream cannot be combined with LOOP: each pass would reopen the same response", 0), nil
+			case gjson.Get(op.Meta, "mode").Exists():
+				return workspaceFailure(into, prov, "", "bad_request",
+					"WITH stream cannot be combined with mode: a promoted request has no client left to stream to", 0), nil
+			case len(refs) > 0:
+				return workspaceFailure(into, prov, "", "bad_request",
+					"WITH stream cannot be combined with secrets: a value split across two chunks could not be redacted", 0), nil
+			case sink == nil:
+				return workspaceFailure(into, prov, "", "bad_request",
+					"WITH stream needs a live HTTP request (this run has no response stream)", 0), nil
+			}
+			req.StdoutTo = &workspaceStreamWriter{ctx: ctx, sink: sink, head: workspaceStreamHead(op.Input)}
+		}
 		if err := applyWorkspaceSecrets(refs, op.Secrets, &req); err != nil {
 			return workspaceFailure(into, prov, "", "bad_request", err.Error(), 0), nil
 		}
@@ -120,7 +150,7 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		if err != nil {
 			return workspaceFailure(into, prov, h.Ref, workspaceErrorCode(err), scrub(err.Error()), wall), nil
 		}
-		payload := workspaceSuccess(into, prov, h.Ref, runID, res, wall)
+		payload := workspaceSuccess(into, prov, h.Ref, runID, res, wall, streamed)
 		// `WITH checkpoint = true`: snapshot after a successful (exit 0)
 		// exec — "after cloning", "after install" are the author's to
 		// name. A failed checkpoint does not fail the exec: the result
@@ -311,12 +341,20 @@ func workspaceStamp(raw, provider, computer, run string, wallMS int64) string {
 	return raw
 }
 
-func workspaceSuccess(into, provider, computer, run string, res workspace.ExecResult, wallMS int64) event.Payload {
+func workspaceSuccess(into, provider, computer, run string, res workspace.ExecResult, wallMS int64, streamed bool) event.Payload {
 	b := jsonx.NewObject()
 	b.Set("exit", res.Exit)
-	b.Set("stdout", string(res.Stdout))
+	if streamed {
+		// The bytes went to the client, not into the envelope. Report how
+		// many so a rule can still gate on "did it produce anything", and
+		// say plainly that `stdout` is absent by design.
+		b.Set("stdout_streamed", true)
+		b.Set("stdout_bytes", res.StdoutBytes)
+	} else {
+		b.Set("stdout", string(res.Stdout))
+		b.Set("stdout_truncated", res.StdoutTruncated)
+	}
 	b.Set("stderr", string(res.Stderr))
-	b.Set("stdout_truncated", res.StdoutTruncated)
 	b.Set("stderr_truncated", res.StderrTruncated)
 	raw, err := sjson.SetRaw("{}", into, b.String())
 	if err != nil {
@@ -384,4 +422,55 @@ func workspaceFuel(wallMS int64) int64 {
 		periods = 1
 	}
 	return periods * fuelCostWorkspacePerPeriod
+}
+
+// workspaceStreamWriter forwards one command's stdout to the request's
+// response stream. The provider writes to it as bytes arrive (a pipe read
+// locally, a WebSocket frame on the fleet), so each write becomes a body
+// chunk the outlet flushes. head is the status + headers snapshot the sink
+// emits once, before the first chunk.
+//
+// A send failure — the client went away, so the outlet stopped receiving —
+// is returned to the provider, which stops copying; the op's context is
+// already cancelled in that case, so the command is killed by the normal
+// path.
+type workspaceStreamWriter struct {
+	ctx  context.Context
+	sink *streamSink
+	head string
+	err  error
+}
+
+func (w *workspaceStreamWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	if err := w.sink.Write(w.ctx, w.head, p); err != nil {
+		w.err = err
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// workspaceStreamHead builds the StreamHead envelope for a streamed exec:
+// the response status and headers the pipeline has shaped so far (a rule may
+// `SET @web.res.status` / headers before the EXEC), defaulting to 200 with a
+// plain-text content type — a command's stdout is bytes, not JSON. Any body
+// already staged is dropped from the head: the body of a streamed response
+// is the chunks.
+func workspaceStreamHead(input string) string {
+	head := "{}"
+	if res := gjson.Get(input, "_txc.web.res"); res.Exists() && res.IsObject() {
+		if merged, err := sjson.SetRaw(head, "_txc.web.res", res.Raw); err == nil {
+			head = merged
+		}
+	}
+	head, _ = sjson.Delete(head, "_txc.web.res.body")
+	if !gjson.Get(head, "_txc.web.res.status").Exists() {
+		head, _ = sjson.Set(head, "_txc.web.res.status", 200)
+	}
+	if !gjson.Get(head, "_txc.web.res.headers.content-type").Exists() {
+		head, _ = sjson.Set(head, "_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
+	}
+	return head
 }

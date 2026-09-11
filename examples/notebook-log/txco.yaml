@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — the notebook store is a chassis built-in
+# (txco://notebook/*); the workspace ships only operations.

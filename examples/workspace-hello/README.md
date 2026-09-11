@@ -15,6 +15,7 @@ OPS/ws-hello/
   100/loop-reset.txcl   rm -f loop
   200/loop.txcl         increment a file … LOOP UNTIL ._ws.stdout == "3" MAX 5
   100/exit.txcl         exit 3 — a non-zero exit is data
+  100/stream.txcl       WITH stream = true — stdout reaches the client live
   300/respond.txcl      copies _ws.* and @workspace onto the body
 ```
 
@@ -43,6 +44,7 @@ Then:
 curl http://localhost:8080/count     # "stdout":"1","read":"1" — then 2, 3, … across requests
 curl http://localhost:8080/loop      # "loop":{"passes":3,"stop":"done",…}
 curl http://localhost:8080/exit      # "exit":3,"stderr":"nope\n"
+curl -N http://localhost:8080/stream # lines appear one at a time, not all at once
 ```
 
 What the responder sees:

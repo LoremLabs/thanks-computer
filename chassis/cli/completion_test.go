@@ -16,6 +16,8 @@ import (
 var hiddenTopLevelCases = map[string]string{
 	// "sources" is a plural alias of the "source" command (in the tree).
 	"sources": "alias of `source`",
+	// "notebooks" is a plural alias of the "notebook" command (in the tree).
+	"notebooks": "alias of `notebook`",
 }
 
 // TestCompletionTopLevelMatchesDispatchSwitch parses chassis/cli/cli.go

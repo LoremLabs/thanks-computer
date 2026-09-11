@@ -297,6 +297,12 @@ var cliCommandTree = []node{
 	{Name: "kv", Desc: "Inspect the op-writable KV store", Children: []node{
 		{Name: "list", Desc: "List keys in a namespace (e.g. blog_subscribers)", Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
 	}},
+	{Name: "notebook", Desc: "Read the append-only notebooks a stack writes", Children: []node{
+		{Name: "list", Desc: "List notebooks in a namespace", Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
+		{Name: "read", Desc: "Print entries oldest first (NDJSON)", Flags: []string{"tenant", "profile", "target", "url", "after", "since", "until", "type", "limit", "all"}},
+		{Name: "tail", Desc: "Print the newest N entries, oldest first", Flags: []string{"tenant", "profile", "target", "url", "n", "since", "until", "type"}},
+		{Name: "export", Desc: "Stream every selected entry as NDJSON", Flags: []string{"tenant", "profile", "target", "url", "after", "since", "until", "type", "limit"}},
+	}},
 	{Name: "source", Desc: "Inspect remote-source watchers (IMAP mailboxes)", Children: []node{
 		{Name: "status", Desc: "Show each declared source and its poll state", Flags: []string{"tenant", "profile", "target", "url"}},
 	}},

@@ -1,0 +1,6 @@
+# GET /log/list[?prefix=…] — this stack's notebooks, sorted by name, with
+# each one's high_seq.
+WHEN @src == "http" && @web.req.url.path == "/log/list"
+  EXEC "txco://notebook/list"
+    WITH prefix = @web.req.url.query.prefix.0,
+         into   = "_nb"

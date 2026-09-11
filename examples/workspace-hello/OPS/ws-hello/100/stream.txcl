@@ -1,0 +1,15 @@
+# GET /stream — watch a command as it runs.
+#
+# `stream = true` sends stdout to the client as it is produced: the
+# response head goes out with the first bytes and the connection stays
+# open until the command exits. The result then carries `stdout_streamed`
+# and `stdout_bytes` instead of `stdout` — the bytes went to the client,
+# so a long build log never rides the envelope or the trace.
+#
+# The responder at 300 still fires, but its status/body no longer reach
+# the client: once bytes stream, the response IS the stream.
+WHEN @src == "http" && @web.req.url.path == "/stream"
+  EXEC "workspace://tools/exec"
+    WITH command = "for i in 1 2 3; do echo line $i; sleep 0.2; done; echo done",
+         stream = true,
+         into = "_ws"

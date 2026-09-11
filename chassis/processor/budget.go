@@ -71,6 +71,12 @@ const (
 	// decode + hash + CAS write at the §2 calibration. Exported because
 	// the handlers live in package server and charge via AddFuel.
 	FuelCostBlobPerMiB int64 = 100
+	// FuelCostNotebookPerMiB charges txco://notebook/read and notebook/export
+	// per MiB of entry bytes returned (rounded up), on top of the flat
+	// dispatch fuel. Appends pay only the dispatch: the per-entry cap
+	// (--notebook-max-entry-bytes) bounds bytes in. Exported because the
+	// handlers live in package server and charge via AddFuel.
+	FuelCostNotebookPerMiB int64 = 100
 )
 
 // AddFuel is the exported charge point for core op handlers that do
