@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,6 +116,9 @@ func TestAttachPumpsBothWays(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	if got := readText(t, c); got != `{"type":"attached"}` {
+		t.Fatalf("first frame = %q, want the attached ack", got)
+	}
 	conn.out <- []byte("hello-term")
 	if got := readBinary(t, c); got != "hello-term" {
 		t.Fatalf("pump output = %q, want hello-term", got)
@@ -203,4 +208,65 @@ func writeBinary(t *testing.T, c *websocket.Conn, s string) {
 	if err := c.Write(ctx, websocket.MessageBinary, []byte(s)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+}
+
+// TestConnectPumpsServiceConn: a service binding (attach.NewNet over a
+// pipe) rides the same frame path as a PTY — bytes both ways, a resize
+// control answered with one error frame and the session kept, and the far
+// side closing ends the socket with an exit frame — with no change to the
+// personality.
+func TestConnectPumpsServiceConn(t *testing.T) {
+	near, far := net.Pipe()
+	defer far.Close()
+	h, reg := attachHarness(t, attach.NewNet(near))
+	c := h.dial(t)
+	defer c.CloseNow()
+
+	writeText(t, c, `{"type":"connect","service":"browser"}`)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := reg.Lookup("acme", firstSID(h)); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("attachment never bound")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := readText(t, c); got != `{"type":"attached"}` {
+		t.Fatalf("first frame = %q, want the attached ack", got)
+	}
+
+	// Service → client.
+	go func() { _, _ = far.Write([]byte("RFB 003.008\n")) }()
+	if got := readBinary(t, c); got != "RFB 003.008\n" {
+		t.Fatalf("pump output = %q", got)
+	}
+	// Client → service.
+	got := make(chan string, 1)
+	go func() {
+		b := make([]byte, 16)
+		n, _ := far.Read(b)
+		got <- string(b[:n])
+	}()
+	writeBinary(t, c, "RFB 003.008\n")
+	select {
+	case s := <-got:
+		if s != "RFB 003.008\n" {
+			t.Fatalf("service read = %q", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client bytes never reached the service")
+	}
+	// A control has nowhere to go on a byte stream: one error frame, session stays.
+	writeText(t, c, `{"type":"resize","cols":100,"rows":30}`)
+	if got := readText(t, c); !strings.Contains(got, `"type":"error"`) || !strings.Contains(got, "bytes only") {
+		t.Fatalf("resize on a service = %q", got)
+	}
+	// The service closing ends the binding: exit frame, close 1000.
+	_ = far.Close()
+	if got := readText(t, c); got != `{"type":"exit","code":0}` {
+		t.Fatalf("exit frame = %q", got)
+	}
+	expectClose(t, c, websocket.StatusNormalClosure)
 }

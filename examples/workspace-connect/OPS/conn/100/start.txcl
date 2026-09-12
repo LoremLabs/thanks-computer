@@ -1,0 +1,18 @@
+# GET /start — leave an echo service listening inside the workspace.
+#
+# `connect` binds a service the workspace is ALREADY running; it never
+# starts one. This is the ordinary exec that starts it: a tiny TCP echo
+# server on the workspace's loopback at 17777, the port the operator mapped
+# to the name `echo` (TXCO_WORKSPACE_SERVICES=echo=17777). It double-forks
+# into its own session so it outlives this exec (the local provider kills
+# the exec's process group when the command returns), exits by itself after
+# ten idle minutes, and is a no-op when something already listens there —
+# so /start is safe to call again. On a provider that manages services
+# (Sprites), the same thing is a service the workspace declares.
+#
+# Python is the one interpreter a developer machine reliably has.
+WHEN @src == "http" && @web.req.url.path == "/start"
+  EXEC "workspace://tools/exec"
+    WITH args = ["python3", "-c", "import os,sys,socket,socketserver as S; s=socket.socket(); (s.connect_ex(('127.0.0.1',17777))==0) and sys.exit(0); s.close(); S.TCPServer.allow_reuse_address=True; srv=S.TCPServer(('127.0.0.1',17777), type('H',(S.BaseRequestHandler,),{'handle':lambda h:[h.request.sendall(d) for d in iter(lambda: h.request.recv(65536), b'')]})); os.fork() and sys.exit(0); os.setsid(); os.fork() and sys.exit(0); f=os.open(os.devnull,os.O_RDWR); os.dup2(f,0); os.dup2(f,1); os.dup2(f,2); srv.timeout=600; srv.handle_timeout=lambda: sys.exit(0); any(srv.handle_request() for _ in iter(int,1))"],
+         timeout = "20s",
+         into = "_ws"

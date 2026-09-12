@@ -43,7 +43,8 @@ dies; reconnect and `tmux` resumes the same screen.
 - **Text frames** are a typed control envelope:
   - client → server: `{"type":"resize","cols":C,"rows":R}`,
     `{"type":"signal","signal":"INT"}`, `{"type":"detach"}`
-  - server → client: `{"type":"exit","code":N}`, `{"type":"expired"}`,
+  - server → client: `{"type":"attached"}` (once, the binding is live),
+    `{"type":"exit","code":N}`, `{"type":"expired"}`,
     `{"type":"error","error":"…"}`
 
 ### Persistence is tmux's job

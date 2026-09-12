@@ -75,6 +75,7 @@ function connect() {
       if (m.type === 'error') { setStatus('error: ' + (m.error || m.code || 'attach failed'), true); return; }
       if (m.type === 'expired') { term.write('\r\n[session expired]\r\n'); return; }
       if (m.type === 'exit') { term.write('\r\n[process exited ' + m.code + ']\r\n'); }
+      if (m.type === 'attached') { if (!attached) { attached = true; setStatus('attached', false); $('detach').disabled = false; term.focus(); } }
       return;
     }
     if (!attached) { attached = true; setStatus('attached', false); $('detach').disabled = false; term.focus(); }

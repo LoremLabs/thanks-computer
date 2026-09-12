@@ -1,0 +1,21 @@
+# The first message binds a service to the session, once.
+#
+# `service` is a name. The page sends one, and the chassis resolves it
+# against its own table — `browser` built in, `echo` added by the operator
+# for this example — so the page can choose a service but can never choose
+# a host or a port. An unknown name is refused with the names this node
+# knows, which the responder below shows.
+#
+# `max_duration` bounds the whole binding — the lease expires, the
+# connection is closed and the socket is told, whatever the client is doing
+# — capped by --workspace-connect-max-duration.
+#
+# On success the chassis returns `_connect.connected = true` with the lease
+# id and expiry; from here the socket is the service. A transport/provider
+# failure (including "unavailable": nothing is listening — click /start
+# first) merges as top-level `workspace.error`, which the responder renders.
+WHEN .msg.type == "connect"
+  EXEC "workspace://tools/connect"
+    WITH service = .msg.service,
+         max_duration = "1h",
+         into = "_connect"

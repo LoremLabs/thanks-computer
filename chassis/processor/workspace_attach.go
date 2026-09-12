@@ -161,10 +161,15 @@ func attachDuration(op operation.Operation, ceilingStr string) (time.Duration, e
 }
 
 // attachStart spawns the per-attachment heartbeat/metering loop and the
-// expiry watch on the node holding the socket.
+// expiry watch on the node holding the socket. Shared by attach (a PTY)
+// and connect (a service): the lease is the same lease.
 func (pu *Unit) attachStart(att *attach.Attachment, spec workspace.Spec) {
 	wsID := workspace.ID(att.Tenant, spec.Stack, att.Workspace)
-	opID := att.AppStack + "/attach/" + att.Workspace
+	verb := "attach"
+	if att.Kind == attach.KindService {
+		verb = "connect"
+	}
+	opID := att.AppStack + "/" + verb + "/" + att.Workspace
 	go func() {
 		t := time.NewTicker(workspace.LeaseHeartbeatInterval)
 		defer t.Stop()

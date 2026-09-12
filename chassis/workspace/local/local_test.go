@@ -3,6 +3,8 @@ package local
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,5 +222,55 @@ func TestRegistered(t *testing.T) {
 	}
 	if p.Name() != "local" {
 		t.Errorf("name = %q", p.Name())
+	}
+}
+
+// TestDialServiceRoundTripsAndReportsUnavailable: a listener on this
+// host's loopback is reachable by port through DialService; a port with
+// nothing behind it is "unavailable", not a provider fault.
+func TestDialServiceRoundTripsAndReportsUnavailable(t *testing.T) {
+	_, c, _ := newComputer(t)
+	d, ok := c.(workspace.Dialer)
+	if !ok {
+		t.Fatal("local computer does not implement workspace.Dialer")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn) // echo
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	svc := workspace.Service{Name: "echo", Port: port}
+	conn, err := d.DialService(context.Background(), svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo = %q err=%v", buf, err)
+	}
+
+	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
+	dead := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close()
+	_, err = d.DialService(context.Background(), workspace.Service{Name: "gone", Port: dead})
+	var we *workspace.Error
+	if !errors.As(err, &we) || we.Code != "unavailable" {
+		t.Fatalf("dead port err = %v, want unavailable", err)
+	}
+	if _, err := d.DialService(context.Background(), workspace.Service{Name: "x"}); err == nil {
+		t.Fatal("a zero port must be refused")
 	}
 }

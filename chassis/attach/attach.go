@@ -3,13 +3,13 @@
 // lease allows, with the stack having authorized the binding ONCE rather
 // than running on every byte.
 //
-// The first Kind is "pty" — `workspace://<name>/attach` binds a
+// Two Kinds exist. "pty" — `workspace://<name>/attach` binds a
 // pseudo-terminal to the WebSocket session whose run made the op, and from
 // then on the personality pumps frames straight to and from the process.
-// The shape is deliberately not terminal-specific: a workspace-local
-// service reached by a future `connect` verb is the intended second Conn,
-// and it reuses the registry, the lease, the metering and the teardown
-// funnel without change.
+// "service" — `workspace://<name>/connect` binds a byte stream to one of
+// the workspace's own loopback services (a VNC display, say), named from a
+// chassis-owned table; the same registry, lease, metering and teardown
+// funnel carry it, and the personality cannot tell the two apart.
 //
 // The processor creates bindings (it has the tenant, the workspace manager
 // and the usage sink); the websocket personality pumps them (it has the
@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,7 +33,8 @@ import (
 
 // Kinds of attached resource.
 const (
-	KindPTY = "pty"
+	KindPTY     = "pty"
+	KindService = "service"
 )
 
 // Control message types a client may send on the text channel; the
@@ -67,7 +69,8 @@ type Params struct {
 	Tenant    string
 	AppStack  string // the workspace's owning stack (workspace.AppStack)
 	Workspace string
-	Kind      string // KindPTY
+	Kind      string // KindPTY | KindService
+	Service   string // KindService: the service name the binding reached
 
 	SessionID string // the WebSocket session holding the socket
 	NodeID    string // the chassis node holding that socket
@@ -86,6 +89,7 @@ type Attachment struct {
 	AppStack  string
 	Workspace string
 	Kind      string
+	Service   string
 
 	SessionID string
 	NodeID    string
@@ -117,7 +121,7 @@ type Attachment struct {
 // Close — detach, expiry, session teardown, shutdown.
 func New(parent context.Context, p Params) *Attachment {
 	att := &Attachment{
-		ID: p.ID, Tenant: p.Tenant, AppStack: p.AppStack, Workspace: p.Workspace, Kind: p.Kind,
+		ID: p.ID, Tenant: p.Tenant, AppStack: p.AppStack, Workspace: p.Workspace, Kind: p.Kind, Service: p.Service,
 		SessionID: p.SessionID, NodeID: p.NodeID, RunID: p.RunID, Computer: p.Computer,
 		StartedAt: p.StartedAt, ExpiresAt: p.ExpiresAt,
 	}
@@ -279,4 +283,47 @@ func (p *ptyConn) Control(_ context.Context, typ string, raw []byte) error {
 		return p.sess.Signal(m.Signal)
 	}
 	return fmt.Errorf("unknown control type %q", typ)
+}
+
+// --- the service Conn --------------------------------------------------------
+
+// netConn adapts a net.Conn — a workspace-local service reached through
+// the provider's Dialer — to Conn. A byte stream has no controls, so
+// resize and signal are refused with an error the personality relays as
+// one error frame; Wait reports exit 0 as soon as either side has closed,
+// which is what the pump's end-of-output needs to send its exit frame.
+type netConn struct {
+	c    net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+// NewNet binds a dialed service connection as a Conn.
+func NewNet(c net.Conn) Conn { return &netConn{c: c, done: make(chan struct{})} }
+
+func (n *netConn) Read(b []byte) (int, error) {
+	k, err := n.c.Read(b)
+	if err != nil {
+		n.end()
+	}
+	return k, err
+}
+
+func (n *netConn) Write(b []byte) (int, error) { return n.c.Write(b) }
+
+func (n *netConn) Close() error {
+	err := n.c.Close()
+	n.end()
+	return err
+}
+
+func (n *netConn) end() { n.once.Do(func() { close(n.done) }) }
+
+func (n *netConn) Wait() (int, error) {
+	<-n.done
+	return 0, nil
+}
+
+func (n *netConn) Control(_ context.Context, typ string, _ []byte) error {
+	return fmt.Errorf("control %q: a service connection carries bytes only (no resize or signal)", typ)
 }

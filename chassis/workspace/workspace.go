@@ -12,7 +12,8 @@
 //
 // Vocabulary: a Computer executes work; a Workspace is the owned, stateful
 // environment that provides one; a Run is one wake→sleep; a Task spans
-// runs. Verbs: create, wake, exec, checkpoint, sleep, destroy.
+// runs. Verbs: create, wake, exec, checkpoint, sleep, destroy, attach,
+// connect.
 //
 // Providers self-register from their package's init() (the compute-engine
 // and vector-store idiom); the chassis activates one with
@@ -394,9 +395,10 @@ type Error struct {
 func (e *Error) Error() string { return "workspace: " + e.Code + ": " + e.Message }
 
 // Verbs is the closed vocabulary after the last "/" of a workspace ref.
-// "attach" binds a live interactive session (a PTY) to the WebSocket run
-// that fires it; it is valid only inside such a run.
-var Verbs = []string{"create", "wake", "exec", "checkpoint", "sleep", "destroy", "attach"}
+// "attach" binds a live interactive session (a PTY) and "connect" a
+// workspace-local service (see Services) to the WebSocket run that fires
+// them; both are valid only inside such a run.
+var Verbs = []string{"create", "wake", "exec", "checkpoint", "sleep", "destroy", "attach", "connect"}
 
 // IsVerb reports whether s is one of Verbs.
 func IsVerb(s string) bool {
@@ -637,8 +639,9 @@ type Manager struct {
 	store *Store
 	now   func() time.Time
 
-	mu    sync.Mutex
-	cache map[string]entry
+	mu       sync.Mutex
+	cache    map[string]entry
+	services *Services // the connect verb's name table; DefaultServices until SetServices
 }
 
 // NewManager builds a Manager over a Provider with per-exec limits. store

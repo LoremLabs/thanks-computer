@@ -136,10 +136,10 @@ type Unit struct {
 	Workspaces *workspace.Manager
 
 	// Attachments is the registry of attached transports — a live resource
-	// in a workspace (a PTY today) bound to one WebSocket session for the
-	// life of a lease. The `workspace://<name>/attach` op creates bindings
-	// here; the websocket personality pumps them. nil-safe: attach fails
-	// in-band when unset.
+	// in a workspace (a PTY, or a workspace-local service) bound to one
+	// WebSocket session for the life of a lease. The `workspace://<name>/attach`
+	// and `/connect` ops create bindings here; the websocket personality
+	// pumps them. nil-safe: both fail in-band when unset.
 	Attachments *attach.Registry
 
 	// Usage is the usage sink. nil-safe. When set, each compute or

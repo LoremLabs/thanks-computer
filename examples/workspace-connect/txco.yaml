@@ -1,0 +1,25 @@
+target: dev
+
+# examples/workspace-connect — a workspace-local service on one WebSocket.
+#
+# The browser opens a WebSocket to /connect; the stack accepts it and the
+# first message runs `workspace://tools/connect WITH service = "echo"`, which
+# binds a TCP service the workspace is running (an echo server on its own
+# loopback) to that session. From then on the socket carries the service's
+# bytes verbatim in both directions — no per-frame stack run — until the tab
+# closes, the service hangs up, or the lease's max_duration passes.
+#
+# `service` is a NAME the chassis resolves against its own table, never a
+# port: the built-in `browser` (5900, a VNC display) plus whatever the
+# operator adds with --workspace-services. This example adds `echo`:
+#
+#   TXCO_WORKSPACE_SERVICES=echo=17777 txco dev --allow-local-workspace
+#
+# then open the URL txco dev prints, click "start the service" (an ordinary
+# exec that leaves an echo server listening in the workspace), then
+# "connect". Whatever you type comes straight back from the service. Try
+# a service name that does not exist to see the refusal. (The websocket
+# personality is on by default under `txco dev`.)
+#
+# There is no `operations:` block: workspace:// and txco://websocket/* are
+# chassis transports, so the stack ships only ops.

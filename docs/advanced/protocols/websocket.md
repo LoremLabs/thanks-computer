@@ -188,16 +188,21 @@ is the belt-and-braces spelling.
 **Streaming:** `@web.res.body` written from a websocket run is drained and
 ignored — the socket is the transport; use `reply`, as many times as needed.
 
-## Attached transports (a PTY on a session)
+## Attached transports (a PTY or a service on a session)
 
 A session can bind a **live resource in a workspace** to itself and stop
-running the stack per frame. Today that resource is a pseudo-terminal:
-`workspace://<name>/attach`, run inside a message, hands the socket a real
-terminal (see [workspaces](../../workspaces.md#attach--an-interactive-terminal)
-and [`examples/workspace-terminal`](../../../examples/workspace-terminal)).
-The same seam is meant to carry a workspace-local service (a `connect` verb)
-later, which is why it lives in its own binding rather than in the message
-path.
+running the stack per frame. Two kinds exist. `workspace://<name>/attach`,
+run inside a message, hands the socket a real pseudo-terminal (see
+[workspaces](../../workspaces.md#attach--an-interactive-terminal) and
+[`examples/workspace-terminal`](../../../examples/workspace-terminal)).
+`workspace://<name>/connect` hands it a service the workspace is already
+running — named from a chassis-owned table, never addressed by port — such
+as its VNC display (see
+[workspaces](../../workspaces.md#connect--a-workspace-local-service-on-a-session)
+and [`examples/workspace-connect`](../../../examples/workspace-connect)).
+The personality cannot tell the two apart: the binding lives in its own
+registry rather than in the message path, and everything below applies to
+both.
 
 The model is the chassis's own: the stack evaluates the upgrade and the
 attach message with everything it normally has and **grants** the binding,
@@ -206,23 +211,29 @@ way possession of a continuation's rcid is authorization, and the stack does
 not re-run to move each byte. An attachment is a *granted capability, not a
 bypass*.
 
-**Framing.** While attached, the reader routes frames straight to the
-binding instead of the per-message queue:
+**Framing.** The chassis sends one `{"type":"attached"}` status frame the
+moment the binding is live, before any resource byte — a client that does
+not greet first (VNC is the exception) waits for it before sending. After
+it, the reader routes frames straight to the binding instead of the
+per-message queue:
 
 | Direction | Binary frame | Text frame |
 |---|---|---|
 | client → process | stdin bytes, verbatim | control: `{"type":"resize","cols","rows"}`, `{"type":"signal","signal":"INT"}`, `{"type":"detach"}` |
-| process → client | stdout bytes (a TTY merges stderr in) | status: `{"type":"exit","code":N}`, `{"type":"expired"}`, `{"type":"error","error":"…"}` |
+| process → client | stdout bytes (a TTY merges stderr in) | status: `{"type":"attached"}` (once, first), `{"type":"exit","code":N}`, `{"type":"expired"}`, `{"type":"error","error":"…"}` |
 
 Keeping terminal traffic as bytes avoids both base64 and UTF-8 boundary
-problems. Unknown control types get one error frame and the session stays.
+problems. Unknown control types get one error frame and the session stays —
+as do `resize` and `signal` on a service binding, which has nothing to
+resize or signal.
 
 **Lifecycle.** The socket closing (tab closed, idle, write timeout) cancels
 the process, exactly as a timeout does. The process exiting flushes the last
 output, sends `exit`, and closes `1000`. `{"type":"detach"}` cancels the
 process and the lease and returns the socket to ordinary per-message runs.
-`max_duration` sends `expired` then `exit`. Both directions count as
-activity, so the idle timeout never fires on a live terminal —
+`max_duration` sends `expired` then `exit`. A service closing its end of a
+`connect` binding reads as a process exit with code 0. Both directions count
+as activity, so the idle timeout never fires on a live terminal —
 `max_duration`, not idle, is what bounds it.
 
 **Flow control** copies streaming's shape: the pump does a bounded, blocking

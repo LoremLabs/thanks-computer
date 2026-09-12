@@ -141,6 +141,7 @@ On a transport or provider failure:
 ```
 
 Codes: `timeout`, `provider`, `capacity`, `bad_request`, `not_allowed`,
+`unsupported`, `unavailable` (a `connect` whose service is not running),
 `unsupported_verb`. Top-level (not under `_txc`) so a rule can gate on it:
 `WHEN .workspace.error.code == "timeout"`.
 
@@ -156,7 +157,8 @@ and login flows that refuse to read a password from a pipe. This gives an
 agent the ordinary one-shot `exec` it already has, with a terminal behind
 it — structured in, structured out, one result. It does **not** turn `exec`
 into a stream; for a live interactive terminal a person drives, see
-[attach](#attach--an-interactive-terminal).
+[attach](#attach--an-interactive-terminal), and for a service the
+workspace runs, [connect](#connect--a-workspace-local-service-on-a-session).
 
 ```txcl
 WHEN @web.req.url.path == "/cols"
@@ -276,10 +278,11 @@ On success the chassis binds a pseudo-terminal and returns immediately:
 ```
 
 From then on the connection is the terminal — the stack does **not** run
-per keystroke. Binary frames are terminal bytes (client→stdin,
-process→client); text frames are a typed control envelope
-(`{"type":"resize"|"signal"|"detach"}` in, `{"type":"exit"|"expired"|"error"}`
-out). The design and the wire protocol are documented under the
+per keystroke. The chassis sends one `{"type":"attached"}` frame the moment
+the binding is live; after it, binary frames are terminal bytes
+(client→stdin, process→client) and text frames are a typed control envelope
+(`{"type":"resize"|"signal"|"detach"}` in,
+`{"type":"attached"|"exit"|"expired"|"error"}` out). The design and the wire protocol are documented under the
 [websocket personality](./advanced/protocols/websocket.md#attached-transports-a-pty-on-a-session).
 
 An attachment refuses `secrets.env.*` (an interactive user could echo the
@@ -290,6 +293,65 @@ long request: it heartbeats every 60 s at the ordinary workspace rate
 heartbeating (a crashed node) is reapable rather than pinning the workspace
 forever. `txco://websocket/send` to an attached session is refused with
 `txco_websocket_attached` — its frames belong to the process.
+
+## `connect` — a workspace-local service on a session
+
+`attach` binds a process; `connect` binds a **service the workspace is
+already running** — a VNC display, a debug port, a dev server — to the
+same kind of WebSocket session, and the socket then carries that service's
+bytes verbatim in both directions. It is how a person reaches software
+inside the workspace that speaks its own protocol: a noVNC page onto the
+workspace's browser, for one. See
+[`examples/workspace-connect`](../examples/workspace-connect) for the whole
+thing, page included.
+
+Like `attach`, it is valid **only inside a WebSocket session run**, and the
+first message the client sends is what connects:
+
+```txcl
+# conn/_websocket/0 — the first message connects, once.
+WHEN .msg.type == "connect"
+  EXEC "workspace://tools/connect"
+    WITH service = "browser",
+         max_duration = "1h",
+         into = "_connect"
+```
+
+| `WITH` key | Meaning |
+|---|---|
+| `service` | **A name, never a port.** Resolved against the chassis's table: `browser` (the workspace's VNC display on loopback 5900) plus whatever the operator added with `--workspace-services`. An unknown name is a `bad_request` that lists the ones this node knows |
+| `max_duration` | How long the binding may live, default and capped by `--workspace-connect-max-duration` (8h). When it passes, the connection is closed and the socket told |
+| `into` | Where the grant lands (default `_workspace`) |
+
+That the vocabulary is a *name* is the whole security property: no `WITH`
+value — and so no model output that reached one — can address a host or a
+port, so `connect` cannot become a tunnel. Adding a service is an operator
+decision on the node, never a stack's.
+
+On success:
+
+```json
+{ "_connect": { "connected": true, "service": "browser", "run": "<run id>",
+    "workspace": "tools", "node": "<node>", "lease": { "id": "<lease>", "expires_at": "…" } } }
+```
+
+From then on the connection **is** the service's socket. The chassis sends
+one `{"type":"attached"}` frame the moment the binding is live — wait for it
+before sending, because a service (unlike a shell) may not speak first.
+After it, binary frames are the service's bytes in both directions; text
+frames are the same control envelope as `attach`, except that `resize` and
+`signal` mean nothing to a byte stream and answer one `{"type":"error"}`
+frame. The service closing its end sends
+`{"type":"exit","code":0}` and closes the socket `1000`; `{"type":"detach"}`
+closes the connection and returns the socket to per-message runs.
+
+A service that is not running answers `workspace.error.code = "unavailable"`
+— the workspace was reached, nothing was listening. Start it first with an
+ordinary `exec` (or, on a provider that manages services, as one of the
+workspace's services) and connect afterwards. Everything else `attach`
+refuses, `connect` refuses too: `secrets.env.*`, `LOOP`, `stream`, and a
+second binding on a session that already holds one. It is metered as the
+same lease, at the same rate.
 
 ## Loops, fuel, usage, trace
 
@@ -334,6 +396,9 @@ name; the stack's txcl does not change.
 | `--workspace-default-timeout` | `5m` | Per-exec default when `WITH timeout` is absent (sized for builds, tests, tool runs) |
 | `--workspace-max-output-bytes` | `1048576` | stdout/stderr capture cap, each |
 | `--workspace-reap` | `720h` | Idle window before the reaper destroys a workspace (fleet background service) |
+| `--workspace-attach-max-duration` | `8h` | Ceiling on one `attach` binding's life |
+| `--workspace-connect-max-duration` | `8h` | Ceiling on one `connect` binding's life |
+| `--workspace-services` | _(none)_ | Extra `connect` targets, `name=port` on the workspace's loopback, added to the built-in `browser=5900` |
 
 ## Identity, runs, and the reaper
 

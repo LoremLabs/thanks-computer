@@ -1,7 +1,8 @@
 # If the attach was refused (not a websocket run, already bound, secrets, no
 # provider) or the workspace would not start, say so on the socket as a
 # control frame the page can show — then the connection is just an idle
-# socket the client can close.
+# socket the client can close. Its own scope (300): an op cannot read what
+# another op in the same scope produced, so this must run after 200.
 WHEN .msg.type == "attach" && .workspace.error.code != null
   EXEC "txco://websocket/reply"
     WITH text = &to_json(&object(

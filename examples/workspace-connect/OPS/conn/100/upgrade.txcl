@@ -1,0 +1,14 @@
+# conn scope 100 — take the WebSocket connection on /connect.
+#
+# Everything past this point is trusted for the life of the session: the
+# stack decided, once, that this connection may bind a service inside its
+# workspace. That is the model — a binding is a capability the stack grants
+# here, not a bypass, and the chassis carries the bytes afterward without
+# running the stack per frame.
+#
+# A real deployment gates this the way any upgrade is gated (a session
+# cookie, an Origin allowlist, `state.user`); this example keeps it open so
+# it runs with nothing configured. The subsequent messages run at
+# conn/_websocket/0.
+WHEN @websocket.upgrade == true && @web.req.url.path == "/connect"
+  EXEC "txco://websocket/accept"

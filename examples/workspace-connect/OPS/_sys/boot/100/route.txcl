@@ -1,0 +1,16 @@
+# _sys/boot scope 100 — EXECUTE the route decided at scope 0.
+#
+# The route-or-not decision is THIS visible WHEN, not hidden in Go:
+# only fire when scope 0 (or an intervening hook) left a route
+# proposal. An unrouted request has no _txc.route.to, skips this rule,
+# and falls through to the scope 1000 404.
+#
+# txco://route is pure mechanism — it promotes the inert _txc.route.*
+# proposal into the active _txc.goto (+ _txc.tenant and parity keys),
+# which triggers the one-way _sys->tenant re-tenant gate and the jump
+# into the resolved tenant's stack. It lives in Go only because txcl
+# SET can assign literals, not copy one envelope path to another.
+#
+# @ is sugar for ._txc.
+WHEN @route.to != ""
+  EXEC "txco://route"

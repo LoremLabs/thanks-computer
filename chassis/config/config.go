@@ -163,6 +163,8 @@ type Config struct {
 	WorkspaceMaxOutputBytes      int      `id:"workspace-max-output-bytes" default:"1048576" desc:"Cap on captured stdout and stderr (each) per workspace exec; excess is dropped and flagged *_truncated. (1048576 = 1 MiB)"`
 	WorkspaceReap                string   `id:"workspace-reap" default:"720h" desc:"Idle window after which the workspace reaper (a background service, where enabled) destroys a workspace: its files are gone and the next exec starts fresh. (720h = 30 days)"`
 	WorkspaceAttachMaxDuration   string   `id:"workspace-attach-max-duration" default:"8h" desc:"Ceiling on how long one workspace://<name>/attach binding (an interactive terminal on a WebSocket session) may live; the op's WITH max_duration defaults to this and cannot exceed it. When it expires the lease ends, the process is killed and the socket is told. (8h)"`
+	WorkspaceConnectMaxDuration  string   `id:"workspace-connect-max-duration" default:"8h" desc:"Ceiling on how long one workspace://<name>/connect binding (a workspace-local service on a WebSocket session) may live; the op's WITH max_duration defaults to this and cannot exceed it. When it expires the lease ends, the connection is closed and the socket is told. (8h)"`
+	WorkspaceServices            []string `id:"workspace-services" default:"" desc:"Extra services the connect verb may bind, as name=port entries on the workspace's own loopback (comma-separated), added to the built-in table (browser=5900). Operator-declared only: a stack names a service, never a port. ()"`
 	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns,mailmap,scheduled,imap,websocket,calendar,contacts,source} (cron,tcp,web,admin)"`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
 	PromNamespace                string   `id:"prom-namespace" default:"txco" desc:"Set the Prometheus namespace (txco)"`
@@ -551,6 +553,21 @@ func Load() (Config, error) {
 	}
 	if d, err := time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceAttachMaxDuration)); err != nil || d <= 0 {
 		log.Fatalf("unable to parse workspace-attach-max-duration %s (want a positive duration)", config.WorkspaceAttachMaxDuration)
+	}
+	if d, err := time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceConnectMaxDuration)); err != nil || d <= 0 {
+		log.Fatalf("unable to parse workspace-connect-max-duration %s (want a positive duration)", config.WorkspaceConnectMaxDuration)
+	}
+	// Syntax only; the workspace package builds the table and refuses a
+	// redefined built-in or a duplicate at boot (server wiring).
+	for _, e := range config.WorkspaceServices {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		name, port, ok := strings.Cut(e, "=")
+		if p, perr := strconv.Atoi(strings.TrimSpace(port)); !ok || strings.TrimSpace(name) == "" || perr != nil || p < 1 || p > 65535 {
+			log.Fatalf("workspace-services entry %q: want name=port with port 1-65535", e)
+		}
 	}
 
 	// async-runtime-default and async-ack-timeout must parse. They are

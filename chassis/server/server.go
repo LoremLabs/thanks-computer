@@ -1371,9 +1371,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		zap.Int("max_memory_mb", conf.ComputeMaxMemoryMB),
 		zap.Duration("max_wall", computeWall))
 
-	// Attached transports (workspace://<name>/attach): the registry the attach
-	// op binds into and the websocket personality pumps. Cheap, so always
-	// built; attach itself fails in-band when no workspace provider is on.
+	// Attached transports (workspace://<name>/attach and /connect): the
+	// registry those ops bind into and the websocket personality pumps.
+	// Cheap, so always built; the ops fail in-band when no workspace
+	// provider is on.
 	pu.Attachments = attach.NewRegistry()
 
 	// Workspace runtime (workspace://<name>/<verb>): an owned, stateful
@@ -1400,6 +1401,16 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 				// restarts and shared across nodes; nil falls back to a
 				// per-process cache (tests, non-server contexts).
 				pu.Workspaces = workspace.NewManager(wsProv, workspace.Limits{MaxOutputBytes: int64(conf.WorkspaceMaxOutputBytes)}, workspaceStore)
+				// The connect verb's name table: the built-ins plus the
+				// operator's --workspace-services. Config checked the
+				// syntax; a redefined built-in or a duplicate is still a
+				// misconfiguration, and misconfiguration is fatal here as
+				// it is for a bad duration.
+				svcs, serr := workspace.NewServices(conf.WorkspaceServices)
+				if serr != nil {
+					logger.Fatal("workspace: --workspace-services: " + serr.Error())
+				}
+				pu.Workspaces.SetServices(svcs)
 				if conf.WorkspaceProvider == "local" {
 					logger.Warn("workspace: LOCAL provider ENABLED — commands run as the chassis uid on this host; dev/self-host only",
 						zap.String("root", conf.WorkspaceLocalRoot))
@@ -1408,6 +1419,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 				logger.Info("workspace runtime loaded",
 					zap.String("provider", wsProv.Name()),
 					zap.Strings("capabilities", wsProv.Capabilities()),
+					zap.Strings("services", svcs.Names()),
 					zap.String("default_timeout", conf.WorkspaceDefaultTimeout),
 					zap.Int("max_output_bytes", conf.WorkspaceMaxOutputBytes))
 			}

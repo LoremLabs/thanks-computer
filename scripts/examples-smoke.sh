@@ -162,17 +162,22 @@ app_ports() {
 
 # emit_probe <probe.json> — print the probe as tab-separated lines:
 #   DEVFLAG<TAB>flag
+#   DEVENV<TAB>KEY=value
 #   BIND<TAB>host<TAB>stack
 #   CHECK<TAB>name<TAB>method<TAB>host<TAB>path<TAB>status<TAB>contains<TAB>body
 # (body is the only field that can be empty; none of the fields contain tabs.)
 # DEVFLAG lines are extra `txco dev` flags the example needs (e.g. "--imap"
-# for a head that is off by default); they are read before dev is spawned.
+# for a head that is off by default); DEVENV lines are environment variables
+# the chassis needs (dev passes its env down); both are read before dev is
+# spawned.
 emit_probe() {
     python3 - "$1" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))
 for f in p.get("dev_flags", []):
     print("DEVFLAG\t%s" % f)
+for e in p.get("dev_env", []):
+    print("DEVENV\t%s" % e)
 for b in p.get("bind", []):
     print("BIND\t%s\t%s" % (b["host"], b["stack"]))
 for c in p.get("checks", []):
@@ -264,15 +269,17 @@ run_checks() {
     # Expanded with the `${arr[@]+"${arr[@]}"}` idiom: under `set -u`, bash
     # 3.2 (macOS /bin/bash) treats an EMPTY array as unbound and aborts the
     # boot for every example that has no dev_flags.
-    local -a dev_flags=()
+    local -a dev_flags=() dev_env=()
     local dkind dflag
     while IFS=$'\t' read -r dkind dflag; do
         [[ "${dkind}" == "DEVFLAG" ]] && dev_flags+=("${dflag}")
+        [[ "${dkind}" == "DEVENV" ]] && dev_env+=("${dflag}")
     done < <(emit_probe "${probe}")
 
     ( cd "${DEV_WS}" && \
-        TXCO_DEBUG_BREAKPOINTS=false \
+        env TXCO_DEBUG_BREAKPOINTS=false \
         WORKER_JOB_MS=500 \
+        ${dev_env[@]+"${dev_env[@]}"} \
         "${TXCO}" dev \
         --chassis-addr ":${ADMIN_PORT}" \
         --web-addr ":${WEB_PORT}" \

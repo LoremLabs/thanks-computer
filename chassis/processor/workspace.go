@@ -228,6 +228,9 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 	case "attach":
 		return pu.execWorkspaceAttach(ctx, op, spec, name, into, prov, refs, tenant, opID, rid)
 
+	case "connect":
+		return pu.execWorkspaceConnect(ctx, op, spec, name, into, prov, refs, tenant, opID, rid)
+
 	default:
 		// Unreachable while ParseRef closes the verb vocabulary; kept so a
 		// verb added to workspace.Verbs without a case here fails in-band

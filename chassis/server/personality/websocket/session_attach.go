@@ -10,12 +10,14 @@ import (
 )
 
 // This file is the attached-transport frame path (D1, D3, D6, D11). Once a
-// message run binds a PTY to the session (workspace://<name>/attach), the
-// session stops running the stack per frame: inbound binary is the
-// terminal's stdin, inbound text is a typed control envelope, and a pump
-// goroutine carries the terminal's output back out. The binding lives in
-// processor.Unit.Attachments; the session holds a pointer to the one that
-// is its own.
+// message run binds a resource to the session — a PTY via
+// workspace://<name>/attach, or a workspace-local service via
+// workspace://<name>/connect — the session stops running the stack per
+// frame: inbound binary is the resource's input, inbound text is a typed
+// control envelope, and a pump goroutine carries the resource's output
+// back out. Nothing here knows which kind it is pumping: the Conn does.
+// The binding lives in processor.Unit.Attachments; the session holds a
+// pointer to the one that is its own.
 
 // maybeAttach is called after each message run. If that run bound a PTY to
 // this session (and no pump is running yet), the session goes into attached
@@ -79,6 +81,12 @@ func (s *session) startPump(att *attach.Attachment) {
 	s.c.wg.Add(1)
 	go func() {
 		defer s.c.wg.Done()
+		// Acknowledge the live binding before any resource byte. A PTY
+		// speaks at once, but a service may wait for the client (RFB is the
+		// exception — its server greets first), so without this a client
+		// cannot know when it is safe to send. A client that keys off the
+		// first output byte instead (the terminal page) ignores it.
+		_ = s.send(att.Context(), MessageText, []byte(`{"type":"attached"}`))
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := att.Conn.Read(buf)

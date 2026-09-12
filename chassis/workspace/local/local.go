@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,7 +61,7 @@ func New(root string) (*Provider, error) {
 func (p *Provider) Root() string { return p.root }
 
 func (p *Provider) Name() string           { return "local" }
-func (p *Provider) Capabilities() []string { return []string{"exec", "session", "tty"} }
+func (p *Provider) Capabilities() []string { return []string{"exec", "session", "tty", "connect"} }
 
 // dirFor maps a spec to its directory and refuses anything that would
 // leave root. Tenant and stack are chassis-validated slugs upstream; the
@@ -301,4 +302,26 @@ func mapRunErr(ctx context.Context, cmd *exec.Cmd, runErr error, res workspace.E
 	// Start failure: argv[0] not found, cwd vanished, fork failure.
 	res.Exit = -1
 	return res, &workspace.Error{Code: "bad_request", Message: runErr.Error()}
+}
+
+// dialTimeout bounds the connect to a local service; loopback answers at
+// once or not at all.
+const dialTimeout = 5 * time.Second
+
+// DialService implements workspace.Dialer. A local workspace has no
+// network of its own — it is a directory — so "the workspace's loopback"
+// is this host's loopback, and a service is whatever the workspace's own
+// commands left listening there (the same absence of isolation as Exec,
+// and the same reason the provider is opt-in). Nothing listening is
+// reported as "unavailable", distinct from a provider fault.
+func (c *computer) DialService(ctx context.Context, svc workspace.Service) (net.Conn, error) {
+	if svc.Port <= 0 {
+		return nil, &workspace.Error{Code: "bad_request", Message: "connect: no service port"}
+	}
+	d := net.Dialer{Timeout: dialTimeout}
+	conn, err := d.DialContext(ctx, "tcp", svc.Addr())
+	if err != nil {
+		return nil, &workspace.Error{Code: "unavailable", Message: fmt.Sprintf("connect %s (%s): %v", svc.Name, svc.Addr(), err)}
+	}
+	return conn, nil
 }

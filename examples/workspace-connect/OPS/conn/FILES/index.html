@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>workspace-connect</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;background:#0b0b0b;color:#ddd;
+       display:flex;flex-direction:column;height:100vh}
+  .bar{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px}
+  .bar h1{font-size:14px;font-weight:600;margin:0 8px 0 0}
+  button{font:inherit;padding:5px 12px;border:0;border-radius:4px;background:#3b82f6;color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  button.warn{background:#7f1d1d;color:#fecaca}
+  button.ghost{background:#27272a;color:#ddd}
+  input{font:inherit;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#111;color:#ddd;width:9em}
+  #log{flex:1 1 auto;min-height:0;overflow:auto;background:#000;margin:0 12px;padding:8px;border-radius:4px;white-space:pre-wrap}
+  .out{color:#a3e635}.in{color:#7dd3fc}.ctl{color:#fbbf24}.err{color:#f87171}
+  .send{flex:0 0 auto;display:flex;gap:8px;padding:8px 12px}
+  .send input{flex:1 1 auto;width:auto}
+  .foot{flex:0 0 auto;color:#888;font-size:11px;padding:6px 12px;border-top:1px solid #1c1c1c}
+  .foot b{color:#bbb}
+</style>
+<div class="bar">
+  <h1>workspace-connect — a workspace-local service over one WebSocket</h1>
+  <button id="start" class="ghost">start the service</button>
+  <label>service <input id="service" value="echo"></label>
+  <button id="connect">connect</button>
+  <button id="detach" class="warn" disabled>detach</button>
+  <span id="status">not connected</span>
+</div>
+<pre id="log"></pre>
+<div class="send">
+  <input id="line" placeholder="type a line and press Enter — it goes to the service as bytes" disabled>
+  <button id="ctl" class="ghost" disabled>send a resize (refused)</button>
+</div>
+<div class="foot">
+  <b>start the service</b> runs an ordinary <code>workspace://tools/exec</code> that
+  leaves a TCP echo server listening inside the workspace. <b>connect</b> opens the
+  socket and its first message runs <code>workspace://tools/connect WITH service =
+  &lt;name&gt;</code>; the chassis resolves the <i>name</i> against its own table
+  (the built-in <code>browser</code>, plus <code>echo</code> added with
+  <code>TXCO_WORKSPACE_SERVICES=echo=17777</code>) and binds the service to this
+  session. From then on every frame is the service's bytes —
+  <b>no per-frame stack run</b>. A name the table does not know is refused with the
+  names it does; a service that is not running is <code>unavailable</code>. This is
+  the transport a noVNC page rides to a workspace's browser.
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const log = (cls, s) => { const el = $('log'); const n = document.createElement('span'); n.className = cls; n.textContent = s + '\n'; el.appendChild(n); el.scrollTop = el.scrollHeight; };
+const setStatus = (s, err) => { $('status').textContent = s; $('status').className = err ? 'err' : ''; };
+const enc = new TextEncoder(), dec = new TextDecoder();
+let ws = null, bound = false;
+
+$('start').onclick = async () => {
+  $('start').disabled = true;
+  try {
+    const r = await fetch('/start');
+    const j = await r.json();
+    const exit = j._ws && j._ws.exit;
+    log(exit === 0 ? 'ctl' : 'err', '/start → exit ' + exit + (j._ws && j._ws.stderr ? '  ' + j._ws.stderr.trim() : '') + (j.workspace && j.workspace.error ? '  ' + j.workspace.error.code + ': ' + j.workspace.error.message : ''));
+  } catch (e) { log('err', '/start failed: ' + e); }
+  $('start').disabled = false;
+};
+
+function connect() {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(scheme + '://' + location.host + '/connect');
+  ws.binaryType = 'arraybuffer';
+  $('connect').disabled = true;
+  setStatus('connecting…');
+  // The FIRST message names the service; the stack's op resolves the name
+  // and binds it. Once bound, the socket is the service and nothing below
+  // is JSON any more except the control envelope.
+  ws.onopen = () => { ws.send(JSON.stringify({ type: 'connect', service: $('service').value.trim() })); setStatus('binding ' + $('service').value.trim() + '…'); };
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === 'error') { log('err', 'error' + (m.code ? ' (' + m.code + ')' : '') + ': ' + (m.error || '')); setStatus('refused: ' + (m.code || 'error'), true); return; }
+      if (m.type === 'expired') { log('ctl', '[lease expired]'); return; }
+      if (m.type === 'exit') { log('ctl', '[service hung up (exit ' + m.code + ')]'); return; }
+      if (m.type === 'attached') { bound = true; setStatus('bound', false); $('detach').disabled = false; $('line').disabled = false; $('ctl').disabled = false; $('line').focus(); log('ctl', '[bound — the socket is the service now]'); return; }
+      log('ctl', e.data);
+      return;
+    }
+    if (!bound) { bound = true; setStatus('bound', false); $('detach').disabled = false; $('line').disabled = false; $('ctl').disabled = false; $('line').focus(); }
+    log('in', '← ' + JSON.stringify(dec.decode(new Uint8Array(e.data))));
+  };
+  ws.onclose = () => { bound = false; $('connect').disabled = false; $('detach').disabled = true; $('line').disabled = true; $('ctl').disabled = true; setStatus('disconnected'); };
+  ws.onerror = () => setStatus('socket error', true);
+}
+
+$('line').onkeydown = (e) => {
+  if (e.key !== 'Enter' || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const s = $('line').value + '\n';
+  // The first binary frame is what tells the page the binding is live
+  // (the echo comes straight back); send it even before "bound".
+  ws.send(enc.encode(s)); log('out', '→ ' + JSON.stringify(s)); $('line').value = '';
+  if (!bound) { bound = true; setStatus('bound', false); $('detach').disabled = false; $('ctl').disabled = false; }
+};
+$('connect').onclick = connect;
+$('detach').onclick = () => { if (ws) ws.send(JSON.stringify({ type: 'detach' })); setStatus('detached'); $('detach').disabled = true; };
+$('ctl').onclick = () => { if (ws) ws.send(JSON.stringify({ type: 'resize', cols: 80, rows: 24 })); log('out', '→ {"type":"resize"} (a byte stream has nothing to resize; expect one error frame)'); };
+</script>

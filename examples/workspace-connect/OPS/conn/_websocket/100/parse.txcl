@@ -1,0 +1,8 @@
+# Every message is one run. The FIRST message the page sends is
+# {"type":"connect","service":"echo"}; parse it so the connect op can read
+# the service name. Once the session is bound the chassis stops making runs
+# for this socket — the service's frames go straight through — so this
+# parse only ever sees the one connect message (and any the page sends
+# after a detach).
+WHEN @websocket.phase == "message" && @websocket.msg.text != ""
+  EMIT .msg = &json(@websocket.msg.text)

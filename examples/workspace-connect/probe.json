@@ -1,0 +1,52 @@
+{
+  "note": "workspace://tools/connect end to end on the local provider. The WebSocket half (bind by name, bytes both ways, controls refused, hang-up \u2192 exit frame) is covered by Go tests in chassis/processor, chassis/attach and the websocket personality; these HTTP checks prove the stack boots with the operator's service table, the 426 posture on /connect, and that /start leaves the echo service listening (idempotently) for a client to bind. Needs --allow-local-workspace and TXCO_WORKSPACE_SERVICES=echo=17777.",
+  "dev_flags": [
+    "--allow-local-workspace"
+  ],
+  "dev_env": [
+    "TXCO_WORKSPACE_SERVICES=echo=17777"
+  ],
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "conn"
+    }
+  ],
+  "checks": [
+    {
+      "name": "the front door is the page (the stock static op serves FILES/index.html at /)",
+      "method": "GET",
+      "path": "/",
+      "status": 200,
+      "contains": "workspace-connect"
+    },
+    {
+      "name": "/connect without an Upgrade is 426",
+      "method": "GET",
+      "path": "/connect",
+      "status": 426,
+      "contains": "Upgrade Required"
+    },
+    {
+      "name": "/start leaves the echo service listening in the workspace",
+      "method": "GET",
+      "path": "/start",
+      "status": 200,
+      "contains": "\"exit\":0"
+    },
+    {
+      "name": "/start again is a no-op while the service is up",
+      "method": "GET",
+      "path": "/start",
+      "status": 200,
+      "contains": "\"exit\":0"
+    },
+    {
+      "name": "the chassis stamps provenance the service cannot forge",
+      "method": "GET",
+      "path": "/start",
+      "status": 200,
+      "contains": "\"provider\":\"local\""
+    }
+  ]
+}
