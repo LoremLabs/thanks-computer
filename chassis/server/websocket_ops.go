@@ -80,6 +80,8 @@ func websocketRegistryErr(into string, err error) event.Payload {
 		return websocketErr(into, "txco_websocket_relay_unavailable", "the session is not on this node and cross-node delivery is unavailable right now")
 	case errors.Is(err, websocketp.ErrSessionClosed):
 		return websocketErr(into, "txco_websocket_session_closed", err.Error())
+	case errors.Is(err, websocketp.ErrSessionAttached):
+		return websocketErr(into, "txco_websocket_attached", "the session holds an interactive attachment; its frames belong to the attached process, not to send")
 	case errors.Is(err, websocketp.ErrWriteTimeout):
 		return websocketErr(into, "txco_websocket_write_timeout", "the client did not accept the message before the write timeout; the session was closed")
 	case errors.Is(err, websocketp.ErrMessageTooLarge):

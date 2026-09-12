@@ -1,0 +1,111 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>workspace-terminal</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- xterm.js and the fit addon, pinned from cdnjs (the one script host the
+     chassis's own artifact CSP admits; here it is just a demo page). -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css">
+<style>
+  body{font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;padding:12px;background:#0b0b0b;color:#ddd}
+  h1{font-size:15px;font-weight:600;margin:0 0 8px}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+  button{font:inherit;padding:5px 12px;border:0;border-radius:4px;background:#3b82f6;color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  button.warn{background:#7f1d1d;color:#fecaca}
+  #term{height:70vh;border:1px solid #333;border-radius:4px;padding:6px;background:#000}
+  .status{color:#888;font-size:12px;margin-top:8px}
+  .status b{color:#bbb}
+  .err{color:#f87171}
+  a{color:#7dd3fc}
+</style>
+<h1>workspace-terminal — a real PTY over one WebSocket</h1>
+<div class="bar">
+  <button id="connect">connect</button>
+  <button id="detach" class="warn" disabled>detach</button>
+  <span class="status" id="status">not connected</span>
+</div>
+<div id="term"></div>
+<div class="status">
+  The first message attaches <code>tmux new -A -s main</code> to this
+  workspace as a pseudo-terminal; from then on every keystroke is a WebSocket
+  frame straight to the process — <b>no per-key stack run</b> — and the
+  terminal's output comes back as binary frames. Resize and Ctrl-C ride the
+  same socket as JSON control frames. Close the tab and the process dies;
+  reconnect and <code>tmux</code> resumes the same screen. Try <code>vi</code>,
+  <code>top</code>, <code>htop</code>.
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm-addon-fit/0.8.0/xterm-addon-fit.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const statusEl = $('status');
+const setStatus = (s, err) => { statusEl.textContent = s; statusEl.className = 'status' + (err ? ' err' : ''); };
+
+const term = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 13,
+  theme: { background: '#000000' } });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open($('term'));
+fit.fit();
+
+let ws = null, attached = false;
+
+// Bytes both ways: input is UTF-8 encoded to binary frames, output is
+// written straight through term.write(Uint8Array). No base64, and no
+// UTF-8-boundary bug from splitting a multibyte character across frames.
+const enc = new TextEncoder();
+
+function sendControl(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function connect() {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(scheme + '://' + location.host + '/term');
+  ws.binaryType = 'arraybuffer';
+  $('connect').disabled = true;
+  setStatus('connecting…');
+
+  ws.onopen = () => {
+    // First message attaches; carry the current geometry so the PTY starts
+    // the right size.
+    fit.fit();
+    ws.send(JSON.stringify({ type: 'attach', cols: term.cols, rows: term.rows }));
+    setStatus('attaching…');
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      // Control/status frames from the server: error, exit, expired.
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === 'error') { setStatus('error: ' + (m.error || m.code || 'attach failed'), true); return; }
+      if (m.type === 'expired') { term.write('\r\n[session expired]\r\n'); return; }
+      if (m.type === 'exit') { term.write('\r\n[process exited ' + m.code + ']\r\n'); }
+      return;
+    }
+    // Binary: terminal output.
+    if (!attached) { attached = true; setStatus('attached', false); $('detach').disabled = false; term.focus(); }
+    term.write(new Uint8Array(e.data));
+  };
+
+  ws.onclose = () => {
+    attached = false;
+    $('connect').disabled = false;
+    $('detach').disabled = true;
+    setStatus('disconnected');
+  };
+  ws.onerror = () => setStatus('socket error', true);
+}
+
+// Keystrokes → stdin (binary frames).
+term.onData((data) => {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(enc.encode(data));
+});
+
+// Terminal resize → a resize control frame.
+term.onResize(({ cols, rows }) => sendControl({ type: 'resize', cols, rows }));
+addEventListener('resize', () => { fit.fit(); });
+
+$('connect').onclick = connect;
+$('detach').onclick = () => { sendControl({ type: 'detach' }); setStatus('detached'); $('detach').disabled = true; };
+</script>

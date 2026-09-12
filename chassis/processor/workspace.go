@@ -225,6 +225,9 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		}
 		return workspaceVerbDone(into, prov, "sleeping", wall), nil
 
+	case "attach":
+		return pu.execWorkspaceAttach(ctx, op, spec, name, into, prov, refs, tenant, opID, rid)
+
 	default:
 		// Unreachable while ParseRef closes the verb vocabulary; kept so a
 		// verb added to workspace.Verbs without a case here fails in-band
@@ -234,10 +237,33 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 	}
 }
 
-// workspaceRequest reads the exec directives off the WITH clause:
+// workspaceRequest reads the exec directives off the WITH clause: the base
+// fields (`command`/`args`, `stdin`, `cwd`, `env`) plus the terminal
+// options (`tty`, and `cols`/`rows`, which require it). The attach path
+// forces a TTY on and so builds from workspaceBaseRequest directly.
+func workspaceRequest(op operation.Operation) (workspace.ExecRequest, error) {
+	req, err := workspaceBaseRequest(op)
+	if err != nil {
+		return req, err
+	}
+	// `tty = true` runs the command with a pseudo-terminal (stderr merges
+	// into stdout); `cols`/`rows` set its geometry and mean nothing without it.
+	if v := gjson.Get(op.Meta, "tty"); v.Exists() && v.Type != gjson.Null {
+		if !v.IsBool() {
+			return req, errors.New("WITH tty must be a boolean")
+		}
+		req.TTY = v.Bool()
+	}
+	if err := parseWorkspaceGeometry(op, &req); err != nil {
+		return req, err
+	}
+	return req, nil
+}
+
+// workspaceBaseRequest parses the transport-neutral exec fields:
 // `command` (a shell line) or `args` (an argv array), `stdin`, `cwd`,
 // `env` (an object of strings).
-func workspaceRequest(op operation.Operation) (workspace.ExecRequest, error) {
+func workspaceBaseRequest(op operation.Operation) (workspace.ExecRequest, error) {
 	var req workspace.ExecRequest
 	if v := gjson.Get(op.Meta, "command"); v.Exists() {
 		if v.Type != gjson.String {
@@ -280,6 +306,30 @@ func workspaceRequest(op operation.Operation) (workspace.ExecRequest, error) {
 		})
 	}
 	return req, nil
+}
+
+// parseWorkspaceGeometry reads `cols`/`rows` into req. They require a TTY, so
+// req.TTY must be decided first — the exec path reads it from `tty`, the
+// attach path forces it on because an attachment is always a terminal.
+func parseWorkspaceGeometry(op operation.Operation, req *workspace.ExecRequest) error {
+	for _, key := range []string{"cols", "rows"} {
+		v := gjson.Get(op.Meta, key)
+		if !v.Exists() || v.Type == gjson.Null {
+			continue
+		}
+		if !req.TTY {
+			return fmt.Errorf("WITH %s needs tty = true", key)
+		}
+		if v.Type != gjson.Number || v.Int() < 1 || v.Int() > 65535 {
+			return fmt.Errorf("WITH %s must be a number between 1 and 65535", key)
+		}
+		if key == "cols" {
+			req.Cols = uint16(v.Int())
+		} else {
+			req.Rows = uint16(v.Int())
+		}
+	}
+	return nil
 }
 
 // applyWorkspaceSecrets copies each `secrets.env.<NAME>` ref's materialized

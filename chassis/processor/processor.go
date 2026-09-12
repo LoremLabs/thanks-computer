@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/attach"
 	authregistry "github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/config"
@@ -133,6 +134,13 @@ type Unit struct {
 	// provider configured, or the local provider refused without
 	// --workspace-allow-local).
 	Workspaces *workspace.Manager
+
+	// Attachments is the registry of attached transports — a live resource
+	// in a workspace (a PTY today) bound to one WebSocket session for the
+	// life of a lease. The `workspace://<name>/attach` op creates bindings
+	// here; the websocket personality pumps them. nil-safe: attach fails
+	// in-band when unset.
+	Attachments *attach.Registry
 
 	// Usage is the usage sink. nil-safe. When set, each compute or
 	// workspace invocation emits a usage event (src="compute" /

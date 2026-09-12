@@ -82,6 +82,7 @@ reports `code = "unsupported"`.
 | `timeout` | Wall clock for the whole exec — create/wake, the command, output capture; the command is killed when it expires. Default `--workspace-default-timeout` (5m), capped by `--op-timeout-max` (10m). A **synchronous HTTP request** is also bounded by whatever fronts the chassis — the hosted edge allows 20 s for response headers — so anything longer must use `WITH mode = "continuable"` (202 + poll); when the client gives up, the request is cancelled and the command is killed |
 | `secrets.env.<NAME>.secret` / `.format` / `.optional` | A stored secret, materialized into the environment as `NAME` (`format = "Bearer {}"` templates it). The only place a workspace op takes a secret — `secrets.headers.*` / `.body.*` are refused |
 | `stream = true` | Send stdout to the client as it is produced (see [Streaming output](#streaming-output)) |
+| `tty = true`, `cols`, `rows` | Run the command with a pseudo-terminal (see [A TTY on exec](#a-tty-on-exec)) |
 | `checkpoint = true`, `comment` | Snapshot after a successful exec (see the verbs) |
 
 The command sees a scrubbed environment — `PATH`, `HOME` (= the
@@ -147,6 +148,32 @@ The op is dropped — logged at ERROR, nothing merged — only on authoring
 errors: a malformed ref, a bad name, no provider configured, an
 untenanted request, or a malformed `secrets` block.
 
+## A TTY on exec
+
+`WITH tty = true` runs the command with a pseudo-terminal instead of pipes.
+Many tools behave differently without one: progress bars, colour, pagers,
+and login flows that refuse to read a password from a pipe. This gives an
+agent the ordinary one-shot `exec` it already has, with a terminal behind
+it — structured in, structured out, one result. It does **not** turn `exec`
+into a stream; for a live interactive terminal a person drives, see
+[attach](#attach--an-interactive-terminal).
+
+```txcl
+WHEN @web.req.url.path == "/cols"
+  EXEC "workspace://tools/exec"
+    WITH command = "tput cols; test -t 1 && echo isatty",
+         tty = true, cols = 120, rows = 40,
+         into = "_ws"
+```
+
+A terminal has **one stream**, so `tty = true` merges stderr into `stdout`
+and leaves `stderr` empty — the same result shape a fleet provider's
+history replay can produce, and the reason to gate on `exit`, not on
+`stderr`. `cols`/`rows` set the initial geometry (default 80×24) and are a
+`bad_request` without `tty`. The local dev provider needs a real PTY
+(`github.com/creack/pty`, pulled in automatically); a provider that cannot
+allocate one answers `workspace.error.code = "unsupported"`.
+
 ## Streaming output
 
 A build or a test suite is worth watching while it runs. `WITH stream =
@@ -210,6 +237,59 @@ Not streaming, but large? Capture as usual and drop the value once you are
 done with it, so it stops riding the envelope:
 `EMIT @delete = ["_build.stdout"]` — see
 [`EMIT @delete`](./advanced/txcl/txcl.md#emit-delete--prune-the-envelope).
+
+## `attach` — an interactive terminal
+
+Where `exec` runs a command to completion, `attach` binds a **live**
+terminal to a WebSocket session: keystrokes reach the process as they are
+typed and its output arrives as it is produced. It is how a *person* drives
+a program inside the workspace — `vi`, `top`, a shell — through a
+[`websocket`](./advanced/protocols/websocket.md) connection the stack
+authorized. See [`examples/workspace-terminal`](../examples/workspace-terminal)
+for the whole thing, browser page included.
+
+`attach` is valid **only inside a WebSocket session run**: the stack accepts
+an upgrade, and the first message the client sends attaches.
+
+```txcl
+# term/_websocket/0 — the first message attaches, once.
+WHEN .msg.type == "attach"
+  EXEC "workspace://tools/attach"
+    WITH command = "tmux new -A -s main",
+         cols = .msg.cols, rows = .msg.rows,
+         max_duration = "8h",
+         into = "_attach"
+```
+
+| `WITH` key | Meaning |
+|---|---|
+| `command` / `args` | What runs in the terminal — `tmux new -A -s main` is the usual choice (reattach + scrollback + survival across disconnects, all inside the workspace) |
+| `cols`, `rows` | Initial geometry; the client resizes later with a control frame |
+| `max_duration` | How long the binding may live, default and capped by `--workspace-attach-max-duration` (8h). When it passes, the process is killed and the socket told |
+| `into` | Where the grant lands (default `_workspace`) |
+
+On success the chassis binds a pseudo-terminal and returns immediately:
+
+```json
+{ "_attach": { "attached": true, "run": "<run id>", "workspace": "tools",
+    "node": "<node>", "lease": { "id": "<lease>", "expires_at": "…" } } }
+```
+
+From then on the connection is the terminal — the stack does **not** run
+per keystroke. Binary frames are terminal bytes (client→stdin,
+process→client); text frames are a typed control envelope
+(`{"type":"resize"|"signal"|"detach"}` in, `{"type":"exit"|"expired"|"error"}`
+out). The design and the wire protocol are documented under the
+[websocket personality](./advanced/protocols/websocket.md#attached-transports-a-pty-on-a-session).
+
+An attachment refuses `secrets.env.*` (an interactive user could echo the
+value back out), a `LOOP`, and `stream`; a second attach on an
+already-bound session is a `bad_request`. It is a **metered lease**, not a
+long request: it heartbeats every 60 s at the ordinary workspace rate
+(1 fuel per 30 s), charged to the tenant, and a lease that stops
+heartbeating (a crashed node) is reapable rather than pinning the workspace
+forever. `txco://websocket/send` to an attached session is refused with
+`txco_websocket_attached` — its frames belong to the process.
 
 ## Loops, fuel, usage, trace
 

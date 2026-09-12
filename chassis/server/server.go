@@ -24,6 +24,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
+	"github.com/loremlabs/thanks-computer/chassis/attach"
 	"github.com/loremlabs/thanks-computer/chassis/bgservice"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
@@ -1369,6 +1370,11 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	logger.Info("compute runtime loaded",
 		zap.Int("max_memory_mb", conf.ComputeMaxMemoryMB),
 		zap.Duration("max_wall", computeWall))
+
+	// Attached transports (workspace://<name>/attach): the registry the attach
+	// op binds into and the websocket personality pumps. Cheap, so always
+	// built; attach itself fails in-band when no workspace provider is on.
+	pu.Attachments = attach.NewRegistry()
 
 	// Workspace runtime (workspace://<name>/<verb>): an owned, stateful
 	// execution environment per (tenant, stack, name). Off unless

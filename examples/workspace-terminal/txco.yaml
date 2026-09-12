@@ -1,0 +1,21 @@
+target: dev
+
+# examples/workspace-terminal — a real interactive terminal onto a workspace.
+#
+# The browser opens a WebSocket to /term; the stack accepts it and the first
+# message runs `workspace://tools/attach`, which binds a PTY (running
+# `tmux new -A -s main`) to that session. From then on the socket carries the
+# terminal's bytes straight to and from the process — no per-keystroke stack
+# run — until the tab closes, the process exits, or the lease's max_duration
+# passes. Resize and Ctrl-C ride the same socket as JSON control frames.
+#
+# This needs the local workspace provider AND a real PTY, so run:
+#
+#   txco dev --allow-local-workspace
+#
+# then open the URL txco dev prints and click into the terminal. `vi`, `top`
+# and `htop` all work at full speed with colour; the tmux session survives a
+# reconnect. (The websocket personality is on by default under `txco dev`.)
+#
+# There is no `operations:` block: workspace:// and txco://websocket/* are
+# chassis transports, so the stack ships only rules.

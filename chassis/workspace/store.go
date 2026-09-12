@@ -95,7 +95,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS workspaces_last_used_idx
 			ON workspaces (status, last_used_at)`,
 	}
-	for _, q := range stmts {
+	for _, q := range append(stmts, leaseDDL...) {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("workspace: ensure schema: %w", err)
 		}

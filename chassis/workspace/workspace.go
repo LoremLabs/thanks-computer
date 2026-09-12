@@ -83,6 +83,37 @@ type ExecRequest struct {
 	// output cap does not apply (nothing accumulates); stderr is unaffected
 	// — still captured and still capped.
 	StdoutTo io.Writer
+
+	// TTY allocates a pseudo-terminal for the command (`WITH tty = true`).
+	// Many tools behave differently without one — progress rendering,
+	// colour, pagers, a login flow that refuses to read a password from a
+	// pipe — and this is how an agent gets the ordinary one-shot exec with
+	// a terminal attached. A terminal has ONE stream, so stderr is merged
+	// into stdout and ExecResult.Stderr comes back empty. Cols/Rows are the
+	// initial geometry; 0 means 80×24. Requires a Computer that implements
+	// Starter; the Manager reports "unsupported" otherwise.
+	TTY  bool
+	Cols uint16
+	Rows uint16
+}
+
+// DefaultCols and DefaultRows are the TTY geometry when the request leaves
+// it unset.
+const (
+	DefaultCols uint16 = 80
+	DefaultRows uint16 = 24
+)
+
+// Geometry returns the requested TTY size with the defaults applied.
+func (r ExecRequest) Geometry() (cols, rows uint16) {
+	cols, rows = r.Cols, r.Rows
+	if cols == 0 {
+		cols = DefaultCols
+	}
+	if rows == 0 {
+		rows = DefaultRows
+	}
+	return cols, rows
 }
 
 // ExecResult is what a command produced. Exit is the process exit code
@@ -146,6 +177,125 @@ type Provider interface {
 // Computer is a woken workspace that can run a command.
 type Computer interface {
 	Exec(ctx context.Context, req ExecRequest, lim Limits) (ExecResult, error)
+}
+
+// Starter is the optional capability behind a live session, implemented by
+// a woken Computer: a process whose stdin the caller holds while it runs,
+// whose output arrives as it is produced, and which can be resized and
+// signalled by name. It is what a TTY exec runs through (RunSession) and
+// what an interactive attachment binds to. A provider also lists
+// "session" (and "tty") in Capabilities, but that string is advertisement
+// for the boot log only — the gate is this interface assertion.
+//
+// Exec stays the one-shot path. Folding it onto Start is attractive and is
+// deliberately NOT done: the local process-group kill + WaitDelay and the
+// fleet provider's detached-context kill dance are exactly the code that
+// breaks quietly.
+type Starter interface {
+	Start(ctx context.Context, req ExecRequest, lim Limits) (ExecSession, error)
+}
+
+// ExecSession is one running process. The ctx handed to Start bounds it the
+// way an exec's ctx bounds an exec: when it ends the process is killed.
+//
+// Stdout is the caller's to drain — output is a stream by definition, so
+// Wait's ExecResult carries Exit, WallMS and (for a non-TTY session) the
+// captured, capped stderr, and leaves Stdout empty. A TTY session merges
+// stderr into Stdout and reports Stderr empty. Stdin is a WriteCloser so a
+// non-TTY session can be sent EOF; a PTY has no EOF to send and ignores
+// Close.
+type ExecSession interface {
+	Stdin() io.WriteCloser
+	Stdout() io.Reader
+	// Resize changes the terminal geometry of a TTY session; an error on a
+	// non-TTY session.
+	Resize(cols, rows uint16) error
+	// Signal delivers a named signal: INT, TERM, HUP, KILL, QUIT, USR1, USR2.
+	Signal(sig string) error
+	// Wait blocks until the process ends and reports how. Safe to call more
+	// than once; every call returns the same answer.
+	Wait() (ExecResult, error)
+	// Close ends the session whatever the process is doing: kill, a grace
+	// period for the exit to land, then the transport is dropped. Idempotent.
+	Close() error
+}
+
+// ValidSignals is the closed set of signal names a session accepts, the
+// intersection of what the providers deliver.
+var ValidSignals = []string{"INT", "TERM", "HUP", "KILL", "QUIT", "USR1", "USR2"}
+
+// IsSignal reports whether sig is one of ValidSignals.
+func IsSignal(sig string) bool {
+	for _, s := range ValidSignals {
+		if s == sig {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionDrainGrace is how long RunSession keeps reading after the process
+// has exited before it drops the transport: a grandchild holding the
+// terminal (or pipe) open past its parent's exit must not hang the exec.
+// The same 2 s os/exec's WaitDelay gets on the one-shot path.
+const sessionDrainGrace = 2 * time.Second
+
+// RunSession drives a session the way a one-shot exec would: feed
+// req.Stdin, drain Stdout into a capped buffer (or req.StdoutTo when
+// streaming), wait for the exit, and shape the ExecResult exactly as
+// Computer.Exec does. This is how `exec WITH tty = true` runs — the same
+// result, with a terminal behind it.
+func RunSession(sess ExecSession, req ExecRequest, lim Limits) (ExecResult, error) {
+	start := time.Now()
+	stdout := NewCappedWriter(lim.MaxOutputBytes)
+	if req.StdoutTo != nil {
+		stdout = NewStreamWriter(req.StdoutTo)
+	}
+	if len(req.Stdin) > 0 {
+		go func() {
+			_, _ = sess.Stdin().Write(req.Stdin)
+			if !req.TTY {
+				_ = sess.Stdin().Close()
+			}
+		}()
+	} else if !req.TTY {
+		_ = sess.Stdin().Close()
+	}
+	copied := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(stdout, sess.Stdout())
+		copied <- err
+	}()
+	res, err := sess.Wait()
+	var copyErr error
+	drained := false
+	select {
+	case copyErr = <-copied:
+		drained = true
+	case <-time.After(sessionDrainGrace):
+		// Something still holds the output open; Close drops it and the
+		// copy returns.
+	}
+	_ = sess.Close()
+	if !drained {
+		select {
+		case copyErr = <-copied:
+		case <-time.After(sessionDrainGrace):
+		}
+	}
+	res.Stdout = stdout.Bytes()
+	res.StdoutTruncated = stdout.Truncated()
+	res.StdoutBytes = stdout.Count()
+	if res.WallMS == 0 {
+		res.WallMS = time.Since(start).Milliseconds()
+	}
+	if err == nil && copyErr != nil && req.StdoutTo != nil {
+		// A streaming write failed: the client is gone. Same transport
+		// failure the one-shot streaming path reports.
+		res.Exit = -1
+		return res, &Error{Code: "provider", Message: "stream: " + copyErr.Error()}
+	}
+	return res, err
 }
 
 // Checkpointer is the optional capability behind the checkpoint verb. A
@@ -244,7 +394,9 @@ type Error struct {
 func (e *Error) Error() string { return "workspace: " + e.Code + ": " + e.Message }
 
 // Verbs is the closed vocabulary after the last "/" of a workspace ref.
-var Verbs = []string{"create", "wake", "exec", "checkpoint", "sleep", "destroy"}
+// "attach" binds a live interactive session (a PTY) to the WebSocket run
+// that fires it; it is valid only inside such a run.
+var Verbs = []string{"create", "wake", "exec", "checkpoint", "sleep", "destroy", "attach"}
 
 // IsVerb reports whether s is one of Verbs.
 func IsVerb(s string) bool {
@@ -380,6 +532,21 @@ func SortedEnv(env map[string]string) []string {
 	for _, k := range keys {
 		out = append(out, k+"="+env[k])
 	}
+	return out
+}
+
+// TTYEnv returns env with TERM set for a terminal session when the request
+// did not set one — a curses program with no TERM renders nothing useful.
+// The input map is not modified.
+func TTYEnv(env map[string]string) map[string]string {
+	if _, ok := env["TERM"]; ok {
+		return env
+	}
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	out["TERM"] = "xterm-256color"
 	return out
 }
 
@@ -614,7 +781,25 @@ func (m *Manager) execOnce(ctx context.Context, spec Spec, req ExecRequest) (Exe
 		return ExecResult{Exit: -1}, e.h, "", err
 	}
 	runID := m.runIDFor(e, comp)
-	res, err := comp.Exec(ctx, req, m.lim)
+	var res ExecResult
+	if req.TTY {
+		// A terminal is a session, not a call: start one and drive it to
+		// completion the way an exec would (RunSession), so the result
+		// shape is identical and the one-shot Exec path stays untouched.
+		st, ok := comp.(Starter)
+		if !ok {
+			m.remember(identityKey(spec), e)
+			return ExecResult{Exit: -1}, e.h, "", &Error{Code: "unsupported", Message: "provider " + m.prov.Name() + " has no session capability (tty)"}
+		}
+		sess, serr := st.Start(ctx, req, m.lim)
+		if serr != nil {
+			res, err = ExecResult{Exit: -1}, serr
+		} else {
+			res, err = RunSession(sess, req, m.lim)
+		}
+	} else {
+		res, err = comp.Exec(ctx, req, m.lim)
+	}
 	now := m.now()
 	e.runID, e.lastUsed = runID, now
 	m.remember(identityKey(spec), e)
@@ -624,6 +809,50 @@ func (m *Manager) execOnce(ctx context.Context, spec Spec, req ExecRequest) (Exe
 		_ = m.store.Touch(ctx, ID(spec.Tenant, spec.Stack, spec.Name), now, runID, StatusRunning)
 	}
 	return res, e.h, runID, err
+}
+
+// Start opens a live session in the workspace spec names — lookup/create,
+// wake, Start, record — and hands it back with the provider handle and the
+// run id, for a caller that will hold the process open (an interactive
+// attachment). The ctx bounds the SESSION, not this call: the process is
+// killed when it ends, so pass one that lives as long as the binding
+// should. Same one-shot not_found heal as Exec. Providers without Starter
+// report "unsupported".
+func (m *Manager) Start(ctx context.Context, spec Spec, req ExecRequest) (ExecSession, Handle, string, error) {
+	sess, h, runID, err := m.startOnce(ctx, spec, req)
+	if err != nil && IsNotFound(err) {
+		m.dropIdentity(ctx, spec)
+		sess, h, runID, err = m.startOnce(ctx, spec, req)
+	}
+	return sess, h, runID, err
+}
+
+func (m *Manager) startOnce(ctx context.Context, spec Spec, req ExecRequest) (ExecSession, Handle, string, error) {
+	e, err := m.lookup(ctx, spec)
+	if err != nil {
+		return nil, Handle{}, "", err
+	}
+	comp, err := m.prov.Wake(ctx, e.h)
+	if err != nil {
+		m.forget(spec)
+		return nil, e.h, "", err
+	}
+	st, ok := comp.(Starter)
+	if !ok {
+		return nil, e.h, "", &Error{Code: "unsupported", Message: "provider " + m.prov.Name() + " has no session capability"}
+	}
+	runID := m.runIDFor(e, comp)
+	sess, err := st.Start(ctx, req, m.lim)
+	now := m.now()
+	e.runID, e.lastUsed = runID, now
+	m.remember(identityKey(spec), e)
+	if m.store != nil {
+		_ = m.store.Touch(ctx, ID(spec.Tenant, spec.Stack, spec.Name), now, runID, StatusRunning)
+	}
+	if err != nil {
+		return nil, e.h, runID, err
+	}
+	return sess, e.h, runID, nil
 }
 
 // Create makes sure the workspace exists (idempotent) and returns its

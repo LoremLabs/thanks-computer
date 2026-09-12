@@ -35,6 +35,10 @@ var (
 	// node path (directory or relay) could not be used. Tenant-independent,
 	// so it reveals nothing about another tenant's sessions.
 	ErrRelayUnavailable = errors.New("cross-node delivery is unavailable")
+	// ErrSessionAttached: the session holds an attached transport (a PTY),
+	// so its frames belong to the process, not to txco://websocket/send. The
+	// pump writes through the private send path and is unaffected (D5).
+	ErrSessionAttached = errors.New("session has an attached transport")
 )
 
 // Accept is the decision a stack makes with txco://websocket/accept. The

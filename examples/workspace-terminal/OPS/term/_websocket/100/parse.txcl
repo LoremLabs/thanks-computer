@@ -1,0 +1,8 @@
+# Every message is one run. The FIRST message the page sends is
+# {"type":"attach","cols":C,"rows":R}; parse it so the attach rule can read
+# the geometry. Once the session is attached the chassis stops making runs
+# for this socket — the terminal's frames go straight to the process — so
+# this parse only ever sees the one attach message (and any the page sends
+# after a detach).
+WHEN @websocket.phase == "message" && @websocket.msg.text != ""
+  EMIT .msg = &json(@websocket.msg.text)

@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/attach"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -71,6 +72,12 @@ type session struct {
 
 	closeOnce sync.Once
 	closed    atomic.Bool
+
+	// attachment is the PTY (or other resource) bound to this session, once
+	// a message run has done so (workspace://<name>/attach). While it is
+	// non-nil the reader routes frames straight to it (session_attach.go)
+	// instead of enqueueing per-message stack runs.
+	attachment atomic.Pointer[attach.Attachment]
 }
 
 func newSession(c *Controller, sid string, a Accept, wc conn, r *http.Request) *session {
@@ -121,6 +128,14 @@ func (s *session) reader() {
 			mt = MessageBinary
 		}
 		s.bytesIn.Add(int64(len(data)))
+		// Attached: the frame is terminal input or a control envelope, not a
+		// stack message. Handle it here, in this one reader goroutine, so it
+		// never touches the 16-deep queue whose overflow closes the session
+		// (A4) and so ordering is preserved for free.
+		if att := s.attachment.Load(); att != nil {
+			s.handleAttachedFrame(att, mt, data)
+			continue
+		}
 		select {
 		case s.inbound <- inboundMsg{typ: mt, data: data}:
 		default:
@@ -207,6 +222,9 @@ func (s *session) handle(m inboundMsg) {
 		return
 	}
 	s.c.record(s.c.messages, direction("in"), outcome("ok"))
+	// If this run bound a PTY to the session, go into attached mode: the
+	// reader stops enqueueing and the pump starts carrying output out.
+	s.maybeAttach()
 }
 
 type closeInfo struct {
@@ -343,6 +361,10 @@ func (s *session) closeWith(code int, reason, who string) {
 func (s *session) finish(code int, reason, who string, closeFn func()) {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		// End any attached transport first: the process dies with the socket,
+		// and the pump stops before the close run below (which must not expect
+		// the binding to still exist).
+		s.teardownAttachment()
 		closeFn()
 		close(s.done)
 		s.cancel()
@@ -401,6 +423,9 @@ func (c *Controller) sendLocal(ctx context.Context, tenant, id string, typ Messa
 	s, ok := c.lookup(tenant, id)
 	if !ok {
 		return ErrSessionNotFound
+	}
+	if s.Attached() {
+		return ErrSessionAttached
 	}
 	return s.send(ctx, typ, data)
 }

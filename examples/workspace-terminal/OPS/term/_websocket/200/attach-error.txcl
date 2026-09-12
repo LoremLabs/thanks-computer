@@ -1,0 +1,10 @@
+# If the attach was refused (not a websocket run, already bound, secrets, no
+# provider) or the workspace would not start, say so on the socket as a
+# control frame the page can show — then the connection is just an idle
+# socket the client can close.
+WHEN .msg.type == "attach" && .workspace.error.code != null
+  EXEC "txco://websocket/reply"
+    WITH text = &to_json(&object(
+      "type", "error",
+      "code", .workspace.error.code,
+      "error", .workspace.error.message))

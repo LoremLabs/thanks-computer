@@ -162,6 +162,7 @@ type Config struct {
 	WorkspaceDefaultTimeout      string   `id:"workspace-default-timeout" default:"5m" desc:"Default per-op timeout for a workspace:// exec when WITH timeout is absent — the whole dispatch (create/wake/run/capture); the command is killed when it expires. Sized for compiles, test suites and tool runs, not request/response calls. Capped by op-timeout-max. (5m)"`
 	WorkspaceMaxOutputBytes      int      `id:"workspace-max-output-bytes" default:"1048576" desc:"Cap on captured stdout and stderr (each) per workspace exec; excess is dropped and flagged *_truncated. (1048576 = 1 MiB)"`
 	WorkspaceReap                string   `id:"workspace-reap" default:"720h" desc:"Idle window after which the workspace reaper (a background service, where enabled) destroys a workspace: its files are gone and the next exec starts fresh. (720h = 30 days)"`
+	WorkspaceAttachMaxDuration   string   `id:"workspace-attach-max-duration" default:"8h" desc:"Ceiling on how long one workspace://<name>/attach binding (an interactive terminal on a WebSocket session) may live; the op's WITH max_duration defaults to this and cannot exceed it. When it expires the lease ends, the process is killed and the socket is told. (8h)"`
 	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns,mailmap,scheduled,imap,websocket,calendar,contacts,source} (cron,tcp,web,admin)"`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
 	PromNamespace                string   `id:"prom-namespace" default:"txco" desc:"Set the Prometheus namespace (txco)"`
@@ -547,6 +548,9 @@ func Load() (Config, error) {
 	}
 	if _, err = time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceReap)); err != nil {
 		log.Fatalf("unable to parse workspace-reap %s", config.WorkspaceReap)
+	}
+	if d, err := time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceAttachMaxDuration)); err != nil || d <= 0 {
+		log.Fatalf("unable to parse workspace-attach-max-duration %s (want a positive duration)", config.WorkspaceAttachMaxDuration)
 	}
 
 	// async-runtime-default and async-ack-timeout must parse. They are

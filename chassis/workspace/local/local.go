@@ -60,7 +60,7 @@ func New(root string) (*Provider, error) {
 func (p *Provider) Root() string { return p.root }
 
 func (p *Provider) Name() string           { return "local" }
-func (p *Provider) Capabilities() []string { return []string{"exec"} }
+func (p *Provider) Capabilities() []string { return []string{"exec", "session", "tty"} }
 
 // dirFor maps a spec to its directory and refuses anything that would
 // leave root. Tenant and stack are chassis-validated slugs upstream; the
@@ -216,19 +216,9 @@ func envFor(dir, tmp string, extra map[string]string) []string {
 // process group is killed (Setpgid) and ErrTimeout is returned with
 // Exit = -1. A non-zero exit is NOT an error — it is data in the result.
 func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim workspace.Limits) (workspace.ExecResult, error) {
-	argv, err := argvFor(req)
+	argv, cwd, tmp, err := c.prepare(req)
 	if err != nil {
 		return workspace.ExecResult{Exit: -1}, err
-	}
-	cwd := c.dir
-	if req.Cwd != "" {
-		if cwd, err = resolveCwd(c.dir, req.Cwd); err != nil {
-			return workspace.ExecResult{Exit: -1}, err
-		}
-	}
-	tmp := filepath.Join(c.dir, "tmp")
-	if err := os.MkdirAll(tmp, 0o700); err != nil {
-		return workspace.ExecResult{Exit: -1}, &workspace.Error{Code: "provider", Message: "mkdir tmp: " + err.Error()}
 	}
 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -263,6 +253,34 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 		StdoutBytes:     stdout.Count(),
 		WallMS:          time.Since(start).Milliseconds(),
 	}
+	return mapRunErr(ctx, cmd, runErr, res)
+}
+
+// prepare resolves a request's argv, working directory and tmp dir — the
+// part of an exec that is the same whether the command is run to
+// completion (Exec) or held open (Start).
+func (c *computer) prepare(req workspace.ExecRequest) (argv []string, cwd, tmp string, err error) {
+	argv, err = argvFor(req)
+	if err != nil {
+		return nil, "", "", err
+	}
+	cwd = c.dir
+	if req.Cwd != "" {
+		if cwd, err = resolveCwd(c.dir, req.Cwd); err != nil {
+			return nil, "", "", err
+		}
+	}
+	tmp = filepath.Join(c.dir, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return nil, "", "", &workspace.Error{Code: "provider", Message: "mkdir tmp: " + err.Error()}
+	}
+	return argv, cwd, tmp, nil
+}
+
+// mapRunErr turns os/exec's verdict into the workspace shape: a timeout is
+// the one transport error, an exit status (including "killed by a signal",
+// -1) is data, and a start failure is a bad request.
+func mapRunErr(ctx context.Context, cmd *exec.Cmd, runErr error, res workspace.ExecResult) (workspace.ExecResult, error) {
 	switch {
 	case runErr == nil:
 		return res, nil
