@@ -1,0 +1,6 @@
+# GET /release — hand control back: restart the harness if its pid is gone.
+WHEN @src == "http" && @web.req.url.path == "/release"
+  EXEC "workspace://tools/exec"
+    WITH command = "echo release $(date -u +%FT%TZ) >> $HOME/takeovers.log; if ! kill -0 $(cat /tmp/ws-harness.pid 2>/dev/null) 2>/dev/null; then setsid python3 $HOME/ws-harness.py </dev/null >/tmp/ws-harness.log 2>&1 & fi; echo pony has control - the harness is running",
+         timeout = "20s",
+         into = "_ctl"

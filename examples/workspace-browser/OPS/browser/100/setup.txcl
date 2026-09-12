@@ -13,7 +13,7 @@
 WHEN @src == "http" && @web.req.url.path == "/setup"
   EXEC "workspace://tools/exec"
     WITH command = "bash -s",
-         env     = &object("REQ", "2"),   # runtime version; bump to re-provision
+         env     = &object("REQ", "5"),   # runtime version; bump to re-provision
          timeout = "45s",
          into    = "_setup",
          stdin   = "set -eu
@@ -47,10 +47,10 @@ if [ \"$(cat \"$MARK\" 2>/dev/null || echo 0)\" != \"$REQ\" ]; then
     BROWSER=chromium
   fi
   sudo timeout 150 apt-get update -o DPkg::Lock::Timeout=120
-  sudo timeout 480 apt-get install -y -o DPkg::Lock::Timeout=120 --no-install-recommends \"$BROWSER\" xvfb x11vnc fonts-liberation
+  sudo timeout 480 apt-get install -y -o DPkg::Lock::Timeout=120 --no-install-recommends \"$BROWSER\" xvfb x11vnc fonts-liberation openbox
   sudo mkdir -p \"$(dirname \"$MARK\")\"; printf '%s\\n' \"$REQ\" | sudo tee \"$MARK\" >/dev/null
   # New runtime version: retire the old daemons so they relaunch with new flags.
-  pkill -x x11vnc 2>/dev/null || true; pkill -x Xvfb 2>/dev/null || true; pkill -f \"user-data-dir=$HOME/browser-profile\" 2>/dev/null || true
+  kill \"$(cat /tmp/ws-harness.pid 2>/dev/null)\" 2>/dev/null || true; pkill -x openbox 2>/dev/null || true; pkill -x x11vnc 2>/dev/null || true; pkill -x Xvfb 2>/dev/null || true; pkill -f \"user-data-dir=$HOME/browser-profile\" 2>/dev/null || true
   echo \"PHASE provisioned\"
 fi
 CHROME=\"$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chromium-browser || true)\"
@@ -60,15 +60,19 @@ sudo mkdir -p /tmp/.X11-unix; sudo chown root:root /tmp/.X11-unix 2>/dev/null ||
 export DISPLAY=:99
 if ! pgrep -x Xvfb >/dev/null; then sudo rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true; setsid Xvfb :99 -screen 0 1280x800x24 -nolisten tcp </dev/null >/tmp/ws-xvfb.log 2>&1 & fi
 for i in $(seq 1 25); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.2; done
-if ! pgrep -f \"user-data-dir=$HOME/browser-profile\" >/dev/null; then setsid \"$CHROME\" --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=\"$HOME/browser-profile\" --no-first-run --no-default-browser-check --window-size=1280,800 --start-maximized about:blank </dev/null >/tmp/ws-chromium.log 2>&1 & fi
+if ! pgrep -x openbox >/dev/null; then setsid openbox </dev/null >/tmp/ws-openbox.log 2>&1 & sleep 1; fi
+if ! pgrep -f \"user-data-dir=$HOME/browser-profile\" >/dev/null; then setsid \"$CHROME\" --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=\"$HOME/browser-profile\" --no-first-run --no-default-browser-check --remote-debugging-port=9222 --remote-allow-origins=* --window-position=0,0 --window-size=1280,800 about:blank </dev/null >/tmp/ws-chromium.log 2>&1 & fi
 # x11vnc: NOT -localhost — the connect tunnel arrives from the sprite gateway,
 # not loopback. Allow loopback + the default gateway (the tunnel's source);
 # the port is reachable only through the authorized chassis tunnel anyway.
 GW=\"$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')\"
 ALLOW=\"\"; [ -n \"$GW\" ] && ALLOW=\"-allow 127.0.0.1,$GW\"
 if ! pgrep -x x11vnc >/dev/null; then setsid x11vnc -display :99 -rfbport 5900 -forever -shared -nopw -noxdamage -nolookup $ALLOW </dev/null >/tmp/ws-x11vnc.log 2>&1 & fi
+printf '%s' 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIFRoZSBwb255J3MgYnJvd3NlciBoYXJuZXNzIChkZW1vbnN0cmF0b3IpOiBkcml2ZXMgQ2hyb21lIG92ZXIgQ0RQLCBuYXZpZ2F0aW5nCiMgaXQgZXZlcnkgZmV3IHNlY29uZHMgc28gYSB3YXRjaGVyIFNFRVMgdGhlIHBvbnkgd29ya2luZy4gUGhhc2UgMyBTVE9QUyB0aGlzCiMgcHJvY2VzcyBkdXJpbmcgYSBodW1hbiB0YWtlb3ZlciDigJQga2lsbGluZyBpdCAobm90IGFza2luZyBpdCB0byBwYXVzZSkgaXMgdGhlCiMgZW5mb3JjZW1lbnQuIFNlbGYtY29udGFpbmVkIHN0ZGxpYiBXZWJTb2NrZXQgY2xpZW50IChubyBwaXAvYXB0IGRlcCkuCmltcG9ydCBqc29uLCBvcywgc3lzLCB0aW1lLCBzb2NrZXQsIGJhc2U2NCwgc3RydWN0LCB1cmxsaWIucmVxdWVzdCwgdXJsbGliLnBhcnNlCm9wZW4oIi90bXAvd3MtaGFybmVzcy5waWQiLCAidyIpLndyaXRlKHN0cihvcy5nZXRwaWQoKSkpCmRlZiBsb2coKmEpOiBwcmludCgiaGFybmVzczoiLCAqYSwgZmx1c2g9VHJ1ZSkKCmRlZiB3c19jb25uZWN0KHVybCk6CiAgICBob3N0cG9ydCwgXywgcGF0aCA9IHVybFs1Ol0ucGFydGl0aW9uKCIvIikgICAgICAgICAgIyB3czovL2hvc3Q6cG9ydC9wYXRoCiAgICBob3N0LCBwb3J0ID0gaG9zdHBvcnQuc3BsaXQoIjoiKQogICAgcyA9IHNvY2tldC5jcmVhdGVfY29ubmVjdGlvbigoaG9zdCwgaW50KHBvcnQpKSwgdGltZW91dD0xNSkKICAgIGtleSA9IGJhc2U2NC5iNjRlbmNvZGUob3MudXJhbmRvbSgxNikpLmRlY29kZSgpCiAgICBzLnNlbmRhbGwoKCJHRVQgLyVzIEhUVFAvMS4xXHJcbkhvc3Q6ICVzXHJcblVwZ3JhZGU6IHdlYnNvY2tldFxyXG4iCiAgICAgICAgICAgICAgICJDb25uZWN0aW9uOiBVcGdyYWRlXHJcblNlYy1XZWJTb2NrZXQtS2V5OiAlc1xyXG4iCiAgICAgICAgICAgICAgICJTZWMtV2ViU29ja2V0LVZlcnNpb246IDEzXHJcblxyXG4iICUgKHBhdGgsIGhvc3Rwb3J0LCBrZXkpKS5lbmNvZGUoKSkKICAgIGJ1ZiA9IGIiIgogICAgd2hpbGUgYiJcclxuXHJcbiIgbm90IGluIGJ1ZjoKICAgICAgICBidWYgKz0gcy5yZWN2KDEpCiAgICBsaW5lMCA9IGJ1Zi5zcGxpdChiIlxyXG4iLCAxKVswXS5kZWNvZGUoImxhdGluMSIpCiAgICBpZiAiIDEwMSAiIG5vdCBpbiBsaW5lMDoKICAgICAgICByYWlzZSBTeXN0ZW1FeGl0KCJDRFAgd2Vic29ja2V0IHVwZ3JhZGUgcmVmdXNlZDogIiArIGxpbmUwKQogICAgcmV0dXJuIHMKCmRlZiB3c19zZW5kKHMsIHRleHQpOgogICAgcCA9IHRleHQuZW5jb2RlKCk7IG4gPSBsZW4ocCk7IG0gPSBvcy51cmFuZG9tKDQpOyBmID0gYnl0ZWFycmF5KFsweDgxXSkKICAgIGlmIG4gPCAxMjY6IGYuYXBwZW5kKDB4ODAgfCBuKQogICAgZWxpZiBuIDwgNjU1MzY6IGYuYXBwZW5kKDB4ODAgfCAxMjYpOyBmICs9IHN0cnVjdC5wYWNrKCI+SCIsIG4pCiAgICBlbHNlOiBmLmFwcGVuZCgweDgwIHwgMTI3KTsgZiArPSBzdHJ1Y3QucGFjaygiPlEiLCBuKQogICAgZiArPSBtOyBmICs9IGJ5dGVzKGIgXiBtW2kgJSA0XSBmb3IgaSwgYiBpbiBlbnVtZXJhdGUocCkpOyBzLnNlbmRhbGwoZikKCmRlZiB3c19yZWN2KHMpOgogICAgZGVmIHJkKG4pOgogICAgICAgIGIgPSBiIiIKICAgICAgICB3aGlsZSBsZW4oYikgPCBuOgogICAgICAgICAgICBjID0gcy5yZWN2KG4gLSBsZW4oYikpCiAgICAgICAgICAgIGlmIG5vdCBjOiByYWlzZSBJT0Vycm9yKCJjbG9zZWQiKQogICAgICAgICAgICBiICs9IGMKICAgICAgICByZXR1cm4gYgogICAgd2hpbGUgVHJ1ZTogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAjIHNraXAgY29udHJvbCBmcmFtZXMKICAgICAgICBoID0gcmQoMik7IG9wID0gaFswXSAmIDB4MGY7IG4gPSBoWzFdICYgMHg3ZgogICAgICAgIGlmIG4gPT0gMTI2OiBuID0gc3RydWN0LnVucGFjaygiPkgiLCByZCgyKSlbMF0KICAgICAgICBlbGlmIG4gPT0gMTI3OiBuID0gc3RydWN0LnVucGFjaygiPlEiLCByZCg4KSlbMF0KICAgICAgICBkYXRhID0gcmQobikgaWYgbiBlbHNlIGIiIgogICAgICAgIGlmIG9wIGluICgweDEsIDB4Mik6IHJldHVybiBkYXRhCiAgICAgICAgaWYgb3AgPT0gMHg4OiByYWlzZSBJT0Vycm9yKCJjbG9zZWQiKQoKZGVmIHBhZ2Vfd3MoKToKICAgIGZvciBrIGluIHJhbmdlKDkwKToKICAgICAgICB0cnk6CiAgICAgICAgICAgIHRhYnMgPSBqc29uLmxvYWQodXJsbGliLnJlcXVlc3QudXJsb3BlbigiaHR0cDovLzEyNy4wLjAuMTo5MjIyL2pzb24iLCB0aW1lb3V0PTMpKQogICAgICAgICAgICBwYWdlcyA9IFt0IGZvciB0IGluIHRhYnMgaWYgdC5nZXQoInR5cGUiKSA9PSAicGFnZSIgYW5kIHQuZ2V0KCJ3ZWJTb2NrZXREZWJ1Z2dlclVybCIpXQogICAgICAgICAgICBpZiBwYWdlczoKICAgICAgICAgICAgICAgIHJldHVybiBwYWdlc1swXVsid2ViU29ja2V0RGVidWdnZXJVcmwiXQogICAgICAgICAgICBsb2coIndhaXRpbmcgZm9yIGEgcGFnZSB0YXJnZXQgKGF0dGVtcHQgJWQsICVkIHRhcmdldHMpIiAlIChrLCBsZW4odGFicykpKQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgbG9nKCIvanNvbiBmZXRjaCBmYWlsZWQgKGF0dGVtcHQgJWQpOiAlciIgJSAoaywgZSkpCiAgICAgICAgdGltZS5zbGVlcCgxKQogICAgcmFpc2UgU3lzdGVtRXhpdCgibm8gQ0RQIHBhZ2UgdGFyZ2V0IG9uIDo5MjIyIGFmdGVyIDkwcyIpCgpsb2coInN0YXJ0aW5nOyBmaW5kaW5nIENocm9tZSdzIENEUCBwYWdlIHRhcmdldCIpCndzID0gd3NfY29ubmVjdChwYWdlX3dzKCkpCmxvZygiYXR0YWNoZWQgdG8gQ2hyb21lIHZpYSBDRFAiKQppID0gMAp3aGlsZSBUcnVlOgogICAgaSArPSAxCiAgICBodG1sID0gKCI8Ym9keSBzdHlsZT0nZm9udDo0NHB4IHN5c3RlbS11aTtwYWRkaW5nOjEuNWVtO2JhY2tncm91bmQ6IzBiMTAyMDtjb2xvcjojZGJlNGZmJz4iCiAgICAgICAgICAgICI8aDE+JiMxMjgwNTI7IHRoZSBwb255IGlzIHdvcmtpbmcmIzgyMzA7PC9oMT4iCiAgICAgICAgICAgICI8cD5uYXZpZ2F0aW5nIHRoZSBicm93c2VyIG92ZXIgQ0RQICZtZGFzaDsgdGljayAlZCwgJXM8L3A+IgogICAgICAgICAgICAiPHAgc3R5bGU9J2NvbG9yOiM4YWEnPkNsaWNrIDxiPnRha2UgY29udHJvbDwvYj4gYW5kIHRoaXMgc3RvcHM6IHRoZSBoYXJuZXNzIgogICAgICAgICAgICAiIHByb2Nlc3MgaXMga2lsbGVkLCBzbyB0aGUgcG9ueSBjYW5ub3QgYWN0IHdoaWxlIHlvdSBkcml2ZS48L3A+PC9ib2R5PiIKICAgICAgICAgICAgJSAoaSwgdGltZS5zdHJmdGltZSgiJUg6JU06JVMiKSkpCiAgICB3c19zZW5kKHdzLCBqc29uLmR1bXBzKHsiaWQiOiBpLCAibWV0aG9kIjogIlBhZ2UubmF2aWdhdGUiLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgInBhcmFtcyI6IHsidXJsIjogImRhdGE6dGV4dC9odG1sLCIgKyB1cmxsaWIucGFyc2UucXVvdGUoaHRtbCl9fSkpCiAgICB3c19yZWN2KHdzKQogICAgaWYgaSAlIDUgPT0gMTogbG9nKCJ0aWNrICVkIiAlIGkpCiAgICB0aW1lLnNsZWVwKDMpCg==' | base64 -d > \"$HOME/ws-harness.py\"
+# The pony harness: the process Phase 3 STOPS during a human takeover.
+if ! kill -0 \"$(cat /tmp/ws-harness.pid 2>/dev/null)\" 2>/dev/null; then setsid python3 \"$HOME/ws-harness.py\" </dev/null >/tmp/ws-harness.log 2>&1 & fi
 for i in $(seq 1 60); do ss -ltn 2>/dev/null | grep -q ':5900 ' && break; sleep 0.5; done
-echo \"PHASE ready gw=${GW:-none}\"
+echo \"PHASE ready gw=${GW:-none} harness=$(kill -0 \"$(cat /tmp/ws-harness.pid 2>/dev/null)\" 2>/dev/null && echo up || echo down)\"
 WORKEOF
 setsid bash /tmp/ws-provision.sh </dev/null >\"$LOG\" 2>&1 &
 echo \"{\\\"ready\\\":false,\\\"phase\\\":\\\"starting\\\"}\""

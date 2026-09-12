@@ -1,0 +1,6 @@
+# GET /pony/act — the pony can act only while its harness pid is alive.
+WHEN @src == "http" && @web.req.url.path == "/pony/act"
+  EXEC "workspace://tools/exec"
+    WITH command = "if kill -0 $(cat /tmp/ws-harness.pid 2>/dev/null) 2>/dev/null; then echo 'pony acted: the harness is running and driving the browser'; else echo 'human has control: the pony harness is stopped, so the pony cannot act'; fi",
+         timeout = "20s",
+         into = "_pony"

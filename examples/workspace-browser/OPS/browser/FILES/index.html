@@ -18,6 +18,8 @@
 <div class="bar">
   <h1>workspace-browser — the workspace's own Chromium, in your browser</h1>
   <button id="go">open the browser</button>
+  <button id="take" disabled>take control</button>
+  <button id="release" class="ghost" disabled>return to pony</button>
   <a href="/logs" target="_blank" class="ghost" style="text-decoration:none;padding:5px 12px;border-radius:4px;background:#27272a;color:#ddd">logs</a>
   <span id="status">idle</span>
 </div>
@@ -28,8 +30,17 @@
   WebSocket to <code>/screen</code> and binds the workspace's VNC display with
   <code>connect</code>; noVNC renders it here. The page keeps polling
   <code>/setup</code> every 15s to keep the sprite awake (it idle-sleeps ~30s
-  after the last exec). <a href="/logs" target="_blank">/logs</a> shows the
-  workspace's x11vnc / Xvfb / Chromium logs.
+  after the last exec).
+  <br><br>
+  <b>Phase 3 — the handoff.</b> A pony <b>harness</b> drives this same Chrome over
+  CDP, navigating it every few seconds — connecting lets you <b>watch the pony
+  work</b>. Click <b>take control</b> and the stack <b>kills the harness</b>: the
+  pony's agent loop is gone, so it cannot read the page or your keystrokes while
+  you drive (the display keeps working). <b>Return to pony</b> restarts the
+  harness; closing the tab does too. Check the pony's side at
+  <a href="/pony/act" target="_blank">/pony/act</a> (it reports "human has control"
+  while the harness is stopped). <a href="/logs" target="_blank">/logs</a> shows the
+  workspace logs.
 </div>
 <script type="module">
 import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.7.0/core/rfb.js';
@@ -38,7 +49,20 @@ const setStatus = (s, err) => { $('status').textContent = s; $('status').classNa
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let ws = null, rfb = null, keepalive = null;
 
-function stop() { if (keepalive) { clearInterval(keepalive); keepalive = null; } $('go').disabled = false; }
+function stop() { if (keepalive) { clearInterval(keepalive); keepalive = null; } $('go').disabled = false; $('take').disabled = true; $('release').disabled = true; }
+
+// The control toggle is HTTP (the socket is the VNC stream once connected).
+// "take control" kills the pony harness; "return to pony" restarts it.
+$('take').onclick = async () => {
+  $('take').disabled = true;
+  try { setStatus(await (await fetch('/take', { cache: 'no-store' })).text()); $('release').disabled = false; }
+  catch (e) { setStatus('take failed: ' + e, true); $('take').disabled = false; }
+};
+$('release').onclick = async () => {
+  $('release').disabled = true;
+  try { setStatus(await (await fetch('/release', { cache: 'no-store' })).text()); $('take').disabled = false; }
+  catch (e) { setStatus('release failed: ' + e, true); $('release').disabled = false; }
+};
 
 // Poll /setup (uncached, so each call is a real exec that also wakes the sprite)
 // until it reports ready. Returns the ready verdict, or null on a hard error.
@@ -75,7 +99,7 @@ async function go() {
     ws.onmessage = null;                              // hand the socket to noVNC
     rfb = new RFB($('screen'), ws, { shared: true });
     rfb.scaleViewport = true;
-    rfb.addEventListener('connect', () => setStatus('connected — the workspace browser'));
+    rfb.addEventListener('connect', () => { setStatus('observing — the pony is driving; click "take control" to drive'); $('take').disabled = false; });
     rfb.addEventListener('securityfailure', (ev) => setStatus('VNC security failure: ' + ((ev.detail && ev.detail.reason) || '?'), true));
     rfb.addEventListener('disconnect', (ev) => { setStatus('disconnected' + (ev.detail && ev.detail.clean ? '' : ' (unexpectedly — see /logs)'), !(ev.detail && ev.detail.clean)); stop(); });
   };

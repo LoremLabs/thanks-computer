@@ -1,0 +1,5 @@
+WHEN ._pony.exit == 0
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(._pony.stdout)

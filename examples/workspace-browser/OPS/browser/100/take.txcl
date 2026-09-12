@@ -1,0 +1,9 @@
+# GET /take — the human takes control: STOP the pony harness by pid. Killing the
+# process (not asking it to pause) is the enforcement — the pony's agent loop is
+# gone. Kill by pidfile, never `pkill -f ws-harness.py`: that pattern would match
+# this very shell (its argv contains the pattern) and kill it before the echo.
+WHEN @src == "http" && @web.req.url.path == "/take"
+  EXEC "workspace://tools/exec"
+    WITH command = "kill $(cat /tmp/ws-harness.pid 2>/dev/null) 2>/dev/null; echo take $(date -u +%FT%TZ) >> $HOME/takeovers.log; echo human has control - the pony harness is stopped",
+         timeout = "20s",
+         into = "_ctl"

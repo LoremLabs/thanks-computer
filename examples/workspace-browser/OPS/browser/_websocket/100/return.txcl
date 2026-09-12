@@ -1,0 +1,7 @@
+# Human returned control (socket closed): restart the harness if its pid is gone,
+# and record the return. Fires on the phase=close run (accept events=["close"]).
+WHEN @websocket.phase == "close"
+  EXEC "workspace://tools/exec"
+    WITH command = "echo return $(date -u +%FT%TZ) >> $HOME/takeovers.log; if ! kill -0 $(cat /tmp/ws-harness.pid 2>/dev/null) 2>/dev/null; then setsid python3 $HOME/ws-harness.py </dev/null >/tmp/ws-harness.log 2>&1 & fi; echo restarted",
+         timeout = "20s",
+         into = "_resume"

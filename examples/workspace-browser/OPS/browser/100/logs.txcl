@@ -5,4 +5,4 @@ WHEN @src == "http" && @web.req.url.path == "/logs"
     WITH command = "bash -s",
          timeout = "20s",
          into    = "_logs",
-         stdin   = "for f in x11vnc xvfb chromium setup; do echo \"===== /tmp/ws-$f.log =====\"; tail -n 30 /tmp/ws-$f.log 2>/dev/null || echo '(none)'; echo; done; echo '===== procs ====='; pgrep -a x11vnc Xvfb chromium 2>/dev/null || true; echo '===== :5900 ====='; (ss -ltnp 2>/dev/null | grep 5900) || echo '(ss unavailable)'"
+         stdin   = "for f in harness x11vnc xvfb openbox chromium setup; do echo \"===== /tmp/ws-$f.log =====\"; tail -n 30 /tmp/ws-$f.log 2>/dev/null || echo '(none)'; echo; done; echo '===== procs ====='; pgrep -a x11vnc Xvfb chromium 2>/dev/null || true; echo '===== :5900 ====='; (ss -ltnp 2>/dev/null | grep 5900) || echo '(ss unavailable)'"

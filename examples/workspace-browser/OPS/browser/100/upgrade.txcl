@@ -1,9 +1,7 @@
-# Take the WebSocket connection on /screen.
-#
-# A real deployment gates this the way any upgrade is gated (a session
-# cookie, an Origin allowlist, `state.user`); this example keeps it open so
-# it runs with nothing configured. Everything past the accept is trusted for
-# the life of the session: the stack decided, once, that this connection may
-# bind the workspace's browser.
+# Take the WebSocket on /screen, and subscribe to the CLOSE event so the stack
+# runs again when the human disconnects (to restart the pony harness). A real
+# deployment gates this upgrade (a session cookie, an Origin allowlist); this
+# example keeps it open so it runs with nothing configured.
 WHEN @websocket.upgrade == true && @web.req.url.path == "/screen"
   EXEC "txco://websocket/accept"
+    WITH events = ["close"]
