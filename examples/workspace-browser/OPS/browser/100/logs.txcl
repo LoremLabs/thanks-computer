@@ -1,0 +1,8 @@
+# GET /logs — read the browser stack's logs from the workspace (x11vnc's is the
+# one that says why an RFB handshake stalls). Diagnostic; safe to leave in.
+WHEN @src == "http" && @web.req.url.path == "/logs"
+  EXEC "workspace://tools/exec"
+    WITH command = "bash -s",
+         timeout = "20s",
+         into    = "_logs",
+         stdin   = "for f in x11vnc xvfb chromium setup; do echo \"===== /tmp/ws-$f.log =====\"; tail -n 30 /tmp/ws-$f.log 2>/dev/null || echo '(none)'; echo; done; echo '===== procs ====='; pgrep -a x11vnc Xvfb chromium 2>/dev/null || true; echo '===== :5900 ====='; (ss -ltnp 2>/dev/null | grep 5900) || echo '(ss unavailable)'"

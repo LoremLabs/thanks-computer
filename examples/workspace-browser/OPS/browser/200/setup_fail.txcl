@@ -1,0 +1,11 @@
+# The script itself failed (a bounded apt step timed out, or `set -e` tripped)
+# — exit != 0 with no JSON on stdout, and no transport error. Say so as JSON so
+# the page shows something actionable rather than hanging. The stderr carries
+# the PHASE markers that say how far provisioning got.
+WHEN ._setup.exit != 0 && .workspace.error.code == null
+  EMIT @web.res.status = 500,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&to_json(&object("ready", false,
+                                        "error", "provisioning failed; see the workspace logs",
+                                        "exit", ._setup.exit)))

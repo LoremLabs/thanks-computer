@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>workspace-browser</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{height:100%;margin:0}
+  body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b0b0b;color:#ddd;display:flex;flex-direction:column;height:100vh}
+  .bar{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px}
+  .bar h1{font-size:14px;font-weight:600;margin:0 8px 0 0}
+  button{font:inherit;padding:5px 12px;border:0;border-radius:4px;background:#3b82f6;color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:#27272a;color:#ddd}
+  #status{font-size:12px}#status.err{color:#f87171}
+  #screen{flex:1 1 auto;min-height:0;background:#000}
+  .foot{flex:0 0 auto;color:#888;font-size:11px;padding:6px 12px;border-top:1px solid #1c1c1c}
+  .foot b{color:#bbb} a{color:#7dd3fc}
+</style>
+<div class="bar">
+  <h1>workspace-browser — the workspace's own Chromium, in your browser</h1>
+  <button id="go">open the browser</button>
+  <a href="/logs" target="_blank" class="ghost" style="text-decoration:none;padding:5px 12px;border-radius:4px;background:#27272a;color:#ddd">logs</a>
+  <span id="status">idle</span>
+</div>
+<div id="screen"></div>
+<div class="foot">
+  <b>open the browser</b> polls <code>/setup</code> (which provisions + launches the
+  browser stack out of band, so the request never times out), then opens a
+  WebSocket to <code>/screen</code> and binds the workspace's VNC display with
+  <code>connect</code>; noVNC renders it here. The page keeps polling
+  <code>/setup</code> every 15s to keep the sprite awake (it idle-sleeps ~30s
+  after the last exec). <a href="/logs" target="_blank">/logs</a> shows the
+  workspace's x11vnc / Xvfb / Chromium logs.
+</div>
+<script type="module">
+import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.7.0/core/rfb.js';
+const $ = id => document.getElementById(id);
+const setStatus = (s, err) => { $('status').textContent = s; $('status').className = err ? 'err' : ''; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let ws = null, rfb = null, keepalive = null;
+
+function stop() { if (keepalive) { clearInterval(keepalive); keepalive = null; } $('go').disabled = false; }
+
+// Poll /setup (uncached, so each call is a real exec that also wakes the sprite)
+// until it reports ready. Returns the ready verdict, or null on a hard error.
+async function pollSetup() {
+  for (;;) {
+    let r;
+    try { r = await fetch('/setup', { cache: 'no-store' }); }
+    catch (e) { setStatus('setup request failed: ' + e, true); return null; }
+    if (r.status >= 502 && r.status <= 504) { setStatus('setup gateway ' + r.status + ' — retrying…'); await sleep(2000); continue; }
+    let j; try { j = await r.json(); } catch { setStatus('setup: empty/bad response (' + r.status + ') — retrying…'); await sleep(2000); continue; }
+    if (j.ready) return j;
+    if (j.error) { setStatus('not ready: ' + j.error, true); return null; }
+    setStatus('setting up… ' + (j.phase || 'working')); await sleep(3000);
+  }
+}
+
+async function go() {
+  $('go').disabled = true;
+  const v = await pollSetup();
+  if (!v) { stop(); return; }
+  setStatus('connecting to the display…');
+  keepalive = setInterval(() => { fetch('/setup', { cache: 'no-store' }).catch(() => {}); }, 15000);
+
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(scheme + '://' + location.host + '/screen');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'connect', service: 'browser' }));
+  ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'error') { setStatus('connect refused: ' + (m.error || m.code), true); stop(); return; }
+    if (m.type !== 'attached') return;
+    setStatus('display bound — starting VNC handshake…');
+    ws.onmessage = null;                              // hand the socket to noVNC
+    rfb = new RFB($('screen'), ws, { shared: true });
+    rfb.scaleViewport = true;
+    rfb.addEventListener('connect', () => setStatus('connected — the workspace browser'));
+    rfb.addEventListener('securityfailure', (ev) => setStatus('VNC security failure: ' + ((ev.detail && ev.detail.reason) || '?'), true));
+    rfb.addEventListener('disconnect', (ev) => { setStatus('disconnected' + (ev.detail && ev.detail.clean ? '' : ' (unexpectedly — see /logs)'), !(ev.detail && ev.detail.clean)); stop(); });
+  };
+  ws.onclose = () => { setStatus('socket closed'); stop(); };
+  ws.onerror = () => setStatus('socket error', true);
+}
+$('go').onclick = go;
+</script>

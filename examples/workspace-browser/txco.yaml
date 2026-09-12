@@ -1,0 +1,31 @@
+target: dev
+
+# examples/workspace-browser — a human sees and drives the workspace's OWN
+# browser, in the browser, over one WebSocket. This is workspace://.../connect
+# (see examples/workspace-connect) carrying a VNC stream instead of an echo
+# service, and it is the transport behind "take over my pony's browser"
+# (thanks-computer-service/docs/todo-workspace-browser-takeover.md).
+#
+# REQUIRES A REAL WORKSPACE PROVIDER (Sprites): the workspace installs and
+# runs Chromium + Xvfb + x11vnc, which the local provider cannot do (and on
+# a Mac would try to apt-get on your own machine — the script refuses that).
+# So this example is NOT part of scripts/examples-smoke.sh; run it against a
+# chassis whose --workspace-provider is a real one.
+#
+# The shape:
+#   GET /setup   → an idempotent exec that PROVISIONS (installs the runtime
+#                  packages once, keyed by a version marker) and COLD-STARTS
+#                  (launches Xvfb + Chromium + x11vnc if not already up).
+#                  First call: up to a minute. Later calls: sub-second.
+#   GET /        → this page; it calls /setup, then opens the socket.
+#   WS  /screen  → accept; the first message runs connect WITH service =
+#                  "browser" (the built-in 127.0.0.1:5900 in the chassis
+#                  service table), and from then on the socket is the VNC
+#                  stream that noVNC renders.
+#
+# Provisioning is DATA: the required runtime version and package list live in
+# 100/setup.txcl as the exec's env, so bumping the version re-provisions on
+# the next /setup without touching the script.
+#
+# There is no `operations:` block: workspace:// and txco://websocket/* are
+# chassis transports, so the stack ships only ops.

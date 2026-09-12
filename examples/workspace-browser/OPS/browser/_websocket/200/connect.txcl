@@ -1,0 +1,11 @@
+# Bind the workspace's VNC display to this session. `service = "browser"` is
+# the built-in chassis service (127.0.0.1:5900); the page names it, and the
+# chassis resolves the name — the page can never name a host or a port. On
+# success the chassis sends {"type":"attached"} and then the VNC bytes; a
+# failure (the display is not up — call /setup first) merges as
+# workspace.error, which 300/connect-error reports.
+WHEN .msg.type == "connect"
+  EXEC "workspace://tools/connect"
+    WITH service = "browser",
+         max_duration = "2h",
+         into = "_connect"

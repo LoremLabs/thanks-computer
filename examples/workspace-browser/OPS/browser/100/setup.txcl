@@ -1,0 +1,74 @@
+# GET /setup — fast every call, so the edge never times out on it.
+#
+# It reports readiness, and if the workspace is not ready it kicks provisioning
+# + launch off DETACHED (setsid) and returns immediately; the page POLLS /setup
+# until ready, each poll reporting the latest PHASE. This is the
+# provisioning-vs-cold-start seam made real: the slow apt install happens out of
+# band, not in the HTTP request. `pgrep ws-provision.sh` is the "already
+# running" check; readiness is marker==REQ + a chromium binary + x11vnc on 5900.
+#
+# Each /setup is a real exec, which also WAKES the sprite (it idle-sleeps ~30s
+# after the last exec) — the page keep-alive-polls this while VNC is open so the
+# display does not freeze. Runtime version + packages are DATA (env).
+WHEN @src == "http" && @web.req.url.path == "/setup"
+  EXEC "workspace://tools/exec"
+    WITH command = "bash -s",
+         env     = &object("REQ", "2"),   # runtime version; bump to re-provision
+         timeout = "45s",
+         into    = "_setup",
+         stdin   = "set -eu
+[ \"$(uname -s)\" = Linux ] || { echo '{\"ready\":false,\"error\":\"needs a Linux workspace (a real provider); the local provider cannot run this\"}'; exit 0; }
+MARK=/var/lib/workspace-runtime/version
+LOG=/tmp/ws-setup.log
+CHROME=\"$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chromium-browser || true)\"
+vncup() { ss -ltn 2>/dev/null | grep -q ':5900 '; }
+if [ \"$(cat \"$MARK\" 2>/dev/null || echo 0)\" = \"$REQ\" ] && [ -n \"$CHROME\" ] && vncup; then
+  echo \"{\\\"ready\\\":true,\\\"chromium\\\":\\\"$CHROME\\\",\\\"vnc\\\":\\\"yes\\\"}\"; exit 0
+fi
+if pgrep -f ws-provision.sh >/dev/null 2>&1; then
+  ph=\"$(tail -n1 \"$LOG\" 2>/dev/null | tr -d '\"\\\\' | tr '\\n' ' ')\"
+  echo \"{\\\"ready\\\":false,\\\"phase\\\":\\\"${ph:-working}\\\"}\"; exit 0
+fi
+cat > /tmp/ws-provision.sh <<'WORKEOF'
+set -eu
+MARK=/var/lib/workspace-runtime/version
+if [ \"$(cat \"$MARK\" 2>/dev/null || echo 0)\" != \"$REQ\" ]; then
+  echo \"PHASE provision req=$REQ\"
+  export DEBIAN_FRONTEND=noninteractive
+  ARCH=\"$(dpkg --print-architecture 2>/dev/null || echo amd64)\"
+  if [ \"$ARCH\" = amd64 ]; then
+    # Ubuntu's `chromium` apt package is a snap stub that won't run in the VM;
+    # Google Chrome ships a real .deb. Armored key referenced directly (no gnupg).
+    sudo install -d -m0755 /etc/apt/keyrings
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo tee /etc/apt/keyrings/google-chrome.asc >/dev/null
+    echo \"deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] http://dl.google.com/linux/chrome/deb/ stable main\" | sudo tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+    BROWSER=google-chrome-stable
+  else
+    BROWSER=chromium
+  fi
+  sudo timeout 150 apt-get update -o DPkg::Lock::Timeout=120
+  sudo timeout 480 apt-get install -y -o DPkg::Lock::Timeout=120 --no-install-recommends \"$BROWSER\" xvfb x11vnc fonts-liberation
+  sudo mkdir -p \"$(dirname \"$MARK\")\"; printf '%s\\n' \"$REQ\" | sudo tee \"$MARK\" >/dev/null
+  # New runtime version: retire the old daemons so they relaunch with new flags.
+  pkill -x x11vnc 2>/dev/null || true; pkill -x Xvfb 2>/dev/null || true; pkill -f \"user-data-dir=$HOME/browser-profile\" 2>/dev/null || true
+  echo \"PHASE provisioned\"
+fi
+CHROME=\"$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chromium-browser || true)\"
+echo \"PHASE launch chrome=${CHROME:-none}\"
+[ -n \"$CHROME\" ] || { echo \"PHASE error no-chromium\"; exit 1; }
+sudo mkdir -p /tmp/.X11-unix; sudo chown root:root /tmp/.X11-unix 2>/dev/null || true; sudo chmod 1777 /tmp/.X11-unix
+export DISPLAY=:99
+if ! pgrep -x Xvfb >/dev/null; then sudo rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true; setsid Xvfb :99 -screen 0 1280x800x24 -nolisten tcp </dev/null >/tmp/ws-xvfb.log 2>&1 & fi
+for i in $(seq 1 25); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.2; done
+if ! pgrep -f \"user-data-dir=$HOME/browser-profile\" >/dev/null; then setsid \"$CHROME\" --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=\"$HOME/browser-profile\" --no-first-run --no-default-browser-check --window-size=1280,800 --start-maximized about:blank </dev/null >/tmp/ws-chromium.log 2>&1 & fi
+# x11vnc: NOT -localhost — the connect tunnel arrives from the sprite gateway,
+# not loopback. Allow loopback + the default gateway (the tunnel's source);
+# the port is reachable only through the authorized chassis tunnel anyway.
+GW=\"$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')\"
+ALLOW=\"\"; [ -n \"$GW\" ] && ALLOW=\"-allow 127.0.0.1,$GW\"
+if ! pgrep -x x11vnc >/dev/null; then setsid x11vnc -display :99 -rfbport 5900 -forever -shared -nopw -noxdamage -nolookup $ALLOW </dev/null >/tmp/ws-x11vnc.log 2>&1 & fi
+for i in $(seq 1 60); do ss -ltn 2>/dev/null | grep -q ':5900 ' && break; sleep 0.5; done
+echo \"PHASE ready gw=${GW:-none}\"
+WORKEOF
+setsid bash /tmp/ws-provision.sh </dev/null >\"$LOG\" 2>&1 &
+echo \"{\\\"ready\\\":false,\\\"phase\\\":\\\"starting\\\"}\""

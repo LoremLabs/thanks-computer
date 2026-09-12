@@ -1,0 +1,7 @@
+# /screen without an Upgrade is not a page.
+WHEN @web.req.url.path == "/screen" && @websocket.upgrade != true
+  EMIT @web.res.status = 426,
+       @web.res.headers.upgrade.0 = "websocket",
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"Upgrade Required: open /screen as a WebSocket (see /index.html).
+"

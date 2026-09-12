@@ -1,0 +1,9 @@
+# A transport/provider failure (the exec timed out, the workspace would not
+# wake, capacity) is not a script verdict — say so as JSON with a 503.
+WHEN .workspace.error.code != null
+  EMIT @web.res.status = 503,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&to_json(&object("ready", false,
+                                        "code", .workspace.error.code,
+                                        "error", .workspace.error.message)))

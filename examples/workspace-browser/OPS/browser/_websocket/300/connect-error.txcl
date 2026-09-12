@@ -1,0 +1,10 @@
+# If connect was refused or the display was not listening, say so on the
+# socket as a control frame the page can show. Its own scope (300): an op
+# cannot read what another op in the same scope produced, so this runs after
+# the connect in 200.
+WHEN .msg.type == "connect" && .workspace.error.code != null
+  EXEC "txco://websocket/reply"
+    WITH text = &to_json(&object(
+      "type", "error",
+      "code", .workspace.error.code,
+      "error", .workspace.error.message))

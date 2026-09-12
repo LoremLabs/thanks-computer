@@ -1,0 +1,6 @@
+# The first message the page sends is {"type":"connect"}; parse it so the
+# connect op can read it. Once bound the chassis stops making runs for this
+# socket — the VNC frames go straight through — so this only ever sees the
+# one connect message (and any sent after a detach).
+WHEN @websocket.phase == "message" && @websocket.msg.text != ""
+  EMIT .msg = &json(@websocket.msg.text)
