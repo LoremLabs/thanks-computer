@@ -73,6 +73,32 @@ working `/usr/bin/chromium-browser` (a real deb, not a snap) and x11vnc binds
    proven end to end. (If a future image lacks a working `chromium` deb, the
    fallback is Google Chrome's `.deb` — bump `REQ`, change `PKGS`.)
 
+## Restricting access
+
+**This stack fails CLOSED**: because it hands over a logged-in browser, every
+route returns 401 until you set a password. Enable access with a tenant secret:
+
+```sh
+txco auth tenant secrets set EXAMPLE_BROWSER_PW --tenant <this stack's tenant>
+```
+
+Until then, `/` and every action answer 401 (only `/healthz` stays open). Once
+set, every route requires HTTP Basic auth: user `human`, password = that secret. The browser
+prompts once on the page and reuses the credentials for the WebSocket and the
+`fetch` calls. `/healthz` stays open for load balancers. The gate
+(`browser/090`, `browser/095`) uses `txco://basic-auth-verify`, which consumes
+the secret inside the op and compares it constant-time — the password never
+reaches the envelope — and **fails closed** three ways: no secret set, wrong password, or a chassis
+without the op all get 401. The `allow_unconfigured=false` decision is written in
+`090/auth.txcl` where you can see it — flip it to `true` only if you truly want
+the open-until-configured behavior.
+
+The page is served from `browser/100/home.txcl` (base64-embedded), NOT a static
+`FILES/index.html` — static files bypass the txcl pipeline, so a static page
+would be world-readable and would never trigger the auth prompt. The editable
+source is `PAGE/index.html`; if you change it, regenerate the base64 in
+`home.txcl`.
+
 ## What this is not (yet)
 
 This is the human **view** — Phase 2 of the takeover plan. It has no control

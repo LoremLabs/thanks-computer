@@ -1,0 +1,13 @@
+# Refuse any request 090 did not vouch for: a wrong or missing Authorization
+# header once EXAMPLE_BROWSER_PW is set, and equally an ABSENT verdict (an older
+# chassis without txco://basic-auth-verify) — so the gate fails CLOSED, not open.
+# @halt stops the request before the route handlers in scope 100: the page is
+# not served, /screen is not upgraded, /setup does not run. When the secret is
+# unset, 090's allow_unconfigured makes the verdict true and this never fires.
+WHEN @src == "http" && @web.req.url.path != "/healthz" && @computed.basic_auth_ok != true
+  EMIT @web.res.status = 401,
+       @web.res.headers.www-authenticate.0 = "Basic realm=workspace-browser",
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"authentication required — user 'human', password = the EXAMPLE_BROWSER_PW tenant secret
+",
+       @halt = true

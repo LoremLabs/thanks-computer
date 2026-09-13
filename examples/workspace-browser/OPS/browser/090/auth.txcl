@@ -1,0 +1,24 @@
+# Gate EVERY HTTP request to this stack behind HTTP Basic auth — the page, the
+# /screen WebSocket upgrade, /setup, /take, /release, /pony/act, /logs. Without
+# this, anyone with the URL can bind the VNC display and drive the pony's Chrome,
+# including whatever it is logged into. (Health checks on /healthz stay open.)
+#
+# The password is a TENANT SECRET. Set it, and the gate closes:
+#   txco auth tenant secrets set EXAMPLE_BROWSER_PW --tenant <this stack's tenant>
+# then reach the stack as user `human`, password = that secret. The browser
+# prompts once and reuses the credentials for the /screen WebSocket and the
+# fetch() calls, so one prompt protects the whole flow.
+#
+# secrets.password.optional=true lets the op RUN when the secret is unset (so it
+# can emit a verdict and issue a 401 prompt rather than being skipped);
+# allow_unconfigured=false is the DECISION, visible here: this stack hands over a
+# logged-in browser, so it FAILS CLOSED — no EXAMPLE_BROWSER_PW set ⇒ nobody gets
+# in (401 everywhere until you set one). The secret never reaches the envelope:
+# the op consumes it and emits only a verdict (@computed.basic_auth_ok),
+# compared constant-time.
+WHEN @src == "http" && @web.req.url.path != "/healthz"
+  WITH user = "human",
+       secrets.password.secret = "EXAMPLE_BROWSER_PW",
+       secrets.password.optional = true,
+       allow_unconfigured = false
+  EXEC "txco://basic-auth-verify"
