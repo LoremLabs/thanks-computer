@@ -77,6 +77,13 @@ const (
 	// (--notebook-max-entry-bytes) bounds bytes in. Exported because the
 	// handlers live in package server and charge via AddFuel.
 	FuelCostNotebookPerMiB int64 = 100
+	// FuelCostKVPerMiB charges txco://kv/mget and kv/list with values per
+	// MiB of stored values returned (rounded up), on top of the flat
+	// dispatch fuel. They are the only KV reads that return an unbounded
+	// number of values; kv/get's single value is bounded by
+	// --kv-max-value-bytes and pays only the dispatch. Exported because the
+	// handlers live in package server and charge via AddFuel.
+	FuelCostKVPerMiB int64 = 100
 )
 
 // AddFuel is the exported charge point for core op handlers that do

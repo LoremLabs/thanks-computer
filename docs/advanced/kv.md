@@ -25,6 +25,8 @@ The ops are identical either way.
 | `txco://kv/delete` | `key` | Remove a value. |
 | `txco://kv/incr` | `key`, `by?`, `ttl?`, `into?` | Atomically add to an integer. |
 | `txco://kv/cas` | `key`, `value?` / `from?`, `expected?`, `ttl?`, `into?` | Check-and-set. |
+| `txco://kv/mget` | `items`, `into?` | Read many keys — each in its own namespace, if you like — in one dispatch. |
+| `txco://kv/list` | `after?`, `limit?`, `values?`, `into?` | List a namespace's keys (and values), one sorted page at a time. |
 
 Every op also takes an optional `namespace` (see below).
 
@@ -136,9 +138,99 @@ That's also how you build a safe state machine: `kv/get` to read, decide in a
 rule, then `kv/cas` with the value you read as `expected` — the write only lands
 if the world hasn't moved under you.
 
+## Read many keys at once — `kv/mget`
+
+`kv/mget` reads a list of keys in **one** dispatch. `items` is an array; each
+item is a bare key string or an object `{key, namespace?}`. An item without its
+own `namespace` uses the call's (`WITH namespace`, else the stack's default),
+so one call can read across namespaces:
+
+```txcl
+# ._cells was built by an earlier op:
+#   [{"key": "triggers", "namespace": "pony-ada"},
+#    {"key": "triggers", "namespace": "pony-bo"}]
+WITH items = ._cells, into = "_trig"
+EXEC "txco://kv/mget"
+```
+
+It writes `{items, count, found}` at `into` (default `_kv`):
+
+```json
+{
+  "items": [
+    {"namespace": "pony-ada", "key": "triggers", "found": true, "value": {"at": "09:00"}},
+    {"namespace": "pony-bo", "key": "triggers", "found": false}
+  ],
+  "count": 2,
+  "found": 1
+}
+```
+
+- **In order.** `items[i]` answers the i-th item you asked for. A key listed
+  twice is read, and reported, twice.
+- **A miss is `found: false` with no `value`**, and so is an expired key.
+- **At most 200 items; above that the whole call is refused.** It never
+  returns a partial answer, because a dropped item would look exactly like a
+  missing key. Split larger reads across calls.
+- **One bad item refuses the whole call**, before anything is read: an empty
+  key, a `/` in a key or namespace, or a reserved `_txc` namespace.
+- `items = []` is not an error; it writes `{items: [], count: 0, found: 0}`.
+
+Compared with N `kv/get`s, this saves N−1 dispatches (25 fuel each). On
+`redis` it also turns N round trips into one `MGET` per 500 keys. On `boltdb`
+the store still reads the keys one at a time, so there the saving is in
+dispatch, not in the store.
+
+## List a namespace — `kv/list`
+
+`kv/list` returns one page of a namespace's keys, sorted: up to `limit`
+(default and maximum 200) that sort after the `after` cursor.
+
+```txcl
+WITH namespace = "subscribers", limit = 100, into = "_subs"
+EXEC "txco://kv/list"
+#   ._subs = {"keys": ["a@x", "b@x", …], "next": "b@x", "count": 100}
+```
+
+`next` is the cursor for the following call — pass it back as `after`. It is
+`""` once the namespace is exhausted.
+
+Add `values = true` to get each key's value alongside it, as `rows`, instead of
+following up with a `kv/get` per key. `keys`, `next` and `count` are still
+written:
+
+```txcl
+WITH namespace = "subscribers", values = true, into = "_subs"
+EXEC "txco://kv/list"
+#   ._subs.rows = [{"key": "a@x", "value": {…}}, …]
+```
+
+To read a whole namespace, drain it with a `LOOP`. Arrays append across passes,
+so `rows` collects every page:
+
+```txcl
+WITH namespace = "subscribers", values = true, after = ._kv.next
+EXEC "txco://kv/list"
+LOOP EVERY "2ms" UNTIL ._kv.next == "" MAX 50
+```
+
+There is no per-key prefix filter: the namespace *is* the prefix. Give a set
+you'll want to list — subscribers, a queue — a namespace of its own.
+
+**Listing is not cheap, and paging doesn't make it cheaper.** The store has no
+cursor, so every page reads the *whole* namespace, sorts it, and returns a
+window. Listing 10,000 keys 200 at a time reads the namespace 50 times. On
+`redis` it is worse again: each page scans the entire keyspace, not just your
+namespace. `kv/list` suits small namespaces and occasional sweeps; don't list a
+large namespace on every request. `values = true` adds no store work — the
+values are read either way.
+
 ## Notes
 
 - KV ops pay normal [fuel](./fuel.md) and appear in [traces](./trace.md).
+  `kv/mget`, and `kv/list` with `values = true`, also pay 100 fuel per MiB of
+  values returned, rounded up — so any call that returns a value pays at least
+  100.
 - Values over `--kv-max-value-bytes` (default 64 KiB) are rejected.
 - With `boltdb` each chassis keeps its own store; switch to `redis` when several
   chassis must share state.

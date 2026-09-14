@@ -3,6 +3,7 @@ package kv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -10,6 +11,9 @@ import (
 
 	"github.com/kvtools/boltdb"
 	"github.com/kvtools/valkeyrie"
+	"github.com/kvtools/valkeyrie/store"
+
+	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 )
 
 func newKV(t *testing.T, maxValue int, maxTTL time.Duration) *KV {
@@ -347,6 +351,164 @@ func TestListPairs(t *testing.T) {
 	// Other tenant / namespace: isolated.
 	if pairs, _ := k.ListPairs(ctx, "t2", "idx"); pairs != nil {
 		t.Fatalf("tenant leak: %v", pairs)
+	}
+}
+
+// The redis backend must stay on GetMany's batch path.
+var _ multiGetter = (*redisstore.Store)(nil)
+
+// batchStore adds a GetMulti to a store, so GetMany's batch path runs on
+// boltdb; calls counts the batch reads.
+type batchStore struct {
+	store.Store
+	calls int
+}
+
+func (b *batchStore) GetMulti(ctx context.Context, keys []string) ([]*store.KVPair, error) {
+	b.calls++
+	out := make([]*store.KVPair, len(keys))
+	for i, key := range keys {
+		p, err := b.Store.Get(ctx, key, nil)
+		if errors.Is(err, store.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out[i] = p
+	}
+	return out, nil
+}
+
+func TestGetMany(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 0, 0)
+	k.now = func() time.Time { return time.Unix(1_000_000, 0) }
+	for _, s := range []struct {
+		ns, key, val string
+		ttl          time.Duration
+	}{
+		{"pony-a", "triggers", `{"n":1}`, 0},
+		{"pony-b", "triggers", `{"n":2}`, 0},
+		{"pony-a", "gone", `{"n":0}`, time.Second},
+	} {
+		if err := k.Set(ctx, "t1", s.ns, s.key, json.RawMessage(s.val), s.ttl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	k.now = func() time.Time { return time.Unix(1_000_010, 0) }
+
+	refs := []Ref{
+		{"pony-b", "triggers"},
+		{"pony-a", "missing"},
+		{"pony-a", "triggers"},
+		{"pony-a", "gone"}, // expired → a miss, like Get
+		{"pony-b", "triggers"},
+	}
+	wantFound := []bool{true, false, true, false, true}
+	wantVal := []string{`{"n":2}`, "", `{"n":1}`, "", `{"n":2}`}
+	check := func(name string, hits []Hit) {
+		t.Helper()
+		if len(hits) != len(refs) {
+			t.Fatalf("%s: %d hits for %d refs", name, len(hits), len(refs))
+		}
+		for i, h := range hits {
+			if h.Found != wantFound[i] || string(h.Value) != wantVal[i] {
+				t.Fatalf("%s: hit %d = {%v %s}, want {%v %s}", name, i, h.Found, h.Value, wantFound[i], wantVal[i])
+			}
+		}
+	}
+
+	hits, err := k.GetMany(ctx, "t1", refs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("key by key", hits)
+
+	// The batch path answers identically, in one read.
+	bs := &batchStore{Store: k.s}
+	kb := New(bs, 0, 0)
+	kb.now = k.now
+	hits, err = kb.GetMany(ctx, "t1", refs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("batch", hits)
+	if bs.calls != 1 {
+		t.Fatalf("batch path made %d reads, want 1", bs.calls)
+	}
+
+	// Another tenant sees nothing.
+	if hits, _ := k.GetMany(ctx, "t2", refs[:1]); hits[0].Found {
+		t.Fatalf("tenant leak: %v", hits)
+	}
+
+	// No refs: an empty answer, not an error.
+	if hits, err := k.GetMany(ctx, "t1", nil); err != nil || len(hits) != 0 {
+		t.Fatalf("empty: hits=%v err=%v", hits, err)
+	}
+
+	// One invalid ref refuses the whole call, before any read.
+	bs.calls = 0
+	for _, bad := range [][]Ref{
+		{{"pony-a", "triggers"}, {"pony-a", "a/b"}},
+		{{"pony-a", "triggers"}, {"", "k"}},
+		{{"pony-a", "triggers"}, {"pony-a", ""}},
+	} {
+		if hits, err := kb.GetMany(ctx, "t1", bad); err == nil || hits != nil {
+			t.Fatalf("invalid ref %v: hits=%v err=%v", bad, hits, err)
+		}
+	}
+	if bs.calls != 0 {
+		t.Fatalf("an invalid ref must fail before reading; %d reads", bs.calls)
+	}
+
+	// The cap is a refusal, never a truncation.
+	max := make([]Ref, MaxGetManyItems)
+	for i := range max {
+		max[i] = Ref{"pony-a", "triggers"}
+	}
+	if hits, err := k.GetMany(ctx, "t1", max); err != nil || len(hits) != MaxGetManyItems {
+		t.Fatalf("at the cap: %d hits, err=%v", len(hits), err)
+	}
+	if hits, err := k.GetMany(ctx, "t1", append(max, Ref{"pony-a", "triggers"})); err == nil || hits != nil {
+		t.Fatalf("over the cap must be refused: %d hits, err=%v", len(hits), err)
+	}
+}
+
+func TestListPairsPage(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 0, 0)
+
+	if page, next, err := k.ListPairsPage(ctx, "t1", "subs", "", 0); err != nil || len(page) != 0 || next != "" {
+		t.Fatalf("empty ns: page=%v next=%q err=%v", page, next, err)
+	}
+	for _, kk := range []string{"c", "a", "b"} {
+		if err := k.Set(ctx, "t1", "subs", kk, json.RawMessage(`{"k":"`+kk+`"}`), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	str := func(page []Pair) []string {
+		var out []string
+		for _, p := range page {
+			out = append(out, p.Key+"="+string(p.Value))
+		}
+		return out
+	}
+
+	page, next, err := k.ListPairsPage(ctx, "t1", "subs", "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{`a={"k":"a"}`, `b={"k":"b"}`}; !reflect.DeepEqual(str(page), want) || next != "b" {
+		t.Fatalf("page 1 = %v next=%q, want %v next=b", str(page), next, want)
+	}
+	page, next, err = k.ListPairsPage(ctx, "t1", "subs", next, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{`c={"k":"c"}`}; !reflect.DeepEqual(str(page), want) || next != "" {
+		t.Fatalf("page 2 = %v next=%q, want %v and no cursor", str(page), next, want)
 	}
 }
 

@@ -155,6 +155,7 @@ func TestKVValidation(t *testing.T) {
 		"delete no key":   {kvDelete, `{}`},
 		"incr no key":     {kvIncr, `{}`},
 		"cas no value":    {kvCAS, `{"key":"k"}`},
+		"mget no items":   {kvMGet, `{}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -199,6 +200,134 @@ func TestKVCASOp(t *testing.T) {
 	pay, _ = callKV(t, kvCAS, k, "t1", "hello", `{"key":"k2","from":".payload"}`, `{"payload":{"a":1}}`)
 	if !gjson.Get(pay.Raw, "_kv.swapped").Bool() || gjson.Get(pay.Raw, "_kv.current.a").Int() != 1 {
 		t.Fatalf("from-path cas should swap and report current: %s", pay.Raw)
+	}
+}
+
+func TestKVMGetOp(t *testing.T) {
+	k := newKVHandle(t)
+	for _, meta := range []string{
+		`{"key":"k1","value":1}`, // the stack's namespace, "hello"
+		`{"key":"triggers","namespace":"pony-a","value":{"at":"09:00"}}`,
+		`{"key":"triggers","namespace":"pony-b","value":{"at":"10:00"}}`,
+	} {
+		if _, err := callKV(t, kvSet, k, "t1", "hello", meta, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Per-item namespaces, a bare key in the stack's namespace, a miss — in order.
+	pay, err := callKV(t, kvMGet, k, "t1", "hello", `{"items":[
+		{"key":"triggers","namespace":"pony-b"},
+		"k1",
+		{"key":"nope","namespace":"pony-a"},
+		{"key":"triggers","namespace":"pony-a"}]}`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"_kv.count":             "4",
+		"_kv.found":             "3",
+		"_kv.items.0.namespace": "pony-b",
+		"_kv.items.0.found":     "true",
+		"_kv.items.0.value.at":  "10:00",
+		"_kv.items.1.namespace": "hello",
+		"_kv.items.1.key":       "k1",
+		"_kv.items.1.value":     "1",
+		"_kv.items.2.key":       "nope",
+		"_kv.items.2.found":     "false",
+		"_kv.items.3.value.at":  "09:00",
+	} {
+		if got := gjson.Get(pay.Raw, path).String(); got != want {
+			t.Fatalf("%s = %q, want %q: raw=%s", path, got, want, pay.Raw)
+		}
+	}
+	if gjson.Get(pay.Raw, "_kv.items.2.value").Exists() {
+		t.Fatalf("a miss must carry no value: raw=%s", pay.Raw)
+	}
+
+	// `into`, and a `_`-nested inlet sub-stack defaulting to the app's namespace.
+	pay, err = callKV(t, kvMGet, k, "t1", "hello/_mail", `{"items":["k1"],"into":"_m"}`, "")
+	if err != nil || gjson.Get(pay.Raw, "_m.items.0.namespace").String() != "hello" ||
+		gjson.Get(pay.Raw, "_m.items.0.value").Int() != 1 {
+		t.Fatalf("nested stack / into: raw=%s err=%v", pay.Raw, err)
+	}
+
+	// The call's namespace is the default for items that don't name one.
+	pay, err = callKV(t, kvMGet, k, "t1", "other",
+		`{"namespace":"pony-a","items":["triggers",{"key":"triggers","namespace":"pony-b"}]}`, "")
+	if err != nil || gjson.Get(pay.Raw, "_kv.items.0.value.at").String() != "09:00" ||
+		gjson.Get(pay.Raw, "_kv.items.1.value.at").String() != "10:00" {
+		t.Fatalf("call namespace default: raw=%s err=%v", pay.Raw, err)
+	}
+
+	// No items: an empty answer, not an error.
+	pay, err = callKV(t, kvMGet, k, "t1", "hello", `{"items":[]}`, "")
+	if err != nil || gjson.Get(pay.Raw, "_kv.items").Raw != "[]" ||
+		gjson.Get(pay.Raw, "_kv.count").Int() != 0 || !gjson.Get(pay.Raw, "_kv.found").Exists() {
+		t.Fatalf("empty items: raw=%s err=%v", pay.Raw, err)
+	}
+
+	// Refusals take the whole call and write nothing.
+	over, _ := sjson.Set(`{}`, "items", make([]string, 201))
+	for name, meta := range map[string]string{
+		"reserved item namespace": `{"items":["k1",{"key":"x","namespace":"_txc.blob"}]}`,
+		"slash in a key":          `{"items":["k1","a/b"]}`,
+		"item without a key":      `{"items":[{"namespace":"pony-a"}]}`,
+		"a number item":           `{"items":[42]}`,
+		"items not an array":      `{"items":"k1"}`,
+		"over the item cap":       over,
+	} {
+		pay, err := callKV(t, kvMGet, k, "t1", "hello", meta, "")
+		if err == nil || gjson.Get(pay.Raw, "_kv").Exists() {
+			t.Fatalf("%s: must refuse the whole call: raw=%s err=%v", name, pay.Raw, err)
+		}
+	}
+}
+
+func TestKVListValues(t *testing.T) {
+	k := newKVHandle(t)
+	for _, kv := range [][2]string{{"b", `{"n":2}`}, {"a", `{"n":1}`}, {"c", `{"n":3}`}} {
+		meta := `{"key":"` + kv[0] + `","namespace":"subs","value":` + kv[1] + `}`
+		if _, err := callKV(t, kvSet, k, "t1", "hello", meta, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Keys only by default: no rows.
+	pay, err := callKV(t, kvList, k, "t1", "hello", `{"namespace":"subs","limit":2}`, "")
+	if err != nil || gjson.Get(pay.Raw, "_kv.keys").Raw != `["a","b"]` ||
+		gjson.Get(pay.Raw, "_kv.rows").Exists() {
+		t.Fatalf("keys only: raw=%s err=%v", pay.Raw, err)
+	}
+
+	// values = true: rows beside unchanged keys / next / count, page by page.
+	pay, err = callKV(t, kvList, k, "t1", "hello", `{"namespace":"subs","limit":2,"values":true}`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"_kv.keys":         `["a","b"]`,
+		"_kv.next":         `"b"`,
+		"_kv.count":        "2",
+		"_kv.rows.#":       "2",
+		"_kv.rows.0.key":   `"a"`,
+		"_kv.rows.0.value": `{"n":1}`,
+		"_kv.rows.1.value": `{"n":2}`,
+	} {
+		if got := gjson.Get(pay.Raw, path).Raw; got != want {
+			t.Fatalf("%s = %s, want %s: raw=%s", path, got, want, pay.Raw)
+		}
+	}
+	pay, _ = callKV(t, kvList, k, "t1", "hello", `{"namespace":"subs","limit":2,"values":true,"after":"b"}`, "")
+	if gjson.Get(pay.Raw, "_kv.rows.#").Int() != 1 || gjson.Get(pay.Raw, "_kv.rows.0.key").String() != "c" ||
+		gjson.Get(pay.Raw, "_kv.rows.0.value").Raw != `{"n":3}` || gjson.Get(pay.Raw, "_kv.next").String() != "" {
+		t.Fatalf("last page: raw=%s", pay.Raw)
+	}
+
+	// An empty namespace: [] for both, never null.
+	pay, _ = callKV(t, kvList, k, "t1", "hello", `{"namespace":"empty","values":true}`, "")
+	if gjson.Get(pay.Raw, "_kv.rows").Raw != "[]" || gjson.Get(pay.Raw, "_kv.keys").Raw != "[]" {
+		t.Fatalf("empty namespace: raw=%s", pay.Raw)
 	}
 }
 

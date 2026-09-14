@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -17,7 +18,8 @@ import (
 )
 
 // kv.go holds the handler bodies for the op-writable KV ops (txco://kv/get,
-// kv/set, kv/delete, kv/incr). They are the only ops that persist data
+// kv/set, kv/delete, kv/incr, kv/cas) and their bulk reads (kv/mget,
+// kv/list). They are the only ops that persist data
 // across requests (the envelope is per-request). Storage is the configured
 // KV backend (boltdb or redis); this layer adds the txcl surface: WITH params
 // in, JSON value into/out of the envelope tree.
@@ -68,14 +70,25 @@ func kvScope(ctx context.Context, in []byte) (tenant, ns string, err error) {
 	if ns == "" {
 		ns = "default"
 	}
+	if ns, err = kvNamespace(ns); err != nil {
+		return "", "", err
+	}
+	return tenant, ns, nil
+}
+
+// kvNamespace maps a namespace as written (or the routed stack's name) to the
+// one keys are stored under — see appStackNamespace — and refuses the
+// chassis-reserved ones. kvScope applies it to the call's namespace; kv/mget
+// applies it to each item's own.
+func kvNamespace(ns string) (string, error) {
 	ns = appStackNamespace(ns)
 	// Chassis-owned namespaces (the txco://blob name index) are not plain KV:
 	// refused here so an author can neither read an index as data nor write
 	// into one. Same reservation idiom as `_txc.*` on the envelope.
 	if kvstore.IsReservedNamespace(ns) {
-		return "", "", fmt.Errorf("kv: namespace %q is reserved for the chassis", ns)
+		return "", fmt.Errorf("kv: namespace %q is reserved for the chassis", ns)
 	}
-	return tenant, ns, nil
+	return ns, nil
 }
 
 func kvKey(ctx context.Context, op string) (string, error) {
@@ -265,7 +278,9 @@ func kvIncr(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 // after the `after` cursor; `next` is the cursor to pass on the following call
 // ("" when the namespace is exhausted). There's no per-key prefix scan — the KV
 // NAMESPACE is the prefix, so bucket a listable set (e.g. subscribers) in its
-// own namespace. No `key` param.
+// own namespace. No `key` param. With `values = true` it also writes
+// rows:[{key, value}] — values the store read for the listing anyway — metered
+// per MiB returned.
 func kvList(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error) {
 	tenant, ns, err := kvScope(ctx, in)
 	if err != nil {
@@ -274,13 +289,30 @@ func kvList(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 	meta := []byte(operation.MetaFromContext(ctx))
 	after := gjson.GetBytes(meta, "after").String()
 	limit := int(gjson.GetBytes(meta, "limit").Int())
-	keys, next, lerr := k.ListKeysPage(ctx, tenant, ns, after, limit)
+	values := gjson.GetBytes(meta, "values").Bool()
+	pairs, next, lerr := k.ListPairsPage(ctx, tenant, ns, after, limit)
 	if lerr != nil {
 		return kvErr(lerr.Error()), lerr
 	}
-	if keys == nil {
-		keys = []string{} // emit [] not null for an empty/exhausted page
+	keys := make([]string, 0, len(pairs)) // emit [] not null for an empty/exhausted page
+	var rows strings.Builder
+	var valueBytes int64
+	rows.WriteByte('[')
+	for i, p := range pairs {
+		keys = append(keys, p.Key)
+		if !values {
+			continue
+		}
+		if i > 0 {
+			rows.WriteByte(',')
+		}
+		row := jsonx.NewObject()
+		row.Set("key", p.Key)
+		row.SetRaw("value", string(p.Value))
+		rows.WriteString(row.String())
+		valueBytes += int64(len(p.Value))
 	}
+	rows.WriteByte(']')
 	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
 	if into == "" {
 		into = "_kv"
@@ -290,7 +322,106 @@ func kvList(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 	resp.SetRaw(into+".keys", string(blob))
 	resp.Set(into+".next", next)
 	resp.Set(into+".count", len(keys))
+	if values {
+		resp.SetRaw(into+".rows", rows.String())
+		chargePerMiB(ctx, valueBytes, processor.FuelCostKVPerMiB, in)
+	}
 	return event.Payload{Raw: resp.String(), Type: event.JSON}, nil
+}
+
+// kvMGet reads many keys in one dispatch. `items` is an array whose entries are
+// a bare key string (in the call's namespace, as kvScope resolves it) or an
+// object {key, namespace?}, where an item's own namespace overrides the call's.
+// It writes {items:[{namespace, key, found, value?}], count, found} at `into`
+// (default `_kv`), in item order. Every item is validated before anything is
+// read, and more than kvstore.MaxGetManyItems items is refused rather than
+// clamped: a dropped or skipped item would read exactly like a missing key, and
+// a sweep that deletes what it cannot find would act on it. Values are metered
+// per MiB returned.
+func kvMGet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error) {
+	tenant, defaultNS, err := kvScope(ctx, in)
+	if err != nil {
+		return kvErr(err.Error()), err
+	}
+	meta := []byte(operation.MetaFromContext(ctx))
+	refs, rerr := kvMGetRefs(gjson.GetBytes(meta, "items"), defaultNS)
+	if rerr != nil {
+		e := "kv/mget: " + rerr.Error()
+		return kvErr(e), errors.New(e)
+	}
+	hits, gerr := k.GetMany(ctx, tenant, refs)
+	if gerr != nil {
+		return kvErr(gerr.Error()), gerr
+	}
+
+	var items strings.Builder
+	var found int
+	var valueBytes int64
+	items.WriteByte('[')
+	for i, h := range hits {
+		if i > 0 {
+			items.WriteByte(',')
+		}
+		row := jsonx.NewObject()
+		row.Set("namespace", refs[i].Namespace)
+		row.Set("key", refs[i].Key)
+		row.Set("found", h.Found)
+		if h.Found {
+			row.SetRaw("value", string(h.Value))
+			found++
+			valueBytes += int64(len(h.Value))
+		}
+		items.WriteString(row.String())
+	}
+	items.WriteByte(']')
+
+	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
+	if into == "" {
+		into = "_kv"
+	}
+	resp := jsonx.NewObject()
+	resp.SetRaw(into+".items", items.String())
+	resp.Set(into+".count", len(hits))
+	resp.Set(into+".found", found)
+	chargePerMiB(ctx, valueBytes, processor.FuelCostKVPerMiB, in)
+	return event.Payload{Raw: resp.String(), Type: event.JSON}, nil
+}
+
+// kvMGetRefs parses kv/mget's `items` into store refs. An item's empty or
+// absent namespace takes the call's, as an empty WITH `namespace` does for
+// kv/get.
+func kvMGetRefs(items gjson.Result, defaultNS string) ([]kvstore.Ref, error) {
+	if !items.IsArray() {
+		return nil, errors.New("need `items`, an array of keys or {key, namespace} objects")
+	}
+	arr := items.Array()
+	if len(arr) > kvstore.MaxGetManyItems {
+		return nil, fmt.Errorf("%d items exceeds the %d-item cap; split the read", len(arr), kvstore.MaxGetManyItems)
+	}
+	refs := make([]kvstore.Ref, len(arr))
+	for i, it := range arr {
+		ref := kvstore.Ref{Namespace: defaultNS}
+		switch {
+		case it.Type == gjson.String:
+			ref.Key = it.String()
+		case it.IsObject():
+			ref.Key = it.Get("key").String()
+			if ns := it.Get("namespace").String(); ns != "" {
+				n, err := kvNamespace(ns)
+				if err != nil {
+					return nil, fmt.Errorf("item %d: %w", i, err)
+				}
+				ref.Namespace = n
+			}
+		default:
+			return nil, fmt.Errorf("item %d: want a key string or a {key, namespace} object", i)
+		}
+		if ref.Key == "" {
+			return nil, fmt.Errorf("item %d: missing `key`", i)
+		}
+		refs[i] = ref
+	}
+	return refs, nil
 }
 
 // kvErr builds a structured error event.Payload (never includes values —

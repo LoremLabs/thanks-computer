@@ -162,6 +162,103 @@ func (k *KV) Get(ctx context.Context, tenant, ns, key string) (value json.RawMes
 	return w.V, true, nil
 }
 
+// MaxGetManyItems bounds one GetMany. Unlike a list window it is a refusal,
+// not a clamp: a dropped ref would read exactly like a missing key.
+const MaxGetManyItems = 200
+
+// Ref names one key for GetMany: a namespace and a user key under the call's
+// tenant.
+type Ref struct {
+	Namespace string
+	Key       string
+}
+
+// Hit is one GetMany result: the JSON value, and whether the key was live.
+type Hit struct {
+	Value json.RawMessage
+	Found bool
+}
+
+// multiGetter is the batch read a backend may offer beyond store.Store
+// (redisstore.GetMulti): one pair per key, positionally, nil for a miss.
+type multiGetter interface {
+	GetMulti(ctx context.Context, keys []string) ([]*store.KVPair, error)
+}
+
+// GetMany reads refs under one tenant and returns one Hit per ref, in order;
+// a repeated ref is read and reported twice. Every ref is validated before
+// anything is read, so an invalid one fails the whole call instead of
+// yielding a partial answer, and more than MaxGetManyItems refs is refused for
+// the same reason. Missing and lazily-expired keys are Found=false, as with
+// Get. A backend with a batch read (redis MGET) serves the call in one round
+// trip per chunk; any other reads key by key.
+func (k *KV) GetMany(ctx context.Context, tenant string, refs []Ref) ([]Hit, error) {
+	if k == nil || k.s == nil {
+		return nil, errors.New("kv: store not configured")
+	}
+	if len(refs) > MaxGetManyItems {
+		return nil, fmt.Errorf("kv: %d keys exceeds the %d-key cap", len(refs), MaxGetManyItems)
+	}
+	fks := make([]string, len(refs))
+	for i, r := range refs {
+		fk, err := k.fullKey(tenant, r.Namespace, r.Key)
+		if err != nil {
+			return nil, err
+		}
+		fks[i] = fk
+	}
+	hits := make([]Hit, len(refs))
+	if len(refs) == 0 {
+		return hits, nil
+	}
+	pairs, err := k.readMany(ctx, fks)
+	if err != nil {
+		return nil, err
+	}
+	for i, p := range pairs {
+		if p == nil {
+			continue
+		}
+		var w wrapper
+		if uerr := json.Unmarshal(p.Value, &w); uerr != nil {
+			return nil, fmt.Errorf("kv: decode %q: %w", refs[i].Key, uerr)
+		}
+		if k.expired(w) {
+			_ = k.s.Delete(ctx, fks[i]) // best-effort lazy GC, as in Get
+			continue
+		}
+		hits[i] = Hit{Value: w.V, Found: true}
+	}
+	return hits, nil
+}
+
+// readMany fetches the stored pairs for composed keys, positionally (nil for a
+// miss) — through the backend's batch read when it has one.
+func (k *KV) readMany(ctx context.Context, fks []string) ([]*store.KVPair, error) {
+	if mg, ok := k.s.(multiGetter); ok {
+		pairs, err := mg.GetMulti(ctx, fks)
+		if err != nil {
+			return nil, err
+		}
+		if len(pairs) != len(fks) {
+			return nil, fmt.Errorf("kv: batch read returned %d values for %d keys", len(pairs), len(fks))
+		}
+		return pairs, nil
+	}
+	pairs := make([]*store.KVPair, len(fks))
+	for i, fk := range fks {
+		p, err := k.s.Get(ctx, fk, nil)
+		if err != nil {
+			if errors.Is(err, store.ErrKeyNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		pairs[i] = p
+	}
+	return pairs, nil
+}
+
 // Set writes value at (tenant, ns, key). A ttl <= 0 stores a persistent
 // key (no expiry); a positive ttl is clamped to maxTTL.
 func (k *KV) Set(ctx context.Context, tenant, ns, key string, value json.RawMessage, ttl time.Duration) error {
@@ -283,24 +380,36 @@ func (k *KV) ListPairs(ctx context.Context, tenant, ns string) ([]Pair, error) {
 // page. Deterministic order makes the `after` cursor a stable resume point even
 // as keys are added/removed between pages.
 func (k *KV) ListKeysPage(ctx context.Context, tenant, ns, after string, limit int) (keys []string, next string, err error) {
-	all, err := k.listKeysAll(ctx, tenant, ns)
+	pairs, next, err := k.ListPairsPage(ctx, tenant, ns, after, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, p := range pairs {
+		keys = append(keys, p.Key)
+	}
+	return keys, next, nil
+}
+
+// ListPairsPage is ListKeysPage with the values: the same stable, windowed,
+// key-sorted page and cursor, each key carrying its JSON value. The values
+// cost nothing extra — listAll has already read them — so it pays exactly
+// ListKeysPage's full-namespace read per page.
+func (k *KV) ListPairsPage(ctx context.Context, tenant, ns, after string, limit int) (page []Pair, next string, err error) {
+	all, err := k.listAll(ctx, tenant, ns)
 	if err != nil {
 		return nil, "", err
 	}
 	if limit <= 0 || limit > MaxListLimit {
 		limit = DefaultListLimit
 	}
-	sort.Strings(all)
+	sort.Slice(all, func(i, j int) bool { return all[i].Key < all[j].Key })
 	// First index strictly greater than the cursor (0 when after == "", since
 	// every non-empty key sorts after "").
-	i := sort.Search(len(all), func(j int) bool { return all[j] > after })
-	end := i + limit
-	if end > len(all) {
-		end = len(all)
-	}
-	page := append([]string(nil), all[i:end]...)
+	i := sort.Search(len(all), func(j int) bool { return all[j].Key > after })
+	end := min(i+limit, len(all))
+	page = append([]Pair(nil), all[i:end]...)
 	if end < len(all) {
-		next = all[end-1] // more remain; resume strictly after the last returned key
+		next = all[end-1].Key // more remain; resume strictly after the last returned key
 	}
 	return page, next, nil
 }

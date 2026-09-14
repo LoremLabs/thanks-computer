@@ -166,6 +166,67 @@ func TestListPaginatesScanAndMGet(t *testing.T) {
 	}
 }
 
+func TestGetMultiPositional(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+
+	// Force multi-chunk MGET with few keys.
+	oldChunk := mgetChunk
+	mgetChunk = 2
+	t.Cleanup(func() { mgetChunk = oldChunk })
+
+	var keys []string
+	for i := 0; i < 7; i++ {
+		k := fmt.Sprintf("%s/ns/k%d", prefix, i)
+		keys = append(keys, k)
+		if i%3 == 1 {
+			continue // misses at 1 and 4, on both sides of a chunk boundary
+		}
+		if err := s.Put(ctx, k, []byte(fmt.Sprintf(`{"v":%d}`, i)), nil); err != nil {
+			t.Fatalf("Put %s: %v", k, err)
+		}
+	}
+	keys = append(keys, "/"+keys[0]) // a leading '/' normalizes, as in Get
+
+	pairs, err := s.GetMulti(ctx, keys)
+	if err != nil {
+		t.Fatalf("GetMulti: %v", err)
+	}
+	if len(pairs) != len(keys) {
+		t.Fatalf("GetMulti returned %d pairs for %d keys", len(pairs), len(keys))
+	}
+	for i := 0; i < 7; i++ {
+		if i%3 == 1 {
+			if pairs[i] != nil {
+				t.Fatalf("pair %d: want nil for a miss, got %q", i, pairs[i].Value)
+			}
+			continue
+		}
+		if want := fmt.Sprintf(`{"v":%d}`, i); pairs[i] == nil || string(pairs[i].Value) != want {
+			t.Fatalf("pair %d = %v, want %s", i, pairs[i], want)
+		}
+	}
+	if pairs[7] == nil || string(pairs[7].Value) != `{"v":0}` {
+		t.Fatalf("normalized duplicate = %v", pairs[7])
+	}
+	if pairs, err := s.GetMulti(ctx, nil); err != nil || len(pairs) != 0 {
+		t.Fatalf("empty GetMulti: pairs=%v err=%v", pairs, err)
+	}
+
+	// Through the chassis wrapper, which takes the batch path on this store.
+	w := kv.New(s, 0, 0)
+	if err := w.Set(ctx, prefix, "w", "a", []byte(`{"a":1}`), 0); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	hits, err := w.GetMany(ctx, prefix, []kv.Ref{{Namespace: "w", Key: "missing"}, {Namespace: "w", Key: "a"}})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if hits[0].Found || !hits[1].Found || string(hits[1].Value) != `{"a":1}` {
+		t.Fatalf("GetMany = %+v", hits)
+	}
+}
+
 func TestAtomicPutAndDelete(t *testing.T) {
 	s, prefix := newTestStore(t)
 	ctx := context.Background()

@@ -27,6 +27,8 @@
 //     rejects CONFIG).
 //   - setNX surfaces the underlying redis error instead of folding every
 //     failure into ErrKeyExists.
+//   - Added GetMulti: a positional, chunked MGET (not in store.Store) that
+//     chassis/kv discovers by interface to serve txco://kv/mget.
 package redisstore
 
 import (
@@ -203,25 +205,56 @@ func (r *Store) keys(ctx context.Context, pattern string) ([]string, error) {
 // vanished since the SCAN (deleted or natively expired) come back nil and are
 // skipped, as is a key exactly equal to the listed prefix itself.
 func (r *Store) mget(ctx context.Context, prefix string, keys []string) ([]*store.KVPair, error) {
+	replies, err := r.mgetReplies(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
 	var pairs []*store.KVPair
-	for start := 0; start < len(keys); start += mgetChunk {
-		chunk := keys[start:min(start+mgetChunk, len(keys))]
-		replies, err := r.client.MGet(ctx, chunk...).Result()
-		if err != nil {
-			return nil, err
+	for i, reply := range replies {
+		sreply, ok := reply.(string)
+		if !ok || sreply == "" || keys[i] == prefix {
+			continue
 		}
-		for i, reply := range replies {
-			sreply, ok := reply.(string)
-			if !ok || sreply == "" {
-				continue
-			}
-			if chunk[i] == prefix {
-				continue
-			}
-			pairs = append(pairs, &store.KVPair{Key: chunk[i], Value: []byte(sreply)})
+		pairs = append(pairs, &store.KVPair{Key: keys[i], Value: []byte(sreply)})
+	}
+	return pairs, nil
+}
+
+// GetMulti reads keys in mgetChunk-sized MGETs and returns one pair per key,
+// positionally, nil where the key is missing. Not part of store.Store: it is
+// the batch read chassis/kv's GetMany discovers by interface, so kv/mget costs
+// one round trip per chunk instead of one per key.
+func (r *Store) GetMulti(ctx context.Context, keys []string) ([]*store.KVPair, error) {
+	nkeys := make([]string, len(keys))
+	for i, k := range keys {
+		nkeys[i] = normalize(k)
+	}
+	replies, err := r.mgetReplies(ctx, nkeys)
+	if err != nil {
+		return nil, err
+	}
+	pairs := make([]*store.KVPair, len(keys))
+	for i, reply := range replies {
+		if sreply, ok := reply.(string); ok && sreply != "" {
+			pairs[i] = &store.KVPair{Key: nkeys[i], Value: []byte(sreply)}
 		}
 	}
 	return pairs, nil
+}
+
+// mgetReplies runs MGET over keys in mgetChunk-sized batches and returns the
+// raw replies positionally (nil for a missing key).
+func (r *Store) mgetReplies(ctx context.Context, keys []string) ([]any, error) {
+	replies := make([]any, 0, len(keys))
+	for start := 0; start < len(keys); start += mgetChunk {
+		chunk := keys[start:min(start+mgetChunk, len(keys))]
+		batch, err := r.client.MGet(ctx, chunk...).Result()
+		if err != nil {
+			return nil, err
+		}
+		replies = append(replies, batch...)
+	}
+	return replies, nil
 }
 
 // AtomicPut is an atomic compare-and-swap on a single value. previous == nil

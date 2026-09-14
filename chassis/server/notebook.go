@@ -126,9 +126,17 @@ func notebookStage(in []byte) string { return gjson.GetBytes(in, "_txc.op").Stri
 // response (export) per MiB, rounded up. Appends pay only the dispatch:
 // the per-entry cap bounds bytes in.
 func notebookChargeBytes(ctx context.Context, n int64, in []byte) {
+	chargePerMiB(ctx, n, processor.FuelCostNotebookPerMiB, in)
+}
+
+// chargePerMiB meters n bytes returned at rate fuel per MiB, rounded up, and
+// labels the charge with the op identity the processor stamped. Shared by the
+// ops that return stored bytes in bulk: notebook read/export, kv/mget and
+// kv/list with values.
+func chargePerMiB(ctx context.Context, n, rate int64, in []byte) {
 	mib := (n + (1 << 20) - 1) >> 20
 	if mib > 0 {
-		_ = processor.AddFuel(ctx, mib*processor.FuelCostNotebookPerMiB, notebookStage(in))
+		_ = processor.AddFuel(ctx, mib*rate, notebookStage(in))
 	}
 }
 
