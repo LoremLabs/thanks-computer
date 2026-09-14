@@ -154,6 +154,63 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) vector.Store) {
 		}
 	})
 
+	t.Run("UpdateMetadata", func(t *testing.T) {
+		const uc = "labels"
+		if err := s.EnsureCollection(ctx, tenant, vector.Collection{Name: uc, Dimensions: dim, Metric: vector.MetricCosine}); err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		if _, err := s.Upsert(ctx, tenant, uc, []vector.Item{
+			{ID: "p", Vector: []float32{1, 0, 0, 0}, Text: "keep-p", Metadata: map[string]any{"classification": "guest", "doc": "d1"}},
+			{ID: "q", Vector: []float32{0, 1, 0, 0}, Text: "keep-q", Metadata: map[string]any{"classification": "guest", "doc": "d2"}},
+			{ID: "r", Vector: []float32{0, 0, 1, 0}, Text: "keep-r", Metadata: map[string]any{"classification": "internal", "doc": "d3"}},
+		}); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		// Re-label the guest items: add audience, keep doc, drop classification.
+		n, err := s.UpdateMetadata(ctx, tenant, uc,
+			vector.Filter{Conditions: []vector.Condition{{Field: "classification", Op: vector.OpEq, Value: "guest"}}},
+			map[string]any{"audience": "anyone", "classification": nil})
+		if err != nil || n != 2 {
+			t.Fatalf("update: n=%d err=%v want 2", n, err)
+		}
+		got, _ := s.Search(ctx, tenant, uc, []float32{1, 0, 0, 0}, 10,
+			vector.Filter{Conditions: []vector.Condition{{Field: "audience", Op: vector.OpEq, Value: "anyone"}}})
+		if !sameSet(ids(got), []string{"p", "q"}) {
+			t.Fatalf("after update: %v want [p q]", ids(got))
+		}
+		for _, m := range got {
+			if m.Metadata["doc"] == nil || m.Metadata["classification"] != nil || m.Text == "" {
+				t.Fatalf("update must merge (keep doc, drop classification, keep text): %+v", m)
+			}
+		}
+		// The untouched item still carries its old label and no audience.
+		got, _ = s.Search(ctx, tenant, uc, []float32{0, 0, 1, 0}, 1, vector.Filter{})
+		if len(got) != 1 || got[0].ID != "r" || got[0].Metadata["classification"] != "internal" || got[0].Metadata["audience"] != nil {
+			t.Fatalf("untouched item changed: %+v", got)
+		}
+		// Vectors are untouched: ranking is unchanged.
+		got, _ = s.Search(ctx, tenant, uc, []float32{0, 1, 0, 0}, 1, vector.Filter{})
+		if len(got) != 1 || got[0].ID != "q" {
+			t.Fatalf("vector changed by update: %v", ids(got))
+		}
+		// id filter works for update too; a miss matches nothing.
+		if n, err := s.UpdateMetadata(ctx, tenant, uc,
+			vector.Filter{Conditions: []vector.Condition{{Field: "id", Op: vector.OpIn, Value: []any{"r", "nope"}}}},
+			map[string]any{"audience": "team"}); err != nil || n != 1 {
+			t.Fatalf("id update: n=%d err=%v want 1", n, err)
+		}
+		// An unconditional update is refused.
+		if _, err := s.UpdateMetadata(ctx, tenant, uc, vector.Filter{}, map[string]any{"x": 1}); err == nil {
+			t.Fatal("unconditional update: want error")
+		} else if _, ok := err.(*vector.InvalidArgError); !ok {
+			t.Fatalf("want InvalidArgError, got %T", err)
+		}
+		if _, err := s.UpdateMetadata(ctx, tenant, "nope",
+			vector.Filter{Conditions: []vector.Condition{{Field: "id", Op: vector.OpEq, Value: "x"}}}, map[string]any{"x": 1}); err == nil {
+			t.Fatal("update missing collection: want error")
+		}
+	})
+
 	t.Run("DimensionMismatch", func(t *testing.T) {
 		mustEnsure()
 		if _, err := s.Upsert(ctx, tenant, coll, []vector.Item{{ID: "z", Vector: []float32{1, 2}}}); err == nil {

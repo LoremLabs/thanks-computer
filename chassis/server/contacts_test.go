@@ -222,8 +222,34 @@ func TestContactsAddressbookAndObjectsOps(t *testing.T) {
 	}
 	out = callCon(t, contactsList, d, "acme", `{"username":"paris@pony.example.com","addressbook":"senders","limit":1}`)
 	if gjson.Get(out, "_contacts.count").Int() != 1 || gjson.Get(out, "_contacts.next").Int() != 2 || gjson.Get(out, "_contacts.items.0.name").String() != "bob-example.com.vcf" ||
-		gjson.Get(out, "_contacts.items.0.addresses.0").String() != "bob@example.com" || gjson.Get(out, "_contacts.items.0.vcard").Exists() {
+		gjson.Get(out, "_contacts.items.0.addresses.0").String() != "bob@example.com" || gjson.Get(out, "_contacts.items.0.vcard").Exists() ||
+		!gjson.Get(out, "_contacts.items.0.members").IsArray() || !gjson.Get(out, "_contacts.items.0.categories").IsArray() {
 		t.Errorf("list objects page 1 = %s", out)
+	}
+	// A group with members and a tagged person: list reports both facts.
+	out = callCon(t, contactsPut, d, "acme", `{"username":"paris@pony.example.com","addressbook":"senders","name":"team.vcf","card":{"fn":"Team","kind":"group","members":["urn:uuid:bob-example.com.paris@pony.example.com"]}}`)
+	if gjson.Get(out, "_contacts.error").Exists() {
+		t.Fatalf("group put = %s", out)
+	}
+	out = callCon(t, contactsPut, d, "acme", `{"username":"paris@pony.example.com","addressbook":"senders","name":"dana.vcf","card":{"fn":"Dana","emails":[{"value":"dana@example.com"}],"categories":["customer","vip"]}}`)
+	if gjson.Get(out, "_contacts.error").Exists() {
+		t.Fatalf("tagged put = %s", out)
+	}
+	out = callCon(t, contactsList, d, "acme", `{"username":"paris@pony.example.com","addressbook":"senders"}`)
+	var sawGroup, sawTags bool
+	for _, it := range gjson.Get(out, "_contacts.items").Array() {
+		switch it.Get("name").String() {
+		case "team.vcf":
+			sawGroup = it.Get("kind").String() == "group" && it.Get("members.0").String() == "urn:uuid:bob-example.com.paris@pony.example.com" && len(it.Get("addresses").Array()) == 0
+		case "dana.vcf":
+			sawTags = it.Get("categories.0").String() == "customer" && it.Get("categories.1").String() == "vip" && len(it.Get("members").Array()) == 0
+		}
+	}
+	if !sawGroup || !sawTags {
+		t.Errorf("list members/categories = %s", out)
+	}
+	for _, name := range []string{"team.vcf", "dana.vcf"} {
+		callCon(t, contactsDelete, d, "acme", `{"username":"paris@pony.example.com","addressbook":"senders","name":"`+name+`"}`)
 	}
 	out = callCon(t, contactsList, d, "acme", `{"username":"paris@pony.example.com","addressbook":"senders","after":2}`)
 	if gjson.Get(out, "_contacts.count").Int() != 1 || gjson.Get(out, "_contacts.next").Int() != 0 || gjson.Get(out, "_contacts.items.0.uid").String() != "8F2C1A34-1111-4C2B-9E5D-ABCDEF012345" {

@@ -1739,6 +1739,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 				return vectorDelete(ctx, vstore, in)
 			}))
+		pu.Handle([]byte("txco://vector/update"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return vectorUpdate(ctx, vstore, in)
+			}))
 		storeSeedMaterializers = append(storeSeedMaterializers, vecseed.New(vstore, vstore.Shared()))
 	}
 

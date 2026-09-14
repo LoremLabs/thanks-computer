@@ -52,6 +52,10 @@ type Card struct {
 	Phones   []Typed  `json:"phones,omitempty"`
 	Kind     string   `json:"kind,omitempty"`
 	Members  []string `json:"members,omitempty"`
+	// Categories are the card's CATEGORIES values (vCard's free tags —
+	// "customer", "vendor"), trimmed and deduped, in order. A label a product
+	// may read, never security state.
+	Categories []string `json:"categories,omitempty"`
 
 	// Facts the chassis fills in when parsing; ignored when rendering.
 	Version   string   `json:"version,omitempty"`
@@ -385,6 +389,15 @@ func Parse(b []byte) (Card, error) {
 			if v := text(); v != "" {
 				c.Members = append(c.Members, v)
 			}
+		case "CATEGORIES":
+			// Comma-separated; a card may carry several CATEGORIES lines.
+			for _, part := range splitUnescaped(l.value, ',') {
+				v := strings.TrimSpace(unescapeText(part))
+				if v == "" || seenCategory(c.Categories, v) {
+					continue
+				}
+				c.Categories = append(c.Categories, v)
+			}
 		case "REV":
 			c.Rev = parseRev(strings.TrimSpace(l.value))
 		}
@@ -399,6 +412,15 @@ func Parse(b []byte) (Card, error) {
 		return Card{}, errors.New("vcard: no UID")
 	}
 	return c, nil
+}
+
+func seenCategory(have []string, v string) bool {
+	for _, h := range have {
+		if strings.EqualFold(h, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // typesOf reads TYPE/PREF params: lower-cased types without `pref`, and
@@ -585,6 +607,12 @@ func Render(c Card, now time.Time) ([]byte, error) {
 	if v := c.Note; strings.TrimSpace(v) != "" {
 		add("NOTE", escapeText(v))
 	}
+	if cats := cleanCategories(c.Categories); len(cats) > 0 {
+		for i := range cats {
+			cats[i] = escapeText(cats[i])
+		}
+		add("CATEGORIES", strings.Join(cats, ","))
+	}
 	if kind == "group" {
 		add("X-ADDRESSBOOKSERVER-KIND", "group")
 		for _, m := range c.Members {
@@ -596,6 +624,20 @@ func Render(c Card, now time.Time) ([]byte, error) {
 	add("REV", now.UTC().Format("20060102T150405Z"))
 	add("END", "VCARD")
 	return []byte(strings.Join(lines, "\r\n") + "\r\n"), nil
+}
+
+// cleanCategories trims, drops empties and dedupes (case-insensitively) a
+// caller's categories, keeping first spelling and order.
+func cleanCategories(in []string) []string {
+	var out []string
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" || seenCategory(out, v) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // typeList builds a TYPE value list: `first` (when given) then the caller's

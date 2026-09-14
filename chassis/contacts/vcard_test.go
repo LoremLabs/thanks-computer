@@ -75,6 +75,19 @@ func TestRenderDefaultsAndErrors(t *testing.T) {
 	if p, _ := Parse(g); p.Kind != "group" || len(p.Members) != 2 || len(p.Addresses) != 0 {
 		t.Errorf("group parsed = %+v", p)
 	}
+	// Categories: rendered as one CATEGORIES line, escaped, deduped; parsed
+	// back in order, from one line or several.
+	cb, err := Render(Card{UID: "c@x", FN: "Cat", Categories: []string{" customer ", "VIP, gold", "Customer", ""}}, stamp)
+	if err != nil || !strings.Contains(string(cb), "CATEGORIES:customer,VIP\\, gold\r\n") {
+		t.Errorf("categories (%v):\n%s", err, cb)
+	}
+	if p, _ := Parse(cb); strings.Join(p.Categories, "|") != "customer|VIP, gold" {
+		t.Errorf("categories parsed = %+v", p.Categories)
+	}
+	two := "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c2\r\nFN:C\r\nCATEGORIES:vendor,Customer\r\nCATEGORIES:customer, press\r\nEND:VCARD\r\n"
+	if p, err := Parse([]byte(two)); err != nil || strings.Join(p.Categories, "|") != "vendor|Customer|press" {
+		t.Errorf("two CATEGORIES lines = %+v err=%v", p.Categories, err)
+	}
 	for name, c := range map[string]Card{
 		"no uid":    {FN: "x"},
 		"no fn":     {UID: "a"},

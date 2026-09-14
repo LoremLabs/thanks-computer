@@ -85,6 +85,26 @@ results. The other ops are `txco://vector/upsert` (one item, or `items = [ … ]
 in bulk) and `txco://vector/delete` (`ids = [ … ]`). Errors surface at
 `vector.error`.
 
+## Re-labelling without re-embedding
+
+`txco://vector/update` merges `merge` into the metadata of every item that
+matches `filter`, leaving vectors and text alone — the way to rename a label
+or reclassify a document without paying for embeddings again:
+
+```txcl
+WITH collection = "books",
+     filter     = &object("audience", "guest"),
+     merge      = &object("audience", "anyone", "legacy", null)
+EXEC "txco://vector/update"
+#   _vector.updated = the number of items matched
+```
+
+`filter` is the search grammar above and must name at least one condition
+(an unconditional rewrite is refused). `merge` is a shallow merge patch: each key
+replaces the item's, a `null` removes the key, every other key is kept. The
+count lands at `into` (default `_vector.updated`), so several updates in one
+scope can keep their counts apart.
+
 ## Deploying data: code vs. data
 
 A search collection is usually a **known set that belongs with the deploy** — a

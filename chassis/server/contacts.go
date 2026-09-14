@@ -177,6 +177,16 @@ func addressbookJSON(b *jsonx.Builder, p, prefix string, ab chcon.Addressbook) {
 	b.Set(p+".updated_at", ab.UpdatedAt.UTC().Format(time.RFC3339))
 }
 
+func setStrings(b *jsonx.Builder, p string, vals []string) {
+	if len(vals) == 0 {
+		b.SetRaw(p, "[]")
+		return
+	}
+	for i, v := range vals {
+		b.Set(fmt.Sprintf("%s.%d", p, i), v)
+	}
+}
+
 func contactJSON(b *jsonx.Builder, p, prefix, username, abName string, o chcon.Object) {
 	b.Set(p+".name", o.Name)
 	b.Set(p+".path", contactsObjectPath(prefix, username, abName, o.Name))
@@ -193,6 +203,15 @@ func contactJSON(b *jsonx.Builder, p, prefix, username, abName string, o chcon.O
 			b.Set(fmt.Sprintf("%s.addresses.%d", p, i), a)
 		}
 	}
+	// members (a group's MEMBER refs) and categories (CATEGORIES) are read
+	// from the stored bytes: labels a stack may act on, never security state.
+	// Both are always present, so a rule can index them without a guard.
+	var members, categories []string
+	if c, err := chcon.Parse(o.VCard); err == nil {
+		members, categories = c.Members, c.Categories
+	}
+	setStrings(b, p+".members", members)
+	setStrings(b, p+".categories", categories)
 	b.Set(p+".modseq", o.ModSeq)
 	b.Set(p+".updated_at", o.UpdatedAt.UTC().Format(time.RFC3339))
 }

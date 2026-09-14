@@ -121,9 +121,10 @@ EXEC "txco://contacts/put"
 `card{}` is generic vCard vocabulary: `uid`, `fn` (defaults to the first
 email), `name{family, given, additional, prefix, suffix}`, `nickname`,
 `org`, `title`, `note`, `url`, `birthday` (`YYYY-MM-DD`), `emails[{value,
-type[], pref}]`, `phones[{value, type[], pref}]`, `kind` (`individual`,
-`group`, `org`, `location`) and, for a group, `members[]`. vCard text must
-be one VCARD, version 3.0 or 4.0, with a UID.
+type[], pref}]`, `phones[{value, type[], pref}]`, `categories[]` (vCard's
+free tags — "customer", "vendor"), `kind` (`individual`, `group`, `org`,
+`location`) and, for a group, `members[]`. vCard text must be one VCARD,
+version 3.0 or 4.0, with a UID.
 
 Result: `{name, path, uid, etag, created, noop, modseq}`. The same content
 again (REV and PRODID aside) is a `noop` — a re-materialization never
@@ -161,9 +162,9 @@ what to add and drop → `sync`.
 
 | Op | WITH | Returns |
 |---|---|---|
-| `txco://contacts/get` | `username`, `addressbook`, `uid` or `name` | `{name, path, uid, etag, size, version, fn, kind, addresses[], modseq, updated_at, vcard, card{}}` — `card` is the parse: every input field plus `version`, `rev`, `addresses[]` (the EMAIL values, lowercased, deduped) |
+| `txco://contacts/get` | `username`, `addressbook`, `uid` or `name` | `{name, path, uid, etag, size, version, fn, kind, addresses[], members[], categories[], modseq, updated_at, vcard, card{}}` — `card` is the parse: every input field plus `version`, `rev`, `addresses[]` (the EMAIL values, lowercased, deduped) |
 | `txco://contacts/list` | `username` | `{addressbooks:[{…, objects}], count, home}` |
-| `txco://contacts/list` | `username`, `addressbook`, `after` (modseq cursor), `limit` (≤ 1000) | `{items:[{name, path, uid, etag, fn, kind, addresses[], modseq, …}], count, next, sync_token}` — facts only, never the bytes |
+| `txco://contacts/list` | `username`, `addressbook`, `after` (modseq cursor), `limit` (≤ 1000) | `{items:[{name, path, uid, etag, fn, kind, addresses[], members[], categories[], modseq, …}], count, next, sync_token}` — facts only, never the bytes. `members[]` is a group's MEMBER refs (`urn:uuid:<uid>`), `categories[]` the CATEGORIES tags; both are always present (empty for a plain person), and neither is security state |
 | `txco://contacts/delete` | `username`, `addressbook`, `uid` or `name` | `{deleted, name, uid}` |
 
 ## What a client gets

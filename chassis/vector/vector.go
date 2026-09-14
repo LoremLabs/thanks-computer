@@ -122,6 +122,14 @@ type Store interface {
 	// Delete removes items by ID. Returns the number removed.
 	Delete(ctx context.Context, tenant, collection string, ids []string) (int, error)
 
+	// UpdateMetadata merges set into the metadata of every item matching
+	// filter, leaving vectors and text untouched (a re-label, never a
+	// re-embed). The merge is shallow, RFC 7396 style: each key in set
+	// replaces the item's key; a nil value removes the key. filter must carry
+	// at least one condition — an unconditional rewrite is refused with
+	// InvalidArgError. Returns the number of items matched.
+	UpdateMetadata(ctx context.Context, tenant, collection string, filter Filter, set map[string]any) (int, error)
+
 	// ListIDs returns the IDs of every item currently in the collection (order
 	// unspecified). The store-seed reconciler uses it to compute which managed
 	// items a re-applied pack dropped (a seeded collection is owned by its pack,

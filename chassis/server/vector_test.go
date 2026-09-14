@@ -101,6 +101,30 @@ func TestVectorOpsEndToEnd(t *testing.T) {
 		t.Fatalf("id not_in: %v want [b c]", got)
 	}
 
+	// update: re-label by filter, custom into; vectors untouched
+	pl, _ = vectorUpdate(vctx(`{"collection":"books","filter":{"genre":"adventure"},"merge":{"audience":"anyone","genre":null},"into":"._retag.anyone"}`), vs, in)
+	if got := gjson.Get(pl.Raw, "_retag.anyone").Int(); got != 2 || gjson.Get(pl.Raw, "_vector.updated").Exists() {
+		t.Fatalf("update: want 2 at custom into only (%s)", pl.Raw)
+	}
+	pl, _ = vectorSearch(vctx(`{"collection":"books","vector":[1,0,0],"filter":{"audience":"anyone"}}`), vs, in)
+	if got := matchIDs(gjson.Get(pl.Raw, "_vector.matches")); !sameStrSet(got, []string{"a", "c"}) || got[0] != "a" {
+		t.Fatalf("after update: %v want [a c], a first", got)
+	}
+	if gjson.Get(pl.Raw, "_vector.matches.0.metadata.genre").Exists() || gjson.Get(pl.Raw, "_vector.matches.0.metadata.age").Int() == 0 {
+		t.Fatalf("update must drop genre and keep age (%s)", pl.Raw)
+	}
+	// update refusals: no filter, no set
+	for _, meta := range []string{
+		`{"collection":"books","merge":{"x":1}}`,
+		`{"collection":"books","filter":{"genre":"cozy"}}`,
+		`{"collection":"books","filter":{"genre":"cozy"},"merge":{}}`,
+	} {
+		pl, _ = vectorUpdate(vctx(meta), vs, in)
+		if got := gjson.Get(pl.Raw, "vector.error.code").String(); got != "txco_vector_invalid_arg" {
+			t.Fatalf("%s → %q, want txco_vector_invalid_arg", meta, got)
+		}
+	}
+
 	// delete
 	pl, _ = vectorDelete(vctx(`{"collection":"books","ids":["a"]}`), vs, in)
 	if got := gjson.Get(pl.Raw, "_vector.deleted").Int(); got != 1 {

@@ -347,6 +347,39 @@ func (s *Store) Delete(ctx context.Context, tenant, collection string, ids []str
 	return int(n), nil
 }
 
+func (s *Store) UpdateMetadata(ctx context.Context, tenant, collection string, filter vector.Filter, set map[string]any) (int, error) {
+	_, table, err := s.lookup(ctx, tenant, collection)
+	if err != nil {
+		return 0, err
+	}
+	if len(filter.Conditions) == 0 {
+		return 0, &vector.InvalidArgError{Reason: "update needs a filter with at least one condition"}
+	}
+	if len(set) == 0 {
+		return 0, &vector.InvalidArgError{Reason: "update needs a non-empty set"}
+	}
+	patch, err := json.Marshal(set)
+	if err != nil {
+		return 0, fmt.Errorf("sqlitevec: marshal set: %w", err)
+	}
+	where, whereArgs, err := buildWhere(filter)
+	if err != nil {
+		return 0, err
+	}
+	// json_patch is SQLite's RFC 7396 merge patch: keys in the patch replace
+	// the item's, a null removes the key, everything else is kept.
+	args := make([]any, 0, len(whereArgs)+1)
+	args = append(args, string(patch))
+	args = append(args, whereArgs...)
+	// table is a hex-only identifier (tableNameFor) — safe to interpolate.
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET metadata = json_patch(metadata, ?)%s", table, where), args...)
+	if err != nil {
+		return 0, fmt.Errorf("sqlitevec: update metadata: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (s *Store) ListIDs(ctx context.Context, tenant, collection string) ([]string, error) {
 	_, table, err := s.lookup(ctx, tenant, collection)
 	if err != nil {

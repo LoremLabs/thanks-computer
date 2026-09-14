@@ -174,6 +174,48 @@ func vectorDelete(ctx context.Context, vs vector.Store, in []byte) (event.Payloa
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }
 
+// vectorUpdate merges `merge` into the metadata of every item matching
+// `filter` — a re-label that never touches vectors or text. `filter` uses
+// the search grammar and must carry at least one condition; a null in `merge`
+// removes that key. Reports the number of items matched at `into` (default
+// `_vector.updated`), so several updates in one scope keep their counts apart.
+func vectorUpdate(ctx context.Context, vs vector.Store, in []byte) (event.Payload, error) {
+	tenant, ok := vecTenant(ctx)
+	if !ok {
+		return vecErr("txco_vector_no_tenant", "no tenant in request scope"), nil
+	}
+	meta := []byte(operation.MetaFromContext(ctx))
+	name := gjson.GetBytes(meta, "collection").String()
+	if name == "" {
+		return vecErr("txco_vector_invalid_arg", "missing `collection`"), nil
+	}
+	filter, ferr := parseFilter(meta)
+	if ferr != nil {
+		return vecErrFrom(ferr), nil
+	}
+	if len(filter.Conditions) == 0 {
+		return vecErr("txco_vector_invalid_arg", "missing `filter` (an update must name at least one condition)"), nil
+	}
+	sr := gjson.GetBytes(meta, "merge")
+	if !sr.Exists() || !sr.IsObject() {
+		return vecErr("txco_vector_invalid_arg", "missing `merge` (the metadata keys to merge)"), nil
+	}
+	var set map[string]any
+	if err := json.Unmarshal([]byte(sr.Raw), &set); err != nil || len(set) == 0 {
+		return vecErr("txco_vector_invalid_arg", "`merge` must be a non-empty object"), nil
+	}
+	n, uerr := vs.UpdateMetadata(ctx, tenant, name, filter, set)
+	if uerr != nil {
+		return vecErrFrom(uerr), nil
+	}
+	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
+	if into == "" {
+		into = "_vector.updated"
+	}
+	resp, _ := sjson.Set(`{}`, into, n)
+	return event.Payload{Raw: resp, Type: event.JSON}, nil
+}
+
 // parseItems reads the upsert items: the batch `items` array, else a single
 // item from top-level `id`/`vector`/`metadata`/`text`.
 func parseItems(meta []byte) ([]vector.Item, error) {
