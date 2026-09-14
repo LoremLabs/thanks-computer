@@ -227,6 +227,56 @@ func TestGetMultiPositional(t *testing.T) {
 	}
 }
 
+func TestPutMultiDeleteMulti(t *testing.T) {
+	s, prefix := newTestStore(t)
+	ctx := context.Background()
+	a, b, c := prefix+"/ns/a", prefix+"/ns/b", prefix+"/ns/c"
+
+	// One persistent entry, one with a native TTL (and a leading '/' that
+	// normalizes, as in Put).
+	if err := s.PutMulti(ctx, []*store.KVPair{
+		{Key: a, Value: []byte(`{"v":1}`)},
+		{Key: "/" + b, Value: []byte(`{"v":2}`)},
+	}, []*store.WriteOptions{nil, {TTL: 30 * time.Second}}); err != nil {
+		t.Fatalf("PutMulti: %v", err)
+	}
+	for key, want := range map[string]string{a: `{"v":1}`, b: `{"v":2}`} {
+		if p, err := s.Get(ctx, key, nil); err != nil || string(p.Value) != want {
+			t.Fatalf("Get %s = %v, %v; want %s", key, p, err, want)
+		}
+	}
+	if ttl, _ := s.client.TTL(ctx, a).Result(); ttl > 0 {
+		t.Fatalf("persistent entry has a ttl: %v", ttl)
+	}
+	if ttl, _ := s.client.TTL(ctx, b).Result(); ttl <= 0 || ttl > 30*time.Second {
+		t.Fatalf("ttl entry: ttl = %v", ttl)
+	}
+
+	// Mismatched options are refused before anything is sent.
+	if err := s.PutMulti(ctx, []*store.KVPair{{Key: c, Value: []byte("1")}}, []*store.WriteOptions{nil, nil}); err == nil {
+		t.Fatal("mismatched write options must be refused")
+	}
+	if _, err := s.Get(ctx, c, nil); !errors.Is(err, store.ErrKeyNotFound) {
+		t.Fatalf("a refused batch wrote: %v", err)
+	}
+
+	// One DEL; a missing key is fine.
+	if err := s.DeleteMulti(ctx, []string{a, "/" + b, c}); err != nil {
+		t.Fatalf("DeleteMulti: %v", err)
+	}
+	for _, key := range []string{a, b} {
+		if _, err := s.Get(ctx, key, nil); !errors.Is(err, store.ErrKeyNotFound) {
+			t.Fatalf("%s survived DeleteMulti: %v", key, err)
+		}
+	}
+	if err := s.PutMulti(ctx, nil, nil); err != nil {
+		t.Fatalf("empty PutMulti: %v", err)
+	}
+	if err := s.DeleteMulti(ctx, nil); err != nil {
+		t.Fatalf("empty DeleteMulti: %v", err)
+	}
+}
+
 func TestAtomicPutAndDelete(t *testing.T) {
 	s, prefix := newTestStore(t)
 	ctx := context.Background()

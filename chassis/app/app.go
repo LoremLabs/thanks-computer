@@ -23,8 +23,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kvtools/boltdb"
 	"github.com/kvtools/valkeyrie"
+	boltdb "github.com/loremlabs/thanks-computer/chassis/kv/boltstore"
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 

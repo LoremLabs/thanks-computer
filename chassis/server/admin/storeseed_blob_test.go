@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/kvtools/boltdb"
 	"github.com/kvtools/valkeyrie"
+	boltdb "github.com/loremlabs/thanks-computer/chassis/kv/boltstore"
 
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/config"

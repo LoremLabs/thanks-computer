@@ -18,7 +18,6 @@ require (
 	github.com/inbucket/html2text v1.0.0
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
 	github.com/jhillyerd/enmime/v2 v2.4.1
-	github.com/kvtools/boltdb v1.0.2
 	github.com/kvtools/valkeyrie v1.0.0
 	github.com/lestrrat-go/jwx/v2 v2.1.2
 	github.com/libdns/libdns v1.1.1
@@ -73,6 +72,7 @@ require (
 	github.com/emersion/go-webdav v0.7.0
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/teambition/rrule-go v1.8.2
+	go.etcd.io/bbolt v1.3.6
 	golang.org/x/text v0.37.0
 )
 
@@ -135,7 +135,6 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/valyala/fastjson v1.6.4 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
-	go.etcd.io/bbolt v1.3.6 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

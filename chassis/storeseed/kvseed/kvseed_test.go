@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kvtools/boltdb"
 	"github.com/kvtools/valkeyrie"
+	boltdb "github.com/loremlabs/thanks-computer/chassis/kv/boltstore"
 
 	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"

@@ -27,8 +27,10 @@
 //     rejects CONFIG).
 //   - setNX surfaces the underlying redis error instead of folding every
 //     failure into ErrKeyExists.
-//   - Added GetMulti: a positional, chunked MGET (not in store.Store) that
-//     chassis/kv discovers by interface to serve txco://kv/mget.
+//   - Added GetMulti (a positional, chunked MGET), PutMulti (one Lua script)
+//     and DeleteMulti (one multi-key DEL): batch operations outside
+//     store.Store that chassis/kv discovers by interface to serve
+//     txco://kv/mget, kv/mset and kv/mdelete.
 package redisstore
 
 import (
@@ -96,6 +98,7 @@ func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config)
 type Store struct {
 	client *redis.Client
 	script *redis.Script
+	mset   *redis.Script // msetScript: PutMulti's atomic batch write
 }
 
 // New creates the redis-backed store. ctx is unused (the client dials
@@ -121,6 +124,7 @@ func New(_ context.Context, endpoints []string, options *Config) (*Store, error)
 	return &Store{
 		client: redis.NewClient(opt),
 		script: redis.NewScript(casScript),
+		mset:   redis.NewScript(msetScript),
 	}, nil
 }
 
@@ -240,6 +244,48 @@ func (r *Store) GetMulti(ctx context.Context, keys []string) ([]*store.KVPair, e
 		}
 	}
 	return pairs, nil
+}
+
+// PutMulti writes pairs atomically in one script round trip (see msetScript),
+// each with its own native expiry from opts (a nil entry, nil opts, or a zero
+// TTL is persistent). Not part of store.Store: chassis/kv discovers it by
+// interface to serve txco://kv/mset.
+func (r *Store) PutMulti(ctx context.Context, pairs []*store.KVPair, opts []*store.WriteOptions) error {
+	if len(opts) != 0 && len(opts) != len(pairs) {
+		return fmt.Errorf("redis: %d write options for %d pairs", len(opts), len(pairs))
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	keys := make([]string, len(pairs))
+	args := make([]any, 0, 2*len(pairs))
+	for i, p := range pairs {
+		keys[i] = normalize(p.Key)
+		ttl := noExpiration
+		if len(opts) > 0 && opts[i] != nil {
+			ttl = opts[i].TTL
+		}
+		ex := formatSec(ttl)
+		if ttl > 0 && ex == "0" {
+			ex = "1" // a sub-second TTL still expires; "0" would mean persistent
+		}
+		args = append(args, p.Value, ex)
+	}
+	return r.mset.Run(ctx, r.client, keys, args...).Err()
+}
+
+// DeleteMulti removes keys with one multi-key DEL, which redis applies
+// atomically. Missing keys are not an error. Not part of store.Store:
+// chassis/kv discovers it by interface to serve txco://kv/mdelete.
+func (r *Store) DeleteMulti(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	nkeys := make([]string, len(keys))
+	for i, k := range keys {
+		nkeys[i] = normalize(k)
+	}
+	return r.client.Del(ctx, nkeys...).Err()
 }
 
 // mgetReplies runs MGET over keys in mgetChunk-sized batches and returns the

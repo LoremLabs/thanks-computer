@@ -26,6 +26,8 @@ The ops are identical either way.
 | `txco://kv/incr` | `key`, `by?`, `ttl?`, `into?` | Atomically add to an integer. |
 | `txco://kv/cas` | `key`, `value?` / `from?`, `expected?`, `ttl?`, `into?` | Check-and-set. |
 | `txco://kv/mget` | `items`, `into?` | Read many keys — each in its own namespace, if you like — in one dispatch. |
+| `txco://kv/mset` | `items`, `ttl?` | Write many keys in one atomic step: all or none. |
+| `txco://kv/mdelete` | `items` | Delete many keys in one atomic step. |
 | `txco://kv/list` | `after?`, `limit?`, `values?`, `into?` | List a namespace's keys (and values), one sorted page at a time. |
 
 Every op also takes an optional `namespace` (see below).
@@ -176,10 +178,54 @@ It writes `{items, count, found}` at `into` (default `_kv`):
   key, a `/` in a key or namespace, or a reserved `_txc` namespace.
 - `items = []` is not an error; it writes `{items: [], count: 0, found: 0}`.
 
-Compared with N `kv/get`s, this saves N−1 dispatches (25 fuel each). On
-`redis` it also turns N round trips into one `MGET` per 500 keys. On `boltdb`
-the store still reads the keys one at a time, so there the saving is in
-dispatch, not in the store.
+Compared with N `kv/get`s, this saves N−1 dispatches (25 fuel each), and the
+store reads the batch together: one `MGET` per 500 keys on `redis`, one read
+transaction on `boltdb`.
+
+## Write or delete many keys at once — `kv/mset` / `kv/mdelete`
+
+`kv/mset` writes a batch **atomically**: every key lands or none does, and no
+other request sees the batch half-written. `items` is an array of
+`{key, value}` objects. Each item may also carry a `namespace`, a `ttl` in
+seconds, or `from` (an envelope path) in place of `value`, exactly as for
+`kv/set`. A `namespace` or `ttl` on the call is the default for items without
+one.
+
+```txcl
+# ._batch was built by an earlier op:
+#   [{"key": "state", "namespace": "pony-ada", "value": {"step": 3}},
+#    {"key": "state", "namespace": "pony-bo", "value": {"step": 1}, "ttl": 3600}]
+WITH items = ._batch
+EXEC "txco://kv/mset"
+```
+
+`kv/mdelete` removes a batch atomically. Its `items` are `kv/mget`'s: bare keys,
+or `{key, namespace?}` objects. Deleting a key that isn't there is not an error.
+
+```txcl
+WITH namespace = "drips", items = ._purge.keys
+EXEC "txco://kv/mdelete"
+```
+
+Both follow the same batch rules as `kv/mget`:
+
+- **At most 200 items; above that the whole call is refused.**
+- **One bad item refuses the whole call, before anything is written**: a
+  missing key or value, a `/` in a key or namespace, a reserved `_txc`
+  namespace, invalid JSON, or a value over the size cap.
+- **`kv/mset` refuses a key listed twice**, since the batch would have no single
+  answer for it. `kv/mdelete` doesn't mind a repeat.
+- `items = []` does nothing and is not an error.
+
+On `boltdb` a batch is one transaction. On `redis`, `kv/mset` runs as one script
+and `kv/mdelete` as one `DEL`, and redis runs each without interleaving any
+other command; only the redis server itself failing partway through a script
+could leave part of a batch written.
+
+A batch is atomic, not conditional — it overwrites whatever is there. To write
+only if nothing has changed since you read it, use `kv/cas` on the keys that
+matter. Like `kv/set` and `kv/delete`, neither op writes anything into the
+envelope.
 
 ## List a namespace — `kv/list`
 
@@ -229,8 +275,8 @@ values are read either way.
 
 - KV ops pay normal [fuel](./fuel.md) and appear in [traces](./trace.md).
   `kv/mget`, and `kv/list` with `values = true`, also pay 100 fuel per MiB of
-  values returned, rounded up — so any call that returns a value pays at least
-  100.
+  values returned, and `kv/mset` 100 per MiB written — rounded up, so any such
+  call that moves a value pays at least 100.
 - Values over `--kv-max-value-bytes` (default 64 KiB) are rejected.
 - With `boltdb` each chassis keeps its own store; switch to `redis` when several
   chassis must share state.

@@ -162,9 +162,10 @@ func (k *KV) Get(ctx context.Context, tenant, ns, key string) (value json.RawMes
 	return w.V, true, nil
 }
 
-// MaxGetManyItems bounds one GetMany. Unlike a list window it is a refusal,
-// not a clamp: a dropped ref would read exactly like a missing key.
-const MaxGetManyItems = 200
+// MaxBatchItems bounds one GetMany, SetMany or DeleteMany. Unlike a list
+// window it is a refusal, not a clamp: a dropped read would look exactly like
+// a missing key, and a dropped write or delete would be lost silently.
+const MaxBatchItems = 200
 
 // Ref names one key for GetMany: a namespace and a user key under the call's
 // tenant.
@@ -180,24 +181,35 @@ type Hit struct {
 }
 
 // multiGetter is the batch read a backend may offer beyond store.Store
-// (redisstore.GetMulti): one pair per key, positionally, nil for a miss.
+// (redisstore and boltstore GetMulti): one pair per key, positionally, nil for
+// a miss.
 type multiGetter interface {
 	GetMulti(ctx context.Context, keys []string) ([]*store.KVPair, error)
+}
+
+// batchWriter is the atomic batch write a backend may offer beyond
+// store.Store: redisstore runs PutMulti as one Lua script and DeleteMulti as
+// one multi-key DEL; boltstore runs each in one bbolt transaction. SetMany and
+// DeleteMany require it — they refuse rather than fall back to separate
+// writes, which could leave a batch half-applied.
+type batchWriter interface {
+	PutMulti(ctx context.Context, pairs []*store.KVPair, opts []*store.WriteOptions) error
+	DeleteMulti(ctx context.Context, keys []string) error
 }
 
 // GetMany reads refs under one tenant and returns one Hit per ref, in order;
 // a repeated ref is read and reported twice. Every ref is validated before
 // anything is read, so an invalid one fails the whole call instead of
-// yielding a partial answer, and more than MaxGetManyItems refs is refused for
+// yielding a partial answer, and more than MaxBatchItems refs is refused for
 // the same reason. Missing and lazily-expired keys are Found=false, as with
-// Get. A backend with a batch read (redis MGET) serves the call in one round
-// trip per chunk; any other reads key by key.
+// Get. A backend with a batch read serves the call in one round trip per
+// chunk (redis MGET) or one transaction (boltdb); any other reads key by key.
 func (k *KV) GetMany(ctx context.Context, tenant string, refs []Ref) ([]Hit, error) {
 	if k == nil || k.s == nil {
 		return nil, errors.New("kv: store not configured")
 	}
-	if len(refs) > MaxGetManyItems {
-		return nil, fmt.Errorf("kv: %d keys exceeds the %d-key cap", len(refs), MaxGetManyItems)
+	if len(refs) > MaxBatchItems {
+		return nil, fmt.Errorf("kv: %d keys exceeds the %d-key cap", len(refs), MaxBatchItems)
 	}
 	fks := make([]string, len(refs))
 	for i, r := range refs {
@@ -257,6 +269,92 @@ func (k *KV) readMany(ctx context.Context, fks []string) ([]*store.KVPair, error
 		pairs[i] = p
 	}
 	return pairs, nil
+}
+
+// Write is one SetMany entry: a JSON value for a key, with an optional TTL
+// (<= 0 is persistent; a positive TTL is clamped as in Set).
+type Write struct {
+	Namespace string
+	Key       string
+	Value     json.RawMessage
+	TTL       time.Duration
+}
+
+// SetMany writes every entry under one tenant atomically: all land or none
+// does, and no reader sees part of the batch. Every entry is validated first —
+// key and namespace segments, valid JSON, the value-size cap — and a key may
+// appear only once, since a batch that writes one key twice has no single
+// answer. More than MaxBatchItems entries, or a backend without an atomic
+// batch write, is refused.
+func (k *KV) SetMany(ctx context.Context, tenant string, writes []Write) error {
+	bw, err := k.batchTarget(len(writes))
+	if err != nil {
+		return err
+	}
+	pairs := make([]*store.KVPair, len(writes))
+	opts := make([]*store.WriteOptions, len(writes))
+	seen := make(map[string]bool, len(writes))
+	for i, w := range writes {
+		fk, err := k.fullKey(tenant, w.Namespace, w.Key)
+		if err != nil {
+			return err
+		}
+		if seen[fk] {
+			return fmt.Errorf("kv: key %q in namespace %q appears twice in one batch", w.Key, w.Namespace)
+		}
+		seen[fk] = true
+		if !json.Valid(w.Value) {
+			return fmt.Errorf("kv: value for %q is not valid JSON", w.Key)
+		}
+		if k.maxValue > 0 && len(w.Value) > k.maxValue {
+			return fmt.Errorf("kv: value for %q is %d bytes, over the cap %d", w.Key, len(w.Value), k.maxValue)
+		}
+		blob, wo := k.encode(w.Value, w.TTL)
+		pairs[i] = &store.KVPair{Key: fk, Value: blob}
+		opts[i] = wo
+	}
+	if len(writes) == 0 {
+		return nil
+	}
+	return bw.PutMulti(ctx, pairs, opts)
+}
+
+// DeleteMany removes every ref under one tenant atomically. Missing keys are
+// not an error and a repeated ref is harmless. Refs are validated first; more
+// than MaxBatchItems, or a backend without an atomic batch write, is refused.
+func (k *KV) DeleteMany(ctx context.Context, tenant string, refs []Ref) error {
+	bw, err := k.batchTarget(len(refs))
+	if err != nil {
+		return err
+	}
+	keys := make([]string, len(refs))
+	for i, r := range refs {
+		fk, err := k.fullKey(tenant, r.Namespace, r.Key)
+		if err != nil {
+			return err
+		}
+		keys[i] = fk
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	return bw.DeleteMulti(ctx, keys)
+}
+
+// batchTarget is what SetMany and DeleteMany share: a configured store with an
+// atomic batch write, and a batch within MaxBatchItems.
+func (k *KV) batchTarget(n int) (batchWriter, error) {
+	if k == nil || k.s == nil {
+		return nil, errors.New("kv: store not configured")
+	}
+	if n > MaxBatchItems {
+		return nil, fmt.Errorf("kv: %d keys exceeds the %d-key cap", n, MaxBatchItems)
+	}
+	bw, ok := k.s.(batchWriter)
+	if !ok {
+		return nil, errors.New("kv: the configured store has no atomic batch write")
+	}
+	return bw, nil
 }
 
 // Set writes value at (tenant, ns, key). A ttl <= 0 stores a persistent

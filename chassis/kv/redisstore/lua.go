@@ -70,3 +70,24 @@ if command_name == 'cad' then
 end
 error('Unknown command ' .. command_name)
 `
+
+// msetScript sets every KEYS[i] to ARGV[2i-1] with an expiry of ARGV[2i]
+// seconds ("0" = persistent) — kv/mset's batch as ONE script. Redis runs a
+// script without interleaving any other command, so no reader ever sees part
+// of a batch. Redis does not roll back a script that errors midway, but these
+// SETs cannot fail on their arguments (SET overwrites a key of any type, and
+// the arity is checked before the first write), so a partial batch would take
+// the server itself failing mid-script. KEYS/ARGV are only read, never
+// modified — see casScript on Upstash's read-only sandbox.
+const msetScript = `
+if #ARGV ~= 2 * #KEYS then error('mset: want a value and a ttl per key') end
+for i = 1, #KEYS do
+    local ex = ARGV[2 * i]
+    if ex == "0" then
+        redis.call('set', KEYS[i], ARGV[2 * i - 1])
+    else
+        redis.call('set', KEYS[i], ARGV[2 * i - 1], 'ex', ex)
+    end
+end
+return #KEYS
+`

@@ -2,16 +2,17 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
-	"github.com/kvtools/boltdb"
 	"github.com/kvtools/valkeyrie"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
+	boltdb "github.com/loremlabs/thanks-computer/chassis/kv/boltstore"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
@@ -149,13 +150,15 @@ func TestKVValidation(t *testing.T) {
 		fn   kvHandler
 		meta string
 	}{
-		"get missing key": {kvGet, `{}`},
-		"set missing key": {kvSet, `{"value":1}`},
-		"set no value":    {kvSet, `{"key":"k"}`},
-		"delete no key":   {kvDelete, `{}`},
-		"incr no key":     {kvIncr, `{}`},
-		"cas no value":    {kvCAS, `{"key":"k"}`},
-		"mget no items":   {kvMGet, `{}`},
+		"get missing key":  {kvGet, `{}`},
+		"set missing key":  {kvSet, `{"value":1}`},
+		"set no value":     {kvSet, `{"key":"k"}`},
+		"delete no key":    {kvDelete, `{}`},
+		"incr no key":      {kvIncr, `{}`},
+		"cas no value":     {kvCAS, `{"key":"k"}`},
+		"mget no items":    {kvMGet, `{}`},
+		"mset no items":    {kvMSet, `{}`},
+		"mdelete no items": {kvMDelete, `{}`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -281,6 +284,91 @@ func TestKVMGetOp(t *testing.T) {
 		if err == nil || gjson.Get(pay.Raw, "_kv").Exists() {
 			t.Fatalf("%s: must refuse the whole call: raw=%s err=%v", name, pay.Raw, err)
 		}
+	}
+}
+
+func TestKVMSetOp(t *testing.T) {
+	k := newKVHandle(t)
+
+	// The call's namespace as the default, a per-item namespace, a `from` path.
+	pay, err := callKV(t, kvMSet, k, "t1", "hello", `{"namespace":"pony-a","items":[
+		{"key":"state","value":{"step":3}},
+		{"key":"state","namespace":"pony-b","from":".next"},
+		{"key":"hits","value":7}]}`, `{"next":{"step":1}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pay.Raw != `{}` {
+		t.Fatalf("kv/mset must write nothing to the envelope: raw=%s", pay.Raw)
+	}
+	pay, _ = callKV(t, kvMGet, k, "t1", "hello", `{"items":[
+		{"key":"state","namespace":"pony-a"},
+		{"key":"state","namespace":"pony-b"},
+		{"key":"hits","namespace":"pony-a"}]}`, "")
+	for path, want := range map[string]string{
+		"_kv.found":         "3",
+		"_kv.items.0.value": `{"step":3}`,
+		"_kv.items.1.value": `{"step":1}`,
+		"_kv.items.2.value": "7",
+	} {
+		if got := gjson.Get(pay.Raw, path).Raw; got != want {
+			t.Fatalf("%s = %s, want %s: raw=%s", path, got, want, pay.Raw)
+		}
+	}
+
+	// Refusals take the whole batch: the valid first item never lands.
+	items := make([]map[string]any, kvstore.MaxBatchItems+1)
+	for i := range items {
+		items[i] = map[string]any{"key": fmt.Sprintf("k%d", i), "value": 1}
+	}
+	over, _ := sjson.Set(`{}`, "items", items)
+	for name, meta := range map[string]string{
+		"a bare key":          `{"items":[{"key":"new1","value":1},"k"]}`,
+		"no value":            `{"items":[{"key":"new1","value":1},{"key":"k"}]}`,
+		"an absent from path": `{"items":[{"key":"new1","value":1},{"key":"k","from":".missing"}]}`,
+		"reserved namespace":  `{"items":[{"key":"new1","value":1},{"key":"k","value":1,"namespace":"_txc.blob"}]}`,
+		"a key twice":         `{"items":[{"key":"new1","value":1},{"key":"new1","value":2}]}`,
+		"items not an array":  `{"items":{"key":"new1","value":1}}`,
+		"over the item cap":   over,
+	} {
+		if _, err := callKV(t, kvMSet, k, "t1", "hello", meta, ""); err == nil {
+			t.Fatalf("%s: must refuse the whole batch", name)
+		}
+		if pay, _ := callKV(t, kvGet, k, "t1", "hello", `{"key":"new1"}`, ""); gjson.Get(pay.Raw, "_kv").Exists() {
+			t.Fatalf("%s: a refused batch wrote new1: raw=%s", name, pay.Raw)
+		}
+	}
+
+	if _, err := callKV(t, kvMSet, k, "t1", "hello", `{"items":[]}`, ""); err != nil {
+		t.Fatalf("empty items: %v", err)
+	}
+}
+
+func TestKVMDeleteOp(t *testing.T) {
+	k := newKVHandle(t)
+	if _, err := callKV(t, kvMSet, k, "t1", "hello", `{"items":[
+		{"key":"a","value":1},{"key":"b","value":2},{"key":"x","namespace":"pony-a","value":3}]}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	read := `{"items":["a","b",{"key":"x","namespace":"pony-a"}]}`
+
+	// A refused batch deletes nothing.
+	if _, err := callKV(t, kvMDelete, k, "t1", "hello", `{"items":["a",{"key":"x","namespace":"_txc.blob"}]}`, ""); err == nil {
+		t.Fatal("a reserved namespace must refuse the batch")
+	}
+	if pay, _ := callKV(t, kvMGet, k, "t1", "hello", read, ""); gjson.Get(pay.Raw, "_kv.found").Int() != 3 {
+		t.Fatalf("a refused batch deleted: raw=%s", pay.Raw)
+	}
+
+	// Bare keys and a per-item namespace; a missing key is fine.
+	pay, err := callKV(t, kvMDelete, k, "t1", "hello", `{"items":["a",{"key":"x","namespace":"pony-a"},"missing"]}`, "")
+	if err != nil || pay.Raw != `{}` {
+		t.Fatalf("mdelete: raw=%s err=%v", pay.Raw, err)
+	}
+	pay, _ = callKV(t, kvMGet, k, "t1", "hello", read, "")
+	if gjson.Get(pay.Raw, "_kv.items.0.found").Bool() || !gjson.Get(pay.Raw, "_kv.items.1.found").Bool() ||
+		gjson.Get(pay.Raw, "_kv.items.2.found").Bool() {
+		t.Fatalf("mdelete removed the wrong keys: raw=%s", pay.Raw)
 	}
 }
 

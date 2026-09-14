@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kvtools/boltdb"
 	"github.com/kvtools/valkeyrie"
 	"github.com/kvtools/valkeyrie/store"
+	boltdb "github.com/loremlabs/thanks-computer/chassis/kv/boltstore"
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"

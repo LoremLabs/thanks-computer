@@ -18,8 +18,8 @@ import (
 )
 
 // kv.go holds the handler bodies for the op-writable KV ops (txco://kv/get,
-// kv/set, kv/delete, kv/incr, kv/cas) and their bulk reads (kv/mget,
-// kv/list). They are the only ops that persist data
+// kv/set, kv/delete, kv/incr, kv/cas) and their batch forms (kv/mget,
+// kv/mset, kv/mdelete, kv/list). They are the only ops that persist data
 // across requests (the envelope is per-request). Storage is the configured
 // KV backend (boltdb or redis); this layer adds the txcl surface: WITH params
 // in, JSON value into/out of the envelope tree.
@@ -334,7 +334,7 @@ func kvList(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 // object {key, namespace?}, where an item's own namespace overrides the call's.
 // It writes {items:[{namespace, key, found, value?}], count, found} at `into`
 // (default `_kv`), in item order. Every item is validated before anything is
-// read, and more than kvstore.MaxGetManyItems items is refused rather than
+// read, and more than kvstore.MaxBatchItems items is refused rather than
 // clamped: a dropped or skipped item would read exactly like a missing key, and
 // a sweep that deletes what it cannot find would act on it. Values are metered
 // per MiB returned.
@@ -344,7 +344,7 @@ func kvMGet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 		return kvErr(err.Error()), err
 	}
 	meta := []byte(operation.MetaFromContext(ctx))
-	refs, rerr := kvMGetRefs(gjson.GetBytes(meta, "items"), defaultNS)
+	refs, rerr := kvItemRefs(gjson.GetBytes(meta, "items"), defaultNS)
 	if rerr != nil {
 		e := "kv/mget: " + rerr.Error()
 		return kvErr(e), errors.New(e)
@@ -387,16 +387,16 @@ func kvMGet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 	return event.Payload{Raw: resp.String(), Type: event.JSON}, nil
 }
 
-// kvMGetRefs parses kv/mget's `items` into store refs. An item's empty or
-// absent namespace takes the call's, as an empty WITH `namespace` does for
-// kv/get.
-func kvMGetRefs(items gjson.Result, defaultNS string) ([]kvstore.Ref, error) {
+// kvItemRefs parses the `items` of kv/mget and kv/mdelete into store refs. An
+// item's empty or absent namespace takes the call's, as an empty WITH
+// `namespace` does for kv/get.
+func kvItemRefs(items gjson.Result, defaultNS string) ([]kvstore.Ref, error) {
 	if !items.IsArray() {
 		return nil, errors.New("need `items`, an array of keys or {key, namespace} objects")
 	}
 	arr := items.Array()
-	if len(arr) > kvstore.MaxGetManyItems {
-		return nil, fmt.Errorf("%d items exceeds the %d-item cap; split the read", len(arr), kvstore.MaxGetManyItems)
+	if len(arr) > kvstore.MaxBatchItems {
+		return nil, fmt.Errorf("%d items exceeds the %d-item cap; split the batch", len(arr), kvstore.MaxBatchItems)
 	}
 	refs := make([]kvstore.Ref, len(arr))
 	for i, it := range arr {
@@ -422,6 +422,99 @@ func kvMGetRefs(items gjson.Result, defaultNS string) ([]kvstore.Ref, error) {
 		refs[i] = ref
 	}
 	return refs, nil
+}
+
+// kvMSet writes many keys atomically — all or none — from `items`, an array of
+// {key, namespace?, value | from, ttl?} objects. An item's namespace and ttl
+// default to the call's WITH `namespace` and `ttl`; `value` is a literal and
+// `from` an envelope path, exactly as for kv/set. Every item is validated
+// before anything is written, a key may appear once, and more than
+// kvstore.MaxBatchItems items is refused. Like kv/set it writes nothing to the
+// envelope; the bytes written are metered per MiB.
+func kvMSet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error) {
+	tenant, defaultNS, err := kvScope(ctx, in)
+	if err != nil {
+		return kvErr(err.Error()), err
+	}
+	meta := []byte(operation.MetaFromContext(ctx))
+	writes, werr := kvMSetWrites(meta, in, defaultNS)
+	if werr != nil {
+		e := "kv/mset: " + werr.Error()
+		return kvErr(e), errors.New(e)
+	}
+	if serr := k.SetMany(ctx, tenant, writes); serr != nil {
+		return kvErr(serr.Error()), serr
+	}
+	var n int64
+	for _, w := range writes {
+		n += int64(len(w.Value))
+	}
+	chargePerMiB(ctx, n, processor.FuelCostKVPerMiB, in)
+	return event.Payload{Raw: `{}`, Type: event.JSON}, nil
+}
+
+// kvMSetWrites parses kv/mset's `items`. The cap is checked first, so an
+// oversized batch is refused without resolving a single value.
+func kvMSetWrites(meta, in []byte, defaultNS string) ([]kvstore.Write, error) {
+	items := gjson.GetBytes(meta, "items")
+	if !items.IsArray() {
+		return nil, errors.New("need `items`, an array of {key, value} objects")
+	}
+	arr := items.Array()
+	if len(arr) > kvstore.MaxBatchItems {
+		return nil, fmt.Errorf("%d items exceeds the %d-item cap; split the batch", len(arr), kvstore.MaxBatchItems)
+	}
+	defaultTTL := gjson.GetBytes(meta, "ttl").Int()
+	writes := make([]kvstore.Write, len(arr))
+	for i, it := range arr {
+		if !it.IsObject() {
+			return nil, fmt.Errorf("item %d: want a {key, value} object", i)
+		}
+		w := kvstore.Write{Namespace: defaultNS, Key: it.Get("key").String()}
+		if w.Key == "" {
+			return nil, fmt.Errorf("item %d: missing `key`", i)
+		}
+		if ns := it.Get("namespace").String(); ns != "" {
+			n, err := kvNamespace(ns)
+			if err != nil {
+				return nil, fmt.Errorf("item %d: %w", i, err)
+			}
+			w.Namespace = n
+		}
+		raw, err := kvNewValue([]byte(it.Raw), in)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: %w", i, err)
+		}
+		w.Value = json.RawMessage(raw)
+		ttl := defaultTTL
+		if t := it.Get("ttl"); t.Exists() {
+			ttl = t.Int()
+		}
+		w.TTL = kvstore.ParseTTLSeconds(ttl)
+		writes[i] = w
+	}
+	return writes, nil
+}
+
+// kvMDelete removes many keys atomically — all or none. `items` is parsed as
+// for kv/mget: bare keys in the call's namespace, or {key, namespace?}
+// objects. Missing keys are not an error; every item is validated before
+// anything is deleted, and more than kvstore.MaxBatchItems is refused.
+func kvMDelete(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error) {
+	tenant, defaultNS, err := kvScope(ctx, in)
+	if err != nil {
+		return kvErr(err.Error()), err
+	}
+	meta := []byte(operation.MetaFromContext(ctx))
+	refs, rerr := kvItemRefs(gjson.GetBytes(meta, "items"), defaultNS)
+	if rerr != nil {
+		e := "kv/mdelete: " + rerr.Error()
+		return kvErr(e), errors.New(e)
+	}
+	if derr := k.DeleteMany(ctx, tenant, refs); derr != nil {
+		return kvErr(derr.Error()), derr
+	}
+	return event.Payload{Raw: `{}`, Type: event.JSON}, nil
 }
 
 // kvErr builds a structured error event.Payload (never includes values —

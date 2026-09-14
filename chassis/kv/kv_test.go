@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/kvtools/boltdb"
 	"github.com/kvtools/valkeyrie"
 	"github.com/kvtools/valkeyrie/store"
 
+	boltdb "github.com/loremlabs/thanks-computer/chassis/kv/boltstore"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 )
 
@@ -354,8 +356,18 @@ func TestListPairs(t *testing.T) {
 	}
 }
 
-// The redis backend must stay on GetMany's batch path.
-var _ multiGetter = (*redisstore.Store)(nil)
+// Both shipped backends must stay on the batch paths: GetMany's batch read,
+// and the atomic batch write SetMany and DeleteMany require.
+var (
+	_ multiGetter = (*redisstore.Store)(nil)
+	_ multiGetter = (*boltdb.Store)(nil)
+	_ batchWriter = (*redisstore.Store)(nil)
+	_ batchWriter = (*boltdb.Store)(nil)
+)
+
+// plainStore hides a backend's batch methods, leaving only store.Store: a
+// backend with neither a batch read nor an atomic batch write.
+type plainStore struct{ store.Store }
 
 // batchStore adds a GetMulti to a store, so GetMany's batch path runs on
 // boltdb; calls counts the batch reads.
@@ -423,6 +435,14 @@ func TestGetMany(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	check("boltdb batch read", hits)
+
+	// A backend with no batch read answers identically, key by key.
+	kp := New(plainStore{k.s}, 0, 0)
+	kp.now = k.now
+	if hits, err = kp.GetMany(ctx, "t1", refs); err != nil {
+		t.Fatal(err)
+	}
 	check("key by key", hits)
 
 	// The batch path answers identically, in one read.
@@ -464,11 +484,11 @@ func TestGetMany(t *testing.T) {
 	}
 
 	// The cap is a refusal, never a truncation.
-	max := make([]Ref, MaxGetManyItems)
+	max := make([]Ref, MaxBatchItems)
 	for i := range max {
 		max[i] = Ref{"pony-a", "triggers"}
 	}
-	if hits, err := k.GetMany(ctx, "t1", max); err != nil || len(hits) != MaxGetManyItems {
+	if hits, err := k.GetMany(ctx, "t1", max); err != nil || len(hits) != MaxBatchItems {
 		t.Fatalf("at the cap: %d hits, err=%v", len(hits), err)
 	}
 	if hits, err := k.GetMany(ctx, "t1", append(max, Ref{"pony-a", "triggers"})); err == nil || hits != nil {
@@ -509,6 +529,127 @@ func TestListPairsPage(t *testing.T) {
 	}
 	if want := []string{`c={"k":"c"}`}; !reflect.DeepEqual(str(page), want) || next != "" {
 		t.Fatalf("page 2 = %v next=%q, want %v and no cursor", str(page), next, want)
+	}
+}
+
+func TestSetMany(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 64, 0)
+	k.now = func() time.Time { return time.Unix(1_000_000, 0) }
+	w := func(ns, key, val string) Write {
+		return Write{Namespace: ns, Key: key, Value: json.RawMessage(val)}
+	}
+	got := func(ns, key string) string {
+		t.Helper()
+		v, found, err := k.Get(ctx, "t1", ns, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			return "<absent>"
+		}
+		return string(v)
+	}
+	if err := k.Set(ctx, "t1", "pony-a", "keep", json.RawMessage(`"old"`), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Across namespaces, one entry with a TTL.
+	ttl := w("pony-b", "state", `{"step":1}`)
+	ttl.TTL = 10 * time.Second
+	if err := k.SetMany(ctx, "t1", []Write{w("pony-a", "keep", `"new"`), ttl}); err != nil {
+		t.Fatal(err)
+	}
+	if g := got("pony-a", "keep"); g != `"new"` {
+		t.Fatalf("keep = %s", g)
+	}
+	if g := got("pony-b", "state"); g != `{"step":1}` {
+		t.Fatalf("state = %s", g)
+	}
+	k.now = func() time.Time { return time.Unix(1_000_011, 0) }
+	if g := got("pony-b", "state"); g != "<absent>" {
+		t.Fatalf("the entry's TTL was not applied: state = %s", g)
+	}
+
+	// One invalid entry refuses the whole batch, before any write.
+	for name, bad := range map[string][]Write{
+		"slash in a key":     {w("pony-a", "keep", `"x"`), w("pony-a", "a/b", `1`)},
+		"invalid JSON":       {w("pony-a", "keep", `"x"`), w("pony-a", "j", `{`)},
+		"over the value cap": {w("pony-a", "keep", `"x"`), w("pony-a", "big", `"`+strings.Repeat("x", 80)+`"`)},
+		"a key twice":        {w("pony-a", "keep", `"x"`), w("pony-a", "keep", `"y"`)},
+	} {
+		if err := k.SetMany(ctx, "t1", bad); err == nil {
+			t.Fatalf("%s: must be refused", name)
+		}
+		if g := got("pony-a", "keep"); g != `"new"` {
+			t.Fatalf("%s: a refused batch wrote keep = %s", name, g)
+		}
+	}
+	// One key name in two namespaces is two keys, not a duplicate.
+	if err := k.SetMany(ctx, "t1", []Write{w("pony-a", "dup", `1`), w("pony-b", "dup", `2`)}); err != nil {
+		t.Fatalf("same key, different namespaces: %v", err)
+	}
+	if err := k.SetMany(ctx, "t1", nil); err != nil {
+		t.Fatalf("empty batch: %v", err)
+	}
+
+	// The cap, and a backend with no atomic batch write, are refusals.
+	over := make([]Write, MaxBatchItems+1)
+	for i := range over {
+		over[i] = w("n", fmt.Sprintf("k%d", i), `1`)
+	}
+	if err := k.SetMany(ctx, "t1", over); err == nil {
+		t.Fatal("over the cap must be refused")
+	}
+	kp := New(plainStore{k.s}, 0, 0)
+	if err := kp.SetMany(ctx, "t1", []Write{w("n", "k", `1`)}); err == nil {
+		t.Fatal("a store with no atomic batch write must refuse")
+	}
+	if _, found, _ := kp.Get(ctx, "t1", "n", "k"); found {
+		t.Fatal("a refused batch wrote through a plain store")
+	}
+}
+
+func TestDeleteMany(t *testing.T) {
+	ctx := context.Background()
+	k := newKV(t, 0, 0)
+	for _, r := range []Ref{{"pony-a", "x"}, {"pony-a", "y"}, {"pony-b", "x"}} {
+		if err := k.Set(ctx, "t1", r.Namespace, r.Key, json.RawMessage(`1`), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	has := func(r Ref) bool {
+		t.Helper()
+		_, found, err := k.Get(ctx, "t1", r.Namespace, r.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+
+	// An invalid ref anywhere: nothing deleted.
+	if err := k.DeleteMany(ctx, "t1", []Ref{{"pony-a", "x"}, {"pony-a", "a/b"}}); err == nil {
+		t.Fatal("an invalid ref must refuse the batch")
+	}
+	if !has(Ref{"pony-a", "x"}) {
+		t.Fatal("a refused batch deleted")
+	}
+
+	// Across namespaces; a missing key and a repeat are fine.
+	if err := k.DeleteMany(ctx, "t1", []Ref{{"pony-a", "x"}, {"pony-b", "x"}, {"pony-b", "missing"}, {"pony-a", "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if has(Ref{"pony-a", "x"}) || has(Ref{"pony-b", "x"}) || !has(Ref{"pony-a", "y"}) {
+		t.Fatal("DeleteMany removed the wrong keys")
+	}
+	if err := k.DeleteMany(ctx, "t1", nil); err != nil {
+		t.Fatalf("empty batch: %v", err)
+	}
+	if err := k.DeleteMany(ctx, "t1", make([]Ref, MaxBatchItems+1)); err == nil {
+		t.Fatal("over the cap must be refused")
+	}
+	if err := New(plainStore{k.s}, 0, 0).DeleteMany(ctx, "t1", []Ref{{"pony-a", "y"}}); err == nil || !has(Ref{"pony-a", "y"}) {
+		t.Fatalf("a store with no atomic batch write must refuse: %v", err)
 	}
 }
 
