@@ -138,6 +138,9 @@ func (s *Store) clampTTL(ttl time.Duration) time.Duration {
 // nodes. A unique-index violation (an out-of-band writer that won the same
 // key) is retried once, in a fresh transaction — Postgres aborts the
 // current one on a violation.
+//
+// On Postgres the common case is tried first as one statement (appendFast);
+// anything it does not cover falls through to this transaction untouched.
 func (s *Store) Append(ctx context.Context, req AppendReq) (AppendResult, error) {
 	if err := req.Ref.Validate(); err != nil {
 		return AppendResult{}, err
@@ -168,6 +171,16 @@ func (s *Store) Append(ctx context.Context, req AppendReq) (AppendResult, error)
 		return AppendResult{}, &TooLargeError{Field: "data", Max: s.limits.MaxDataBytes, Got: len(data)}
 	}
 	ttl := s.clampTTL(req.TTL)
+
+	if s.dialect == registry.Postgres {
+		res, ok, err := s.appendFast(ctx, req.Ref, req.Type, data, req.ObjectKey, ttl)
+		if err != nil {
+			return AppendResult{}, &StoreError{Op: "append", Err: err}
+		}
+		if ok {
+			return res, nil
+		}
+	}
 
 	var res AppendResult
 	var err error
@@ -281,6 +294,82 @@ func (s *Store) appendOnce(ctx context.Context, ref Ref, typ string, data json.R
 		return AppendResult{}, fmt.Errorf("commit: %w", err)
 	}
 	return AppendResult{Seq: seq, At: now}, nil
+}
+
+// appendFast is appendOnce's common case — the head exists, the entry
+// inherits no default TTL from it, and the object_key is unused — as ONE
+// autocommit statement on Postgres, where appendOnce costs six round trips
+// (BEGIN, lock, key check, allocate, insert, COMMIT) and each one is a
+// network hop to the database.
+//
+// The UPDATE takes the same head-row lock appendOnce's FOR UPDATE does, at
+// the same point (before the entry is written), so appends and Delete
+// serialize exactly as they do there. Its guards fail closed: when any of
+// the three conditions does not hold the UPDATE matches nothing, the INSERT
+// selects from an empty set, and nothing is written — ok=false, and Append
+// runs the transaction, which owns every other case (first append, a live
+// or lazily expired original, a head TTL to inherit). The same is true of
+// the failures Postgres guarantees rolled the statement back: a unique
+// violation (an object_key that committed after the statement's snapshot —
+// the transaction then returns that original), a serialization failure
+// under a SERIALIZABLE session default (BeginWrite pins READ COMMITTED; an
+// autocommit statement cannot), and a deadlock. Any other error is returned
+// as-is, as appendOnce would, and is never retried: after an error of
+// unknown outcome a keyless append run twice would record two entries.
+func (s *Store) appendFast(ctx context.Context, ref Ref, typ string, data json.RawMessage, key string, ttl time.Duration) (AppendResult, bool, error) {
+	now := s.now().UTC()
+	at := FormatAt(now)
+	id := ref.ID()
+
+	var q strings.Builder
+	q.WriteString(`WITH head AS (
+		UPDATE notebooks SET next_seq = next_seq + 1, updated_at = ?
+		 WHERE notebook_id = ?`)
+	args := []any{at, id}
+	var expires any // nil ⇒ SQL NULL
+	if ttl > 0 {
+		expires = FormatAt(now.Add(ttl))
+	} else {
+		// No per-append TTL: only a head without a default, whose entry
+		// never expires. A head with one goes to appendOnce, which reads it.
+		q.WriteString(` AND (ttl_secs IS NULL OR ttl_secs <= 0)`)
+	}
+	if key != "" {
+		q.WriteString(` AND NOT EXISTS (SELECT 1 FROM notebook_entries WHERE notebook_id = ? AND object_key = ?)`)
+		args = append(args, id, key)
+	}
+	q.WriteString(`
+		RETURNING next_seq - 1 AS seq
+	)
+	INSERT INTO notebook_entries (notebook_id, seq, at, type, data, object_key, expires_at)
+	SELECT CAST(? AS TEXT), head.seq, CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT) FROM head
+	RETURNING seq`)
+	args = append(args, id, at, typ, string(data), key, expires)
+
+	var seq int64
+	err := s.db.QueryRowContext(ctx, s.rb(q.String()), args...).Scan(&seq)
+	switch {
+	case err == nil:
+		return AppendResult{Seq: seq, At: now}, true, nil
+	case errors.Is(err, sql.ErrNoRows), s.dialect.IsUniqueViolationGeneric(err), pgRolledBack(err):
+		return AppendResult{}, false, nil
+	}
+	return AppendResult{}, false, err
+}
+
+// pgRolledBack reports a Postgres serialization_failure (40001) or
+// deadlock_detected (40P01) — errors after which the statement is known to
+// have written nothing. Duck-typed so core never imports a driver (the
+// registry dialect's rule).
+func pgRolledBack(err error) bool {
+	var s interface{ SQLState() string }
+	if errors.As(err, &s) {
+		switch s.SQLState() {
+		case "40001", "40P01":
+			return true
+		}
+	}
+	return false
 }
 
 // Stat returns the head row. ok is false when the notebook has never been
