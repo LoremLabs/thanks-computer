@@ -193,6 +193,16 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) vector.Store) {
 		if len(got) != 1 || got[0].ID != "q" {
 			t.Fatalf("vector changed by update: %v", ids(got))
 		}
+		// Re-running the same re-label with a not_in on the new field must
+		// match nothing: the retag lane's "done" signal.
+		if n, err := s.UpdateMetadata(ctx, tenant, uc,
+			vector.Filter{Conditions: []vector.Condition{
+				{Field: "doc", Op: vector.OpIn, Value: []any{"d1", "d2"}},
+				{Field: "audience", Op: vector.OpNotIn, Value: []any{"anyone"}},
+			}},
+			map[string]any{"audience": "anyone"}); err != nil || n != 0 {
+			t.Fatalf("second pass: n=%d err=%v want 0 (not_in must exclude the rows already tagged)", n, err)
+		}
 		// id filter works for update too; a miss matches nothing.
 		if n, err := s.UpdateMetadata(ctx, tenant, uc,
 			vector.Filter{Conditions: []vector.Condition{{Field: "id", Op: vector.OpIn, Value: []any{"r", "nope"}}}},
