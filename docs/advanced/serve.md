@@ -81,6 +81,31 @@ specific range with `--egress-allow-cidrs`) only when your own rules must
 reach internal/localhost services. `txco dev` and `start.sh` opt into
 `open` for local development.
 
+## Shutdown
+
+On `SIGTERM` or `SIGINT` the chassis drains before it stops. New work from
+peers that come back on their own is refused: web requests get `503` with
+`Retry-After` (and `/healthz` answers `503`, so a load balancer moves on),
+and LMTP deliveries get `451`, so the sending MTA requeues. The `scheduled`
+and `source` pollers stop claiming. Work already in flight keeps running —
+requests, a continuation's detached tail, a worker callback's resume — and
+so does internal work nobody would retry, such as a scheduled event already
+claimed. The chassis waits up to `--shutdown-grace` for all of it to finish,
+then cancels whatever is left and stops.
+
+| Flag               | Default | Meaning                                                          |
+| ------------------ | ------- | ---------------------------------------------------------------- |
+| `--shutdown-grace` | `25s`   | How long in-flight work gets before it is cancelled; `0` cancels at once |
+
+:::note
+Give the container a stop timeout above the grace. Docker's default is
+`10s`, after which it sends `SIGKILL` mid-drain; in Compose, set
+`stop_grace_period` (for example `60s`).
+:::
+
+`SIGUSR1` turns the same drain on without stopping the process, and
+`SIGUSR2` turns it off — for taking a node out of rotation by hand.
+
 ## AI gateway
 
 The `web` head also serves the AI-gateway inlet (`POST /v1/messages`), which forwards to

@@ -486,7 +486,14 @@ Flags:
 			fmt.Fprintf(stdout, "[txco]        then `dig @127.0.0.1 -p %s ops.example.com A`\n", strings.TrimPrefix(devDNSListenAddr, "127.0.0.1:"))
 		}
 		if *lmtpHead {
-			fmt.Fprintf(stdout, "[txco]   lmtp head: %s → relay %s (run MailHog/Mailpit for the sink)\n", devLMTPListenAddr, devMailRelayAddr)
+			// Name the relay the chassis will actually use: an explicit
+			// TXCO_MAIL_RELAY_ADDR wins over the dev default (devDefaults
+			// is set-if-missing), so printing the constant would lie.
+			relay := devMailRelayAddr
+			if v, ok := os.LookupEnv("TXCO_MAIL_RELAY_ADDR"); ok && v != "" {
+				relay = v
+			}
+			fmt.Fprintf(stdout, "[txco]   lmtp head: %s → relay %s (run MailHog/Mailpit for the sink)\n", devLMTPListenAddr, relay)
 			fmt.Fprintf(stdout, "[txco]        test: swaks --protocol LMTP --server localhost%s --to you@<host>\n", devLMTPListenAddr)
 		}
 		if *imapHead {

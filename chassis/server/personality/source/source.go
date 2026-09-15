@@ -136,6 +136,12 @@ func (c *Controller) Stop() {
 // poll is one pass: reclaim stale claims, claim due sources, handle each
 // (bounded fan-out).
 func (c *Controller) poll(ctx context.Context, maxInflight int) {
+	// Draining (SIGUSR1, or shutdown's grace): claim nothing new. A source
+	// claimed now would be read on a node that is leaving; left unclaimed,
+	// another node polls it — or this one, after SIGUSR2.
+	if admission.IsDraining() {
+		return
+	}
 	stale := time.Duration(c.pu.Conf.SourceStaleAfter) * time.Second
 	if stale <= 0 {
 		stale = 600 * time.Second

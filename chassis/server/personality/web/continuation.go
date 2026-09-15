@@ -170,7 +170,9 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 			},
 		})
 	}
+	endWork := web.pu.Work.Begin() // shutdown waits for a resume in progress
 	rerr := web.pu.Resume(rctx, lk.RunID, lk.Stage)
+	endWork()
 	status := "ok"
 	reason := ""
 	var final []byte

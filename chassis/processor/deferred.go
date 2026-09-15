@@ -401,7 +401,11 @@ func (pu *Unit) suspendForDeferredJoins(ctx context.Context, di deferredIdent, j
 	// claim, so exactly one resume runs.
 	if state, serr := pu.Runs.StageState(ctx, di.runID, joinStage, manifest); serr == nil && state == continuation.StateResumable {
 		runID, stage := di.runID, joinStage
-		go pu.DriveDeferredResume(runID, stage)
+		endWork := pu.Work.Begin()
+		go func() {
+			defer endWork()
+			pu.DriveDeferredResume(runID, stage)
+		}()
 	}
 	return nil
 }
@@ -411,6 +415,7 @@ func (pu *Unit) suspendForDeferredJoins(ctx context.Context, di deferredIdent, j
 // both the suspend-time race guard and the worker-completion path: it
 // re-checks resumability and lets ClaimResume pick the single winner.
 func (pu *Unit) DriveDeferredResume(runID, stage string) {
+	defer pu.Work.Begin()() // a worker callback's resume runs here too: shutdown waits for it
 	bg := context.Background()
 	ss, err := pu.Runs.ReadStageSuspended(bg, runID, stage)
 	if err != nil {
@@ -506,7 +511,9 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 	})
 
 	workCtx, fuelStart, cancel := pu.detachedOpContext(reqCtx, raw, timeout)
+	endWork := pu.Work.Begin() // outlives the request: shutdown waits for it
 	go func() {
+		defer endWork()
 		defer cancel()
 
 		// The transport rides the terminal so the join merge applies the

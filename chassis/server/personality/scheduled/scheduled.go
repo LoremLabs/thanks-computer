@@ -143,6 +143,12 @@ func (c *Controller) Stop() {
 // fan-out). Errors are logged (unless we're shutting down) and the pass
 // returns — the next tick retries.
 func (c *Controller) poll(ctx context.Context, maxInflight int) {
+	// Draining (SIGUSR1, or shutdown's grace): claim nothing new. A row
+	// claimed now would run on a node that is leaving; left unclaimed,
+	// another node fires it — or this one, after SIGUSR2.
+	if admission.IsDraining() {
+		return
+	}
 	stale := time.Duration(c.pu.Conf.ScheduledStaleAfter) * time.Second
 	if stale <= 0 {
 		stale = 600 * time.Second

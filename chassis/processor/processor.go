@@ -114,6 +114,11 @@ type Unit struct {
 	// untraced (used in unit tests + non-server contexts).
 	Sink trace.Sink
 
+	// Work tracks pipeline work that outlives its request goroutine — a
+	// continuation's detached tail, a local async op, a worker callback's
+	// resume — so shutdown can let it finish before cancelling. Nil-safe.
+	Work *Tracker
+
 	// MCPSessions caches server-minted `Mcp-Session-Id` values per
 	// (tenant, endpoint) so hot MCP paths skip the init lifecycle
 	// (3 HTTPS round-trips → 1). Nil-safe — when unset, ExecMCPHTTP
@@ -435,6 +440,7 @@ func New(conf config.Config, logger *zap.Logger, reg registry.Registry, mc *metr
 		Runs:            runs,
 		CallbackBaseURL: conf.ContinuationCallbackBaseURL,
 		Secrets:         secretsResolver,
+		Work:            NewTracker(),
 	}
 
 	return pu
@@ -1722,7 +1728,9 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 	// Detach under the value-preserving ctx (built now, while the request
 	// values are certainly live).
 	workCtx, fuelStart, cancel := pu.detachedOpContext(reqCtx, raw, timeout)
+	endWork := pu.Work.Begin() // outlives the request: shutdown waits for it
 	go func() {
+		defer endWork()
 		defer cancel()
 
 		// Spawn a resume trace — symmetric with continuation.go's

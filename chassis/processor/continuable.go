@@ -392,7 +392,11 @@ func (pu *Unit) promoteContinuable(
 	// 4. Detach the upstream goroutine. When it returns (or workCtx
 	//    times out), record the terminal and drive Resume — symmetric
 	//    with dispatchLocalAsync's tail.
-	go pu.finishContinuableDetached(workCtx, workCancel, done, runID, cstage, name, op, fuelStart)
+	endWork := pu.Work.Begin() // the rest of the run happens here: shutdown waits for it
+	go func() {
+		defer endWork()
+		pu.finishContinuableDetached(workCtx, workCancel, done, runID, cstage, name, op, fuelStart)
+	}()
 
 	// 5. Emit the 202 (or 303 for browser Accept) to the client. From
 	//    here the lifecycle is identical to mode=async: client polls

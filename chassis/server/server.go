@@ -1323,10 +1323,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	bus := make(chan *event.Envelope)
 
 	// Track in-flight bus-loop request goroutines so shutdown waits for
-	// them to call tracer.End before we drain and close the trace sink.
-	// Without this, async traces of mid-flight requests are lost on
-	// SIGINT — the AsyncSink's Close runs before End is enqueued.
-	var inflightWg sync.WaitGroup
+	// them: first for their runs to finish (drainBeforeStop, before the
+	// cancel), then for them to call tracer.End before we drain and close
+	// the trace sink. Without this, async traces of mid-flight requests are
+	// lost on SIGINT — the AsyncSink's Close runs before End is enqueued.
+	// A Tracker, not a WaitGroup: the drain admits internal work while it
+	// waits, which a WaitGroup forbids at a zero count.
+	inflight := processor.NewTracker()
 
 	pu := processor.New(conf, logger, reg, mc, bus, kv, runtimeDB, authDB, dbc, runs, guard, secretsResolver)
 
@@ -2199,12 +2202,15 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 					}
 
 					// Drain: while this node is bleeding out of its load
-					// balancer (SIGUSR1; SIGUSR2 to resume), reject new
-					// requests with a 503 + Retry-After before dispatch.
-					// In-flight requests already past this point finish
-					// normally; /healthz also reports 503 so the LB stops
-					// routing new traffic here.
-					if admission.IsDraining() {
+					// balancer (SIGUSR1; SIGUSR2 to resume) or shutting down
+					// (drainBeforeStop), refuse new work from peers that
+					// retry or fail over — web 503 + Retry-After, LMTP 451 —
+					// before dispatch. Internal work (a claimed scheduled
+					// event, a cron job, an IMAP lane) still runs: refused,
+					// it would be lost rather than retried. In-flight
+					// requests finish normally; /healthz reports 503 so the
+					// LB stops routing new traffic here.
+					if admission.IsDraining() && refusedWhileDraining(envelope.Src) {
 						emitDrainResponse(envelope)
 						continue
 					}
@@ -2234,9 +2240,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						continue
 					}
 
-					inflightWg.Add(1)
+					endInflight := inflight.Begin()
 					go func() {
-						defer inflightWg.Done()
+						defer endInflight()
 						// Per-request admission lease: the concurrency gate
 						// (processor) registers its slot-release on this lease;
 						// the defer frees it when the request goroutine returns
@@ -2372,6 +2378,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// Return a function that will stop all controllers.
 	return ctx, func(reason string) {
 		logger.Info("calling shutdown")
+		// Let in-flight runs finish before cancelling the context they run
+		// on — without this a deploy's SIGTERM cuts every run mid-flight.
+		// Bounded by --shutdown-grace; 0 keeps the cancel-at-once behavior.
+		drainBeforeStop(logger, conf.ShutdownGrace, inflight, pu.Work)
 		cancel()
 
 		var wg sync.WaitGroup
@@ -2388,13 +2398,8 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		// loop. Without this, their tracer.End calls race against
 		// traceSink.Close and async traces get lost on shutdown. 5s
 		// ceiling so a deadlocked request doesn't stall shutdown.
-		inflightDone := make(chan struct{})
-		go func() {
-			inflightWg.Wait()
-			close(inflightDone)
-		}()
 		select {
-		case <-inflightDone:
+		case <-inflight.Idle():
 		case <-time.After(5 * time.Second):
 			logger.Warn("inflight wait timed out; trace records may be incomplete")
 		}

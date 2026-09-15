@@ -88,6 +88,24 @@ pre-emitted verdict (broadcast code or per-recipient array) always
 wins, so emit it in a scope before the suspending op when you want
 something other than 250.
 
+## Keep working while it runs: `join_at_scope`
+
+A plain `mode = "async"` op suspends the flow at its own scope. Add
+`join_at_scope` and the op is dispatched now but *joins later*: the
+scopes in between keep running while the worker is busy, and the result
+merges in just before the join scope's ops run.
+
+```txcl
+WITH mode = "async", join_at_scope = 200
+EXEC "https://research.example.com/start"
+```
+
+If the worker answers before the flow reaches scope 200, the request
+finishes synchronously; otherwise the flow suspends at 200 exactly like
+a plain async op. What may run in between, what happens when the join
+is never reached, and what it costs are in
+[Deferred join](./advanced/deferred-join.md).
+
 ## Why it's safe to wait
 
 - **Durable.** Suspended state is files on disk, not memory. The
