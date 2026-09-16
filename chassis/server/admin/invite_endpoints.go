@@ -182,7 +182,12 @@ func (c *Controller) handleListInvitations(w http.ResponseWriter, r *http.Reques
 		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
 		return
 	}
-	rows, err := c.registry.ListInvitations(r.Context())
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	rows, err := c.registry.ListInvitations(r.Context(), ac.TenantID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "list invitations",
 			map[string]any{"err": err.Error()})
@@ -248,7 +253,14 @@ func (c *Controller) handleRevokeInvitation(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, "missing invitation id", nil)
 		return
 	}
-	if err := c.registry.RevokeInvitation(r.Context(), invID); err != nil {
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	// Scoped in the registry: another tenant's invitation is ErrNotFound,
+	// so it gets the same 404 as an unknown id.
+	if err := c.registry.RevokeInvitation(r.Context(), invID, ac.TenantID); err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "invitation not found",
 				map[string]any{"invitation_id": invID})

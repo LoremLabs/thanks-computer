@@ -14,8 +14,11 @@ import (
 // runRevokeActor revokes an actor by id. The server's RevokeActor
 // stamps actors.revoked_at and cascades to actor_keys; subsequent
 // signed calls from any of the actor's keys land on the middleware's
-// actor_revoked response. Capability gate: actor:*:revoke (super_admin),
-// enforced server-side.
+// actor_revoked response. Capability gate: actor:*:revoke in the tenant,
+// enforced server-side. Because the revoke is chassis-wide, a tenant
+// admin may only revoke a non-super-admin actor whose sole membership is
+// that tenant (404 outside it, 409 when the actor spans tenants);
+// super_admin may revoke any actor.
 //
 // Self-revoke is refused both client-side (whoami compare) and server-
 // side (409). The client check is ergonomics — it costs one round-trip
@@ -39,6 +42,11 @@ Usage: txco auth revoke-actor <actor-id> [flags]
 Revoke an actor by id. Stamps actors.revoked_at and cascades to all
 the actor's keys; subsequent signed calls fail with actor_revoked.
 Soft-revoke only — the row stays for forensics.
+
+The revoke applies across the whole chassis, so a tenant admin can
+only revoke actors whose sole membership is --tenant. To remove an
+actor who also belongs to other tenants from just this one, use
+"txco auth tenant revoke"; revoking them everywhere needs a super_admin.
 
 Flags:
 `)

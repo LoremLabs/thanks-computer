@@ -293,12 +293,21 @@ type actorRecord struct {
 	RevokedAt *string `json:"revoked_at,omitempty"`
 }
 
+// handleListActors lists the actors with an active membership in the
+// URL's tenant. Scoped for every caller, super_admin included: the
+// capability check only proves authority inside this tenant, so the
+// listing must not reach past it.
 func (c *Controller) handleListActors(w http.ResponseWriter, r *http.Request) {
 	if err := policy.RequireCapability(r.Context(), "actor:*:read"); err != nil {
 		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
 		return
 	}
-	actors, err := c.registry.ListActors(r.Context())
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	actors, err := c.registry.ListActorsInTenant(r.Context(), ac.TenantID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "list actors", map[string]any{"err": err.Error()})
 		return
@@ -352,6 +361,9 @@ func (c *Controller) handleRevokeActor(w http.ResponseWriter, r *http.Request) {
 			map[string]any{"hint": "ask a peer super_admin to revoke this actor"})
 		return
 	}
+	if !c.authorizeActorRevoke(w, r, actorID) {
+		return
+	}
 	if err := c.registry.RevokeActor(r.Context(), actorID); err != nil {
 		if errors.Is(err, registry.ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "actor not found", map[string]any{"actor_id": actorID})
@@ -382,6 +394,84 @@ func (c *Controller) handleRevokeActor(w http.ResponseWriter, r *http.Request) {
 	}
 	c.pu.Logger.Info("actor revoked", zap.String("actor_id", actorID))
 	writeJSON(w, http.StatusOK, revokeResponse{Revoked: true, ActorID: actorID})
+}
+
+// authorizeActorRevoke decides whether the caller may revoke actorID
+// from the URL's tenant. Revoking an actor is chassis-wide (every key
+// and session goes), but the actor:*:revoke check only proved authority
+// inside this tenant. So:
+//
+//   - operators (super_admin, basic-auth, open) may revoke any actor;
+//     the only check is that it exists.
+//   - everyone else may revoke only a non-super-admin actor whose sole
+//     active membership is this tenant. An actor outside the tenant is
+//     a 404 (same as unknown, so other tenants can't be probed); one
+//     that also belongs elsewhere is a 409 pointing at the per-tenant
+//     membership revoke instead.
+//
+// The checks run before the revoke rather than in one transaction, so a
+// membership granted elsewhere in between would slip through. That needs
+// a concurrent grant by another tenant's admin; accepted for v1.
+//
+// Writes the error response itself; returns false when the caller
+// should stop.
+func (c *Controller) authorizeActorRevoke(w http.ResponseWriter, r *http.Request, actorID string) bool {
+	ctx := r.Context()
+	notFound := func() bool {
+		writeJSONError(w, http.StatusNotFound, "actor not found", map[string]any{"actor_id": actorID})
+		return false
+	}
+	lookupFailed := func(err error) bool {
+		writeJSONError(w, http.StatusInternalServerError, "lookup actor", map[string]any{"err": err.Error()})
+		return false
+	}
+
+	if policy.RequireSuperAdmin(ctx) == nil {
+		if _, err := c.registry.LookupActor(ctx, actorID); err != nil {
+			if errors.Is(err, registry.ErrNotFound) {
+				return notFound()
+			}
+			return lookupFailed(err)
+		}
+		return true
+	}
+
+	ac := auth.FromContext(ctx)
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return false
+	}
+	if _, err := c.registry.LoadMembership(ctx, actorID, ac.TenantID); err != nil {
+		if errors.Is(err, registry.ErrNotFound) {
+			return notFound()
+		}
+		return lookupFailed(err)
+	}
+	target, err := c.registry.LookupActor(ctx, actorID)
+	if err != nil {
+		if errors.Is(err, registry.ErrNotFound) {
+			return notFound()
+		}
+		return lookupFailed(err)
+	}
+	if target.SuperAdmin {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return false
+	}
+	ms, err := c.registry.ListMembershipsForActor(ctx, actorID)
+	if err != nil {
+		return lookupFailed(err)
+	}
+	for _, m := range ms {
+		if m.TenantID != ac.TenantID {
+			writeJSONError(w, http.StatusConflict, "actor_spans_tenants", map[string]any{
+				"actor_id": actorID,
+				"hint":     "this actor also belongs to other tenants; use `txco auth tenant revoke` to remove them from this tenant, or ask a super_admin to revoke the actor everywhere",
+			})
+			return false
+		}
+	}
+	return true
 }
 
 // handleRevokeKey revokes a single key. Chassis-wide (the key isn't

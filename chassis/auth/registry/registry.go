@@ -184,6 +184,9 @@ func (r *Registry) HasAnyActiveActor(ctx context.Context) (bool, error) {
 
 // ListActors returns every row in actors, newest first. v1 returns them
 // all; pagination ships in v2 when there's a real need.
+//
+// Chassis-wide: it sees every tenant's actors, so it must never back a
+// tenant-scoped route — use ListActorsInTenant there.
 func (r *Registry) ListActors(ctx context.Context) ([]Actor, error) {
 	rows, err := r.qy(ctx, r.DB,
 		`SELECT actor_id, COALESCE(label, ''), COALESCE(kind, ''), COALESCE(subject, ''),
@@ -193,6 +196,34 @@ func (r *Registry) ListActors(ctx context.Context) ([]Actor, error) {
 	if err != nil {
 		return nil, err
 	}
+	return scanActorList(rows)
+}
+
+// ListActorsInTenant returns the actors holding an active membership in
+// tenantID, newest first. A revoked actor whose membership row is still
+// active is included (with RevokedAt set) so tenant admins can see who
+// was cut off.
+func (r *Registry) ListActorsInTenant(ctx context.Context, tenantID string) ([]Actor, error) {
+	rows, err := r.qy(ctx, r.DB,
+		`SELECT a.actor_id, COALESCE(a.label, ''), COALESCE(a.kind, ''), COALESCE(a.subject, ''),
+		        COALESCE(a.tenant, ''), COALESCE(a.stack, ''), a.super_admin,
+		        a.created_at, a.revoked_at, COALESCE(a.meta, '')
+		 FROM actors a
+		 WHERE EXISTS (
+		     SELECT 1 FROM actor_memberships m
+		      WHERE m.actor_id = a.actor_id
+		        AND m.tenant_id = ?
+		        AND m.revoked_at IS NULL)
+		 ORDER BY a.created_at DESC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return scanActorList(rows)
+}
+
+// scanActorList drains an actors result set (the column order shared by
+// ListActors and ListActorsInTenant) and closes it.
+func scanActorList(rows *sql.Rows) ([]Actor, error) {
 	defer rows.Close()
 	var out []Actor
 	for rows.Next() {
@@ -458,16 +489,24 @@ func (r *Registry) CreateInvitation(ctx context.Context, inv Invitation) error {
 	return err
 }
 
-// ListInvitations returns every invitation row, newest first. Status
-// derivation happens at the HTTP layer — this method is pure storage.
-func (r *Registry) ListInvitations(ctx context.Context) ([]Invitation, error) {
+// invitationInTenant is the tenant predicate shared by ListInvitations
+// and RevokeInvitation. A pre-0008 row with an empty tenant_id counts as
+// the default tenant, matching ConsumeInvitation. Takes two binds:
+// (DefaultTenantID, tenantID).
+const invitationInTenant = `COALESCE(NULLIF(tenant_id, ''), ?) = ?`
+
+// ListInvitations returns tenantID's invitation rows, newest first.
+// Status derivation happens at the HTTP layer — this method is pure
+// storage.
+func (r *Registry) ListInvitations(ctx context.Context, tenantID string) ([]Invitation, error) {
 	rows, err := r.qy(ctx, r.DB,
 		`SELECT invitation_id, token_hash, COALESCE(label, ''), COALESCE(kind, ''),
 		        COALESCE(tenant_id, ''),
 		        capabilities, created_by, created_at, expires_at,
 		        consumed_at, COALESCE(consumed_by, ''), revoked_at
 		 FROM actor_invitations
-		 ORDER BY created_at DESC`)
+		 WHERE `+invitationInTenant+`
+		 ORDER BY created_at DESC`, DefaultTenantID, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -483,23 +522,26 @@ func (r *Registry) ListInvitations(ctx context.Context) ([]Invitation, error) {
 	return out, rows.Err()
 }
 
-// RevokeInvitation marks an invitation as revoked. Idempotent: revoking
-// an already-revoked / already-consumed invitation is a no-op (the
-// WHERE clause filters those out).
-func (r *Registry) RevokeInvitation(ctx context.Context, invitationID string) error {
+// RevokeInvitation marks one of tenantID's invitations as revoked.
+// Idempotent: revoking an already-revoked / already-consumed invitation
+// is a no-op (the WHERE clause filters those out). An invitation that
+// belongs to another tenant returns ErrNotFound, same as an unknown id.
+func (r *Registry) RevokeInvitation(ctx context.Context, invitationID, tenantID string) error {
 	res, err := r.ex(ctx, r.DB,
 		`UPDATE actor_invitations
 		 SET revoked_at = ?
-		 WHERE invitation_id = ? AND revoked_at IS NULL AND consumed_at IS NULL`,
-		time.Now().UTC().Format(time.RFC3339), invitationID)
+		 WHERE invitation_id = ? AND `+invitationInTenant+`
+		   AND revoked_at IS NULL AND consumed_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339), invitationID, DefaultTenantID, tenantID)
 	if err != nil {
 		return err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		// Either gone, already revoked, or consumed.
+		// Either gone, in another tenant, already revoked, or consumed.
 		row := r.qr(ctx, r.DB,
-			`SELECT 1 FROM actor_invitations WHERE invitation_id = ?`, invitationID)
+			`SELECT 1 FROM actor_invitations WHERE invitation_id = ? AND `+invitationInTenant,
+			invitationID, DefaultTenantID, tenantID)
 		var one int
 		if err := row.Scan(&one); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {

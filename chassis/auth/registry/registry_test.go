@@ -276,7 +276,7 @@ func TestConsumeInvitationRevoked(t *testing.T) {
 	r := New(newRegistryDB(t), nil)
 	ctx := context.Background()
 	token, _ := mintInvitation(t, r, time.Hour)
-	if err := r.RevokeInvitation(ctx, "inv_test"); err != nil {
+	if err := r.RevokeInvitation(ctx, "inv_test", DefaultTenantID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	pub, _, _ := ed25519.GenerateKey(nil)
@@ -301,7 +301,7 @@ func TestConsumeInvitationUnknownToken(t *testing.T) {
 func TestListInvitationsRoundtrip(t *testing.T) {
 	r := New(newRegistryDB(t), nil)
 	mintInvitation(t, r, time.Hour)
-	out, err := r.ListInvitations(context.Background())
+	out, err := r.ListInvitations(context.Background(), DefaultTenantID)
 	if err != nil {
 		t.Fatalf("ListInvitations: %v", err)
 	}

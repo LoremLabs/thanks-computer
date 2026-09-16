@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 )
 
 // Membership-side tests. Tenant CRUD lives in chassis/tenants/store_test.go
@@ -165,6 +166,145 @@ func TestListMembershipsForActorAcrossTenants(t *testing.T) {
 	want := []string{"beta", "tnt_a-slug"}
 	if !reflect.DeepEqual(slugs, want) {
 		t.Errorf("slug lookup failed: got %v, want %v", slugs, want)
+	}
+}
+
+// TestListActorsInTenant — only actors with an ACTIVE membership in the
+// tenant come back. A revoked actor with a live membership is still
+// listed (forensics); a revoked membership is not.
+func TestListActorsInTenant(t *testing.T) {
+	r, db := newRegistryWithSlugs(t)
+	ctx := context.Background()
+	seedTenant(t, db, "tnt_a", "alpha")
+	seedTenant(t, db, "tnt_b", "bravo")
+
+	grants := map[string][]string{
+		"actor_a_only":      {"tnt_a"},
+		"actor_b_only":      {"tnt_b"},
+		"actor_both":        {"tnt_a", "tnt_b"},
+		"actor_a_revoked_m": {"tnt_a"},
+		"actor_a_revoked":   {"tnt_a"},
+	}
+	for actorID, tids := range grants {
+		if err := r.CreateActor(ctx, Actor{ActorID: actorID}); err != nil {
+			t.Fatalf("CreateActor(%s): %v", actorID, err)
+		}
+		for _, tid := range tids {
+			if _, err := r.CreateMembership(ctx, Membership{
+				ActorID: actorID, TenantID: tid, Capabilities: []string{"opstack:read"},
+			}); err != nil {
+				t.Fatalf("CreateMembership(%s, %s): %v", actorID, tid, err)
+			}
+		}
+	}
+	if err := r.RevokeMembership(ctx, "actor_a_revoked_m", "tnt_a"); err != nil {
+		t.Fatalf("RevokeMembership: %v", err)
+	}
+	if err := r.RevokeActor(ctx, "actor_a_revoked"); err != nil {
+		t.Fatalf("RevokeActor: %v", err)
+	}
+
+	actors, err := r.ListActorsInTenant(ctx, "tnt_a")
+	if err != nil {
+		t.Fatalf("ListActorsInTenant: %v", err)
+	}
+	var got []string
+	for _, a := range actors {
+		got = append(got, a.ActorID)
+		if a.ActorID == "actor_a_revoked" && a.RevokedAt == nil {
+			t.Errorf("actor_a_revoked listed without RevokedAt")
+		}
+	}
+	sort.Strings(got)
+	want := []string{"actor_a_only", "actor_a_revoked", "actor_both"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tnt_a actors = %v, want %v", got, want)
+	}
+}
+
+// TestInvitationsScopedToTenant — ListInvitations and RevokeInvitation
+// only see the given tenant's rows. Pre-0008 rows with a NULL or empty
+// tenant_id count as the default tenant; another tenant's invitation is
+// ErrNotFound on revoke and stays live.
+func TestInvitationsScopedToTenant(t *testing.T) {
+	r, db := newRegistryWithSlugs(t)
+	ctx := context.Background()
+	seedTenant(t, db, "tnt_a", "alpha")
+
+	mint := func(id, tenantID string) {
+		t.Helper()
+		if err := r.CreateInvitation(ctx, Invitation{
+			InvitationID: id,
+			TokenHash:    HashToken(id),
+			TenantID:     tenantID,
+			Capabilities: []string{"admin:all"},
+			CreatedBy:    "actor_admin",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("CreateInvitation(%s): %v", id, err)
+		}
+	}
+	mint("inv_a", "tnt_a")
+	mint("inv_default", "") // CreateInvitation defaults to DefaultTenantID
+	// Legacy rows: CreateInvitation can't produce these, so insert raw.
+	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	for id, tenant := range map[string]any{"inv_legacy_empty": "", "inv_legacy_null": nil} {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO actor_invitations
+				(invitation_id, token_hash, tenant_id, capabilities, created_by, created_at, expires_at)
+			 VALUES (?, ?, ?, '["admin:all"]', 'actor_admin', '2026-01-01T00:00:00Z', ?)`,
+			id, HashToken(id), tenant, expires); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+
+	ids := func(tenantID string) []string {
+		t.Helper()
+		invs, err := r.ListInvitations(ctx, tenantID)
+		if err != nil {
+			t.Fatalf("ListInvitations(%s): %v", tenantID, err)
+		}
+		var out []string
+		for _, inv := range invs {
+			out = append(out, inv.InvitationID)
+		}
+		sort.Strings(out)
+		return out
+	}
+	if got, want := ids("tnt_a"), []string{"inv_a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("tnt_a invitations = %v, want %v", got, want)
+	}
+	if got, want := ids(DefaultTenantID), []string{"inv_default", "inv_legacy_empty", "inv_legacy_null"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("default invitations = %v, want %v", got, want)
+	}
+
+	// Cross-tenant revoke: not found, and the row stays live.
+	if err := r.RevokeInvitation(ctx, "inv_default", "tnt_a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("cross-tenant revoke: got %v, want ErrNotFound", err)
+	}
+	inv, err := r.LookupInvitationByTokenHash(ctx, HashToken("inv_default"))
+	if err != nil {
+		t.Fatalf("LookupInvitationByTokenHash: %v", err)
+	}
+	if inv.RevokedAt != nil {
+		t.Errorf("inv_default revoked by a cross-tenant call")
+	}
+
+	// In-tenant revokes succeed, including a legacy row via the default tenant.
+	for _, tc := range []struct{ id, tenantID string }{
+		{"inv_a", "tnt_a"},
+		{"inv_legacy_null", DefaultTenantID},
+	} {
+		if err := r.RevokeInvitation(ctx, tc.id, tc.tenantID); err != nil {
+			t.Errorf("RevokeInvitation(%s, %s): %v", tc.id, tc.tenantID, err)
+		}
+		inv, err := r.LookupInvitationByTokenHash(ctx, HashToken(tc.id))
+		if err != nil {
+			t.Fatalf("LookupInvitationByTokenHash(%s): %v", tc.id, err)
+		}
+		if inv.RevokedAt == nil {
+			t.Errorf("%s not revoked", tc.id)
+		}
 	}
 }
 
