@@ -85,3 +85,22 @@ func TestContactsStoreMode(t *testing.T) {
 		}
 	}
 }
+
+func TestDriveStoreMode(t *testing.T) {
+	for _, c := range []struct {
+		personalities, store string
+		open, fatal          bool
+	}{
+		{"cron,web,admin", "sqlite", false, false},
+		{"cron,web,admin,webdav", "sqlite", true, true},
+		{"cron,web,admin", "postgres", true, false},
+		{"cron,web,webdav", "postgres", true, true},
+		{"cron,web,webdavx", "sqlite", false, false}, // whole-token match
+		{"cron,web,dav", "sqlite", false, false},     // the head token is webdav, not dav
+	} {
+		open, fatal := driveStoreMode(c.personalities, c.store)
+		if open != c.open || fatal != c.fatal {
+			t.Errorf("driveStoreMode(%q, %q) = (%v, %v), want (%v, %v)", c.personalities, c.store, open, fatal, c.open, c.fatal)
+		}
+	}
+}

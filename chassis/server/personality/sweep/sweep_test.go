@@ -21,7 +21,7 @@ func harness(t *testing.T, cfg config.Config) (*SweeperController, *continuation
 	}
 	runs := continuation.NewRuns(fs)
 	pu := &processor.Unit{Conf: cfg, Logger: zap.NewNop(), Runs: runs}
-	return NewController(context.Background(), pu), runs
+	return NewController(context.Background(), pu, nil), runs
 }
 
 func mustState(t *testing.T, r *continuation.Runs, id, want string) {

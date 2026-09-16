@@ -37,6 +37,9 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
+	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
+	_ "github.com/loremlabs/thanks-computer/chassis/drive/filestore" // registers the "file" drive object backend
+	"github.com/loremlabs/thanks-computer/chassis/drive/scheduledsink"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
@@ -436,6 +439,61 @@ func Run(bi BuildInfo) int {
 		logger.Info("skipping contacts store open — contacts personality not active and --contacts-store=sqlite",
 			zap.String("personalities", conf.Personalities))
 	}
+
+	// Drive: the mutable document store the `webdav` personality serves and
+	// txco://drive/* write to. Two backends — the INDEX (--drive-store, the
+	// DAV siblings' posture: own sqlite file with the head, a shared backend
+	// everywhere) and the OBJECT store for bytes (--drive-objects: a
+	// directory, or the overlay's S3). Mutation events go through the
+	// scheduled store when this node has one: written INSIDE the drive
+	// transaction when both stores are the same database (probed here, not
+	// inferred from DSN strings), after commit otherwise.
+	var driveStore *chdrive.Store
+	if open, fatal := driveStoreMode(conf.Personalities, conf.DriveStore); open {
+		objects, oerr := chdrive.OpenObjects(conf.DriveObjects, chdrive.ObjectsConfig{FileDir: conf.DriveObjectsFileDir})
+		var st *chdrive.Store
+		derr := oerr
+		if derr == nil {
+			st, derr = chdrive.Open(conf.DriveStore, chdrive.Config{DBPath: conf.DriveDBPath, Objects: objects})
+		}
+		switch {
+		case derr != nil && fatal:
+			logger.Fatal("drive store open failed",
+				zap.String("store", conf.DriveStore), zap.String("objects", conf.DriveObjects), zap.String("err", derr.Error()))
+		case derr != nil:
+			logger.Warn("drive store open failed; txco://drive/* answer txco_drive_disabled on this node until restart",
+				zap.String("store", conf.DriveStore), zap.String("objects", conf.DriveObjects), zap.String("err", derr.Error()))
+		default:
+			defer st.Close()
+			st.SetLimits(chdrive.Limits{
+				MaxFileBytes:       int64(conf.DriveMaxFileBytes),
+				MaxCollectionBytes: int64(conf.DriveMaxCollectionBytes),
+				MaxResources:       int64(conf.DriveMaxResources),
+			})
+			st.SetSinkErrorHandler(func(m chdrive.Mutation, err error) {
+				logger.Warn("drive mutation event not enqueued (the mutation stands)",
+					zap.String("event", m.Event), zap.String("resource_id", m.ResourceID), zap.String("err", err.Error()))
+			})
+			sinkMode := "none"
+			if scheduledStore != nil {
+				transactional := driveSinkTransactional(ctx, conf, st)
+				st.SetSink(scheduledsink.New(scheduledStore, transactional))
+				sinkMode = "post-commit"
+				if transactional {
+					sinkMode = "transactional"
+				} else if conf.DriveStore != "sqlite" {
+					logger.Warn("drive events are enqueued after commit, not with it — --drive-store and --scheduled-store are not the same database; a crash between the two loses the event",
+						zap.String("drive_store", conf.DriveStore), zap.String("scheduled_store", conf.ScheduledStore))
+				}
+			}
+			driveStore = st
+			logger.Info("drive store opened", zap.String("store", conf.DriveStore), zap.String("objects", objects.Name()),
+				zap.Bool("head", fatal), zap.String("events", sinkMode))
+		}
+	} else {
+		logger.Info("skipping drive store open — webdav personality not active and --drive-store=sqlite",
+			zap.String("personalities", conf.Personalities))
+	}
 	// Notebook store — the append-only record behind txco://notebook/*.
 	// Own file (never the runtime DB: the dbcache watcher reloads the
 	// mirror on every runtime-file write, and a notebook is written on
@@ -465,10 +523,20 @@ func Run(bi BuildInfo) int {
 	}
 	// Two DAV heads on one prefix would leave the second unreachable; say so
 	// at boot instead.
-	if conf.HasPersonality("calendar") && conf.HasPersonality("contacts") &&
-		strings.TrimSuffix(strings.TrimSpace(conf.CalendarPathPrefix), "/") == strings.TrimSuffix(strings.TrimSpace(conf.ContactsPathPrefix), "/") {
-		logger.Fatal("--calendar-path-prefix and --contacts-path-prefix must differ",
-			zap.String("prefix", conf.CalendarPathPrefix))
+	davPrefixes := map[string]string{} // cleaned prefix → flag that claimed it
+	for _, h := range []struct{ personality, flag, prefix string }{
+		{"calendar", "--calendar-path-prefix", conf.CalendarPathPrefix},
+		{"contacts", "--contacts-path-prefix", conf.ContactsPathPrefix},
+		{"webdav", "--drive-path-prefix", conf.DrivePathPrefix},
+	} {
+		if !conf.HasPersonality(h.personality) {
+			continue
+		}
+		p := strings.TrimSuffix(strings.TrimSpace(h.prefix), "/")
+		if other, dup := davPrefixes[p]; dup {
+			logger.Fatal(other+" and "+h.flag+" must differ", zap.String("prefix", h.prefix))
+		}
+		davPrefixes[p] = h.flag
 	}
 
 	logger.Info("db setup") // feedback here proved helpful in debugging file locking for db
@@ -600,7 +668,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore, driveStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)
@@ -1026,4 +1094,31 @@ func contactsStoreMode(personalities, store string) (open, fatal bool) {
 	head := config.Config{Personalities: personalities}.HasPersonality("contacts")
 	shared := store != "" && store != "sqlite"
 	return head || shared, head
+}
+
+// driveStoreMode is calendarStoreMode for the drive index; the head token
+// is `webdav`.
+func driveStoreMode(personalities, store string) (open, fatal bool) {
+	head := config.Config{Personalities: personalities}.HasPersonality("webdav")
+	shared := store != "" && store != "sqlite"
+	return head || shared, head
+}
+
+// driveSinkTransactional decides whether drive mutation events can be
+// written inside the drive index transaction: only when the drive index
+// and the scheduled store are the SAME shared database. A DSN string
+// comparison would be fragile (two spellings of one database); the probe
+// is a statement that succeeds only when scheduled_events is reachable on
+// the drive index's connection. The bundled sqlite backends are separate
+// files by construction, so they never qualify.
+func driveSinkTransactional(ctx context.Context, conf config.Config, st *chdrive.Store) bool {
+	if conf.DriveStore == "sqlite" || conf.ScheduledStore == "sqlite" || conf.DriveStore != conf.ScheduledStore {
+		return false
+	}
+	rows, err := st.DB().QueryContext(ctx, `SELECT 1 FROM scheduled_events LIMIT 0`)
+	if err != nil {
+		return false
+	}
+	_ = rows.Close()
+	return true
 }

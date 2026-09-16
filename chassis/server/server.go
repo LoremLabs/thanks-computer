@@ -43,6 +43,7 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/cron/local" // registers the "local" cron queue backend
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
+	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/egress"
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/open"    // registers the "open" policy
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/private" // registers the "private" policy
@@ -84,6 +85,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
+	webdavp "github.com/loremlabs/thanks-computer/chassis/server/personality/webdav"
 	websocketp "github.com/loremlabs/thanks-computer/chassis/server/personality/websocket"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
 	chsource "github.com/loremlabs/thanks-computer/chassis/source"
@@ -949,7 +951,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store, driveStore *chdrive.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1711,6 +1713,34 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			}))
 	}
 
+	// Drive store ops (txco://drive/{collection,account,put,get,stat,list,
+	// delete,mkdir,move,copy}): the mutable document store the `webdav`
+	// personality serves — a stack provisions a collection + login, writes
+	// and reads files, and lists changes since a sync token. Registered
+	// unconditionally so a node without the store answers `_drive.error
+	// txco_drive_disabled`. See chassis/server/drive.go + chassis/drive +
+	// docs/advanced/drive.md.
+	drvD := driveDeps{store: driveStore, snap: dbc.Snapshot,
+		maxBytes: int64(conf.DriveOpMaxBytes), prefix: conf.DrivePathPrefix} // nil dialect ⇒ SQLite (the mirror)
+	for name, fn := range map[string]func(context.Context, driveDeps, []byte) (event.Payload, error){
+		"txco://drive/collection": driveCollection,
+		"txco://drive/account":    driveAccount,
+		"txco://drive/put":        drivePut,
+		"txco://drive/get":        driveGet,
+		"txco://drive/stat":       driveStat,
+		"txco://drive/list":       driveList,
+		"txco://drive/delete":     driveDelete,
+		"txco://drive/mkdir":      driveMkdir,
+		"txco://drive/move":       driveMove,
+		"txco://drive/copy":       driveCopy,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, drvD, in)
+			}))
+	}
+
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
 	// delete}). The backend is selected by --vector-store (default "sqlite",
 	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
@@ -2010,6 +2040,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	if conCtrl.Enabled() {
 		webCtrl.MountDAV("/.well-known/carddav", conCtrl.Prefix(), conCtrl.Handler())
 	}
+	// WebDAV personality (the drive store on the web head under
+	// --drive-path-prefix): a plain file tree per account, no well-known
+	// path (WebDAV has no discovery — the mount URL is the prefix itself).
+	wdCtrl := webdavp.NewController(ctx, pu, driveStore, resolver)
+	if wdCtrl.Enabled() {
+		webCtrl.MountDAV("", wdCtrl.Prefix(), wdCtrl.Handler())
+	}
 
 	// Bundled TLS: when --web-tls-addr is set the chassis terminates TLS
 	// itself, obtaining + renewing wildcard certs for delegated zones via
@@ -2087,7 +2124,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		// --personalities; Stop() is the only drain hijacked sockets get.
 		wsCtrl,
 		adminCtrl,
-		sweep.NewController(ctx, pu),
+		sweep.NewController(ctx, pu, driveStore),
 		lmtp.NewController(ctx, pu, mailResolver),
 		// mailmap: a Postfix tcp_table responder answering the edge MTA's
 		// relay_domains lookup against tenant_hostnames. Shares the SAME
@@ -2099,6 +2136,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		imapCtrl,
 		calCtrl,
 		conCtrl,
+		wdCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
 	}

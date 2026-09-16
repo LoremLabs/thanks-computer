@@ -84,6 +84,13 @@ const (
 	// --kv-max-value-bytes, and pay only the dispatch. Exported because the
 	// handlers live in package server and charge via AddFuel.
 	FuelCostKVPerMiB int64 = 100
+	// FuelCostDrivePerMiB charges txco://drive/put per MiB written and
+	// drive/get per MiB returned (rounded up), on top of the flat dispatch
+	// fuel — the blob rate: decode + hash + object write. The streaming
+	// WebDAV head is not fuel-metered (it runs no stack); its bytes are
+	// bounded by the drive limits instead. Exported because the handlers
+	// live in package server and charge via AddFuel.
+	FuelCostDrivePerMiB int64 = 100
 )
 
 // AddFuel is the exported charge point for core op handlers that do

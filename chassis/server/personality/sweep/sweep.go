@@ -1,9 +1,11 @@
-// Package sweep is the continuation-store janitor: a single periodic
-// background pass that fails abandoned/expired runs, fails runs whose
-// resumer crashed mid-resume, and purges long-dead runs. It only ever
-// reads the store and writes create-if-absent terminal docs (FailRun) or
-// deletes whole finished runs (PurgeRun) — it never re-enters the
-// processor and never mutates a live run.
+// Package sweep is the store janitor: a single periodic background pass
+// per store. For the continuation store it fails abandoned/expired runs,
+// fails runs whose resumer crashed mid-resume, and purges long-dead runs;
+// it only ever reads the store and writes create-if-absent terminal docs
+// (FailRun) or deletes whole finished runs (PurgeRun) — it never re-enters
+// the processor and never mutates a live run. For the drive store (where
+// the `webdav` head runs) it reclaims unreferenced objects and hard-deletes
+// old tombstones (drive.Store.Sweep).
 package sweep
 
 import (
@@ -14,27 +16,44 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
+	"github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
 
 type SweeperController struct {
 	ctx      context.Context
 	pu       *processor.Unit
+	drive    *drive.Store // nil ⇒ no drive sweep
 	shutdown chan bool
 	wg       sync.WaitGroup
 }
 
-func NewController(ctx context.Context, pu *processor.Unit) *SweeperController {
+// NewController constructs the sweeper. driveStore may be nil; the drive
+// arm runs only where the `webdav` head runs (the node that serves a
+// collection is the one that pays for its housekeeping).
+func NewController(ctx context.Context, pu *processor.Unit, driveStore *drive.Store) *SweeperController {
 	return &SweeperController{
 		ctx:      ctx,
 		pu:       pu,
+		drive:    driveStore,
 		shutdown: make(chan bool),
 	}
 }
 
-func (sc *SweeperController) enabled() bool {
+func (sc *SweeperController) continuationEnabled() bool {
 	return sc.pu.Conf.ContinuationSweepPeriod > 0 && sc.pu.Runs != nil
 }
+
+func (sc *SweeperController) driveEnabled() bool {
+	return sc.drive != nil && sc.pu.Conf.DriveSweepPeriod > 0 && sc.pu.Conf.HasPersonality("webdav")
+}
+
+func (sc *SweeperController) enabled() bool {
+	return sc.continuationEnabled() || sc.driveEnabled()
+}
+
+// never is a channel that never fires, for a disabled arm.
+var never = make(chan time.Time)
 
 func (sc *SweeperController) Start() {
 	if !sc.enabled() {
@@ -43,23 +62,44 @@ func (sc *SweeperController) Start() {
 
 	ctx, cancel := context.WithCancel(sc.ctx)
 	sc.ctx = ctx
+	sc.wg.Add(1)
 
 	go func() {
-		sc.pu.Logger.Info("continuation sweeper started",
-			zap.Int("period_s", sc.pu.Conf.ContinuationSweepPeriod),
-			zap.Int("retention_s", sc.pu.Conf.ContinuationRetention),
-			zap.Int("stale_resume_after_s", sc.pu.Conf.ContinuationStaleResumeAfter))
-		sc.wg.Add(1)
-
-		period := time.Duration(sc.pu.Conf.ContinuationSweepPeriod) * time.Second
+		defer sc.wg.Done()
+		var contPeriod, drivePeriod time.Duration
+		if sc.continuationEnabled() {
+			contPeriod = time.Duration(sc.pu.Conf.ContinuationSweepPeriod) * time.Second
+			sc.pu.Logger.Info("continuation sweeper started",
+				zap.Int("period_s", sc.pu.Conf.ContinuationSweepPeriod),
+				zap.Int("retention_s", sc.pu.Conf.ContinuationRetention),
+				zap.Int("stale_resume_after_s", sc.pu.Conf.ContinuationStaleResumeAfter))
+		}
+		if sc.driveEnabled() {
+			drivePeriod = time.Duration(sc.pu.Conf.DriveSweepPeriod) * time.Second
+			sc.pu.Logger.Info("drive sweeper started",
+				zap.Int("period_s", sc.pu.Conf.DriveSweepPeriod),
+				zap.Int("grace_s", sc.pu.Conf.DriveSweepGrace),
+				zap.Int("tombstone_retention_s", sc.pu.Conf.DriveTombstoneRetention))
+		}
+		after := func(d time.Duration) <-chan time.Time {
+			if d <= 0 {
+				return never
+			}
+			return time.After(d)
+		}
+		contTick := after(contPeriod)
+		driveTick := after(drivePeriod)
 		for {
 			select {
-			case <-time.After(period):
+			case <-contTick:
 				sc.sweep(sc.ctx)
+				contTick = after(contPeriod)
+			case <-driveTick:
+				sc.sweepDrive(sc.ctx)
+				driveTick = after(drivePeriod)
 			case doshutdown := <-sc.shutdown:
 				if doshutdown {
 					cancel()
-					sc.wg.Done()
 					return
 				}
 			}
@@ -71,10 +111,34 @@ func (sc *SweeperController) Stop() {
 	if !sc.enabled() {
 		return
 	}
-	sc.pu.Logger.Info("calling continuation sweeper stop")
+	sc.pu.Logger.Info("calling sweeper stop")
 	sc.shutdown <- true
 	sc.wg.Wait()
-	sc.pu.Logger.Info("continuation sweeper stopped")
+	sc.pu.Logger.Info("sweeper stopped")
+}
+
+// sweepDrive is one drive pass: unreferenced objects older than the grace
+// window and tombstones past retention.
+func (sc *SweeperController) sweepDrive(ctx context.Context) {
+	rep, err := sc.drive.Sweep(ctx,
+		time.Duration(sc.pu.Conf.DriveSweepGrace)*time.Second,
+		time.Duration(sc.pu.Conf.DriveTombstoneRetention)*time.Second)
+	fields := []zap.Field{
+		zap.Int("scanned", rep.Scanned),
+		zap.Int("orphans", rep.Orphans),
+		zap.Int64("orphan_bytes", rep.OrphanBytes),
+		zap.Int64("tombstones", rep.Tombstones),
+		zap.Int64("collections", rep.Collections),
+		zap.Int("errors", rep.Errors),
+	}
+	switch {
+	case err != nil:
+		sc.pu.Logger.Warn("drive sweep error", append(fields, zap.Error(err))...)
+	case rep.Orphans+int(rep.Tombstones)+int(rep.Collections)+rep.Errors > 0:
+		sc.pu.Logger.Info("drive sweep", fields...)
+	default:
+		sc.pu.Logger.Debug("drive sweep", fields...)
+	}
 }
 
 // sweep is one full pass. Every transition is create-if-absent or a
