@@ -244,14 +244,19 @@ func (s *Store) discard(ctx context.Context, keys ...string) {
 	}
 }
 
-// Put stores size bytes from r at path p in the collection, creating or
-// replacing the file. Bytes first: the body streams to a fresh object key
-// (hashed on the way), then one index transaction locks the collection,
-// re-checks parent / kind / preconditions / quota, writes the row, advances
-// the sync token and reports the mutation. An unchanged body (same etag) is
-// a Noop: no version bump, no event, and the freshly written object is
-// discarded. A directory at p is ErrIsDirectory; a missing parent
-// ErrNoParent; a body shorter or longer than size ErrSizeMismatch.
+// Put stores the bytes from r at path p in the collection, creating or
+// replacing the file. size is the caller's declared byte count, or -1 when
+// the body's length is not known up front (a chunked HTTP PUT — macOS
+// Finder streams a dragged file that way): then the body is read up to the
+// per-file cap and its length is what was read. Bytes first: the body
+// streams to a fresh object key (hashed on the way), then one index
+// transaction locks the collection, re-checks parent / kind /
+// preconditions / quota, writes the row, advances the sync token and
+// reports the mutation. An unchanged body (same etag) is a Noop: no version
+// bump, no event, and the freshly written object is discarded. A directory
+// at p is ErrIsDirectory; a missing parent ErrNoParent; a body shorter or
+// longer than a declared size ErrSizeMismatch; a body over the cap
+// ErrTooLarge.
 func (s *Store) Put(ctx context.Context, collID, p string, r io.Reader, size int64, opts PutOpts) (PutResult, error) {
 	p, err := NormalizePath(p)
 	if err != nil {
@@ -261,12 +266,12 @@ func (s *Store) Put(ctx context.Context, collID, p string, r io.Reader, size int
 		return PutResult{}, fmt.Errorf("%w: the root is not a file", ErrBadPath)
 	}
 	if size < 0 {
-		return PutResult{}, errors.New("drive: put needs a declared size")
+		size = -1
 	}
-	if s.limits.MaxFileBytes > 0 && size > s.limits.MaxFileBytes {
+	if size >= 0 && s.limits.MaxFileBytes > 0 && size > s.limits.MaxFileBytes {
 		return PutResult{}, ErrTooLarge
 	}
-	if s.limits.MaxCollectionBytes > 0 && size > s.limits.MaxCollectionBytes {
+	if size >= 0 && s.limits.MaxCollectionBytes > 0 && size > s.limits.MaxCollectionBytes {
 		return PutResult{}, ErrQuota
 	}
 	coll, ok, err := s.GetCollectionByID(ctx, collID)
@@ -308,15 +313,36 @@ func (s *Store) Put(ctx context.Context, collID, p string, r io.Reader, size int
 	if ct == "" {
 		ct = DefaultContentType(p)
 	}
+	// Read at most one byte past what is allowed, so a long body is caught
+	// without being stored: past the declared size when there is one, past
+	// the per-file cap when there is not (an unlimited cap reads to EOF).
 	h := sha256.New()
-	cr := &countingReader{r: io.LimitReader(r, size+1)}
+	limit := size + 1
+	if size < 0 {
+		limit = 0
+		if s.limits.MaxFileBytes > 0 {
+			limit = s.limits.MaxFileBytes + 1
+		}
+	}
+	body := r
+	if limit > 0 {
+		body = io.LimitReader(r, limit)
+	}
+	cr := &countingReader{r: body}
 	if err := s.objects.Put(ctx, key, io.TeeReader(cr, h), size, ct); err != nil {
 		s.discard(ctx, key)
 		return PutResult{}, fmt.Errorf("drive: store object: %w", err)
 	}
-	if cr.n != size {
+	if size >= 0 && cr.n != size {
 		s.discard(ctx, key)
 		return PutResult{}, ErrSizeMismatch
+	}
+	if size < 0 {
+		if s.limits.MaxFileBytes > 0 && cr.n > s.limits.MaxFileBytes {
+			s.discard(ctx, key)
+			return PutResult{}, ErrTooLarge
+		}
+		size = cr.n
 	}
 	etag := hex.EncodeToString(h.Sum(nil))
 

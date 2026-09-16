@@ -246,6 +246,14 @@ func TestPutRoundTrip(t *testing.T) {
 		t.Fatalf("counters: %+v", coll)
 	}
 
+	// Unknown size (-1): the length is what was read; the etag matches.
+	r4, err := s.Put(ctx, c.ID, "stream.txt", strings.NewReader("streamed"), -1, drive.PutOpts{})
+	if err != nil || r4.Size != 8 || r4.ETag != drive.ETagOf([]byte("streamed")) || !r4.Created {
+		t.Fatalf("unknown-size put: %+v %v", r4, err)
+	}
+	if body, res := read(t, s, c.ID, "stream.txt"); body != "streamed" || res.Size != 8 {
+		t.Fatalf("unknown-size read: %q %+v", body, res)
+	}
 	// Size mismatch both ways.
 	if _, err := s.Put(ctx, c.ID, "short.txt", strings.NewReader("abc"), 5, drive.PutOpts{}); !errors.Is(err, drive.ErrSizeMismatch) {
 		t.Fatalf("short body: %v", err)
@@ -306,6 +314,19 @@ func TestPreconditionsAndLimits(t *testing.T) {
 	s.SetLimits(drive.Limits{MaxFileBytes: 4, MaxCollectionBytes: 10, MaxResources: 3})
 	if _, err := s.Put(ctx, c.ID, "big", strings.NewReader("12345"), 5, drive.PutOpts{}); !errors.Is(err, drive.ErrTooLarge) {
 		t.Fatalf("too large: %v", err)
+	}
+	// Unknown size over the cap: refused after the cap, nothing stored.
+	if _, err := s.Put(ctx, c.ID, "big2", strings.NewReader("12345"), -1, drive.PutOpts{}); !errors.Is(err, drive.ErrTooLarge) {
+		t.Fatalf("too large (unknown size): %v", err)
+	}
+	if _, ok, _ := s.Stat(ctx, c.ID, "big2"); ok {
+		t.Fatal("over-cap unknown-size put left a row")
+	}
+	if _, err := s.Put(ctx, c.ID, "ok4", strings.NewReader("1234"), -1, drive.PutOpts{}); err != nil {
+		t.Fatalf("at cap (unknown size): %v", err)
+	}
+	if _, err := s.Delete(ctx, c.ID, "ok4", drive.DeleteOpts{}); err != nil {
+		t.Fatal(err)
 	}
 	put(t, s, c.ID, "g", "1234")
 	put(t, s, c.ID, "h", "12") // f(3) + g(4) + h(2) = 9 of 10

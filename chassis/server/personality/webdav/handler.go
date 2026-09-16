@@ -273,23 +273,35 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 	return principal{tenant: tenant, username: acct.Username, acct: acct, coll: coll, clientIP: ip}, true
 }
 
-// servePut streams a PUT body into the store. Content-Length is required
-// (the S3 backend sizes its upload from it, and an unbounded chunked body
-// invites abuse); the read deadline scales with it so a large upload
-// escapes the listener's global timeout while an abandoned stream is
-// still reaped.
+// servePut streams a PUT body into the store. A Content-Length is used
+// when the client sends one (a 413 before any byte moves, a deadline sized
+// to it); a body without one — macOS Finder streams a dragged file with
+// chunked encoding (prod, 2026-09-16: every such PUT was refused with 411
+// and the file stayed the empty one the client had created first) — is
+// streamed up to the per-file cap, with the cap's deadline. Either way the
+// read deadline escapes the listener's global timeout while an abandoned
+// stream is still reaped, and the body reader refuses to deliver more than
+// allowed.
 func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr principal) {
 	size := r.ContentLength
 	if size < 0 {
-		http.Error(w, "Content-Length required", http.StatusLengthRequired)
-		return
+		size = -1
 	}
-	if c.maxBytes > 0 && size > c.maxBytes {
+	if size >= 0 && c.maxBytes > 0 && size > c.maxBytes {
 		http.Error(w, fmt.Sprintf("file over %d bytes", c.maxBytes), http.StatusRequestEntityTooLarge)
 		return
 	}
-	_ = http.NewResponseController(w).SetReadDeadline(c.now().Add(bodyBudget(size)))
-	body := http.MaxBytesReader(w, r.Body, size)
+	budget, limit := size, size
+	if size < 0 {
+		// One byte past the cap, so the store sees the overflow and answers
+		// ErrTooLarge (413) itself; the reader is the belt, not the judge.
+		budget, limit = c.maxBytes, c.maxBytes+1
+	}
+	_ = http.NewResponseController(w).SetReadDeadline(c.now().Add(bodyBudget(budget)))
+	body := r.Body
+	if limit > 0 {
+		body = http.MaxBytesReader(w, r.Body, limit)
+	}
 	ct := r.Header.Get("Content-Type")
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = strings.TrimSpace(ct[:i])
@@ -303,6 +315,11 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 		ContentType: ct,
 	})
 	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, fmt.Sprintf("file over %d bytes", c.maxBytes), http.StatusRequestEntityTooLarge)
+			return
+		}
 		serveStoreError(w, err)
 		return
 	}

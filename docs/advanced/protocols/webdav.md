@@ -86,7 +86,7 @@ Finder expects before its first PUT.
 
 | | |
 |---|---|
-| `--drive-max-file-bytes` (4 GiB) | a larger PUT is 413; `Content-Length` is required (411 without) |
+| `--drive-max-file-bytes` (4 GiB) | a PUT that declares more is 413 before a byte moves; a PUT without a `Content-Length` (Finder streams a dragged file that way) is accepted and stops at the cap |
 | `--drive-max-collection-bytes`, `--drive-max-resources` (unlimited) | a write past them is 507 |
 | `--drive-login-rate` (30/min) | per client IP and per username, counted only on verified-login-cache misses; over it is 429 |
 | `--drive-sweep-period` (15 min) | on `webdav` nodes: superseded versions and the objects of failed writes are reclaimed after `--drive-sweep-grace` (1 h); tombstones are hard-deleted after `--drive-tombstone-retention` (7 d) |

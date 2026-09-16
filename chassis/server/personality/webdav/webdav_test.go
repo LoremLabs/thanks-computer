@@ -75,6 +75,7 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	if conf.DriveMaxFileBytes == 0 {
 		conf.DriveMaxFileBytes = 1 << 20
 	}
+	store.SetLimits(chdrive.Limits{MaxFileBytes: int64(conf.DriveMaxFileBytes)}) // as boot wires it
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), Admission: fakeAdmission{suspended: "suspended"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu, store, fakeResolver{"pony.example.com": "acme", "other.example.com": "other", "sad.example.com": "suspended"})
@@ -212,10 +213,28 @@ func TestFileLifecycle(t *testing.T) {
 	insecure(&conf)
 	h := newHarness(t, conf)
 
-	// PUT needs a Content-Length; creates 201 with a quoted ETag; same
-	// bytes again 204 with the same ETag.
-	resp, _ := h.do(t, http.MethodPut, "/drive/hello.txt", body("hello"), chunked())
-	want(t, resp, http.StatusLengthRequired, "chunked put")
+	// A PUT without a Content-Length (chunked — what Finder sends for a
+	// dragged file) streams and creates; then the same bytes with a length
+	// are a 204 with the same ETag.
+	resp, _ := h.do(t, http.MethodPut, "/drive/hello.txt", body("hello"), chunked(), hdr("Content-Type", "text/plain"))
+	want(t, resp, http.StatusCreated, "chunked put")
+	if resp.Header.Get("ETag") != `"`+chdrive.ETagOf([]byte("hello"))+`"` {
+		t.Fatalf("chunked put ETag = %q", resp.Header.Get("ETag"))
+	}
+	if got, _ := h.do(t, http.MethodGet, "/drive/hello.txt", nil); got.StatusCode != http.StatusOK || got.Header.Get("Content-Length") != "5" {
+		t.Fatalf("chunked put stored %s bytes", got.Header.Get("Content-Length"))
+	}
+	resp, _ = h.do(t, http.MethodPut, "/drive/hello.txt", body("hello"), hdr("Content-Type", "text/plain"))
+	want(t, resp, http.StatusNoContent, "put same with length")
+	if _, err := h.store.Delete(context.Background(), h.coll.ID, "hello.txt", chdrive.DeleteOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	// A chunked body over the cap is refused after the cap, not stored.
+	resp, _ = h.do(t, http.MethodPut, "/drive/toobig.bin", body(strings.Repeat("x", (1<<20)+1)), chunked())
+	want(t, resp, http.StatusRequestEntityTooLarge, "chunked over cap")
+	if _, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "toobig.bin"); ok {
+		t.Fatal("over-cap chunked body left a row")
+	}
 	resp, _ = h.do(t, http.MethodPut, "/drive/hello.txt", body("hello"), hdr("Content-Type", "text/plain"))
 	want(t, resp, http.StatusCreated, "put create")
 	etag := resp.Header.Get("ETag")
