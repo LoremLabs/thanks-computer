@@ -522,8 +522,10 @@ func TestCollectionPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := h.store.Put(ctx, h.coll.ID, "Knowledge/ai/paper.pdf", strings.NewReader("good"), 4, chdrive.PutOpts{}); err != nil {
-		t.Fatal(err)
+	for _, p := range []string{"Knowledge/ai/paper.pdf", "Knowledge/ai/keep.pdf"} {
+		if _, err := h.store.Put(ctx, h.coll.ID, p, strings.NewReader("good"), 4, chdrive.PutOpts{}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := h.store.SetCollectionPolicy(ctx, "acme", "paris", chdrive.Policy{
 		"Knowledge": {chdrive.VerbWrite: chdrive.ModeDeny},
@@ -571,6 +573,30 @@ func TestCollectionPolicy(t *testing.T) {
 	// Reading is never affected.
 	resp, _ = h.do(t, "PROPFIND", "/drive/Knowledge/", nil, hdr("Depth", "1"))
 	want(t, resp, http.StatusMultiStatus, "propfind a reserved tree")
+	resp, _ = h.do(t, http.MethodGet, "/drive/Knowledge/ai/keep.pdf", nil)
+	want(t, resp, http.StatusOK, "get from a reserved tree")
+
+	// A LOCK is a WRITE lock, so it is refused in the reserved tree — and
+	// refused UP FRONT, which is the point: a client that cannot take a
+	// write lock opens the file read-only instead of discovering at save
+	// time that it cannot save, and then retrying until the mount stalls.
+	resp, _ = h.do(t, "LOCK", "/drive/Knowledge/ai/keep.pdf", nil)
+	want(t, resp, http.StatusForbidden, "lock in a reserved tree")
+	// A lock on an unmapped URL would CREATE the file, so it is refused too
+	// (and must not leave the empty file behind).
+	resp, _ = h.do(t, "LOCK", "/drive/Knowledge/ghost.pdf", nil)
+	want(t, resp, http.StatusForbidden, "lock creating in a reserved tree")
+	if _, ok, _ := h.store.Stat(ctx, h.coll.ID, "Knowledge/ghost.pdf"); ok {
+		t.Fatal("a refused LOCK still created the file")
+	}
+	// Outside the reserved tree, and for client bookkeeping inside it,
+	// locking is untouched.
+	resp, _ = h.do(t, "LOCK", "/drive/Input/drop.txt", nil)
+	want(t, resp, http.StatusOK, "lock outside the reserved tree")
+	// Finder locks a sidecar before its first PUT, so this one is a create
+	// (201) — and the exemption has to cover that, not just the overwrite.
+	resp, _ = h.do(t, "LOCK", "/drive/Knowledge/ai/._keep.pdf", nil)
+	want(t, resp, http.StatusCreated, "lock an AppleDouble sidecar")
 
 	// The stack itself is never subject to the policy — that asymmetry is
 	// the whole point, and it is what keeps ingest able to place a file.

@@ -43,6 +43,20 @@ const maxLockBody = 64 << 10
 
 func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr principal) {
 	rel := c.rel(pr, r.URL.Path)
+	// A lock is a WRITE lock (`<D:locktype><D:write/>` below), and on an
+	// unmapped URL it CREATES the file. Both are writes, so a subtree whose
+	// policy refuses `write` refuses the lock too.
+	//
+	// Refusing HERE rather than at the PUT is the difference between a
+	// client that opens a file read-only and one that finds out at save
+	// time: macOS Finder took a lock, read the file, released it, tried to
+	// write, got a 403 and then retried until the whole volume stalled
+	// (prod, 2026-09-17). A client that cannot take a write lock stops
+	// asking.
+	if !c.allows(pr, rel, chdrive.VerbWrite) {
+		http.Error(w, "forbidden by the collection's policy", http.StatusForbidden)
+		return
+	}
 	// A refresh (If: (<token>), no body) keeps the client's token; a new
 	// lock mints one.
 	token := ""
