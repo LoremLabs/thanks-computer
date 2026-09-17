@@ -25,6 +25,11 @@ type principal struct {
 	acct     chdrive.Account
 	coll     chdrive.Collection
 	clientIP string
+	// prefix is the mount prefix this REQUEST used — the bare one, or the
+	// one that names the collection (mountPrefix). Every rel/href on the
+	// request reads it, so a session's URLs stay in the form the client
+	// mounted with.
+	prefix string
 }
 
 type ctxKeyPrincipal struct{}
@@ -88,7 +93,7 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Escape the web listener's global write timeout for a large body:
 		// budget the deadline from the file's size before the library
 		// streams it.
-		if res, found, err := c.store.Stat(ctx, pr.coll.ID, c.rel(r.URL.Path)); err == nil && found && !res.IsDir() {
+		if res, found, err := c.store.Stat(ctx, pr.coll.ID, c.rel(pr, r.URL.Path)); err == nil && found && !res.IsDir() {
 			_ = http.NewResponseController(w).SetWriteDeadline(c.now().Add(bodyBudget(res.Size)))
 		}
 	case "PROPFIND":
@@ -107,22 +112,47 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
-// rel strips the mount prefix from a request path; the result is what the
-// drive store normalizes ("" is the root).
-func (c *Controller) rel(p string) string {
-	return strings.TrimPrefix(p, c.prefix)
+// mountPrefix is the prefix IN FORCE for one request. A drive answers at
+// two URLs, and the difference is cosmetic but useful:
+//
+//	https://host/drive/            the bare mount
+//	https://host/drive/paris/      the same collection, named
+//
+// A client takes the volume's name from the last path segment, so the bare
+// form mounts as "drive" on every pony — mount two and you get "drive" and
+// "drive 1". The named form mounts as "paris". Both address the same tree;
+// which one a request used decides the hrefs it gets back, so a session
+// stays self-consistent.
+//
+// The named form wins when it matches, which means a top-level directory
+// with the SAME NAME as the collection is addressed one level down
+// (`/drive/paris/paris`) rather than at `/drive/paris`. That is the whole
+// cost of the alias, and it is why the segment must equal the collection's
+// own name rather than being any leading segment.
+func (c *Controller) mountPrefix(coll chdrive.Collection, urlPath string) string {
+	named := c.prefix + "/" + coll.Name
+	if urlPath == named || strings.HasPrefix(urlPath, named+"/") {
+		return named
+	}
+	return c.prefix
 }
 
-// href is the absolute path a resource is served at (collections carry a
-// trailing slash, per RFC 4918's recommendation).
-func (c *Controller) href(res chdrive.Resource) string {
+// rel strips the mount prefix from a request path; the result is what the
+// drive store normalizes ("" is the root).
+func (c *Controller) rel(pr principal, p string) string {
+	return strings.TrimPrefix(p, pr.prefix)
+}
+
+// href is the absolute path a resource is served at, in the same form the
+// request used (collections carry a trailing slash, per RFC 4918).
+func (c *Controller) href(pr principal, res chdrive.Resource) string {
 	if res.Path == "" {
-		return c.prefix + "/"
+		return pr.prefix + "/"
 	}
 	if res.IsDir() {
-		return c.prefix + "/" + res.Path + "/"
+		return pr.prefix + "/" + res.Path + "/"
 	}
-	return c.prefix + "/" + res.Path
+	return pr.prefix + "/" + res.Path
 }
 
 func (c *Controller) resolveHost(host string) (string, bool, error) {
@@ -270,7 +300,10 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		return principal{}, false
 	}
 	c.noteLogin("ok", username, ip)
-	return principal{tenant: tenant, username: acct.Username, acct: acct, coll: coll, clientIP: ip}, true
+	return principal{
+		tenant: tenant, username: acct.Username, acct: acct, coll: coll, clientIP: ip,
+		prefix: c.mountPrefix(coll, r.URL.Path),
+	}, true
 }
 
 // servePut streams a PUT body into the store. A Content-Length is used
@@ -286,7 +319,7 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 	// The collection's policy decides BEFORE a byte is read: a refused write
 	// must not spend the upload, and the client must not be left half-sent
 	// wondering why.
-	rel := c.rel(r.URL.Path)
+	rel := c.rel(pr, r.URL.Path)
 	if !c.allows(pr, rel, chdrive.VerbWrite) {
 		http.Error(w, "forbidden by the collection's policy", http.StatusForbidden)
 		return
@@ -317,7 +350,7 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 	if ct == "application/octet-stream" {
 		ct = "" // the generic default: let the extension decide
 	}
-	res, err := c.store.Put(r.Context(), pr.coll.ID, c.rel(r.URL.Path), body, size, chdrive.PutOpts{
+	res, err := c.store.Put(r.Context(), pr.coll.ID, c.rel(pr, r.URL.Path), body, size, chdrive.PutOpts{
 		IfMatch:     unquoteETag(r.Header.Get("If-Match")),
 		IfNoneMatch: unquoteETag(r.Header.Get("If-None-Match")),
 		ContentType: ct,

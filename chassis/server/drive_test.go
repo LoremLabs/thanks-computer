@@ -113,7 +113,7 @@ func TestDriveCollectionAndAccountOps(t *testing.T) {
 	pw := gjson.Get(out, "_drive.password").String()
 	if gjson.Get(out, "_drive.username").String() != "paris@pony.example.com" || !gjson.Get(out, "_drive.created").Bool() ||
 		strings.Count(pw, "-") != 4 || gjson.Get(out, "_drive.collection_id").String() != collID ||
-		gjson.Get(out, "_drive.collection").String() != "paris" || gjson.Get(out, "_drive.mount").String() != "/drive/" {
+		gjson.Get(out, "_drive.collection").String() != "paris" || gjson.Get(out, "_drive.mount").String() != "/drive/paris/" {
 		t.Errorf("create = %s", out)
 	}
 	a, ok, _ := d.store.GetAccount(context.Background(), "paris@pony.example.com")

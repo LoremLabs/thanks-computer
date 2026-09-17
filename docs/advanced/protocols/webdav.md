@@ -61,10 +61,20 @@ it with the request's host.
 
 | client | how |
 |---|---|
-| macOS Finder | Go → Connect to Server → `https://pony.example.com/drive/`, user `paris` |
-| Windows Explorer | Map network drive → `https://pony.example.com/drive/` |
-| rclone | `rclone config` type `webdav`, url `https://pony.example.com/drive/`, vendor `other`; then `rclone sync ./docs pony:` |
-| curl | `curl -u paris@pony.example.com -T brief.md https://pony.example.com/drive/brief.md` |
+| macOS Finder | Go → Connect to Server → `https://pony.example.com/drive/paris/`, user `paris` |
+| Windows Explorer | Map network drive → `https://pony.example.com/drive/paris/` |
+| rclone | `rclone config` type `webdav`, url `https://pony.example.com/drive/paris/`, vendor `other`; then `rclone sync ./docs pony:` |
+| curl | `curl -u paris@pony.example.com -T brief.md https://pony.example.com/drive/paris/brief.md` |
+
+**Name the collection in the URL.** A client takes the volume's name from
+the last path segment, so the bare `/drive/` mounts as "drive" on every
+account — mount two and you get "drive" and "drive 1". Ending the URL with
+the collection's own name mounts it as "paris". Both forms address the same
+tree and a session gets its hrefs back in the form it used, so anything
+already mounted at `/drive/` keeps working. `drive/account` answers with
+the named form in `mount`. The one cost of the alias: a top-level directory
+that shares the collection's name is addressed one level in, at
+`/drive/paris/paris`.
 
 The head answers OPTIONS with `DAV: 1, 2, 3` and LOCK/UNLOCK, which is what
 Finder needs to mount read-write; PROPFIND `Depth: infinity` is refused

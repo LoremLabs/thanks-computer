@@ -595,3 +595,55 @@ func TestCollectionPolicy(t *testing.T) {
 	resp, _ = h.do(t, http.MethodPut, "/drive/Knowledge/ai/paper.pdf", body("now allowed"))
 	want(t, resp, http.StatusCreated, "write after the policy is cleared")
 }
+
+// TestNamedMount: the same collection answers at the bare prefix and at a
+// prefix that names it, so a client can mount `/drive/paris/` and show the
+// volume as "paris" instead of a third "drive". Whichever form the request
+// used comes back in the hrefs, or a client would follow a listing out of
+// its own mount.
+func TestNamedMount(t *testing.T) {
+	var conf config.Config
+	insecure(&conf)
+	h := newHarness(t, conf)
+
+	resp, _ := h.do(t, http.MethodPut, "/drive/paris/note.txt", body("hello"))
+	want(t, resp, http.StatusCreated, "put through the named mount")
+	// The same file, addressed both ways.
+	if got, _ := h.do(t, http.MethodGet, "/drive/note.txt", nil); got.StatusCode != http.StatusOK {
+		t.Fatalf("bare mount cannot see the named mount's file: %d", got.StatusCode)
+	}
+	if got, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "note.txt"); !ok || got.Size != 5 {
+		t.Fatalf("the named segment was stored as a folder: %+v ok=%v", got, ok)
+	}
+
+	// Hrefs come back in the form the request used.
+	_, bare := h.do(t, "PROPFIND", "/drive/", nil, hdr("Depth", "1"))
+	if !strings.Contains(bare, "<href>/drive/note.txt</href>") || strings.Contains(bare, "/drive/paris/note.txt") {
+		t.Fatalf("bare PROPFIND hrefs: %s", bare)
+	}
+	_, named := h.do(t, "PROPFIND", "/drive/paris/", nil, hdr("Depth", "1"))
+	if !strings.Contains(named, "<href>/drive/paris/note.txt</href>") {
+		t.Fatalf("named PROPFIND hrefs: %s", named)
+	}
+
+	// A MOVE inside the named mount stays inside it.
+	resp, _ = h.do(t, "MOVE", "/drive/paris/note.txt", nil, hdr("Destination", h.srv.URL+"/drive/paris/moved.txt"))
+	want(t, resp, http.StatusCreated, "move within the named mount")
+	if _, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "moved.txt"); !ok {
+		t.Fatal("the move did not land at the collection root")
+	}
+	// Crossing between the two forms is still the same mount, not an escape.
+	resp, _ = h.do(t, "MOVE", "/drive/moved.txt", nil, hdr("Destination", h.srv.URL+"/drive/back.txt"))
+	want(t, resp, http.StatusCreated, "move within the bare mount")
+
+	// Another collection's name is not a mount: it is an ordinary path.
+	resp, _ = h.do(t, http.MethodPut, "/drive/lisbon/x.txt", body("x"))
+	want(t, resp, http.StatusConflict, "a name that is not this collection has no parent")
+
+	// A directory that shares the collection's name is reached one level in.
+	resp, _ = h.do(t, "MKCOL", "/drive/paris/paris", nil)
+	want(t, resp, http.StatusCreated, "a folder named like the collection")
+	if _, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "paris"); !ok {
+		t.Fatal("the folder did not land at the collection root")
+	}
+}

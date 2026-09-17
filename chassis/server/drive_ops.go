@@ -146,7 +146,11 @@ func driveAccount(ctx context.Context, d driveDeps, in []byte) (event.Payload, e
 	out.Set(into+".created", created)
 	out.Set(into+".collection_id", acct.CollectionID)
 	out.Set(into+".collection", coll.Name)
-	out.Set(into+".mount", strings.TrimSuffix(d.prefix, "/")+"/")
+	// The mount URL names the collection: a client takes a volume's name
+	// from the last path segment, so this is what makes a mounted drive
+	// show up as "paris" rather than as another "drive". The bare prefix
+	// still serves the same tree for anything already mounted.
+	out.Set(into+".mount", strings.TrimSuffix(d.prefix, "/")+"/"+coll.Name+"/")
 	if pwr.generated != "" {
 		out.Set(into+".password", pwr.generated)
 	}

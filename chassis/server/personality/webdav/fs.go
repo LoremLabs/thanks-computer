@@ -34,7 +34,7 @@ func wrap(err error) error {
 
 func (f *fs) info(res chdrive.Resource) *webdav.FileInfo {
 	fi := &webdav.FileInfo{
-		Path:    f.c.href(res),
+		Path:    f.c.href(f.pr, res),
 		Size:    res.Size,
 		ModTime: res.UpdatedAt,
 		IsDir:   res.IsDir(),
@@ -49,14 +49,14 @@ func (f *fs) info(res chdrive.Resource) *webdav.FileInfo {
 // dest validates a COPY/MOVE destination: inside the mount, on the same
 // collection by construction.
 func (f *fs) dest(p string) (string, error) {
-	if p != f.c.prefix && !strings.HasPrefix(p, f.c.prefix+"/") {
+	if p != f.pr.prefix && !strings.HasPrefix(p, f.pr.prefix+"/") {
 		return "", webdav.NewHTTPError(http.StatusForbidden, errOutsidePrefix)
 	}
-	return f.c.rel(p), nil
+	return f.c.rel(f.pr, p), nil
 }
 
 func (f *fs) Stat(ctx context.Context, name string) (*webdav.FileInfo, error) {
-	res, found, err := f.c.store.Stat(ctx, f.pr.coll.ID, f.c.rel(name))
+	res, found, err := f.c.store.Stat(ctx, f.pr.coll.ID, f.c.rel(f.pr, name))
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -67,7 +67,7 @@ func (f *fs) Stat(ctx context.Context, name string) (*webdav.FileInfo, error) {
 }
 
 func (f *fs) Open(ctx context.Context, name string) (io.ReadCloser, error) {
-	rc, _, err := f.c.store.Open(ctx, f.pr.coll.ID, f.c.rel(name))
+	rc, _, err := f.c.store.Open(ctx, f.pr.coll.ID, f.c.rel(f.pr, name))
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -78,7 +78,7 @@ func (f *fs) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 // library's contract: PROPFIND Depth 1 is the collection plus its
 // members) or, recursive, everything below it.
 func (f *fs) ReadDir(ctx context.Context, name string, recursive bool) ([]webdav.FileInfo, error) {
-	rel := f.c.rel(name)
+	rel := f.c.rel(f.pr, name)
 	dir, found, err := f.c.store.Stat(ctx, f.pr.coll.ID, rel)
 	if err != nil {
 		return nil, wrap(err)
@@ -108,7 +108,7 @@ func (f *fs) Create(ctx context.Context, name string, body io.ReadCloser, opts *
 }
 
 func (f *fs) RemoveAll(ctx context.Context, name string, opts *webdav.RemoveAllOptions) error {
-	rel := f.c.rel(name)
+	rel := f.c.rel(f.pr, name)
 	if rel == "" || rel == "/" {
 		return webdav.NewHTTPError(http.StatusForbidden, errors.New("webdav: the mount root cannot be deleted"))
 	}
@@ -134,7 +134,7 @@ func (f *fs) RemoveAll(ctx context.Context, name string, opts *webdav.RemoveAllO
 }
 
 func (f *fs) Mkdir(ctx context.Context, name string) error {
-	rel := f.c.rel(name)
+	rel := f.c.rel(f.pr, name)
 	if err := f.check(rel, chdrive.VerbCreate); err != nil {
 		return err
 	}
@@ -160,7 +160,7 @@ func (f *fs) Copy(ctx context.Context, name, dst string, opts *webdav.CopyOption
 	existed := f.exists(ctx, to)
 	if opts != nil && opts.NoRecursive {
 		// Depth: 0 on a collection copies the collection without members.
-		src, found, serr := f.c.store.Stat(ctx, f.pr.coll.ID, f.c.rel(name))
+		src, found, serr := f.c.store.Stat(ctx, f.pr.coll.ID, f.c.rel(f.pr, name))
 		if serr != nil {
 			return false, wrap(serr)
 		}
@@ -180,7 +180,7 @@ func (f *fs) Copy(ctx context.Context, name, dst string, opts *webdav.CopyOption
 			return !existed, wrap(merr)
 		}
 	}
-	if _, err := f.c.store.Copy(ctx, f.pr.coll.ID, f.c.rel(name), to, overwrite); err != nil {
+	if _, err := f.c.store.Copy(ctx, f.pr.coll.ID, f.c.rel(f.pr, name), to, overwrite); err != nil {
 		return false, wrap(err)
 	}
 	return !existed, nil
@@ -193,7 +193,7 @@ func (f *fs) Move(ctx context.Context, name, dst string, opts *webdav.MoveOption
 	}
 	// A move is two verbs: it removes from one subtree and adds to another,
 	// and a policy may refuse either end.
-	from := f.c.rel(name)
+	from := f.c.rel(f.pr, name)
 	if err := f.check(from, chdrive.VerbMoveOut); err != nil {
 		return false, err
 	}
@@ -202,7 +202,7 @@ func (f *fs) Move(ctx context.Context, name, dst string, opts *webdav.MoveOption
 	}
 	overwrite := opts == nil || !opts.NoOverwrite
 	existed := f.exists(ctx, to)
-	if _, err := f.c.store.Move(ctx, f.pr.coll.ID, f.c.rel(name), to, overwrite); err != nil {
+	if _, err := f.c.store.Move(ctx, f.pr.coll.ID, f.c.rel(f.pr, name), to, overwrite); err != nil {
 		return false, wrap(err)
 	}
 	return !existed, nil

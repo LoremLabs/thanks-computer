@@ -42,7 +42,7 @@ type lockInfo struct {
 const maxLockBody = 64 << 10
 
 func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr principal) {
-	rel := c.rel(r.URL.Path)
+	rel := c.rel(pr, r.URL.Path)
 	// A refresh (If: (<token>), no body) keeps the client's token; a new
 	// lock mints one.
 	token := ""
@@ -114,7 +114,7 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 	}
 	fmt.Fprintf(&b, `<D:timeout>%s</D:timeout>`, timeout)
 	fmt.Fprintf(&b, `<D:locktoken><D:href>%s</D:href></D:locktoken>`, xmlEscape(token))
-	fmt.Fprintf(&b, `<D:lockroot><D:href>%s</D:href></D:lockroot>`, xmlEscape(c.href(res)))
+	fmt.Fprintf(&b, `<D:lockroot><D:href>%s</D:href></D:lockroot>`, xmlEscape(c.href(pr, res)))
 	b.WriteString(`</D:activelock></D:lockdiscovery></D:prop>`)
 
 	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
