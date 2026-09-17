@@ -82,8 +82,12 @@ means `in`, and an object like `{"not_in": [...]}` / `{"gte": 12}` selects the
 operator (`eq`, `in`, `not_in`, `gte`, `lte`, `gt`, `lt`). The special field
 `id` filters the item id itself — the idiomatic way to exclude already-seen
 results. The other ops are `txco://vector/upsert` (one item, or `items = [ … ]`
-in bulk) and `txco://vector/delete` (`ids = [ … ]`). Errors surface at
-`vector.error`.
+in bulk — and in bulk the items may omit their `vector` when a parallel
+`vectors = [ … ]` supplies one per item by index, so a stack can assemble ids,
+metadata and text in a small sandboxed op and hand `ai://embed`'s result
+straight to the store without the floats ever riding through the sandbox; a
+count mismatch is `txco_vector_invalid_arg`) and `txco://vector/delete`
+(`ids = [ … ]`). Errors surface at `vector.error`.
 
 ## Re-labelling without re-embedding
 

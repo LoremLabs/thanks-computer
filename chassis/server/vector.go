@@ -216,18 +216,36 @@ func vectorUpdate(ctx context.Context, vs vector.Store, in []byte) (event.Payloa
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }
 
-// parseItems reads the upsert items: the batch `items` array, else a single
-// item from top-level `id`/`vector`/`metadata`/`text`.
+// parseItems reads the upsert items: the batch `items` array (each with its
+// `vector`, or without one when a parallel `vectors` array supplies them by
+// index — so a stack can assemble ids, metadata and text in a small
+// sandboxed op and hand the embeddings straight from ai://embed's result,
+// which never then rides through the sandbox), else a single item from
+// top-level `id`/`vector`/`metadata`/`text`.
 func parseItems(meta []byte) ([]vector.Item, error) {
 	if arr := gjson.GetBytes(meta, "items"); arr.Exists() {
 		if !arr.IsArray() {
 			return nil, &vector.InvalidArgError{Reason: "`items` must be an array"}
 		}
+		var paired []gjson.Result
+		if vr := gjson.GetBytes(meta, "vectors"); vr.Exists() {
+			if !vr.IsArray() {
+				return nil, &vector.InvalidArgError{Reason: "`vectors` must be an array, one vector per item"}
+			}
+			paired = vr.Array()
+			if len(paired) != len(arr.Array()) {
+				return nil, &vector.InvalidArgError{Reason: "`vectors` must have exactly one entry per item"}
+			}
+		}
 		var items []vector.Item
-		for _, it := range arr.Array() {
-			vec, ok := parseFloat32(it.Get("vector"))
+		for i, it := range arr.Array() {
+			vr := it.Get("vector")
+			if !vr.Exists() && paired != nil {
+				vr = paired[i]
+			}
+			vec, ok := parseFloat32(vr)
 			if !ok {
-				return nil, &vector.InvalidArgError{Reason: "each item needs a `vector` array"}
+				return nil, &vector.InvalidArgError{Reason: "each item needs a `vector` array (or pass `vectors`, one per item)"}
 			}
 			items = append(items, vector.Item{
 				ID:       it.Get("id").String(),

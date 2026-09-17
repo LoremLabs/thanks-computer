@@ -69,6 +69,31 @@ func TestVectorOpsEndToEnd(t *testing.T) {
 	if got := gjson.Get(pl.Raw, "_vector.upserted").Int(); got != 3 {
 		t.Fatalf("upserted=%d, want 3 (%s)", got, pl.Raw)
 	}
+	// upsert with the vectors paired by index (items without their own):
+	// the same three ids, re-labelled, so nothing below changes shape.
+	pl, _ = vectorUpsert(vctx(`{"collection":"books","items":[
+		{"id":"a","metadata":{"genre":"adventure","age":9},"text":"alpha"},
+		{"id":"b","metadata":{"genre":"cozy","age":50}},
+		{"id":"c","vector":[0.9,0.1,0],"metadata":{"genre":"adventure","age":12}}],
+		"vectors":[[1,0,0],[0,1,0],[0,0,1]]}`), vs, in)
+	if got := gjson.Get(pl.Raw, "_vector.upserted").Int(); got != 3 {
+		t.Fatalf("paired upsert=%d, want 3 (%s)", got, pl.Raw)
+	}
+	// c kept its own vector over the paired one: it still ranks with a.
+	pl, _ = vectorSearch(vctx(`{"collection":"books","vector":[1,0,0],"limit":2}`), vs, in)
+	if got := matchIDs(gjson.Get(pl.Raw, "_vector.matches")); !sameStrSet(got, []string{"a", "c"}) {
+		t.Fatalf("paired upsert ranking: %v want [a c]", got)
+	}
+	for _, meta := range []string{
+		`{"collection":"books","items":[{"id":"a"},{"id":"b"}],"vectors":[[1,0,0]]}`,
+		`{"collection":"books","items":[{"id":"a"}],"vectors":"nope"}`,
+		`{"collection":"books","items":[{"id":"a"}]}`,
+	} {
+		pl, _ = vectorUpsert(vctx(meta), vs, in)
+		if got := gjson.Get(pl.Raw, "vector.error.code").String(); got != "txco_vector_invalid_arg" {
+			t.Fatalf("%s → %q, want txco_vector_invalid_arg", meta, got)
+		}
+	}
 
 	// search → custom `into` path (the multiple-ops-don't-collide requirement)
 	pl, _ = vectorSearch(vctx(`{"collection":"books","vector":[1,0,0],"limit":10,"into":".myresults"}`), vs, in)
