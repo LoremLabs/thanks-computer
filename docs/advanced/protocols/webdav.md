@@ -70,6 +70,19 @@ The head answers OPTIONS with `DAV: 1, 2, 3` and LOCK/UNLOCK, which is what
 Finder needs to mount read-write; PROPFIND `Depth: infinity` is refused
 (403), as the RFC permits, so a listing is always one directory.
 
+### A folder the stack owns
+
+A collection can reserve a subtree from clients: `txco://drive/collection`
+takes a `policy` of path prefix → verb → `deny`, the head enforces it, and
+the stack's own ops are never subject to it ([drive](../drive.md)). The case
+it exists for is a curated folder — the stack puts documents somewhere and a
+desktop client must not overwrite them. It is worth reaching for, because a
+client with a stale cache can re-upload a file nobody edited: macOS did
+exactly that in the field, replacing a good PDF with one spliced at a 16 KiB
+boundary, and the server stored it faithfully because a WebDAV PUT carries
+no end-to-end checksum. Denying `write` on that tree is what makes the
+question moot.
+
 ### Locks are a courtesy, not a guarantee
 
 LOCK mints a fresh token and UNLOCK answers 204; nothing is stored and

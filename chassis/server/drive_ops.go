@@ -20,8 +20,18 @@ import (
 
 // driveCollection ensures (creates) or removes one collection of the
 // pinned tenant. Result at `into`: {id, name, sync_token, bytes_used,
-// resource_count, created} or {name, removed}. A remove refuses a
+// resource_count, created, policy?} or {name, removed}. A remove refuses a
 // non-empty collection unless `force`.
+//
+// `policy` (optional) sets what a WebDAV CLIENT may do, by subtree — path
+// prefix → verb → deny|allow, the IMAP mailbox policy's shape:
+//
+//	policy = &object("Knowledge", &object("write", "deny"))
+//
+// It binds clients only; these ops are never subject to it, which is how a
+// stack keeps curating a tree its clients may only read. Passing it again
+// REPLACES the whole policy; `&object()` clears it. Absent leaves it alone,
+// so an ensure that does not mention policy never disturbs one.
 func driveCollection(ctx context.Context, d driveDeps, in []byte) (event.Payload, error) {
 	tenant, meta, into, ep, ok := drivePrelude(ctx, d)
 	if !ok {
@@ -45,12 +55,32 @@ func driveCollection(ctx context.Context, d driveDeps, in []byte) (event.Payload
 	if err != nil {
 		return driveStoreErr(into, err), nil
 	}
+	if pr := gjson.GetBytes(meta, "policy"); pr.Exists() {
+		if !pr.IsObject() {
+			return driveErr(into, "txco_drive_invalid_arg", "`policy` must be an object of path prefix → verb → allow|deny"), nil
+		}
+		var p chdrive.Policy
+		if uerr := json.Unmarshal([]byte(pr.Raw), &p); uerr != nil {
+			return driveErr(into, "txco_drive_invalid_arg", "`policy`: "+uerr.Error()), nil
+		}
+		updated, perr := d.store.SetCollectionPolicy(ctx, tenant, name, p)
+		if perr != nil {
+			if errors.Is(perr, chdrive.ErrNotFound) {
+				return driveStoreErr(into, perr), nil
+			}
+			return driveErr(into, "txco_drive_invalid_arg", perr.Error()), nil
+		}
+		c = updated
+	}
 	out.Set(into+".id", c.ID)
 	out.Set(into+".name", c.Name)
 	out.Set(into+".sync_token", c.SyncToken)
 	out.Set(into+".bytes_used", c.BytesUsed)
 	out.Set(into+".resource_count", c.ResourceCount)
 	out.Set(into+".created", created)
+	if s := c.Policy.String(); s != "" {
+		out.SetRaw(into+".policy", s)
+	}
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
 }
 

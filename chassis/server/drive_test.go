@@ -406,3 +406,53 @@ func TestDrivePutFromShaAndParents(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// The `policy` argument is how a stack reserves a subtree for itself: the
+// head refuses those verbs to a WebDAV client, while these ops (the stack's
+// own hands) stay unrestricted.
+func TestDriveCollectionPolicyOp(t *testing.T) {
+	d := newDriveDeps(t, map[string]string{"pony.example.com": "acme"})
+
+	// An ensure without `policy` leaves a collection open.
+	out := callDrive(t, driveCollection, d, "acme", `{"name":"paris"}`)
+	if gjson.Get(out, "_drive.policy").Exists() {
+		t.Fatalf("a new collection carries a policy: %s", out)
+	}
+	// Setting one reads back, and the store agrees.
+	out = callDrive(t, driveCollection, d, "acme", `{"name":"paris","policy":{"Knowledge":{"write":"deny"}}}`)
+	if gjson.Get(out, "_drive.error").Exists() || gjson.Get(out, "_drive.policy.Knowledge.write").String() != "deny" {
+		t.Fatalf("set policy = %s", out)
+	}
+	c, found, err := d.store.GetCollection(context.Background(), "acme", "paris")
+	if err != nil || !found {
+		t.Fatalf("GetCollection: %v %v", err, found)
+	}
+	if c.Policy.Allows("Knowledge/a.pdf", chdrive.VerbWrite) {
+		t.Error("the stored policy does not refuse the write")
+	}
+	// An ensure that does not mention policy must not disturb it.
+	out = callDrive(t, driveCollection, d, "acme", `{"name":"paris"}`)
+	if gjson.Get(out, "_drive.policy.Knowledge.write").String() != "deny" {
+		t.Fatalf("a plain ensure cleared the policy: %s", out)
+	}
+	// The ops themselves are never subject to it.
+	out = callDrive(t, drivePut, d, "acme", `{"collection":"paris","path":"Knowledge/a.pdf","value":"aGk=","parents":true,"into":"_p"}`)
+	if gjson.Get(out, "_p.error").Exists() {
+		t.Fatalf("the policy leaked into the ops: %s", out)
+	}
+	// A typo is refused rather than silently allowing what it meant to deny.
+	for _, meta := range []string{
+		`{"name":"paris","policy":{"Knowledge":{"put":"deny"}}}`,
+		`{"name":"paris","policy":{"Knowledge":{"write":"refuse"}}}`,
+		`{"name":"paris","policy":"deny"}`,
+	} {
+		if got := gjson.Get(callDrive(t, driveCollection, d, "acme", meta), "_drive.error.code").String(); got != "txco_drive_invalid_arg" {
+			t.Errorf("%s → %s, want txco_drive_invalid_arg", meta, got)
+		}
+	}
+	// An empty object clears it.
+	out = callDrive(t, driveCollection, d, "acme", `{"name":"paris","policy":{}}`)
+	if gjson.Get(out, "_drive.policy").Exists() {
+		t.Fatalf("an empty policy did not clear: %s", out)
+	}
+}

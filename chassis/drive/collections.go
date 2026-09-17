@@ -29,20 +29,54 @@ type Collection struct {
 	SyncToken     int64
 	BytesUsed     int64
 	ResourceCount int64
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// Policy is what a WebDAV CLIENT may do, by subtree (policy.go). The
+	// stack's own txco://drive/* ops are never subject to it.
+	Policy    Policy
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
-const collectionCols = `id, tenant, name, sync_token, bytes_used, resource_count, created_at, updated_at`
+const collectionCols = `id, tenant, name, sync_token, bytes_used, resource_count, created_at, updated_at, policy`
 
 func scanCollection(r rowScanner) (Collection, error) {
 	var c Collection
 	var created, updated string
-	if err := r.Scan(&c.ID, &c.Tenant, &c.Name, &c.SyncToken, &c.BytesUsed, &c.ResourceCount, &created, &updated); err != nil {
+	var policy sql.NullString
+	if err := r.Scan(&c.ID, &c.Tenant, &c.Name, &c.SyncToken, &c.BytesUsed, &c.ResourceCount, &created, &updated, &policy); err != nil {
 		return Collection{}, err
 	}
 	c.CreatedAt = parseTime(created)
 	c.UpdatedAt = parseTime(updated)
+	// A stored policy that no longer parses is dropped rather than fatal:
+	// the head then allows, which is every collection's default. Validate()
+	// at the write door is what keeps a bad policy from landing.
+	c.Policy, _ = ParsePolicy(policy.String)
+	return c, nil
+}
+
+// SetCollectionPolicy replaces a collection's client policy; an empty
+// policy clears it (every verb allowed again).
+func (s *Store) SetCollectionPolicy(ctx context.Context, tenant, name string, p Policy) (Collection, error) {
+	if err := p.Validate(); err != nil {
+		return Collection{}, err
+	}
+	res, err := s.db.ExecContext(ctx, s.rb(`
+		UPDATE drive_collections SET policy = ?, updated_at = ?
+		 WHERE tenant = ? AND name = ? AND deleted_at IS NULL`),
+		p.String(), fmtTime(s.now()), tenant, strings.TrimSpace(name))
+	if err != nil {
+		return Collection{}, fmt.Errorf("drive: set collection policy: %w", err)
+	}
+	if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
+		return Collection{}, ErrNotFound
+	}
+	c, found, err := s.GetCollection(ctx, tenant, name)
+	if err != nil {
+		return Collection{}, err
+	}
+	if !found {
+		return Collection{}, ErrNotFound
+	}
 	return c, nil
 }
 
@@ -91,7 +125,7 @@ func (s *Store) ensureCollectionOnce(ctx context.Context, tenant, name string) (
 		id := "dc_" + hxid.NewTimeSort().String()
 		if _, err := tx.ExecContext(ctx, s.rb(`
 			INSERT INTO drive_collections (`+collectionCols+`, deleted_at)
-			VALUES (?, ?, ?, 0, 0, 0, ?, ?, NULL)`),
+			VALUES (?, ?, ?, 0, 0, 0, ?, ?, '', NULL)`),
 			id, tenant, name, now, now); err != nil {
 			if s.dialect.IsUniqueViolationGeneric(err) {
 				return Collection{}, false, err // caller retries

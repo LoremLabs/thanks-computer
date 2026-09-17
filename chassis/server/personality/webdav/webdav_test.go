@@ -503,3 +503,95 @@ func TestDisabledController(t *testing.T) {
 		t.Error("bodyBudget")
 	}
 }
+
+// TestCollectionPolicy: a collection can reserve a subtree for the stack.
+// The case it exists for is a curated folder — the stack puts documents in
+// Knowledge/ and a desktop client must not overwrite them, which is how a
+// client with a stale cache silently replaced a good file with a spliced
+// one (2026-09-17). Everything that does not move bytes stays available,
+// because the person still files and forgets things in that tree.
+func TestCollectionPolicy(t *testing.T) {
+	var conf config.Config
+	insecure(&conf)
+	h := newHarness(t, conf)
+	ctx := context.Background()
+
+	// Seed the tree as the stack would, BEFORE the policy is in force.
+	for _, p := range []string{"Knowledge", "Knowledge/ai", "Input"} {
+		if _, err := h.store.Mkdir(ctx, h.coll.ID, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.store.Put(ctx, h.coll.ID, "Knowledge/ai/paper.pdf", strings.NewReader("good"), 4, chdrive.PutOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.SetCollectionPolicy(ctx, "acme", "paris", chdrive.Policy{
+		"Knowledge": {chdrive.VerbWrite: chdrive.ModeDeny},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The refused verb: a client cannot write bytes into the curated tree,
+	// at any depth, whether it would create or overwrite.
+	resp, _ := h.do(t, http.MethodPut, "/drive/Knowledge/ai/paper.pdf", body("spliced"))
+	want(t, resp, http.StatusForbidden, "overwrite in a reserved tree")
+	resp, _ = h.do(t, http.MethodPut, "/drive/Knowledge/new.txt", body("x"))
+	want(t, resp, http.StatusForbidden, "create in a reserved tree")
+	// And the bytes really are untouched.
+	if got, _, err := h.store.Open(ctx, h.coll.ID, "Knowledge/ai/paper.pdf"); err != nil {
+		t.Fatal(err)
+	} else {
+		b, _ := io.ReadAll(got)
+		got.Close()
+		if string(b) != "good" {
+			t.Fatalf("the refused PUT still changed the file: %q", b)
+		}
+	}
+
+	// The drop zone is untouched by the policy: that is where a person works.
+	resp, _ = h.do(t, http.MethodPut, "/drive/Input/drop.txt", body("mine"))
+	want(t, resp, http.StatusCreated, "write outside the reserved tree")
+
+	// Client bookkeeping is exempt, or browsing a read-only folder in
+	// Finder becomes a stream of error dialogs.
+	resp, _ = h.do(t, http.MethodPut, "/drive/Knowledge/ai/._paper.pdf", body("applesingle"))
+	want(t, resp, http.StatusCreated, "AppleDouble sidecar in a reserved tree")
+	resp, _ = h.do(t, http.MethodPut, "/drive/Knowledge/.DS_Store", body("finder"))
+	want(t, resp, http.StatusCreated, ".DS_Store in a reserved tree")
+
+	// What does NOT move bytes stays the person's: making a folder (the
+	// taxonomy the stack files INTO), filing, and forgetting.
+	resp, _ = h.do(t, "MKCOL", "/drive/Knowledge/people", nil)
+	want(t, resp, http.StatusCreated, "mkcol in a reserved tree")
+	resp, _ = h.do(t, "MOVE", "/drive/Knowledge/ai/paper.pdf", nil, hdr("Destination", h.srv.URL+"/drive/Knowledge/people/paper.pdf"))
+	want(t, resp, http.StatusCreated, "file within a reserved tree")
+	resp, _ = h.do(t, http.MethodDelete, "/drive/Knowledge/people/paper.pdf", nil)
+	want(t, resp, http.StatusNoContent, "delete from a reserved tree")
+
+	// Reading is never affected.
+	resp, _ = h.do(t, "PROPFIND", "/drive/Knowledge/", nil, hdr("Depth", "1"))
+	want(t, resp, http.StatusMultiStatus, "propfind a reserved tree")
+
+	// The stack itself is never subject to the policy — that asymmetry is
+	// the whole point, and it is what keeps ingest able to place a file.
+	if _, err := h.store.Put(ctx, h.coll.ID, "Knowledge/ai/stack.pdf", strings.NewReader("by the stack"), 12, chdrive.PutOpts{}); err != nil {
+		t.Fatalf("the policy leaked into the store: %v", err)
+	}
+
+	// A tighter policy can refuse the rest; a cleared one restores an
+	// ordinary drive.
+	if _, err := h.store.SetCollectionPolicy(ctx, "acme", "paris", chdrive.Policy{
+		"Knowledge": {chdrive.VerbWrite: chdrive.ModeDeny, chdrive.VerbDelete: chdrive.ModeDeny, chdrive.VerbCreate: chdrive.ModeDeny},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = h.do(t, "MKCOL", "/drive/Knowledge/nope", nil)
+	want(t, resp, http.StatusForbidden, "mkcol under a stricter policy")
+	resp, _ = h.do(t, http.MethodDelete, "/drive/Knowledge/ai/stack.pdf", nil)
+	want(t, resp, http.StatusForbidden, "delete under a stricter policy")
+	if _, err := h.store.SetCollectionPolicy(ctx, "acme", "paris", nil); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = h.do(t, http.MethodPut, "/drive/Knowledge/ai/paper.pdf", body("now allowed"))
+	want(t, resp, http.StatusCreated, "write after the policy is cleared")
+}

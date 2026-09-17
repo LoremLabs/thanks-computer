@@ -188,6 +188,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			resource_count BIGINT NOT NULL DEFAULT 0,
 			created_at     TEXT NOT NULL,
 			updated_at     TEXT NOT NULL,
+			policy         TEXT NOT NULL DEFAULT '',
 			deleted_at     TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS drive_collections_name_idx
@@ -231,6 +232,22 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	for _, q := range stmts {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("drive: ensure schema: %w", err)
+		}
+	}
+	// Additive columns, for a table that predates them. CREATE TABLE IF NOT
+	// EXISTS leaves an existing table alone, and the two engines disagree
+	// about ALTER ... ADD COLUMN IF NOT EXISTS (Postgres has it, SQLite does
+	// not), so the portable move is to PROBE and then add — the same shape
+	// the boot code uses to decide whether the scheduled store shares this
+	// database.
+	for _, c := range []struct{ table, column, ddl string }{
+		{"drive_collections", "policy", `ALTER TABLE drive_collections ADD COLUMN policy TEXT NOT NULL DEFAULT ''`},
+	} {
+		if _, err := s.db.ExecContext(ctx, `SELECT `+c.column+` FROM `+c.table+` WHERE 1 = 0`); err == nil {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("drive: add %s.%s: %w", c.table, c.column, err)
 		}
 	}
 	return nil

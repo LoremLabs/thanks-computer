@@ -71,7 +71,7 @@ collection is always addressed by `collection` (its name); a resource by
 
 | op | WITH | result |
 |---|---|---|
-| `drive/collection` | `name`; `remove` (+ `force` to remove a non-empty one) | `{id, name, sync_token, bytes_used, resource_count, created}` or `{name, removed}` |
+| `drive/collection` | `name`; `remove` (+ `force` to remove a non-empty one); `policy` (what a CLIENT may do, by subtree — see below) | `{id, name, sync_token, bytes_used, resource_count, created, policy?}` or `{name, removed}` |
 | `drive/account` | `username`, `collection`; `password` / `rotate` / `password_style` (`token` \| `words`) / `password_words` as `imap/account`; `status` `active` \| `disabled` | `{username, created, collection_id, collection, mount, password?, rotated?}` |
 | `drive/put` | `collection`, `path`; `from` XOR `value` XOR `from_sha` (a sha256 the tenant already holds in the blob store — streamed, not buffered, so the op cap does not apply); `encoding` `base64` (default) \| `utf8`; `content_type`; `if_match`, `if_none_match` (etag or `*`); `parents` (create missing ancestors) | `{resource_id, path, etag, size, created, noop, modseq}` — `noop` when the bytes were already there |
 | `drive/get` | `collection`; `path` XOR `resource_id`; `encoding` `base64` (default) \| `utf8` \| `auto`; `max_bytes` | `{resource_id, path, name, etag, size, content_type, modseq, content, encoding}` |
@@ -95,6 +95,41 @@ dispatch fuel; the head is not fuel-metered.
 Error codes: `txco_drive_{no_tenant, disabled, invalid_arg, not_found,
 exists, no_parent, is_directory, not_directory, precondition, quota,
 too_large, cycle, not_empty, username_taken, domain_not_owned, store}`.
+
+## Reserving a subtree for the stack
+
+A drive can have two writers with different jobs: the person at the mount,
+and the stack that curates what the person dropped. A collection's `policy`
+says which verbs a **WebDAV client** may use on which subtree, so a folder
+the stack owns is not rewritten by a client that thinks it knows better.
+
+```txcl
+EXEC "txco://drive/collection"
+  WITH name   = "paris",
+       policy = &object("Knowledge", &object("write", "deny"))
+```
+
+That reads as: a client may list, read, rename, delete and make folders
+under `Knowledge/`, but may not write a file's **content** there. Verbs are
+`write` (PUT a file), `create` (MKCOL), `delete`, `move_in` and `move_out`
+(the two halves of a MOVE; a COPY is judged at its destination). Modes are
+`allow` and `deny`; an unnamed prefix, verb or mode allows, so a policy only
+names what it refuses. The longest matching prefix decides, so a refused
+tree can readmit one folder inside it. Passing `policy` again replaces the
+whole thing and `&object()` clears it; leaving it out never disturbs one.
+
+**The policy binds the head, never these ops.** `txco://drive/*` talks to
+the store directly and is never checked, which is exactly what lets a stack
+keep filing into a tree its clients may only read. It is therefore not a
+boundary between principals — one account is bound to one collection, so
+there is only ever one client — but a division of labour. A typo in a verb
+or mode is refused at the write door rather than ignored, because a policy
+that fails open would allow precisely what its author meant to refuse.
+
+Client bookkeeping is exempt from `write`: a dot-file (`.DS_Store`, and the
+`._name` AppleDouble sidecars macOS writes into every folder it merely
+displays) is always allowed, or browsing a reserved folder in Finder would
+be a stream of error dialogs.
 
 ## Mutation events
 

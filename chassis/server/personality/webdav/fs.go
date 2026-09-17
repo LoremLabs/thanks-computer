@@ -112,6 +112,9 @@ func (f *fs) RemoveAll(ctx context.Context, name string, opts *webdav.RemoveAllO
 	if rel == "" || rel == "/" {
 		return webdav.NewHTTPError(http.StatusForbidden, errors.New("webdav: the mount root cannot be deleted"))
 	}
+	if err := f.check(rel, chdrive.VerbDelete); err != nil {
+		return err
+	}
 	var ifMatch string
 	if opts != nil {
 		ifMatch = unquoteETag(string(opts.IfMatch))
@@ -131,7 +134,11 @@ func (f *fs) RemoveAll(ctx context.Context, name string, opts *webdav.RemoveAllO
 }
 
 func (f *fs) Mkdir(ctx context.Context, name string) error {
-	_, err := f.c.store.Mkdir(ctx, f.pr.coll.ID, f.c.rel(name))
+	rel := f.c.rel(name)
+	if err := f.check(rel, chdrive.VerbCreate); err != nil {
+		return err
+	}
+	_, err := f.c.store.Mkdir(ctx, f.pr.coll.ID, rel)
 	if errors.Is(err, chdrive.ErrExists) {
 		// RFC 4918 §9.3.1: MKCOL on an existing resource is 405.
 		return webdav.NewHTTPError(http.StatusMethodNotAllowed, err)
@@ -142,6 +149,11 @@ func (f *fs) Mkdir(ctx context.Context, name string) error {
 func (f *fs) Copy(ctx context.Context, name, dst string, opts *webdav.CopyOptions) (bool, error) {
 	to, err := f.dest(dst)
 	if err != nil {
+		return false, err
+	}
+	// A copy only adds: the source is untouched, so only the destination
+	// is judged.
+	if err := f.check(to, chdrive.VerbMoveIn); err != nil {
 		return false, err
 	}
 	overwrite := opts == nil || !opts.NoOverwrite
@@ -177,6 +189,15 @@ func (f *fs) Copy(ctx context.Context, name, dst string, opts *webdav.CopyOption
 func (f *fs) Move(ctx context.Context, name, dst string, opts *webdav.MoveOptions) (bool, error) {
 	to, err := f.dest(dst)
 	if err != nil {
+		return false, err
+	}
+	// A move is two verbs: it removes from one subtree and adds to another,
+	// and a policy may refuse either end.
+	from := f.c.rel(name)
+	if err := f.check(from, chdrive.VerbMoveOut); err != nil {
+		return false, err
+	}
+	if err := f.check(to, chdrive.VerbMoveIn); err != nil {
 		return false, err
 	}
 	overwrite := opts == nil || !opts.NoOverwrite

@@ -283,6 +283,14 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 // stream is still reaped, and the body reader refuses to deliver more than
 // allowed.
 func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr principal) {
+	// The collection's policy decides BEFORE a byte is read: a refused write
+	// must not spend the upload, and the client must not be left half-sent
+	// wondering why.
+	rel := c.rel(r.URL.Path)
+	if !c.allows(pr, rel, chdrive.VerbWrite) {
+		http.Error(w, "forbidden by the collection's policy", http.StatusForbidden)
+		return
+	}
 	size := r.ContentLength
 	if size < 0 {
 		size = -1
