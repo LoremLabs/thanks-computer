@@ -176,6 +176,15 @@ is enqueued after commit and boot says so.
 | `--drive-op-max-bytes` | 32 MiB | `put` / `get` through the ops |
 | `--drive-sweep-period` / `--drive-sweep-grace` / `--drive-tombstone-retention` | 900 s / 1 h / 7 d | the sweeper, on `webdav` nodes |
 
+An object backend implements `Put`, `Get`, `Stat`, `List`, `Delete`. It may
+also implement `GetRange` (`drive.RangeReader`) to open part of an object;
+the S3 backend does. The store returns every object as a seekable reader
+sized from the index, so a client's `Range` is positioned before anything
+is opened: a backend with `GetRange` serves only that slice, one whose
+`Get` returns a seeker (the file backend) is seeked, and any other is read
+from the start with the prefix discarded — correct on every backend, cheap
+on the ones that matter.
+
 The index opens on a node when `webdav` is in `--personalities` (fatal if
 it fails) or when `--drive-store` names a shared backend (warn-and-continue;
 the ops answer `txco_drive_disabled` until restart). The head itself is

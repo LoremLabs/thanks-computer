@@ -17,6 +17,17 @@ type ObjectInfo struct {
 	ContentType string
 }
 
+// RangeReader is an ObjectStore that can open PART of an object. A backend
+// that cannot needs nothing: the Store reads and discards the prefix
+// instead, or seeks when Get already returns a seeker (the file backend).
+// A network backend should implement it — a client reading the tail of a
+// large file must not pull the whole object through the server first.
+type RangeReader interface {
+	// GetRange opens bytes [off, off+length) of key; length < 0 means to
+	// the end. off is always inside the object. ErrNotFound if absent.
+	GetRange(ctx context.Context, key string, off, length int64) (io.ReadCloser, error)
+}
+
 // ObjectStore holds resource bytes under keys the Store mints:
 // `<tenant>/<collection_id>/<resource_id>/<version_id>` — "/"-separated,
 // every segment `[A-Za-z0-9._-]`. A backend adds its own root (a directory,

@@ -127,6 +127,25 @@ as the PUT: telling the client up front is what makes it open the file
 read-only, instead of discovering the refusal at save time and retrying
 until the mount stalls.
 
+### Reads are ranged
+
+A GET honours `Range` on every backend — `206` with `Content-Range`, a
+suffix (`bytes=-64`), a range that runs past the end (clamped, never
+padded), `416` with the file's length when it starts past the end, and
+`If-Range` against the etag so a client resuming into a changed file gets
+the whole new file rather than a splice. HEAD advertises `Accept-Ranges:
+bytes`.
+
+This is not a nicety. macOS webdavfs serves a read it has not cached as a
+Range GET, and a PDF reader's first read is the tail (the cross-reference
+table lives there). A server that answers a Range request with `200` and
+the whole file is *accepted* by the client, which takes the file's head
+as its tail — and every PDF opens as "damaged" while `shasum` over the
+mount says the bytes are perfect (prod, 2026-09-17). The store returns
+each object as a seekable reader whose size is the index's, so the range
+is positioned before anything is opened, and a backend that can open part
+of an object (S3) sends only that part through the server.
+
 ## Limits and housekeeping
 
 | | |

@@ -3,6 +3,7 @@ package webdav
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -51,15 +52,26 @@ type harness struct {
 
 func newHarness(t *testing.T, conf config.Config) *harness {
 	t.Helper()
+	return newHarnessWith(t, conf, nil)
+}
+
+// newHarnessWith lets a test stand a different object store behind the
+// head: wrap receives the file backend and returns what the Store sees.
+func newHarnessWith(t *testing.T, conf config.Config, wrap func(chdrive.ObjectStore) chdrive.ObjectStore) *harness {
+	t.Helper()
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "drive.db")+"?mode=rwc&_journal_mode=WAL&_busy_timeout=15000&_txlock=immediate")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	objects, err := filestore.New(filepath.Join(dir, "objects"))
+	fsObjects, err := filestore.New(filepath.Join(dir, "objects"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	var objects chdrive.ObjectStore = fsObjects
+	if wrap != nil {
+		objects = wrap(objects)
 	}
 	store := chdrive.NewStore(db, registry.SQLite, objects)
 	if err := store.EnsureSchema(context.Background()); err != nil {
@@ -741,4 +753,174 @@ func TestConditionalHeaders(t *testing.T) {
 	want(t, resp, http.StatusPreconditionFailed, "delete refused by if-none-match")
 	resp, _ = h.do(t, http.MethodDelete, "/drive/doc.txt", nil, hdr("If-Match", `"stale", "`+etag+`"`))
 	want(t, resp, http.StatusNoContent, "delete on a list holding the current etag")
+}
+
+// streamOnly hides everything but Read and Close on what Get returns. That
+// is the shape of an S3 body — what prod serves — and what the file backend
+// in this harness would otherwise paper over with an *os.File that seeks.
+// Prod ignored every Range request for exactly this reason (2026-09-17):
+// the library only serves ranges from a seeker.
+type streamOnly struct{ chdrive.ObjectStore }
+
+func (s streamOnly) Get(ctx context.Context, key string) (io.ReadCloser, chdrive.ObjectInfo, error) {
+	rc, info, err := s.ObjectStore.Get(ctx, key)
+	if err != nil {
+		return nil, info, err
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{rc, rc}, info, nil
+}
+
+// ranged is streamOnly plus GetRange, recording every range asked for, so
+// a test can prove the head fetched the slice rather than the object.
+type ranged struct {
+	streamOnly
+	asked *[]string
+}
+
+func (r ranged) GetRange(ctx context.Context, key string, off, length int64) (io.ReadCloser, error) {
+	*r.asked = append(*r.asked, fmt.Sprintf("%d+%d", off, length))
+	rc, _, err := r.streamOnly.ObjectStore.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := rc.(io.Seeker).Seek(off, io.SeekStart); err != nil {
+		rc.Close()
+		return nil, err
+	}
+	var rd io.Reader = rc
+	if length >= 0 {
+		rd = io.LimitReader(rc, length)
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{rd, rc}, nil
+}
+
+// A PDF reader finds the cross-reference table by seeking to the tail, and
+// macOS webdavfs turns that seek into a Range GET. Answering 200 with the
+// whole file made the client take the file's HEAD as its tail: Preview
+// reported every PDF on the drive as damaged while `shasum` said the bytes
+// were fine (prod, 2026-09-17). Ranges have to work on every backend, not
+// only the one whose Get happens to return a seeker.
+func TestGetRanges(t *testing.T) {
+	content := strings.Repeat("0123456789", 1000) // 10,000 bytes, offset-legible
+	for _, tc := range []struct {
+		name  string
+		wrap  func(chdrive.ObjectStore) chdrive.ObjectStore
+		asked *[]string
+	}{
+		{name: "stream-only backend", wrap: func(o chdrive.ObjectStore) chdrive.ObjectStore { return streamOnly{o} }},
+		{name: "ranged backend", asked: new([]string)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.asked != nil {
+				tc.wrap = func(o chdrive.ObjectStore) chdrive.ObjectStore { return ranged{streamOnly{o}, tc.asked} }
+			}
+			var conf config.Config
+			insecure(&conf)
+			h := newHarnessWith(t, conf, tc.wrap)
+			resp, _ := h.do(t, http.MethodPut, "/drive/big.bin", body(content))
+			want(t, resp, http.StatusCreated, "seed")
+			etag := resp.Header.Get("ETag")
+			askedSoFar := func() int {
+				if tc.asked == nil {
+					return 0
+				}
+				return len(*tc.asked)
+			}
+			lastAsked := func(t *testing.T, wantPrefix string) {
+				t.Helper()
+				if tc.asked == nil {
+					return
+				}
+				if n := len(*tc.asked); n == 0 || !strings.HasPrefix((*tc.asked)[n-1], wantPrefix) {
+					t.Fatalf("backend was asked %v, want the last to start %q", *tc.asked, wantPrefix)
+				}
+			}
+
+			// HEAD says the size and that ranges are welcome.
+			resp, got := h.do(t, http.MethodHead, "/drive/big.bin", nil)
+			want(t, resp, http.StatusOK, "head")
+			if resp.ContentLength != int64(len(content)) || got != "" {
+				t.Fatalf("head: Content-Length %d body %d bytes", resp.ContentLength, len(got))
+			}
+			if ar := resp.Header.Get("Accept-Ranges"); ar != "bytes" {
+				t.Fatalf("head: Accept-Ranges %q, want bytes", ar)
+			}
+
+			// A plain GET is the whole file, and never a ranged read.
+			n := askedSoFar()
+			resp, got = h.do(t, http.MethodGet, "/drive/big.bin", nil)
+			want(t, resp, http.StatusOK, "plain get")
+			if got != content || resp.ContentLength != int64(len(content)) {
+				t.Fatalf("plain get: %d bytes, Content-Length %d", len(got), resp.ContentLength)
+			}
+			if askedSoFar() != n {
+				t.Fatalf("a plain GET went through GetRange: %v", *tc.asked)
+			}
+
+			// A slice from the middle.
+			resp, got = h.do(t, http.MethodGet, "/drive/big.bin", nil, hdr("Range", "bytes=5000-5009"))
+			want(t, resp, http.StatusPartialContent, "range in the middle")
+			if got != content[5000:5010] {
+				t.Fatalf("range: got %q", got)
+			}
+			if cr := resp.Header.Get("Content-Range"); cr != "bytes 5000-5009/10000" {
+				t.Fatalf("range: Content-Range %q", cr)
+			}
+			if resp.ContentLength != 10 {
+				t.Fatalf("range: Content-Length %d", resp.ContentLength)
+			}
+			lastAsked(t, "5000+")
+
+			// The last page, straddling EOF — what a PDF reader asks for.
+			// Clamped to the file, never padded, never the whole file.
+			resp, got = h.do(t, http.MethodGet, "/drive/big.bin", nil, hdr("Range", "bytes=9990-19999"))
+			want(t, resp, http.StatusPartialContent, "range straddling EOF")
+			if got != content[9990:] {
+				t.Fatalf("straddle: got %d bytes starting %q", len(got), got[:min(len(got), 12)])
+			}
+			if cr := resp.Header.Get("Content-Range"); cr != "bytes 9990-9999/10000" {
+				t.Fatalf("straddle: Content-Range %q", cr)
+			}
+			lastAsked(t, "9990+")
+
+			// A suffix.
+			resp, got = h.do(t, http.MethodGet, "/drive/big.bin", nil, hdr("Range", "bytes=-7"))
+			want(t, resp, http.StatusPartialContent, "suffix range")
+			if got != content[9993:] {
+				t.Fatalf("suffix: got %q", got)
+			}
+			lastAsked(t, "9993+")
+
+			// Past the end is unsatisfiable, and says how long the file is.
+			n = askedSoFar()
+			resp, _ = h.do(t, http.MethodGet, "/drive/big.bin", nil, hdr("Range", "bytes=10000-10010"))
+			want(t, resp, http.StatusRequestedRangeNotSatisfiable, "range past EOF")
+			if cr := resp.Header.Get("Content-Range"); cr != "bytes */10000" {
+				t.Fatalf("past EOF: Content-Range %q", cr)
+			}
+			if askedSoFar() != n {
+				t.Fatalf("an unsatisfiable range still read the object: %v", *tc.asked)
+			}
+
+			// If-Range: the slice when the etag still holds, the whole file
+			// when it does not — a client resuming into a changed file must
+			// not splice two versions.
+			resp, got = h.do(t, http.MethodGet, "/drive/big.bin", nil, hdr("Range", "bytes=0-9"), hdr("If-Range", etag))
+			want(t, resp, http.StatusPartialContent, "if-range, current etag")
+			if got != content[:10] {
+				t.Fatalf("if-range current: got %q", got)
+			}
+			resp, got = h.do(t, http.MethodGet, "/drive/big.bin", nil, hdr("Range", "bytes=0-9"), hdr("If-Range", `"stale"`))
+			want(t, resp, http.StatusOK, "if-range, stale etag")
+			if got != content {
+				t.Fatalf("if-range stale: %d bytes", len(got))
+			}
+		})
+	}
 }

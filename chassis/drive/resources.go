@@ -629,7 +629,7 @@ func (s *Store) StatByID(ctx context.Context, collID, resID string) (Resource, b
 
 // Open returns a reader over the file at p and its row. ErrNotFound when
 // absent; ErrIsDirectory for a directory (the root included).
-func (s *Store) Open(ctx context.Context, collID, p string) (io.ReadCloser, Resource, error) {
+func (s *Store) Open(ctx context.Context, collID, p string) (io.ReadSeekCloser, Resource, error) {
 	r, ok, err := s.Stat(ctx, collID, p)
 	if err != nil {
 		return nil, Resource{}, err
@@ -641,7 +641,7 @@ func (s *Store) Open(ctx context.Context, collID, p string) (io.ReadCloser, Reso
 }
 
 // OpenByID is Open addressed by resource id.
-func (s *Store) OpenByID(ctx context.Context, collID, resID string) (io.ReadCloser, Resource, error) {
+func (s *Store) OpenByID(ctx context.Context, collID, resID string) (io.ReadSeekCloser, Resource, error) {
 	r, ok, err := s.StatByID(ctx, collID, resID)
 	if err != nil {
 		return nil, Resource{}, err
@@ -652,15 +652,110 @@ func (s *Store) OpenByID(ctx context.Context, collID, resID string) (io.ReadClos
 	return s.openResource(ctx, r)
 }
 
-func (s *Store) openResource(ctx context.Context, r Resource) (io.ReadCloser, Resource, error) {
+// openResource returns the object as a seekable reader. Nothing is opened
+// until a Read needs bytes, so a caller may seek freely first — which is
+// how http.ServeContent finds the size and positions a range.
+func (s *Store) openResource(ctx context.Context, r Resource) (io.ReadSeekCloser, Resource, error) {
 	if r.Kind == KindDir {
 		return nil, r, ErrIsDirectory
 	}
-	rc, _, err := s.objects.Get(ctx, r.ObjectKey)
-	if err != nil {
-		return nil, r, fmt.Errorf("drive: open object %s: %w", r.ObjectKey, err)
+	return &objectReader{ctx: ctx, objects: s.objects, key: r.ObjectKey, size: r.Size}, r, nil
+}
+
+// objectReader is what Open returns: an io.ReadSeekCloser over one object
+// whose size is the index's, so a Seek is arithmetic and the object is
+// opened — at the current offset — only when a Read needs bytes.
+//
+// Every backend gets the same behaviour. One that can open part of an
+// object does (RangeReader); one whose Get returns a seeker is seeked; any
+// other is read from the start with the prefix discarded. That last case
+// is the floor, not the plan: before this, a backend without a seeker made
+// the webdav head ignore Range outright and answer 200 with the whole
+// file, and macOS webdavfs — which fetches an uncached read as a Range
+// GET — took the file's head as its tail. Every PDF on the drive opened
+// as "damaged" while the bytes were fine (prod, 2026-09-17).
+type objectReader struct {
+	ctx     context.Context
+	objects ObjectStore
+	key     string
+	size    int64
+	pos     int64         // where the next Read starts
+	cur     io.ReadCloser // the open stream, if any, positioned at curPos
+	curPos  int64
+}
+
+func (r *objectReader) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = r.pos + offset
+	case io.SeekEnd:
+		abs = r.size + offset
+	default:
+		return 0, errors.New("drive: seek: bad whence")
 	}
-	return rc, r, nil
+	if abs < 0 {
+		return 0, errors.New("drive: seek: negative position")
+	}
+	r.pos = abs
+	return abs, nil
+}
+
+func (r *objectReader) Read(p []byte) (int, error) {
+	if r.pos >= r.size {
+		return 0, io.EOF
+	}
+	if r.cur != nil && r.curPos != r.pos {
+		// A seek since the last read: the stream is in the wrong place.
+		_ = r.cur.Close()
+		r.cur = nil
+	}
+	if r.cur == nil {
+		if err := r.open(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := r.cur.Read(p)
+	r.pos += int64(n)
+	r.curPos += int64(n)
+	return n, err
+}
+
+// open positions a stream at r.pos by the best means the backend offers.
+func (r *objectReader) open() error {
+	var rc io.ReadCloser
+	var err error
+	if rr, ok := r.objects.(RangeReader); ok && r.pos > 0 {
+		rc, err = rr.GetRange(r.ctx, r.key, r.pos, -1)
+	} else {
+		rc, _, err = r.objects.Get(r.ctx, r.key)
+		if err == nil && r.pos > 0 {
+			if sk, ok := rc.(io.Seeker); ok {
+				_, err = sk.Seek(r.pos, io.SeekStart)
+			} else {
+				_, err = io.CopyN(io.Discard, rc, r.pos)
+			}
+			if err != nil {
+				_ = rc.Close()
+			}
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("drive: open object %s: %w", r.key, err)
+	}
+	r.cur, r.curPos = rc, r.pos
+	return nil
+}
+
+func (r *objectReader) Close() error {
+	if r.cur == nil {
+		return nil
+	}
+	err := r.cur.Close()
+	r.cur = nil
+	return err
 }
 
 // List returns resources per opts, ordered by path. Without Recursive the
