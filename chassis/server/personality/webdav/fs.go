@@ -115,21 +115,14 @@ func (f *fs) RemoveAll(ctx context.Context, name string, opts *webdav.RemoveAllO
 	if err := f.check(rel, chdrive.VerbDelete); err != nil {
 		return err
 	}
-	var ifMatch string
+	// ConditionalMatch is the raw header value; the store parses it (a list
+	// is legal) and applies it inside the delete's own transaction, so
+	// there is no window between the check and the delete.
+	var del chdrive.DeleteOpts
 	if opts != nil {
-		ifMatch = unquoteETag(string(opts.IfMatch))
-		if opts.IfNoneMatch.IsSet() {
-			// If-None-Match on DELETE: refuse when the current etag matches.
-			res, found, err := f.c.store.Stat(ctx, f.pr.coll.ID, rel)
-			if err != nil {
-				return wrap(err)
-			}
-			if found && (opts.IfNoneMatch.IsWildcard() || unquoteETag(string(opts.IfNoneMatch)) == res.ETag) {
-				return webdav.NewHTTPError(http.StatusPreconditionFailed, chdrive.ErrPrecondition)
-			}
-		}
+		del.IfMatch, del.IfNoneMatch = string(opts.IfMatch), string(opts.IfNoneMatch)
 	}
-	_, err := f.c.store.Delete(ctx, f.pr.coll.ID, rel, chdrive.DeleteOpts{IfMatch: ifMatch})
+	_, err := f.c.store.Delete(ctx, f.pr.coll.ID, rel, del)
 	return wrap(err)
 }
 

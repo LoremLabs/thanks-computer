@@ -44,8 +44,9 @@ func (r Resource) IsDir() bool { return r.Kind == KindDir }
 
 // PutOpts steers Put.
 type PutOpts struct {
-	// IfMatch / IfNoneMatch are the client's conditional headers, unquoted
-	// ("*" for IfNoneMatch means create-only; "*" for IfMatch means
+	// IfMatch / IfNoneMatch are the client's conditional headers, as sent:
+	// a bare etag, a quoted one, or an RFC 7232 list, with "*" the
+	// wildcard ("*" for IfNoneMatch means create-only; "*" for IfMatch means
 	// must-exist).
 	IfMatch     string
 	IfNoneMatch string
@@ -66,8 +67,12 @@ type PutResult struct {
 
 // DeleteOpts steers Delete.
 type DeleteOpts struct {
-	// IfMatch is the client's conditional header, unquoted ("*" = any).
-	IfMatch string
+	// IfMatch and IfNoneMatch are the client's conditional headers, as
+	// sent: a bare etag, a quoted one, or a list, with "*" the wildcard.
+	// Both are applied inside the transaction, so a concurrent write
+	// cannot slip between the check and the delete.
+	IfMatch     string
+	IfNoneMatch string
 }
 
 // ListOpts narrows List.
@@ -133,19 +138,103 @@ func ETagOf(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// checkPreconditions applies If-Match / If-None-Match (unquoted etags,
-// "*" wildcard) against the live state.
-func checkPreconditions(ifMatch, ifNoneMatch string, live bool, etag string) error {
-	if ifNoneMatch == "*" && live {
+// etagEntry is one entry of an If-Match / If-None-Match header. weak says
+// it carried the W/ prefix, which decides whether it can satisfy If-Match:
+// that header compares STRONGLY (RFC 7232 §3.1), so a weak entry never
+// matches, while If-None-Match compares weakly and the prefix is noise.
+type etagEntry struct {
+	tag  string
+	weak bool
+}
+
+// parseETagList reads a conditional header value. RFC 7232 allows a LIST
+// ("a", "b"), which the header satisfies when ANY entry matches; reading
+// only the first — or, worse, trimming quotes off the whole string —
+// turns `If-None-Match: "a", "b"` into a guard that matches nothing and
+// silently passes, which is the wrong direction to fail in.
+//
+// A bare unquoted etag is accepted too: that is how a stack op names one.
+// The scan is quote-aware rather than a Split, because a comma inside the
+// quotes is part of the etag, not a separator.
+func parseETagList(v string) []etagEntry {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	if v == "*" {
+		return []etagEntry{{tag: "*"}}
+	}
+	var out []etagEntry
+	for i := 0; i < len(v); {
+		if c := v[i]; c == ',' || c == ' ' || c == '\t' {
+			i++
+			continue
+		}
+		var e etagEntry
+		if strings.HasPrefix(v[i:], "W/") {
+			e.weak, i = true, i+2
+		}
+		if i < len(v) && v[i] == '"' {
+			j := strings.IndexByte(v[i+1:], '"')
+			if j < 0 {
+				return out // unterminated: keep what parsed, refuse the rest
+			}
+			e.tag, i = v[i+1:i+1+j], i+j+2
+		} else {
+			j := strings.IndexByte(v[i:], ',')
+			if j < 0 {
+				j = len(v) - i
+			}
+			e.tag, i = strings.TrimSpace(v[i:i+j]), i+j
+		}
+		if e.tag != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// checkIfMatch applies If-Match: the write proceeds only when the resource
+// is live and one entry names its current version. Strong comparison, so a
+// weak entry is never enough.
+func checkIfMatch(ifMatch string, live bool, etag string) error {
+	entries := parseETagList(ifMatch)
+	if len(entries) == 0 {
+		return nil // the header was absent: nothing is required
+	}
+	if !live {
 		return ErrPrecondition
 	}
-	if ifNoneMatch != "" && ifNoneMatch != "*" && live && etag == ifNoneMatch {
-		return ErrPrecondition
+	for _, e := range entries {
+		if e.tag == "*" || (!e.weak && e.tag == etag) {
+			return nil
+		}
 	}
-	if ifMatch != "" && (!live || (ifMatch != "*" && etag != ifMatch)) {
-		return ErrPrecondition
+	return ErrPrecondition
+}
+
+// checkIfNoneMatch applies If-None-Match: the write proceeds unless the
+// resource is live and an entry names it ("*" naming any live resource,
+// which is how a client asks to create only). Weak comparison.
+func checkIfNoneMatch(ifNoneMatch string, live bool, etag string) error {
+	if !live {
+		return nil
+	}
+	for _, e := range parseETagList(ifNoneMatch) {
+		if e.tag == "*" || e.tag == etag {
+			return ErrPrecondition
+		}
 	}
 	return nil
+}
+
+// checkPreconditions applies both conditional headers against the live
+// state.
+func checkPreconditions(ifMatch, ifNoneMatch string, live bool, etag string) error {
+	if err := checkIfNoneMatch(ifNoneMatch, live, etag); err != nil {
+		return err
+	}
+	return checkIfMatch(ifMatch, live, etag)
 }
 
 // getResourceQ fetches the row at path (live only unless withDeleted; a
@@ -687,8 +776,8 @@ func (s *Store) deleteWhere(ctx context.Context, collID string, opts DeleteOpts,
 	if !live {
 		return Resource{}, ErrNotFound
 	}
-	if opts.IfMatch != "" && opts.IfMatch != "*" && cur.ETag != opts.IfMatch {
-		return Resource{}, ErrPrecondition
+	if err := checkPreconditions(opts.IfMatch, opts.IfNoneMatch, live, cur.ETag); err != nil {
+		return Resource{}, err
 	}
 	c.SyncToken++
 	// The files below a directory, listed before the tombstone hides them:

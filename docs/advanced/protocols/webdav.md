@@ -99,11 +99,33 @@ LOCK mints a fresh token and UNLOCK answers 204; nothing is stored and
 nothing is excluded. Two clients editing one file both "hold" a lock. The
 real protection is the etag: every PUT and DELETE honours `If-Match` /
 `If-None-Match` against the current sha256, and a client that sends them
-(Finder, rclone and most sync tools do) never overwrites a version it has
-not seen. This is what a lock can honestly be on a fleet with no shared
-lock state; it also keeps the head stateless across nodes. A LOCK on a
-path that does not exist creates an empty file, as the RFC requires and as
-Finder expects before its first PUT.
+never overwrites a version it has not seen. This is what a lock can
+honestly be on a fleet with no shared lock state; it also keeps the head
+stateless across nodes — a LOCK, a PUT and an UNLOCK may each land on a
+different machine, and none of them consults lock state, so none of them
+can disagree. A LOCK on a path that does not exist creates an empty file,
+as the RFC requires and as Finder expects before its first PUT.
+
+Because the etag is the guarantee, the conditional headers are parsed as
+RFC 7232 writes them rather than as the one bare etag most clients send:
+a list (`If-Match: "a", "b"`) is satisfied by any entry, a comma inside
+the quotes belongs to the etag, and `If-Match` compares strongly, so a
+`W/` entry never satisfies it while `If-None-Match` ignores the prefix.
+Both are applied inside the write's own transaction, so nothing slips
+between the check and the change.
+
+What none of this can catch is a client that lies about its own bytes.
+The etag is the sha256 of what the server received, and WebDAV carries no
+end-to-end checksum on a PUT, so a client uploading from a damaged cache
+gets an etag that faithfully certifies the damage. Guarding against that
+is a matter of refusing the write (see the collection policy above), not
+of validating it.
+
+Note also that macOS takes a write lock even to open a file for reading.
+A subtree whose policy denies `write` therefore refuses the LOCK as well
+as the PUT: telling the client up front is what makes it open the file
+read-only, instead of discovering the refusal at save time and retrying
+until the mount stalls.
 
 ## Limits and housekeeping
 

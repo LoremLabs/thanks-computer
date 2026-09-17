@@ -247,8 +247,8 @@ func drivePut(ctx context.Context, d driveDeps, in []byte) (event.Payload, error
 	}
 	driveChargeBytes(ctx, size, in)
 	res, err := d.store.Put(ctx, coll.ID, path, body, size, chdrive.PutOpts{
-		IfMatch:     strings.Trim(gjson.GetBytes(meta, "if_match").String(), `"`),
-		IfNoneMatch: strings.Trim(gjson.GetBytes(meta, "if_none_match").String(), `"`),
+		IfMatch:     gjson.GetBytes(meta, "if_match").String(),
+		IfNoneMatch: gjson.GetBytes(meta, "if_none_match").String(),
 		ContentType: strings.TrimSpace(gjson.GetBytes(meta, "content_type").String()),
 	})
 	if err != nil {
@@ -455,7 +455,7 @@ func driveDelete(ctx context.Context, d driveDeps, in []byte) (event.Payload, er
 	if !ok {
 		return ep, nil
 	}
-	opts := chdrive.DeleteOpts{IfMatch: strings.Trim(gjson.GetBytes(meta, "if_match").String(), `"`)}
+	opts := chdrive.DeleteOpts{IfMatch: gjson.GetBytes(meta, "if_match").String()}
 	var res chdrive.Resource
 	var err error
 	if id != "" {

@@ -673,3 +673,72 @@ func TestNamedMount(t *testing.T) {
 		t.Fatal("the folder did not land at the collection root")
 	}
 }
+
+// Conditional headers are the fleet's real concurrency control: the locks
+// are a stateless shim (see lock.go), so If-Match on the etag is what
+// actually stops a lost update. This walks the header forms RFC 7232
+// allows, end to end through the head and the store's transaction.
+func TestConditionalHeaders(t *testing.T) {
+	var conf config.Config
+	insecure(&conf)
+	h := newHarness(t, conf)
+
+	etagOf := func(resp *http.Response) string {
+		t.Helper()
+		e := strings.Trim(resp.Header.Get("ETag"), `"`)
+		if e == "" {
+			t.Fatal("the response carried no ETag")
+		}
+		return e
+	}
+
+	resp, _ := h.do(t, http.MethodPut, "/drive/doc.txt", body("one"))
+	want(t, resp, http.StatusCreated, "seed")
+	etag := etagOf(resp)
+
+	// If-Match, single: the ordinary lost-update guard.
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("two"), hdr("If-Match", `"`+etag+`"`))
+	want(t, resp, http.StatusNoContent, "if-match on the current etag")
+	etag = etagOf(resp)
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("three"), hdr("If-Match", `"stale"`))
+	want(t, resp, http.StatusPreconditionFailed, "if-match on a stale etag")
+
+	// If-Match, list: any entry satisfies it. Trimming quotes off the whole
+	// header value made this a spurious 412.
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("four"), hdr("If-Match", `"stale", "`+etag+`"`))
+	want(t, resp, http.StatusNoContent, "if-match on a list holding the current etag")
+	etag = etagOf(resp)
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("five"), hdr("If-Match", `"stale", "older"`))
+	want(t, resp, http.StatusPreconditionFailed, "if-match on a list holding neither")
+
+	// If-Match compares strongly, so a weak entry cannot satisfy it even
+	// when the etag is right.
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("six"), hdr("If-Match", `W/"`+etag+`"`))
+	want(t, resp, http.StatusPreconditionFailed, "if-match on a weak etag")
+
+	// If-None-Match: "*" is create-only, and a list that names the live
+	// etag refuses. That list is the case that used to pass silently — the
+	// guard was armed and did nothing.
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("seven"), hdr("If-None-Match", "*"))
+	want(t, resp, http.StatusPreconditionFailed, "create-only over a live file")
+	resp, _ = h.do(t, http.MethodPut, "/drive/fresh.txt", body("new"), hdr("If-None-Match", "*"))
+	want(t, resp, http.StatusCreated, "create-only over nothing")
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("eight"), hdr("If-None-Match", `"stale", "`+etag+`"`))
+	want(t, resp, http.StatusPreconditionFailed, "if-none-match on a list holding the current etag")
+	resp, _ = h.do(t, http.MethodPut, "/drive/doc.txt", body("nine"), hdr("If-None-Match", `"stale", "older"`))
+	want(t, resp, http.StatusNoContent, "if-none-match on a list holding neither")
+	etag = etagOf(resp)
+
+	// A conditional GET: the library's ServeContent answers the revalidation.
+	resp, _ = h.do(t, http.MethodGet, "/drive/doc.txt", nil, hdr("If-None-Match", `"`+etag+`"`))
+	want(t, resp, http.StatusNotModified, "conditional get on the current etag")
+
+	// DELETE carries them too, and the store applies them in the same
+	// transaction as the delete rather than in a racy pre-check.
+	resp, _ = h.do(t, http.MethodDelete, "/drive/doc.txt", nil, hdr("If-Match", `"stale"`))
+	want(t, resp, http.StatusPreconditionFailed, "delete on a stale etag")
+	resp, _ = h.do(t, http.MethodDelete, "/drive/doc.txt", nil, hdr("If-None-Match", `"`+etag+`"`))
+	want(t, resp, http.StatusPreconditionFailed, "delete refused by if-none-match")
+	resp, _ = h.do(t, http.MethodDelete, "/drive/doc.txt", nil, hdr("If-Match", `"stale", "`+etag+`"`))
+	want(t, resp, http.StatusNoContent, "delete on a list holding the current etag")
+}

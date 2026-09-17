@@ -351,8 +351,8 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 		ct = "" // the generic default: let the extension decide
 	}
 	res, err := c.store.Put(r.Context(), pr.coll.ID, c.rel(pr, r.URL.Path), body, size, chdrive.PutOpts{
-		IfMatch:     unquoteETag(r.Header.Get("If-Match")),
-		IfNoneMatch: unquoteETag(r.Header.Get("If-None-Match")),
+		IfMatch:     r.Header.Get("If-Match"),
+		IfNoneMatch: r.Header.Get("If-None-Match"),
 		ContentType: ct,
 	})
 	if err != nil {
@@ -370,14 +370,6 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 	} else {
 		w.WriteHeader(http.StatusNoContent)
 	}
-}
-
-// unquoteETag strips the quotes (and a weak prefix) off a conditional
-// header value; "*" stays "*".
-func unquoteETag(v string) string {
-	v = strings.TrimSpace(v)
-	v = strings.TrimPrefix(v, "W/")
-	return strings.Trim(v, `"`)
 }
 
 // storeStatus maps a drive error to the WebDAV status it answers with.
