@@ -1,38 +1,54 @@
 # workspace-browser
 
-A human sees and drives the workspace's **own** Chromium, in their browser,
-over one WebSocket — no browser state is copied anywhere. This is the second
+A human sees and drives the workspace's **own** Chrome, in their browser, over
+one WebSocket — no browser state is copied anywhere. This is the second
 attached transport (`workspace://<name>/connect`, see
 [`workspace-connect`](../workspace-connect)) carrying a VNC stream, and it is
 the transport behind "take over my pony's browser"
-(`thanks-computer-service/docs/todo-workspace-browser-takeover.md`).
+(`thanks-computer-service/docs/todo-workspace-browser-takeover.md`). It also
+carries that plan's Phase 3 demonstrator: a pony-side harness that drives the
+same Chrome over CDP, and a control handoff that stops it while a human has
+the controls.
 
 > **Requires a real workspace provider (Sprites).** The workspace installs
-> and runs Chromium + Xvfb + x11vnc; the local provider cannot, and on a Mac
-> the setup script refuses rather than `apt-get` on your own machine. This
+> and runs Google Chrome + Xvfb + x11vnc; the local provider cannot, and on a
+> Mac the setup script refuses rather than `apt-get` on your own machine. This
 > example is therefore **not part of `scripts/examples-smoke.sh`** — run it
 > against a chassis whose `--workspace-provider` is a real one, the way the
-> hosted fleet runs.
+> hosted fleet runs. Proven end to end on a real sprite (2026-09-12/13).
 
 ## The shape
 
 ```
-GET /setup   → an idempotent exec that PROVISIONS (installs the runtime
-               packages once, keyed by a version marker) and COLD-STARTS
-               (launches Xvfb + Chromium + x11vnc if not already up)
-GET /        → this page; calls /setup, then opens the socket
-WS  /screen  → accept; the first message runs connect WITH service="browser"
-               (the built-in 127.0.0.1:5900 in the chassis service table);
-               from then on the socket is the VNC stream noVNC renders
+GET /setup    → fast every call: reports readiness; if the workspace is not
+                ready it kicks PROVISIONING + LAUNCH off DETACHED and returns
+                at once; the page polls it until {"ready":true}
+GET /         → the page (served from a gated op, not a static file); calls
+                /setup until ready, then opens the socket
+WS  /screen   → accept; the first message runs connect WITH service="browser"
+                (the built-in 127.0.0.1:5900 in the chassis service table);
+                from then on the socket is the VNC stream noVNC renders
+GET /take     → the human takes control: the pony harness is killed by pidfile
+GET /release  → control goes back: the harness is restarted if its pid is gone
+GET /pony/act → the pony side: it can act only while the harness pid is alive
+GET /logs     → tails the workspace's harness/x11vnc/Xvfb/openbox/chrome logs
 ```
 
 | Piece | What it does |
 |---|---|
-| `browser/100/setup.txcl` | provisions + cold-starts; runtime version and package list are its `env` (data), the script is fixed mechanism |
-| `browser/200/setup_ok.txcl` / `setup_err.txcl` | return the script's JSON verdict, or a 503 on a transport failure |
+| `browser/090/auth.txcl` / `095/auth_reject.txcl` | the HTTP Basic gate over every route but `/healthz` (fails closed, see below) |
+| `browser/100/setup.txcl` | readiness check + detached provision/launch; the runtime version is its `env` (`REQ`, data), the script is fixed mechanism, fed on `stdin` to `bash -s` |
+| `browser/200/setup_ok.txcl` / `setup_err.txcl` / `setup_fail.txcl` | the script's JSON verdict, or a 503 on a transport failure |
+| `browser/100/home.txcl` | serves the page, base64-embedded; the editable source is `PAGE/index.html` (regenerate the base64 after editing) |
 | `browser/100/upgrade.txcl` | accepts the WebSocket on `/screen` |
 | `browser/_websocket/200/connect.txcl` | `workspace://tools/connect WITH service = "browser"` |
-| `browser/FILES/index.html` | calls `/setup`, opens the socket, hands it to noVNC after the `{"type":"attached"}` ack |
+| `browser/100/take.txcl` / `release.txcl` / `pony_act.txcl` / `logs.txcl` | the control handoff and diagnostics, one exec each |
+
+The pony harness (`ws-harness.py`: a stdlib-only WebSocket client that finds
+Chrome's CDP page target on `:9222` and navigates it every few seconds, so a
+watcher sees the pony working) is written into the workspace by `setup.txcl`
+from a base64 literal. There is no separate source file for it yet; to change
+it, decode that literal, edit, re-encode.
 
 ## Provisioning vs cold start vs warm
 
@@ -40,38 +56,64 @@ WS  /screen  → accept; the first message runs connect WITH service="browser"
 point:
 
 - **Provision** — the `/var/lib/workspace-runtime/version` marker is behind
-  `REQ`: `apt-get install` the packages, write the marker. Tens of seconds,
-  and only when the runtime version bumps. Because the version and package
-  list are data in `setup.txcl`, the workspace *evolves* — bump `REQ` and the
-  next `/setup` re-provisions, no new image.
-- **Cold start** — packages are present but the browser is not running: launch
-  Xvfb + Chromium + x11vnc. A second or two.
-- **Warm** — everything is up: a sub-second no-op (guarded by `pgrep`).
+  `REQ`: install the packages, write the marker. About a minute, and only
+  when the runtime version bumps. On amd64 the browser is **Google Chrome's
+  `.deb`** from Google's apt repo (key and source list installed by the
+  script) — Ubuntu's `chromium` apt package is a snap stub that never
+  launches in the VM — plus `xvfb`, `x11vnc`, `openbox` (Chrome under Xvfb
+  needs a window manager or the screen is black) and `fonts-liberation`; on
+  other architectures, `chromium`. Because the version is data in
+  `setup.txcl`, the workspace *evolves* — bump `REQ` and the next `/setup`
+  re-provisions, no new image; a bump also retires the running daemons so
+  they relaunch with new flags.
+- **Cold start** — packages are present but the browser is not running:
+  launch Xvfb `:99`, openbox, Chrome (`--remote-debugging-port=9222`, a
+  persistent `--user-data-dir=$HOME/browser-profile`, `--no-sandbox`),
+  x11vnc on 5900, then the harness. A second or two.
+- **Warm** — everything is up: a sub-second no-op (guarded by `pgrep` and a
+  listener check on 5900).
+
+Provisioning runs **out of band** (`setsid bash /tmp/ws-provision.sh`, logging
+to `/tmp/ws-setup.log`): the hosted edge allows 20 s for response headers and
+an `apt-get` takes longer, so `/setup` returns at once and reports the latest
+`PHASE` line while the script runs. Each `/setup` is a real exec, which also
+wakes the sprite (it idle-sleeps ~30 s after the last exec) — the page
+keep-alive-polls it while VNC is open so the display does not freeze.
 
 ## Run it (against a real provider)
 
 Point a chassis at a real workspace provider (see
 `thanks-computer-service/docs/runbook-workspaces-prod.md`), apply this stack,
-open its hostname, click **open the browser**. First click provisions; give it
-a minute. After that it is a cold start, then the live browser.
+set the password (below), open its hostname, click **open the browser**. First
+click provisions; give it a minute. After that it is a cold start, then the
+live browser.
 
-## Caveats to verify on the first real run
+## Verified on a real sprite (2026-09-12/13)
 
-Verified on a real sprite (2026-09-12): `apt-get install chromium` gives a
-working `/usr/bin/chromium-browser` (a real deb, not a snap) and x11vnc binds
-5900. Two things to know:
-
-1. **Daemons must be detached from the exec's stdio.** Xvfb/Chromium/x11vnc are
-   launched `setsid … </dev/null >log 2>&1` so they do not hold the exec's
-   stdout open — otherwise the exec hangs until its timeout even though the
-   work finished. Only the final JSON reaches stdout (the rest is a `{ } 1>&2`
-   group).
-2. **noVNC with a pre-opened socket.** The page hands the WebSocket to
-   `RFB(target, ws, …)` after the `attached` ack — supported in noVNC ≥ 1.3 (pinned 1.7.0);
-   if the pinned build behaves differently the handshake stalls at "connecting
-   to the display…". Check the browser console. This is the one thing not yet
-   proven end to end. (If a future image lacks a working `chromium` deb, the
-   fallback is Google Chrome's `.deb` — bump `REQ`, change `PKGS`.)
+1. **`chromium` from apt is a snap stub** ("requires the chromium snap") that
+   never launches in the VM; Google Chrome's `.deb` works. The script picks
+   by architecture.
+2. **Daemons must be detached from the exec's stdio.** Xvfb, openbox, Chrome
+   and x11vnc are launched `setsid … </dev/null >log 2>&1` so they do not
+   hold the exec's stdout open — otherwise the exec hangs until its timeout
+   even though the work finished.
+3. **x11vnc must not be `-localhost`.** The `connect` tunnel arrives from the
+   sprite's gateway address, not loopback, so `-localhost` rejects it ("does
+   not match 127.0.0.1"). The script allows `127.0.0.1` plus the default
+   gateway (from `ip route`); 5900 is still reachable only through the
+   authorized chassis tunnel.
+4. **Xvfb needs `/tmp/.X11-unix`** (mode 1777) to exist.
+5. **Chrome under Xvfb needs a window manager** (openbox) or the display is
+   black.
+6. **noVNC with a pre-opened socket works:** the page hands the WebSocket to
+   `RFB(target, ws, …)` after the `{"type":"attached"}` ack (noVNC ≥ 1.3,
+   pinned 1.7.0 — 1.5/1.6 do not exist on jsdelivr). The full path —
+   connect → attached → x11vnc's `RFB 003.008` greeting → noVNC's reply — was
+   traced end to end.
+7. **Kill the harness by pidfile, never `pkill -f ws-harness.py`:** that
+   pattern matches the shell running the kill itself.
+8. When the handshake stalls at "connecting to the display…", `/logs`
+   (x11vnc's log above all) says why.
 
 ## Restricting access
 
@@ -99,14 +141,16 @@ would be world-readable and would never trigger the auth prompt. The editable
 source is `PAGE/index.html`; if you change it, regenerate the base64 in
 `home.txcl`.
 
-## What this is not (yet)
+## The control handoff (Phase 3 demonstrator)
 
-This is the human **view** — Phase 2 of the takeover plan. It has no control
-model: the pony's browser automation is not started here, and there is no
-"who has the controls" handoff. That is Phase 3
-(`todo-workspace-browser-takeover.md` §6), where entering human control stops
-the pony harness and the lease is the single source of truth.
+`/take` kills the harness by its pidfile and logs the handoff to
+`~/takeovers.log`; while it is dead the pony cannot act (`/pony/act` says so);
+`/release` restarts it. Killing the process, not asking it to pause, is the
+enforcement. What this example does NOT have is the product control model —
+the lease as the single source of truth, the pony's own agent loop wired to
+the harness, control handed back and forth from the pony's mail loop — which
+is the takeover plan's Phase 4.
 
-x11vnc runs `-nopw` on `127.0.0.1:5900`: no VNC password, because the port is
-loopback-only and reachable solely through the `connect` binding the chassis
-authorized. `--no-sandbox` is the pragmatic choice for a single-tenant VM.
+x11vnc runs `-nopw`: no VNC password, because 5900 is reachable solely through
+the `connect` binding the chassis authorized. `--no-sandbox` is the pragmatic
+choice for a single-tenant VM.

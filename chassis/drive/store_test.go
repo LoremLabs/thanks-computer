@@ -609,9 +609,12 @@ func TestSinkEvents(t *testing.T) {
 				drive.EventResourceCreated, drive.EventResourceUpdated, // a
 				drive.EventResourceCreated, // d
 				drive.EventResourceCreated, // d/x
-				drive.EventResourceMoved,   // d → e (one event)
-				drive.EventResourceCreated, // copy e → f (one event)
-				drive.EventResourceDeleted, // e (one event)
+				drive.EventResourceMoved,   // d → e: the directory first…
+				drive.EventResourceMoved,   // …then d/x → e/x
+				drive.EventResourceCreated, // copy e → f: the directory…
+				drive.EventResourceCreated, // …then f/x (a new id)
+				drive.EventResourceDeleted, // e: the directory…
+				drive.EventResourceDeleted, // …then e/x
 			}
 			got := events()
 			if len(got) != len(want) {
@@ -631,8 +634,19 @@ func TestSinkEvents(t *testing.T) {
 			if got[4].FromPath != "d" || got[4].Path != "e" || got[4].Kind != drive.KindDir {
 				t.Errorf("move event: %+v", got[4])
 			}
-			if got[6].Kind != drive.KindDir || got[6].Path != "e" {
-				t.Errorf("delete event: %+v", got[6])
+			xid := got[3].ResourceID
+			if got[5].FromPath != "d/x" || got[5].Path != "e/x" || got[5].Kind != drive.KindFile || got[5].ResourceID != xid ||
+				got[5].ETag != drive.ETagOf([]byte("x")) || got[5].Size != 1 || got[5].ModSeq != got[4].ModSeq {
+				t.Errorf("move file event: %+v", got[5])
+			}
+			if got[7].Path != "f/x" || got[7].Kind != drive.KindFile || got[7].ResourceID == xid || got[7].ModSeq != got[6].ModSeq {
+				t.Errorf("copy file event: %+v", got[7])
+			}
+			if got[8].Kind != drive.KindDir || got[8].Path != "e" {
+				t.Errorf("delete event: %+v", got[8])
+			}
+			if got[9].Kind != drive.KindFile || got[9].Path != "e/x" || got[9].ResourceID != xid || got[9].ModSeq != got[8].ModSeq {
+				t.Errorf("delete file event: %+v", got[9])
 			}
 			// Keys are unique per mutation even for one resource.
 			seen := map[string]bool{}
@@ -650,6 +664,79 @@ func TestSinkEvents(t *testing.T) {
 				t.Errorf("transactional sink also called post-commit: %d", len(rec.post))
 			}
 		})
+	}
+}
+
+// TestSubtreeOverwriteEvents: an overwriting move or copy first reports the
+// replaced destination (its own deleted event, then one per file below it),
+// then the operation's own events, one per file — the shape an indexer
+// needs to drop the replaced documents and re-key the moved ones.
+func TestSubtreeOverwriteEvents(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	rec := &recSink{}
+	s.SetSink(rec)
+	c := newColl(t, s)
+	kinds := func(from int) string {
+		var out []string
+		for _, m := range rec.post[from:] {
+			out = append(out, strings.TrimPrefix(m.Event, "drive.resource.")+":"+m.Kind+":"+m.Path)
+		}
+		return strings.Join(out, " ")
+	}
+
+	// A file over a file.
+	s.Mkdir(ctx, c.ID, "k")
+	old := put(t, s, c.ID, "k/a", "old")
+	s.Mkdir(ctx, c.ID, "in")
+	nu := put(t, s, c.ID, "in/a", "new")
+	n := len(rec.post)
+	if _, err := s.Move(ctx, c.ID, "in/a", "k/a", true); err != nil {
+		t.Fatalf("move over file: %v", err)
+	}
+	if got := kinds(n); got != "deleted:file:k/a moved:file:k/a" {
+		t.Fatalf("file overwrite events: %s", got)
+	}
+	if rec.post[n].ResourceID != old.ResourceID || rec.post[n+1].ResourceID != nu.ResourceID || rec.post[n+1].FromPath != "in/a" ||
+		rec.post[n].ModSeq != rec.post[n+1].ModSeq {
+		t.Errorf("file overwrite facts: %+v", rec.post[n:])
+	}
+
+	// A directory over a directory.
+	s.Mkdir(ctx, c.ID, "p")
+	put(t, s, c.ID, "p/1", "p1")
+	s.Mkdir(ctx, c.ID, "q")
+	put(t, s, c.ID, "q/1", "q1")
+	s.Mkdir(ctx, c.ID, "q/sub")
+	put(t, s, c.ID, "q/sub/2", "q2")
+	n = len(rec.post)
+	if _, err := s.Move(ctx, c.ID, "q", "p", true); err != nil {
+		t.Fatalf("move over dir: %v", err)
+	}
+	if got := kinds(n); got != "deleted:dir:p deleted:file:p/1 moved:dir:p moved:file:p/1 moved:file:p/sub/2" {
+		t.Fatalf("dir overwrite events: %s", got)
+	}
+	if rec.post[n+4].FromPath != "q/sub/2" {
+		t.Errorf("nested move from path: %+v", rec.post[n+4])
+	}
+	// A copy of that directory: created for the root and each file, new ids.
+	n = len(rec.post)
+	if _, err := s.Copy(ctx, c.ID, "p", "r", false); err != nil {
+		t.Fatalf("copy dir: %v", err)
+	}
+	if got := kinds(n); got != "created:dir:r created:file:r/1 created:file:r/sub/2" {
+		t.Fatalf("copy events: %s", got)
+	}
+	if rec.post[n+1].ResourceID == rec.post[n-2].ResourceID || rec.post[n+1].ETag != drive.ETagOf([]byte("q1")) {
+		t.Errorf("copied file facts: %+v", rec.post[n+1])
+	}
+	// Deleting it: the directory, then each file below (not the subdirectory).
+	n = len(rec.post)
+	if _, err := s.Delete(ctx, c.ID, "r", drive.DeleteOpts{}); err != nil {
+		t.Fatalf("delete dir: %v", err)
+	}
+	if got := kinds(n); got != "deleted:dir:r deleted:file:r/1 deleted:file:r/sub/2" {
+		t.Fatalf("delete events: %s", got)
 	}
 }
 

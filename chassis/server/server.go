@@ -1720,7 +1720,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// unconditionally so a node without the store answers `_drive.error
 	// txco_drive_disabled`. See chassis/server/drive.go + chassis/drive +
 	// docs/advanced/drive.md.
-	drvD := driveDeps{store: driveStore, snap: dbc.Snapshot,
+	drvD := driveDeps{store: driveStore, snap: dbc.Snapshot, ix: blobIndex, fcas: fcas,
 		maxBytes: int64(conf.DriveOpMaxBytes), prefix: conf.DrivePathPrefix} // nil dialect ⇒ SQLite (the mirror)
 	for name, fn := range map[string]func(context.Context, driveDeps, []byte) (event.Payload, error){
 		"txco://drive/collection": driveCollection,

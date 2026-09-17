@@ -15,9 +15,11 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/blob"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/drive/filestore"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	casfs "github.com/loremlabs/thanks-computer/chassis/filecas/filestore"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
@@ -63,9 +65,14 @@ func newDriveDeps(t *testing.T, owned map[string]string) driveDeps {
 			t.Fatal(err)
 		}
 	}
+	fcas, err := casfs.New(filepath.Join(dir, "cas"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixed := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
 	return driveDeps{store: store, snap: func() *sql.DB { return mirror }, dialect: registry.SQLite,
-		maxBytes: 1 << 20, prefix: "/drive", now: func() time.Time { return fixed }}
+		maxBytes: 1 << 20, prefix: "/drive", now: func() time.Time { return fixed },
+		ix: blob.NewKVIndex(newKVHandle(t)), fcas: fcas}
 }
 
 func callDrive(t *testing.T, fn func(context.Context, driveDeps, []byte) (event.Payload, error), d driveDeps, tenant, metaJSON string) string {
@@ -316,6 +323,85 @@ func TestDriveFileOps(t *testing.T) {
 	}
 	if got := gjson.Get(callDrive(t, driveGet, d, "acme", `{"collection":"docs","path":"top.txt"}`), "_drive.error.code").String(); got != "txco_drive_too_large" {
 		t.Errorf("op cap get → %s", got)
+	}
+}
+
+// TestDrivePutFromShaAndParents: bytes the tenant already holds in the
+// blob store land in the drive by sha (ownership-checked, not through the
+// envelope), and `parents` makes the directories on the way.
+func TestDrivePutFromShaAndParents(t *testing.T) {
+	d := newDriveDeps(t, map[string]string{"pony.example.com": "acme"})
+	callDrive(t, driveCollection, d, "acme", `{"name":"docs"}`)
+	callDrive(t, driveCollection, d, "rival", `{"name":"docs"}`)
+	bd := blobDeps{fcas: d.fcas, ix: d.ix, maxBytes: 1 << 20, now: d.now}
+	bout := callBlob(t, blobPut, bd, "acme", `{"name":"docs/seed","value":"from the cas","encoding":"utf8","grants":[]}`, "")
+	sha := gjson.Get(bout, "_blob.sha256").String()
+	if gjson.Get(bout, "blob.error").Exists() || sha == "" {
+		t.Fatalf("seed blob = %s", bout)
+	}
+
+	// parents: three levels made on the way; the put lands; a re-run is a noop.
+	out := callDrive(t, drivePut, d, "acme", `{"collection":"docs","path":"Knowledge/reports/2026/q3.txt","from_sha":"`+sha+`","content_type":"text/plain","parents":true,"into":"_p"}`)
+	if gjson.Get(out, "_p.error").Exists() || !gjson.Get(out, "_p.created").Bool() || gjson.Get(out, "_p.size").Int() != int64(len("from the cas")) ||
+		gjson.Get(out, "_p.etag").String() != chdrive.ETagOf([]byte("from the cas")) {
+		t.Fatalf("put from_sha = %s", out)
+	}
+	out = callDrive(t, driveGet, d, "acme", `{"collection":"docs","path":"Knowledge/reports/2026/q3.txt","encoding":"utf8"}`)
+	if gjson.Get(out, "_drive.content").String() != "from the cas" || gjson.Get(out, "_drive.content_type").String() != "text/plain" {
+		t.Errorf("get = %s", out)
+	}
+	out = callDrive(t, driveList, d, "acme", `{"collection":"docs","recursive":true}`)
+	var ps []string
+	for _, it := range gjson.Get(out, "_drive.items").Array() {
+		ps = append(ps, it.Get("kind").String()+":"+it.Get("path").String())
+	}
+	if got := strings.Join(ps, ","); got != "dir:Knowledge,dir:Knowledge/reports,dir:Knowledge/reports/2026,file:Knowledge/reports/2026/q3.txt" {
+		t.Errorf("tree = %s", got)
+	}
+	out = callDrive(t, drivePut, d, "acme", `{"collection":"docs","path":"Knowledge/reports/2026/q3.txt","from_sha":"`+sha+`","parents":true}`)
+	if !gjson.Get(out, "_drive.noop").Bool() {
+		t.Errorf("same bytes again = %s", out)
+	}
+	// The op cap does not apply to a streamed object.
+	d.maxBytes = 4
+	out = callDrive(t, drivePut, d, "acme", `{"collection":"docs","path":"Knowledge/again.txt","from_sha":"`+sha+`"}`)
+	if gjson.Get(out, "_drive.error").Exists() {
+		t.Errorf("streamed put under a tiny op cap = %s", out)
+	}
+	d.maxBytes = 1 << 20
+
+	// Refusals: another tenant, an unknown sha, a bad sha, both sources, no store.
+	for meta, code := range map[string]string{
+		`{"collection":"docs","path":"x","from_sha":"` + sha + `"}`:                     "txco_drive_not_found",
+		`{"collection":"docs","path":"x","from_sha":"` + strings.Repeat("0", 64) + `"}`: "txco_drive_not_found",
+		`{"collection":"docs","path":"x","from_sha":"nope"}`:                            "txco_drive_invalid_arg",
+		`{"collection":"docs","path":"x","from_sha":"` + sha + `","value":"aGk="}`:      "txco_drive_invalid_arg",
+	} {
+		tenant := "acme"
+		if code == "txco_drive_not_found" && strings.Contains(meta, sha) {
+			tenant = "rival"
+		}
+		if got := gjson.Get(callDrive(t, drivePut, d, tenant, meta), "_drive.error.code").String(); got != code {
+			t.Errorf("%s (%s) → %s, want %s", meta, tenant, got, code)
+		}
+	}
+	off := d
+	off.ix, off.fcas = nil, nil
+	if got := gjson.Get(callDrive(t, drivePut, off, "acme", `{"collection":"docs","path":"x","from_sha":"`+sha+`"}`), "_drive.error.code").String(); got != "txco_drive_disabled" {
+		t.Errorf("no blob store → %s", got)
+	}
+
+	// parents on mkdir and move; a file in the way is still refused.
+	out = callDrive(t, driveMkdir, d, "acme", `{"collection":"docs","path":"Input/Knowledge","parents":true}`)
+	if gjson.Get(out, "_drive.error").Exists() || !gjson.Get(out, "_drive.created").Bool() {
+		t.Errorf("mkdir parents = %s", out)
+	}
+	out = callDrive(t, driveMove, d, "acme", `{"collection":"docs","path":"Knowledge/reports/2026/q3.txt","to":"Archive/2026/q3.txt","parents":true}`)
+	if gjson.Get(out, "_drive.error").Exists() || gjson.Get(out, "_drive.path").String() != "Archive/2026/q3.txt" {
+		t.Errorf("move parents = %s", out)
+	}
+	if got := gjson.Get(callDrive(t, drivePut, d, "acme", `{"collection":"docs","path":"Archive/2026/q3.txt/inside.txt","value":"aGk=","parents":true}`), "_drive.error.code").String(); got != "txco_drive_not_directory" {
+		t.Errorf("parents through a file → %s", got)
 	}
 }
 

@@ -73,14 +73,14 @@ collection is always addressed by `collection` (its name); a resource by
 |---|---|---|
 | `drive/collection` | `name`; `remove` (+ `force` to remove a non-empty one) | `{id, name, sync_token, bytes_used, resource_count, created}` or `{name, removed}` |
 | `drive/account` | `username`, `collection`; `password` / `rotate` / `password_style` (`token` \| `words`) / `password_words` as `imap/account`; `status` `active` \| `disabled` | `{username, created, collection_id, collection, mount, password?, rotated?}` |
-| `drive/put` | `collection`, `path`; `from` XOR `value`; `encoding` `base64` (default) \| `utf8`; `content_type`; `if_match`, `if_none_match` (etag or `*`) | `{resource_id, path, etag, size, created, noop, modseq}` — `noop` when the bytes were already there |
+| `drive/put` | `collection`, `path`; `from` XOR `value` XOR `from_sha` (a sha256 the tenant already holds in the blob store — streamed, not buffered, so the op cap does not apply); `encoding` `base64` (default) \| `utf8`; `content_type`; `if_match`, `if_none_match` (etag or `*`); `parents` (create missing ancestors) | `{resource_id, path, etag, size, created, noop, modseq}` — `noop` when the bytes were already there |
 | `drive/get` | `collection`; `path` XOR `resource_id`; `encoding` `base64` (default) \| `utf8` \| `auto`; `max_bytes` | `{resource_id, path, name, etag, size, content_type, modseq, content, encoding}` |
 | `drive/stat` | `collection`; `path` XOR `resource_id` (`path = ""` is the root) | `{exists, resource?}` — a miss is a result |
 | `drive/list` | `collection`; `path` (a directory, `""` = root); `recursive`; `since` (a sync token; implies recursive); `include_deleted`; `limit` (≤ 1000, default 200); `after` | `{items[], count, next, sync_token}` |
 | `drive/delete` | `collection`; `path` XOR `resource_id`; `if_match` | `{deleted, resource_id?, path?, kind?, modseq?}` — a miss is `{deleted: false}`; a directory takes everything below it |
-| `drive/mkdir` | `collection`, `path` | `{resource_id, path, created, modseq}` — an existing directory is `created: false` |
-| `drive/move` | `collection`, `path`, `to`; `overwrite` | `{resource_id, path, from, kind, etag, modseq}` — the id is kept |
-| `drive/copy` | `collection`, `path`, `to`; `overwrite` | the same shape; a NEW id (every descendant too) |
+| `drive/mkdir` | `collection`, `path`; `parents` | `{resource_id, path, created, modseq}` — an existing directory is `created: false` |
+| `drive/move` | `collection`, `path`, `to`; `overwrite`; `parents` (for `to`) | `{resource_id, path, from, kind, etag, modseq}` — the id is kept |
+| `drive/copy` | `collection`, `path`, `to`; `overwrite`; `parents` | the same shape; a NEW id (every descendant too) |
 
 Every item of `list`, and `stat`'s `resource`, is
 `{resource_id, kind (file | dir), path, name, parent, size, content_type,
@@ -112,11 +112,17 @@ poller fires `_scheduled/0` with `@src == "scheduled"` and the facts under
 ```
 
 `event` is one of `drive.resource.{created, updated, deleted, moved}`
-(`moved` also carries `from_path`); a directory move, copy or delete is ONE
-event, for the directory — descendants are re-derived by listing. The
-event carries no bytes: a consumer that wants them calls `drive/get` by
-`resource_id`. The idempotency key is `drive:<resource_id>:<modseq>`, so
-two quick writes to one resource are two events.
+(`moved` also carries `from_path`). A directory move, copy or delete
+reports the directory's own event first and then one event per FILE below
+it, all at the same `modseq` (`moved` per file with its own `from_path`;
+`created` per copied file with its new id; `deleted` per file); an
+overwriting move or copy reports the replaced destination's `deleted`
+events before its own. Subdirectories get no event of their own. So a
+consumer that indexes files hears about every file a folder rename or
+delete touched without walking the tree. The event carries no bytes: a
+consumer that wants them calls `drive/get` by `resource_id`. The
+idempotency key is `drive:<resource_id>:<modseq>`, so two quick writes to
+one resource are two events.
 
 With `--drive-store` and `--scheduled-store` on the SAME shared database
 (the hosted build) the event row commits with the mutation; otherwise it

@@ -102,8 +102,16 @@ events, so a stack with an `OPS/_scheduled/` tree keyed on
 `@scheduled.payload.event =~ /^drive\./` hears every write. The payload
 carries the facts (collection, resource id, path, etag, size, content
 type) and never the bytes; `txco://drive/get` by `resource_id` fetches
-them. A file the stack chooses not to parse is still there for the
+them. A folder rename, copy or delete reports the folder and then every
+file below it, one event each, so a consumer keyed on files never walks
+the tree. A file the stack chooses not to parse is still there for the
 client — **stored, not indexed** is a valid state, and the stack's own
 status record is where it says so.
+
+What a client does maps onto events like this: Finder creates a file as
+LOCK (→ `created`, size 0), a zero-byte PUT (no event), then the bytes (→
+`updated`); `cp` and rclone send the bytes at once (→ `created`). Finder
+also writes `.DS_Store` and `._*` sidecars into every folder it touches; a
+consumer that indexes files should skip any segment starting with a dot.
 
 Ops reference: [drive](../drive.md).

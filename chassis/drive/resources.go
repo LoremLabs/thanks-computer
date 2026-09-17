@@ -691,6 +691,14 @@ func (s *Store) deleteWhere(ctx context.Context, collID string, opts DeleteOpts,
 		return Resource{}, ErrPrecondition
 	}
 	c.SyncToken++
+	// The files below a directory, listed before the tombstone hides them:
+	// each gets its own deleted event after the directory's.
+	var below []Resource
+	if cur.Kind == KindDir {
+		if below, err = s.listQ(ctx, tx, collID, cur.Path); err != nil {
+			return Resource{}, err
+		}
+	}
 	n, bytes, err := s.tombstoneSubtree(ctx, tx, collID, cur.Path, cur.Kind, c.SyncToken, now)
 	if err != nil {
 		return Resource{}, err
@@ -706,18 +714,24 @@ func (s *Store) deleteWhere(ctx context.Context, collID string, opts DeleteOpts,
 	if err := s.advance(ctx, tx, c, now); err != nil {
 		return Resource{}, err
 	}
-	m := Mutation{
+	at := s.now()
+	ms := []Mutation{{
 		Event: EventResourceDeleted, Tenant: c.Tenant, CollectionID: c.ID, Collection: c.Name,
 		ResourceID: cur.ResourceID, Kind: cur.Kind, Path: cur.Path, ETag: cur.ETag, Size: cur.Size, ContentType: cur.ContentType,
-		ModSeq: c.SyncToken, At: s.now(),
+		ModSeq: c.SyncToken, At: at,
+	}}
+	for _, r := range below {
+		if r.Kind == KindFile {
+			ms = append(ms, fileMutation(EventResourceDeleted, c, r, at))
+		}
 	}
-	if err := s.emitTx(ctx, tx, m); err != nil {
+	if err := s.emitTxAll(ctx, tx, ms); err != nil {
 		return Resource{}, fmt.Errorf("drive: enqueue mutation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Resource{}, fmt.Errorf("drive: commit: %w", err)
 	}
-	s.emitPost(ctx, m)
+	s.emitPostAll(ctx, ms)
 	cur.ModSeq = c.SyncToken
 	cur.Deleted = true
 	cur.DeletedAt = parseTime(now)
@@ -745,32 +759,52 @@ func checkMoveCopyPaths(from, to string) (string, string, error) {
 
 // replaceDestination tombstones whatever is live at `to` when overwrite is
 // set (RFC 4918 §9.8.4 / §9.9.3: a DELETE with Depth infinity first), or
-// refuses with ErrExists. The counters on c are adjusted.
-func (s *Store) replaceDestination(ctx context.Context, tx txq, c *collState, to string, overwrite bool, now string) error {
+// refuses with ErrExists. The counters on c are adjusted. Returns the
+// deleted events the replacement owes: the destination's own, then one per
+// file below it — the caller emits them before its own event.
+func (s *Store) replaceDestination(ctx context.Context, tx txq, c *collState, to string, overwrite bool, now string) ([]Mutation, error) {
 	dst, dlive, err := s.getResourceQ(ctx, tx, c.ID, to, false, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !dlive {
-		return nil
+		return nil, nil
 	}
 	if !overwrite {
-		return ErrExists
+		return nil, ErrExists
+	}
+	var below []Resource
+	if dst.Kind == KindDir {
+		if below, err = s.listQ(ctx, tx, c.ID, to); err != nil {
+			return nil, err
+		}
 	}
 	n, bytes, err := s.tombstoneSubtree(ctx, tx, c.ID, to, dst.Kind, c.SyncToken, now)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.ResourceCount -= n
 	c.BytesUsed -= bytes
-	return nil
+	at := s.now()
+	ms := []Mutation{{
+		Event: EventResourceDeleted, Tenant: c.Tenant, CollectionID: c.ID, Collection: c.Name,
+		ResourceID: dst.ResourceID, Kind: dst.Kind, Path: dst.Path, ETag: dst.ETag, Size: dst.Size, ContentType: dst.ContentType,
+		ModSeq: c.SyncToken, At: at,
+	}}
+	for _, r := range below {
+		if r.Kind == KindFile {
+			ms = append(ms, fileMutation(EventResourceDeleted, *c, r, at))
+		}
+	}
+	return ms, nil
 }
 
 // Move renames the resource at from to to, keeping its resource id (and,
 // for a directory, every descendant's). ErrCycle when to is from or inside
 // it; ErrNoParent when to's parent is missing; ErrExists when to is live
 // and overwrite is false — with overwrite the destination subtree is
-// deleted first. One event, for the moved root.
+// deleted first (its deleted events come first too). Then one moved event
+// for the root and one per file below it.
 func (s *Store) Move(ctx context.Context, collID, from, to string, overwrite bool) (Resource, error) {
 	from, to, err := checkMoveCopyPaths(from, to)
 	if err != nil {
@@ -798,10 +832,15 @@ func (s *Store) Move(ctx context.Context, collID, from, to string, overwrite boo
 		return Resource{}, err
 	}
 	c.SyncToken++
-	if err := s.replaceDestination(ctx, tx, &c, to, overwrite, now); err != nil {
+	replaced, err := s.replaceDestination(ctx, tx, &c, to, overwrite, now)
+	if err != nil {
 		return Resource{}, err
 	}
+	var below []Resource
 	if src.Kind == KindDir {
+		if below, err = s.listQ(ctx, tx, collID, from); err != nil {
+			return Resource{}, err
+		}
 		// Descendants: rewrite the `from` prefix of path and parent_path
 		// (a descendant's parent_path is `from` or `from/…`), shift depth.
 		// SUBSTR(x, n) is 1-based and `||` concatenates on both engines.
@@ -828,18 +867,26 @@ func (s *Store) Move(ctx context.Context, collID, from, to string, overwrite boo
 	if err := s.advance(ctx, tx, c, now); err != nil {
 		return Resource{}, err
 	}
-	m := Mutation{
+	at := s.now()
+	ms := append(replaced, Mutation{
 		Event: EventResourceMoved, Tenant: c.Tenant, CollectionID: c.ID, Collection: c.Name,
 		ResourceID: src.ResourceID, Kind: src.Kind, Path: to, FromPath: from, ETag: src.ETag, Size: src.Size, ContentType: src.ContentType,
-		ModSeq: c.SyncToken, At: s.now(),
+		ModSeq: c.SyncToken, At: at,
+	})
+	for _, r := range below {
+		if r.Kind == KindFile {
+			fm := fileMutation(EventResourceMoved, c, r, at)
+			fm.FromPath, fm.Path = r.Path, to+r.Path[len(from):]
+			ms = append(ms, fm)
+		}
 	}
-	if err := s.emitTx(ctx, tx, m); err != nil {
+	if err := s.emitTxAll(ctx, tx, ms); err != nil {
 		return Resource{}, fmt.Errorf("drive: enqueue mutation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Resource{}, fmt.Errorf("drive: commit: %w", err)
 	}
-	s.emitPost(ctx, m)
+	s.emitPostAll(ctx, ms)
 	src.Path, src.ParentPath, src.Depth, src.ModSeq, src.UpdatedAt = to, ParentOf(to), Depth(to), c.SyncToken, parseTime(now)
 	return src, nil
 }
@@ -858,7 +905,8 @@ type copied struct {
 // rows, then the index transaction re-reads the source and inserts the
 // rows — a source row that changed in between is copied again inline; a
 // failed transaction leaves orphans the sweeper reclaims. ErrCycle /
-// ErrNoParent / ErrExists as Move. One event, for the copied root.
+// ErrNoParent / ErrExists as Move. Events: the replaced destination's
+// (if any), then created for the copied root, then created per copied file.
 func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite bool) (Resource, error) {
 	from, to, err := checkMoveCopyPaths(from, to)
 	if err != nil {
@@ -960,10 +1008,13 @@ func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite boo
 		return fail(ErrQuota)
 	}
 	c.SyncToken++
-	if err := s.replaceDestination(ctx, tx, &c, to, overwrite, now); err != nil {
+	replaced, err := s.replaceDestination(ctx, tx, &c, to, overwrite, now)
+	if err != nil {
 		return fail(err)
 	}
+	at := s.now()
 	var newRoot Resource
+	var files []Mutation // created, one per copied file below the root
 	for _, r := range rows {
 		cp, have := copies[r.ResourceID]
 		if !have || cp.srcKey != r.ObjectKey {
@@ -992,6 +1043,9 @@ func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite boo
 			newRoot.ResourceID, newRoot.Path, newRoot.ParentPath, newRoot.Depth = cp.newID, np, ParentOf(np), Depth(np)
 			newRoot.ObjectKey, newRoot.ModSeq = cp.newKey, c.SyncToken
 			newRoot.CreatedAt, newRoot.UpdatedAt = parseTime(now), parseTime(now)
+		} else if r.Kind == KindFile {
+			files = append(files, fileMutation(EventResourceCreated, c,
+				Resource{ResourceID: cp.newID, Path: np, ETag: r.ETag, Size: r.Size, ContentType: r.ContentType}, at))
 		}
 	}
 	c.ResourceCount += addCount
@@ -999,18 +1053,19 @@ func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite boo
 	if err := s.advance(ctx, tx, c, now); err != nil {
 		return fail(err)
 	}
-	m := Mutation{
+	ms := append(replaced, Mutation{
 		Event: EventResourceCreated, Tenant: c.Tenant, CollectionID: c.ID, Collection: c.Name,
 		ResourceID: newRoot.ResourceID, Kind: newRoot.Kind, Path: to, ETag: newRoot.ETag, Size: newRoot.Size, ContentType: newRoot.ContentType,
-		ModSeq: c.SyncToken, At: s.now(),
-	}
-	if err := s.emitTx(ctx, tx, m); err != nil {
+		ModSeq: c.SyncToken, At: at,
+	})
+	ms = append(ms, files...)
+	if err := s.emitTxAll(ctx, tx, ms); err != nil {
 		return fail(fmt.Errorf("drive: enqueue mutation: %w", err))
 	}
 	if err := tx.Commit(); err != nil {
 		return fail(fmt.Errorf("drive: commit: %w", err))
 	}
-	s.emitPost(ctx, m)
+	s.emitPostAll(ctx, ms)
 	return newRoot, nil
 }
 

@@ -9,8 +9,11 @@ import (
 
 // Mutation event names: `drive.resource.<verb>`, one per committed
 // mutation of a resource. A subtree operation (move, copy or delete of a
-// directory) reports ONE event, for the directory; descendants are
-// re-derived by listing.
+// directory, or the overwrite of a destination) reports the directory's
+// own event FIRST and then one event per FILE below it, all at the same
+// modseq — so a consumer that indexes files never has to walk a tree to
+// learn which of them a folder rename or delete touched. Directories below
+// the root get no event of their own (nothing to index).
 const (
 	EventResourceCreated = "drive.resource.created"
 	EventResourceUpdated = "drive.resource.updated"
@@ -84,5 +87,33 @@ func (s *Store) emitPost(ctx context.Context, m Mutation) {
 	}
 	if err := s.sink.Enqueue(ctx, m); err != nil {
 		s.onSinkErr(m, err)
+	}
+}
+
+// emitTxAll / emitPostAll are the list forms, in order (a subtree
+// operation's directory event and then its files).
+func (s *Store) emitTxAll(ctx context.Context, tx *sql.Tx, ms []Mutation) error {
+	for _, m := range ms {
+		if err := s.emitTx(ctx, tx, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) emitPostAll(ctx context.Context, ms []Mutation) {
+	for _, m := range ms {
+		s.emitPost(ctx, m)
+	}
+}
+
+// fileMutation is the per-file event of a subtree operation: the same
+// facts as the directory's event, for one file below it, at the
+// collection's current token.
+func fileMutation(event string, c collState, r Resource, at time.Time) Mutation {
+	return Mutation{
+		Event: event, Tenant: c.Tenant, CollectionID: c.ID, Collection: c.Name,
+		ResourceID: r.ResourceID, Kind: KindFile, Path: r.Path, ETag: r.ETag, Size: r.Size, ContentType: r.ContentType,
+		ModSeq: c.SyncToken, At: at,
 	}
 }

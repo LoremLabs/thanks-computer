@@ -12,8 +12,10 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/blob"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
@@ -42,6 +44,33 @@ type driveDeps struct {
 	maxBytes int64 // --drive-op-max-bytes: cap on buffered put/get content
 	prefix   string
 	now      func() time.Time
+	// ix + fcas are the blob index and content store `drive/put from_sha`
+	// reads from (an object the tenant already owns, streamed, never
+	// buffered in the envelope); either nil ⇒ from_sha answers
+	// txco_drive_disabled.
+	ix   blob.Index
+	fcas filecas.Store
+}
+
+// driveEnsureParents creates the missing ancestors of path (`parents =
+// true` on put/mkdir/move/copy): Mkdir per level, top down, an existing
+// entry ignored — a FILE in the way is left for the write itself to refuse
+// (ErrNotDirectory). Concurrent creators race benignly to ErrExists.
+func driveEnsureParents(ctx context.Context, d driveDeps, collID, path, into string) (event.Payload, bool) {
+	norm, err := chdrive.NormalizePath(path)
+	if err != nil {
+		return driveStoreErr(into, err), false
+	}
+	var ancestors []string
+	for p := chdrive.ParentOf(norm); p != ""; p = chdrive.ParentOf(p) {
+		ancestors = append([]string{p}, ancestors...)
+	}
+	for _, p := range ancestors {
+		if _, err := d.store.Mkdir(ctx, collID, p); err != nil && !errors.Is(err, chdrive.ErrExists) {
+			return driveStoreErr(into, err), false
+		}
+	}
+	return event.Payload{}, true
 }
 
 // driveListMax caps one txco://drive/list page.

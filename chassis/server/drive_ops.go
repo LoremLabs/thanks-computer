@@ -11,8 +11,10 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/loremlabs/thanks-computer/chassis/blob"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 )
 
@@ -147,9 +149,13 @@ func driveStatFor(ctx context.Context, d driveDeps, collID, path, id string) (ch
 
 // drivePut stores bytes at `path` in `collection`. Bytes come from `from`
 // (an envelope path) XOR `value` (a literal), decoded per `encoding`
-// (base64 default | utf8), capped by --drive-op-max-bytes. `content_type`,
-// `if_match`, `if_none_match` as the store's PutOpts. Result at `into`:
-// {resource_id, path, etag, size, created, noop, modseq}.
+// (base64 default | utf8), capped by --drive-op-max-bytes — or from
+// `from_sha`, an object the tenant already holds in the content store
+// (the imap/append door: ownership is checked in the blob index, the bytes
+// stream straight from the CAS and the envelope cap does not apply).
+// `parents` creates missing ancestors. `content_type`, `if_match`,
+// `if_none_match` as the store's PutOpts. Result at `into`: {resource_id,
+// path, etag, size, created, noop, modseq}.
 func drivePut(ctx context.Context, d driveDeps, in []byte) (event.Payload, error) {
 	tenant, meta, into, ep, ok := drivePrelude(ctx, d)
 	if !ok {
@@ -163,17 +169,50 @@ func drivePut(ctx context.Context, d driveDeps, in []byte) (event.Payload, error
 	if strings.TrimSpace(path) == "" {
 		return driveErr(into, "txco_drive_invalid_arg", "missing `path`"), nil
 	}
-	data, err := blobBytes(meta, in)
-	if err != nil {
-		return driveErr(into, "txco_drive_invalid_arg", "drive/put: "+err.Error()), nil
+	var body io.Reader
+	var size int64
+	if sha := strings.ToLower(strings.TrimSpace(gjson.GetBytes(meta, "from_sha").String())); sha != "" {
+		if gjson.GetBytes(meta, "from").Exists() || gjson.GetBytes(meta, "value").Exists() {
+			return driveErr(into, "txco_drive_invalid_arg", "give `from_sha` or `from`/`value`, not both"), nil
+		}
+		if !blob.ValidSha256(sha) {
+			return driveErr(into, "txco_drive_invalid_arg", "`from_sha` must be 64 lowercase hex chars"), nil
+		}
+		if d.ix == nil || d.fcas == nil {
+			return driveErr(into, "txco_drive_disabled", "no blob store on this node for `from_sha`"), nil
+		}
+		// Ownership, never the CAS alone: one tenant must not learn what
+		// another holds.
+		if _, owned, err := d.ix.GetSha(ctx, tenant, sha); err != nil {
+			return driveErr(into, "txco_drive_store", err.Error()), nil
+		} else if !owned {
+			return driveErr(into, "txco_drive_not_found", "no object with that sha256 for this tenant"), nil
+		}
+		rc, n, err := filecas.GetReader(ctx, d.fcas, sha)
+		if err != nil {
+			return driveErr(into, "txco_drive_store", err.Error()), nil
+		}
+		defer rc.Close()
+		body, size = rc, n
+	} else {
+		data, err := blobBytes(meta, in)
+		if err != nil {
+			return driveErr(into, "txco_drive_invalid_arg", "drive/put: "+err.Error()), nil
+		}
+		size = int64(len(data))
+		if d.maxBytes > 0 && size > d.maxBytes {
+			return driveErr(into, "txco_drive_too_large",
+				fmt.Sprintf("%d bytes exceeds drive-op-max-bytes %d", size, d.maxBytes)), nil
+		}
+		body = bytes.NewReader(data)
 	}
-	size := int64(len(data))
-	if d.maxBytes > 0 && size > d.maxBytes {
-		return driveErr(into, "txco_drive_too_large",
-			fmt.Sprintf("%d bytes exceeds drive-op-max-bytes %d", size, d.maxBytes)), nil
+	if gjson.GetBytes(meta, "parents").Bool() {
+		if ep, ok := driveEnsureParents(ctx, d, coll.ID, path, into); !ok {
+			return ep, nil
+		}
 	}
 	driveChargeBytes(ctx, size, in)
-	res, err := d.store.Put(ctx, coll.ID, path, bytes.NewReader(data), size, chdrive.PutOpts{
+	res, err := d.store.Put(ctx, coll.ID, path, body, size, chdrive.PutOpts{
 		IfMatch:     strings.Trim(gjson.GetBytes(meta, "if_match").String(), `"`),
 		IfNoneMatch: strings.Trim(gjson.GetBytes(meta, "if_none_match").String(), `"`),
 		ContentType: strings.TrimSpace(gjson.GetBytes(meta, "content_type").String()),
@@ -406,9 +445,10 @@ func driveDelete(ctx context.Context, d driveDeps, in []byte) (event.Payload, er
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
 }
 
-// driveMkdir creates a directory at `path`; an existing directory there
-// is {created:false}, an existing file txco_drive_exists. Result at
-// `into`: {resource_id, path, created, modseq}.
+// driveMkdir creates a directory at `path` (`parents` creates missing
+// ancestors); an existing directory there is {created:false}, an existing
+// file txco_drive_exists. Result at `into`: {resource_id, path, created,
+// modseq}.
 func driveMkdir(ctx context.Context, d driveDeps, in []byte) (event.Payload, error) {
 	tenant, meta, into, ep, ok := drivePrelude(ctx, d)
 	if !ok {
@@ -419,6 +459,11 @@ func driveMkdir(ctx context.Context, d driveDeps, in []byte) (event.Payload, err
 		return ep, nil
 	}
 	path := gjson.GetBytes(meta, "path").String()
+	if gjson.GetBytes(meta, "parents").Bool() {
+		if ep, ok := driveEnsureParents(ctx, d, coll.ID, path, into); !ok {
+			return ep, nil
+		}
+	}
 	res, err := d.store.Mkdir(ctx, coll.ID, path)
 	created := true
 	if errors.Is(err, chdrive.ErrExists) {
@@ -443,8 +488,9 @@ func driveMkdir(ctx context.Context, d driveDeps, in []byte) (event.Payload, err
 }
 
 // driveMove renames the resource at `path` to `to` (same collection),
-// keeping its resource id; `overwrite` replaces whatever is at `to`.
-// Result at `into`: {resource_id, path, from, kind, modseq}.
+// keeping its resource id; `overwrite` replaces whatever is at `to`;
+// `parents` creates `to`'s missing ancestors. Result at `into`:
+// {resource_id, path, from, kind, modseq}.
 func driveMove(ctx context.Context, d driveDeps, in []byte) (event.Payload, error) {
 	return driveMoveCopy(ctx, d, in, "move")
 }
@@ -471,6 +517,11 @@ func driveMoveCopy(ctx context.Context, d driveDeps, in []byte, verb string) (ev
 		return driveErr(into, "txco_drive_invalid_arg", "need `path` and `to`"), nil
 	}
 	overwrite := gjson.GetBytes(meta, "overwrite").Bool()
+	if gjson.GetBytes(meta, "parents").Bool() {
+		if ep, ok := driveEnsureParents(ctx, d, coll.ID, to, into); !ok {
+			return ep, nil
+		}
+	}
 	var res chdrive.Resource
 	var err error
 	if verb == "move" {
