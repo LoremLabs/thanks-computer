@@ -23,6 +23,9 @@ type TenantObserver struct {
 	slug  string
 	set   bool
 	stack string
+
+	ingress  string
+	verified bool
 }
 
 // NewTenantObserver returns a fresh observer with no tenant recorded yet.
@@ -39,14 +42,27 @@ func (o *TenantObserver) observe(slug string) {
 	o.mu.Unlock()
 }
 
-// observeStack records the stack the boot handoff routed into. Nil-safe.
-func (o *TenantObserver) observeStack(stack string) {
+// observeRoute records the route the boot handoff promoted: the stack it
+// routed into, the ingress key that matched and whether the hostname was
+// verified. Nil-safe.
+func (o *TenantObserver) observeRoute(stack, ingress string, verified bool) {
 	if o == nil {
 		return
 	}
 	o.mu.Lock()
-	o.stack = stack
+	o.stack, o.ingress, o.verified = stack, ingress, verified
 	o.mu.Unlock()
+}
+
+// Route returns the ingress key and verified flag recorded beside Stack
+// at the _sys->tenant handoff; zero values when no handoff happened.
+func (o *TenantObserver) Route() (ingress string, hostnameVerified bool) {
+	if o == nil {
+		return "", false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.ingress, o.verified
 }
 
 // Stack returns the stack recorded at the _sys->tenant handoff (routeBody

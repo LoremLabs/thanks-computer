@@ -309,19 +309,22 @@ func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
 // rows only, whatever --require-hostname-verification says — matching
 // the tls-ask gate: a name that could not get a certificate must not
 // route a connection either — and OPT-IN: the target is the hostname's
-// stack's `_tcp` inlet, and a stack without an active one is a miss (the
-// head then closes the connection). Without that gate, opening a TCP port
-// would turn every HTTP hostname on the chassis into a TCP endpoint.
+// stack's inlet for the listener's protocol (`_tcp` for the line
+// protocol; key.Inlet otherwise), and a stack without an active one is a
+// miss (the head then closes the connection). Without that gate, opening
+// a TCP port would turn every HTTP hostname on the chassis into a TCP
+// endpoint; with it a stack opts into a protocol, not into "TCP".
 func (r *DBResolver) resolveTCP(key RouteKey) (RouteTarget, bool, error) {
-	if key.Hostname != "" {
+	inlet, ok := tcpInlet(key.Inlet)
+	if key.Hostname != "" && ok {
 		t, ok, err := r.resolveHost(key.Hostname, true)
 		if err != nil {
 			return RouteTarget{}, false, err
 		}
 		if ok {
 			// Opt-in: the hostname names a stack, but a connection only
-			// enters its `_tcp` inlet, and only if the stack has one.
-			t.Stack += "/" + TCPInletStack
+			// enters its inlet, and only if the stack has one.
+			t.Stack += "/" + inlet
 			active, err := r.inletActive(t.Tenant, t.Stack)
 			if err != nil {
 				return RouteTarget{}, false, err
@@ -342,10 +345,33 @@ func (r *DBResolver) resolveTCP(key RouteKey) (RouteTarget, bool, error) {
 // TCPInletStack is the nested stack a hostname-routed TCP connection
 // enters: `<stack>/_tcp`, beside `<stack>/_mail`. Its existence IS the
 // opt-in — a stack that never declared one is not reachable over TCP just
-// because its hostname is verified for HTTP.
+// because its hostname is verified for HTTP. A listener with a protocol
+// handler asks for that protocol's inlet instead (RouteKey.Inlet).
 const TCPInletStack = "_tcp"
 
-// inletActive reports whether tenant has an active stack named stack.
+// tcpInlet picks the inlet stack name for a tcp key: "" is the line
+// protocol's `_tcp`. The name is chassis-stamped, but it is spliced into
+// a stack path, so anything that is not a single `_name` segment is
+// refused (no hostname route) rather than trusted.
+func tcpInlet(name string) (string, bool) {
+	if name == "" {
+		return TCPInletStack, true
+	}
+	if len(name) < 2 || name[0] != '_' {
+		return "", false
+	}
+	for _, c := range name[1:] {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return "", false
+		}
+	}
+	return name, true
+}
+
+// inletActive reports whether tenant has an active, non-empty stack named
+// stack (a deactivated stack has an empty active version: inletHasFiles).
 // Route cache first (no mirror round trip on the connect path); the
 // mirror query is the not-ready fallback. err is a transient lookup
 // failure, never a miss.
@@ -373,6 +399,7 @@ func (r *DBResolver) inletActive(tenant, stack string) (bool, error) {
 		    AND t.revoked_at IS NULL
 		    AND s.name = ?
 		    AND s.active_version IS NOT NULL
+		    AND `+inletHasFiles+`
 		  LIMIT 1`, tenant, stack).Scan(&one)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):

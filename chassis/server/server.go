@@ -2080,6 +2080,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// --tcp-listen-addrs without `;self-signed` serves managed certificates
 	// by SNI (see tcp.ListenerSpec).
 	tcpCtrl := tcp.NewController(ctx, pu)
+	// The resolver detect-tenant routes the connect run with: the head
+	// asks it again before each later event, so a connection does not
+	// outlive its inlet (tcp.pin).
+	tcpCtrl.SetResolver(resolver)
 	tcpWantsManagedCert := tcpCtrl.WantsManagedTLS()
 	imapCtrl := imapp.NewController(ctx, pu, imapStore)
 	imapCtrl.SetFileCAS(fcas)
@@ -2341,12 +2345,15 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						if envelope.ResultCh != nil {
 							tenant, _ := tenantObs.Tenant()
 							stack, _ := tenantObs.Stack()
+							ingressKey, verified := tenantObs.Route()
 							select {
 							case envelope.ResultCh <- event.DispatchResult{
-								Payload: event.Payload{Raw: string(finalPayload), Type: event.JSON},
-								Tenant:  tenant,
-								Stack:   stack,
-								Err:     runErr,
+								Payload:          event.Payload{Raw: string(finalPayload), Type: event.JSON},
+								Tenant:           tenant,
+								Stack:            stack,
+								Ingress:          ingressKey,
+								HostnameVerified: verified,
+								Err:              runErr,
 							}:
 							case <-reqCtx.Done():
 							}

@@ -10,7 +10,7 @@ import (
 
 // listenerSpec is one parsed --tcp-listen-addrs entry:
 //
-//	name=addr[;tls][;self-signed][;proxy=CIDR|CIDR…]
+//	name=addr[;tls][;self-signed][;proxy=CIDR|CIDR…][;handler=NAME]
 //
 // Options follow the address, ';'-separated, and a list inside an option
 // is '|'-separated (',' is the flag's own list separator, so it can never
@@ -24,12 +24,20 @@ import (
 // REQUIRED from the listed networks; a connection from anywhere else is
 // closed. It never combines with `tls` — a listener either observes the
 // handshake itself or trusts an edge that did, not both.
+//
+// `handler=` picks the protocol spoken once a connection is accepted
+// (RegisterHandler); without it the listener speaks the line protocol.
+// The handler also names the inlet a hostname-routed connection enters —
+// `<stack>/_tcp` for line, `<stack>/_NAME` otherwise — so which port
+// speaks which protocol is the operator's choice, and which stacks speak
+// it is theirs.
 type listenerSpec struct {
 	Name       string
 	Addr       string
 	TLS        bool
 	SelfSigned bool
 	Proxy      []*net.IPNet
+	Handler    string
 }
 
 // parseTCPListenSpec splits one `--tcp-listen-addrs` entry into its
@@ -66,6 +74,7 @@ func parseListenerSpec(spec string) (listenerSpec, error) {
 	if addr == "" {
 		return ls, nil
 	}
+	ls.Handler = LineHandler
 	for _, opt := range parts[1:] {
 		switch opt = strings.TrimSpace(opt); opt {
 		case "":
@@ -74,9 +83,16 @@ func parseListenerSpec(spec string) (listenerSpec, error) {
 		case "self-signed":
 			ls.TLS, ls.SelfSigned = true, true
 		default:
+			if h, ok := strings.CutPrefix(opt, "handler="); ok {
+				if _, err := lookupHandler(h); err != nil {
+					return ls, fmt.Errorf("tcp listener %q: %w", spec, err)
+				}
+				ls.Handler = h
+				continue
+			}
 			list, ok := strings.CutPrefix(opt, "proxy=")
 			if !ok {
-				return ls, fmt.Errorf("tcp listener %q: unknown option %q (want tls, self-signed, proxy=CIDR|CIDR)", spec, opt)
+				return ls, fmt.Errorf("tcp listener %q: unknown option %q (want tls, self-signed, proxy=CIDR|CIDR, handler=NAME)", spec, opt)
 			}
 			nets, bad := edgeproxy.ParseTrusted(strings.Split(list, "|"))
 			if len(bad) > 0 {

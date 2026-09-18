@@ -40,7 +40,7 @@ is a shorthand for `_txc.` Note that this shorthand is for chassis `txcl`, opera
 | lmtp | `@lmtp.rcpt[]`, `@lmtp.msg.{subject,text,html,from[].addr,to[],headers.*,attachments[],raw}` (`text`/`html` are the parsed bodies; `raw` is the b64 original), `@lmtp.listener`; spam verdict under `@mail.spam.{score,verdict}` when an upstream Rspamd stamped it |
 | cron | `@cron.job`, `@cron.tenant` |
 | source | `@source.msg.*` (same shape as `@lmtp.msg.*`), `@source.id`, `@source.key`, `@source.stack`, `@source.meta.{uid,flags}` — a message pulled from a watched remote mailbox |
-| tcp | `@tcp.listener`, `@tcp.host` (routing hostname from SNI), `@tcp.tls.{enabled,sni,alpn,version}`, `@tcp.local.{ip,port}`, `@tcp.remote.port`; the stack answers in `@tcp.res.{write,action}` |
+| tcp | `@tcp.listener`, `@tcp.inlet`, `@tcp.host` (routing hostname from SNI), `@tcp.tls.{enabled,sni,alpn,version}`, `@tcp.local.{ip,port}`, `@tcp.remote.port`; the stack answers in `@tcp.res.{write,action}` |
 
 
 ## Flow control

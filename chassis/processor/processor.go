@@ -356,7 +356,8 @@ func (pu *Unit) maybeRetenant(ctx context.Context, resp string) context.Context 
 	// The routed stack rides next to the tenant on the envelope (routeBody
 	// writes both from the same proposal); record it for the same
 	// out-of-band readers as the tenant pin.
-	tenantObserverFromContext(ctx).observeStack(gjson.Get(resp, "_txc.stack").String())
+	route := gjson.GetMany(resp, "_txc.stack", "_txc.ingress", "_txc.hostname_verified")
+	tenantObserverFromContext(ctx).observeRoute(route[0].String(), route[1].String(), route[2].Bool())
 	return WithTenant(ctx, target)
 }
 

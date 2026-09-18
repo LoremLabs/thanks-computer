@@ -124,6 +124,13 @@ func (c *HostRouteCache) Rebuild(db *sql.DB) error {
 // the form `<stack>/_<inlet>` with an active version, under a live
 // tenant. The LIKE is a coarse prefilter (its `_` is a wildcard); the
 // exact name is matched at lookup.
+// inletHasFiles is the other half of "active": `txco deactivate` retires a
+// stack by activating an EMPTY version, so active_version stays set. An
+// inlet whose active version has no files is withdrawn, not opted in —
+// and on a head where accept is implicit (tcp), an empty stack would
+// otherwise accept every connection.
+const inletHasFiles = `EXISTS (SELECT 1 FROM stack_files f WHERE f.version_id = s.active_version)`
+
 func loadInletStacks(db *sql.DB) (map[string]struct{}, error) {
 	rows, err := db.Query(
 		`SELECT t.slug, s.name
@@ -131,7 +138,8 @@ func loadInletStacks(db *sql.DB) (map[string]struct{}, error) {
 		   JOIN tenants t ON t.tenant_id = s.tenant_id
 		  WHERE s.active_version IS NOT NULL
 		    AND s.name LIKE '%/_%'
-		    AND t.revoked_at IS NULL`)
+		    AND t.revoked_at IS NULL
+		    AND ` + inletHasFiles)
 	if err != nil {
 		return nil, err
 	}

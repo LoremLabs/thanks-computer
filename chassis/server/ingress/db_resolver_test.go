@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"database/sql"
+	"sync/atomic"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -48,6 +49,12 @@ func newDBResolverTestStore(t *testing.T) *sql.DB {
 			created_at      TEXT NOT NULL,
 			UNIQUE(tenant_id, name)
 		);
+		CREATE TABLE stack_files (
+			version_id  INTEGER NOT NULL,
+			path        TEXT NOT NULL,
+			content     TEXT NOT NULL,
+			PRIMARY KEY (version_id, path)
+		);
 	`); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
@@ -75,17 +82,37 @@ func seedHostname(t *testing.T, db *sql.DB, id, hostname, tenantID, stack string
 
 // seedStack inserts a stack row; active=false leaves it without an
 // active version (pushed as a draft, or deactivated).
+var seedVersionID atomic.Int64
+
+// seedStack inserts a stack; active gives it an active version holding one
+// rule file.
 func seedStack(t *testing.T, db *sql.DB, tenantID, name string, active bool) {
 	t.Helper()
 	var ver any
 	if active {
-		ver = 1
+		id := seedVersionID.Add(1)
+		ver = id
+		if _, err := db.Exec(`INSERT INTO stack_files (version_id, path, content) VALUES (?, '0100_X/x.txcl', 'EMIT .x = 1')`, id); err != nil {
+			t.Fatalf("seed stack file: %v", err)
+		}
 	}
 	if _, err := db.Exec(
 		`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at)
 		 VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z')`,
 		"stk_"+tenantID+"_"+name, tenantID, name, ver); err != nil {
 		t.Fatalf("seed stack: %v", err)
+	}
+}
+
+// seedRetiredStack is a stack after `txco deactivate`: its active version
+// is set, and empty.
+func seedRetiredStack(t *testing.T, db *sql.DB, tenantID, name string) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at)
+		 VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z')`,
+		"stk_"+tenantID+"_"+name, tenantID, name, seedVersionID.Add(1)); err != nil {
+		t.Fatalf("seed retired stack: %v", err)
 	}
 }
 
@@ -241,6 +268,7 @@ func TestDBResolverTCPIsOptIn(t *testing.T) {
 		{"irc.acme.example", "chat"},     // chat/_tcp active        → routes
 		{"www.acme.example", "shop"},     // no _tcp at all          → closed
 		{"draft.acme.example", "beta"},   // beta/_tcp never activated → closed
+		{"retired.acme.example", "old"},  // old/_tcp deactivated (empty active version) → closed
 		{"lookalike.acme.example", "ch"}, // `ch` has no inlet; LIKE's `_` wildcard must not invent one
 		{"irc.other.example", "chat"},    // same stack name, another tenant, no inlet of its own
 	} {
@@ -256,6 +284,8 @@ func TestDBResolverTCPIsOptIn(t *testing.T) {
 	seedStack(t, db, "tnt_a", "shop/_mail", true) // a different inlet is not a TCP opt-in
 	seedStack(t, db, "tnt_a", "beta", true)
 	seedStack(t, db, "tnt_a", "beta/_tcp", false)
+	seedStack(t, db, "tnt_a", "old", true)
+	seedRetiredStack(t, db, "tnt_a", "old/_tcp")
 	seedStack(t, db, "tnt_a", "ch", true)
 	seedStack(t, db, "tnt_a", "ch/xtcp", true)
 	seedStack(t, db, "tnt_b", "chat", true)
@@ -272,7 +302,7 @@ func TestDBResolverTCPIsOptIn(t *testing.T) {
 		if !ok || got.Tenant != "acme" || got.Stack != "chat/_tcp" {
 			t.Errorf("%s: opted-in stack: got %+v ok=%v", name, got, ok)
 		}
-		for _, host := range []string{"www.acme.example", "draft.acme.example", "lookalike.acme.example", "irc.other.example"} {
+		for _, host := range []string{"www.acme.example", "draft.acme.example", "retired.acme.example", "lookalike.acme.example", "irc.other.example"} {
 			if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "edge", Hostname: host}); ok {
 				t.Errorf("%s: %s has no active _tcp inlet and must not route; got %+v", name, host, got)
 			}
@@ -280,6 +310,58 @@ func TestDBResolverTCPIsOptIn(t *testing.T) {
 		if got, ok := r.Resolve(RouteKey{Src: "http", Hostname: "www.acme.example"}); !ok || got.Stack != "shop" {
 			t.Errorf("%s: http routing must not depend on a _tcp inlet: got %+v ok=%v", name, got, ok)
 		}
+	}
+}
+
+// TestDBResolverTCPInletFollowsHandler — a listener with a protocol
+// handler asks for that protocol's inlet (RouteKey.Inlet): a stack opts
+// into `_echo` separately from `_tcp`, and one never stands in for the
+// other. A name that is not a single `_name` segment never routes by
+// hostname.
+func TestDBResolverTCPInletFollowsHandler(t *testing.T) {
+	db := newDBResolverTestStore(t)
+	seedTenant(t, db, "tnt_a", "acme")
+	seedHostnameFull(t, db, "thn_a", "both.acme.example", "tnt_a", "both", "2026-01-02T00:00:00Z", "")
+	seedHostnameFull(t, db, "thn_b", "line.acme.example", "tnt_a", "lineonly", "2026-01-02T00:00:00Z", "")
+	seedStack(t, db, "tnt_a", "both/_tcp", true)
+	seedStack(t, db, "tnt_a", "both/_echo", true)
+	seedStack(t, db, "tnt_a", "lineonly/_tcp", true)
+
+	cache := NewHostRouteCache()
+	if err := cache.Rebuild(db); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	cached := NewDBResolverFunc(nil, func() *sql.DB { return nil }, nil, false)
+	cached.SetHostRouteCache(cache)
+
+	for name, r := range map[string]*DBResolver{"sql": NewDBResolver(nil, db, nil, false), "cache": cached} {
+		for _, tc := range []struct {
+			host, inlet, want string
+		}{
+			{"both.acme.example", "", "both/_tcp"},
+			{"both.acme.example", "_tcp", "both/_tcp"},
+			{"both.acme.example", "_echo", "both/_echo"},
+			{"line.acme.example", "_tcp", "lineonly/_tcp"},
+			{"line.acme.example", "_echo", ""}, // opted into line, not echo
+			{"both.acme.example", "echo", ""},  // not an inlet name
+			{"both.acme.example", "_", ""},
+			{"both.acme.example", "_Echo", ""},
+			{"both.acme.example", "_echo/0", ""},
+			{"both.acme.example", "_tcp/../_echo", ""},
+		} {
+			got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "edge", Hostname: tc.host, Inlet: tc.inlet})
+			if ok != (tc.want != "") || got.Stack != tc.want {
+				t.Errorf("%s: %s inlet %q: got %+v ok=%v, want stack %q", name, tc.host, tc.inlet, got, ok, tc.want)
+			}
+		}
+	}
+
+	// The inlet is a tcp fact: KeyFromEnvelope reads it only for tcp.
+	if k := KeyFromEnvelope(`{"_txc":{"src":"tcp","tcp":{"host":"h.example","inlet":"_echo"}}}`); k.Inlet != "_echo" {
+		t.Errorf("tcp key inlet = %q", k.Inlet)
+	}
+	if k := KeyFromEnvelope(`{"_txc":{"src":"http","tcp":{"inlet":"_echo"}}}`); k.Inlet != "" {
+		t.Errorf("http key must not carry an inlet, got %q", k.Inlet)
 	}
 }
 

@@ -72,7 +72,13 @@ type DispatchResult struct {
 	Payload Payload
 	Tenant  string // "" or "_sys": the run never left the system tenant
 	Stack   string // the routed stack; "" when unrouted
-	Err     error  // pipeline error, if any
+	// Ingress and HostnameVerified are the rest of the route the boot
+	// handoff promoted (`_txc.ingress`, `_txc.hostname_verified`), so an
+	// inlet that pins a connection can pre-stamp the same route on the
+	// connection's later events.
+	Ingress          string
+	HostnameVerified bool
+	Err              error // pipeline error, if any
 }
 
 type OpsHandler interface {

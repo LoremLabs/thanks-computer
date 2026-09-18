@@ -53,6 +53,10 @@ type RouteKey struct {
 	Listener string
 	Job      string
 	Path     string
+	// Inlet is the nested inlet stack a hostname-routed tcp connection
+	// asks for (`_tcp`, `_echo`, …): the listener's protocol handler
+	// decides it, the TCP head stamps it. "" means `_tcp`.
+	Inlet string
 }
 
 // RouteTarget is the resolver's output: the tenant the event belongs
@@ -527,7 +531,7 @@ func LoadResolverFromFile(path string, opts ...ResolverOption) (Resolver, error)
 // `_txc.route.*` proposal so detectTenantBody no-ops on it.
 func KeyFromEnvelope(raw string) RouteKey {
 	f := gjson.GetMany(raw, "_txc.src", "_txc.web.req.host", "_txc.tcp.listener",
-		"_txc.cron.job", "_txc.web.req.url.path", "_txc.tcp.host")
+		"_txc.cron.job", "_txc.web.req.url.path", "_txc.tcp.host", "_txc.tcp.inlet")
 	key := RouteKey{
 		Src:      f[0].String(),
 		Hostname: f[1].String(),
@@ -539,6 +543,7 @@ func KeyFromEnvelope(raw string) RouteKey {
 		// The canonical connection hostname only — never `_txc.tcp.tls.sni`,
 		// which is provenance, not the routing fact.
 		key.Hostname = f[5].String()
+		key.Inlet = f[6].String()
 	}
 	return key
 }

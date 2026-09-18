@@ -21,16 +21,20 @@ func TestParseListenerSpecOptions(t *testing.T) {
 		want    listenerSpec
 		wantErr bool
 	}{
-		{":5050", listenerSpec{Name: "default", Addr: ":5050"}, false},
-		{"irc=:6697;tls", listenerSpec{Name: "irc", Addr: ":6697", TLS: true}, false},
-		{"irc=:6697; tls ;", listenerSpec{Name: "irc", Addr: ":6697", TLS: true}, false},
-		{"dev=127.0.0.1:6697;self-signed", listenerSpec{Name: "dev", Addr: "127.0.0.1:6697", TLS: true, SelfSigned: true}, false},
-		{"dev=:6697;tls;self-signed", listenerSpec{Name: "dev", Addr: ":6697", TLS: true, SelfSigned: true}, false},
+		{":5050", listenerSpec{Name: "default", Addr: ":5050", Handler: "line"}, false},
+		{"irc=:6697;tls", listenerSpec{Name: "irc", Addr: ":6697", TLS: true, Handler: "line"}, false},
+		{"irc=:6697; tls ;", listenerSpec{Name: "irc", Addr: ":6697", TLS: true, Handler: "line"}, false},
+		{"dev=127.0.0.1:6697;self-signed", listenerSpec{Name: "dev", Addr: "127.0.0.1:6697", TLS: true, SelfSigned: true, Handler: "line"}, false},
+		{"dev=:6697;tls;self-signed", listenerSpec{Name: "dev", Addr: ":6697", TLS: true, SelfSigned: true, Handler: "line"}, false},
 		{"", listenerSpec{}, false},
 		{"edge=:16697;proxy=172.16.0.0/12|fdaa::/8", listenerSpec{Name: "edge", Addr: ":16697",
-			Proxy: []*net.IPNet{cidr(t, "172.16.0.0/12"), cidr(t, "fdaa::/8")}}, false},
+			Proxy: []*net.IPNet{cidr(t, "172.16.0.0/12"), cidr(t, "fdaa::/8")}, Handler: "line"}, false},
 		{"edge=:16697;proxy=127.0.0.1", listenerSpec{Name: "edge", Addr: ":16697",
-			Proxy: []*net.IPNet{cidr(t, "127.0.0.1/32")}}, false}, // a bare IP is a /32
+			Proxy: []*net.IPNet{cidr(t, "127.0.0.1/32")}, Handler: "line"}, false}, // a bare IP is a /32
+		{"echo=:7;handler=echo", listenerSpec{Name: "echo", Addr: ":7", Handler: "echo"}, false},
+		{"e=:7;self-signed;handler=echo", listenerSpec{Name: "e", Addr: ":7", TLS: true, SelfSigned: true, Handler: "echo"}, false},
+		{"irc=:6697;handler=irc", listenerSpec{}, true},                  // not in this build: refuse, never fall back to line
+		{"irc=:6697;handler=", listenerSpec{}, true},                     //
 		{"irc=:6697;tsl", listenerSpec{}, true},                          // typo must not bind plaintext
 		{"irc=:6697;proxy=x", listenerSpec{}, true},                      // nor trust nobody-in-particular
 		{"irc=:6697;proxy=", listenerSpec{}, true},                       //

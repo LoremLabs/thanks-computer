@@ -1,14 +1,13 @@
 package tcp
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
-	"io"
 	"net"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
@@ -24,7 +22,9 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
 	"github.com/loremlabs/thanks-computer/chassis/units"
@@ -46,12 +46,13 @@ type limits struct {
 	maxLine           int           // longest accepted line, bytes
 }
 
-// TCPController is the raw line-delimited socket head. It owns every
-// accepted net.Conn end to end: the accept loop admits it, the connect
-// run through _sys/boot decides whether it stays open (and which tenant
-// it belongs to), and the read loop turns each line into one bounded
-// event until the stack hangs up, the peer goes quiet, or the chassis
-// shuts down.
+// TCPController is the raw socket head. It owns every accepted net.Conn
+// end to end: the accept loop admits it, the connect run through
+// _sys/boot decides whether it stays open (and which tenant and stack it
+// belongs to), and the listener's protocol Handler — by default the line
+// handler, one bounded event per newline-terminated line — serves it
+// until the stack hangs up, the peer goes quiet, or the chassis shuts
+// down.
 //
 // A `;tls` listener terminates TLS here and stamps the SNI hostname as
 // `@tcp.host`, the connection's routing fact. A `;proxy=` listener sits
@@ -73,6 +74,10 @@ type TCPController struct {
 	selfSigned    *tls.Config
 	selfSignedDir string
 
+	// resolver re-checks a pinned connection's route before each of its
+	// events (SetResolver). nil: nothing is re-checked.
+	resolver RouteResolver
+
 	mu        sync.Mutex
 	listeners []net.Listener
 	addrs     []net.Addr
@@ -87,16 +92,51 @@ type TCPController struct {
 // and the tenant the connect run pinned it to.
 type connection struct {
 	net.Conn
-	rid  string
-	spec listenerSpec
-	tls  tlsFacts
+	rid     string
+	spec    listenerSpec
+	handler Handler
+	tls     tlsFacts
 
 	// host is the hostname the client asked for, raw: the SNI we saw or
 	// the edge's AUTHORITY. hostSource ("sni" | "edge") is for the log
-	// only — it never reaches the envelope.
+	// only — it never reaches the envelope. canonHost is host as the
+	// routing fact, `@tcp.host`; "" when there is none or it is not a
+	// hostname.
 	host, hostSource string
+	canonHost        string
 
 	tenant, stack string // "" until the connect run routed
+
+	// route is the connect run's outcome, pre-stamped on every later
+	// event; revalidate says the resolver produced it and is asked again
+	// before each one (pin).
+	route      RouteStamp
+	revalidate bool
+}
+
+// CloseWrite half-closes the stream — the peer reads EOF while we can
+// still read — where the transport underneath can: TCP, TLS
+// (close_notify), or either behind a PROXY header. A handler that hangs
+// up with the peer's bytes unread uses it to say goodbye first; a plain
+// Close then would reset the connection, and a reset can cost the peer
+// the tail of what we wrote.
+func (c *connection) CloseWrite() error {
+	switch u := c.Conn.(type) {
+	case interface{ CloseWrite() error }:
+		return u.CloseWrite()
+	case interface{ TCPConn() (*net.TCPConn, bool) }:
+		if t, ok := u.TCPConn(); ok {
+			return t.CloseWrite()
+		}
+	}
+	return errors.ErrUnsupported
+}
+
+// RouteResolver is the data-plane resolver detect-tenant uses
+// (ingress.DBResolver.ResolveErr); the head asks it whether a pinned
+// connection's route still stands.
+type RouteResolver interface {
+	ResolveErr(key ingress.RouteKey) (ingress.RouteTarget, bool, error)
 }
 
 // tlsFacts is what the handshake observed — ours, or the one the edge
@@ -171,6 +211,10 @@ func dataDir(conf config.Config) string {
 // SetTLSConfig wires the managed certificate source for `;tls` listeners.
 // Call before Start.
 func (tcp *TCPController) SetTLSConfig(t *tls.Config) { tcp.tlsConfig = t }
+
+// SetResolver wires the resolver the head re-checks pinned routes with.
+// Call before Start.
+func (tcp *TCPController) SetResolver(r RouteResolver) { tcp.resolver = r }
 
 // WantsManagedTLS reports whether any listener needs the bundled cert
 // manager (`;tls` without `;self-signed`), so the server can build it.
@@ -256,14 +300,26 @@ func (tcp *TCPController) Start() {
 		tcp.addrs = append(tcp.addrs, l.Addr())
 		tcp.mu.Unlock()
 
+		// parseListenerSpec already refused an unknown handler= name.
+		newHandler, err := lookupHandler(spec.Handler)
+		if err != nil {
+			tcp.pu.Logger.Fatal("tcp listener handler", zap.String("name", spec.Name), zap.String("err", err.Error()))
+		}
+		h := newHandler(tcp.pu)
+		if lh, ok := h.(*lineHandler); ok {
+			lh.lim = tcp.lim // the head's parsed knobs, not a second parse
+		}
+
 		tcp.pu.Logger.Info("tcp controller started",
 			zap.String("listen", spec.Addr),
 			zap.String("name", spec.Name),
+			zap.String("handler", spec.Handler),
+			zap.String("inlet", handlerInlet(spec.Handler)),
 			zap.Bool("tls", spec.TLS),
 			zap.Bool("proxy", len(spec.Proxy) > 0))
 
 		tcp.wg.Add(1)
-		go tcp.acceptLoop(l, spec)
+		go tcp.acceptLoop(l, spec, h)
 	}
 }
 
@@ -275,7 +331,7 @@ func (tcp *TCPController) Addrs() []net.Addr {
 	return append([]net.Addr(nil), tcp.addrs...)
 }
 
-func (tcp *TCPController) acceptLoop(l net.Listener, spec listenerSpec) {
+func (tcp *TCPController) acceptLoop(l net.Listener, spec listenerSpec, h Handler) {
 	defer tcp.wg.Done()
 	for {
 		c, err := l.Accept()
@@ -294,7 +350,7 @@ func (tcp *TCPController) acceptLoop(l net.Listener, spec listenerSpec) {
 			}
 			continue
 		}
-		tcp.admit(c, spec)
+		tcp.admit(c, spec, h)
 	}
 }
 
@@ -302,7 +358,7 @@ func (tcp *TCPController) acceptLoop(l net.Listener, spec listenerSpec) {
 // the connect event so a draining or full node answers in one line
 // instead of spending a handshake and a pipeline run on a connection it
 // is about to drop.
-func (tcp *TCPController) admit(c net.Conn, spec listenerSpec) {
+func (tcp *TCPController) admit(c net.Conn, spec listenerSpec, h Handler) {
 	// Off the accept loop: on a `;proxy=` listener the first Write (and
 	// RemoteAddr) waits for the peer's PROXY header, and a silent peer
 	// must not stall accepts. A `;tls` listener gets no line at all — it
@@ -328,7 +384,7 @@ func (tcp *TCPController) admit(c net.Conn, spec listenerSpec) {
 		refuse("503 draining", "draining")
 		return
 	}
-	conn := &connection{Conn: c, rid: hxid.NewTimeSort().String(), spec: spec}
+	conn := &connection{Conn: c, rid: hxid.NewTimeSort().String(), spec: spec, handler: h}
 	if !tcp.register(conn) {
 		refuse("503 too many connections", "capped")
 		return
@@ -428,52 +484,56 @@ func (tcp *TCPController) edgeFacts(c *connection) error {
 	return nil
 }
 
-// facts is the envelope every event on this connection starts from: the
-// source, the listener the ingress router keys on, the socket addresses,
-// and — on TLS — what the handshake observed. Chassis-stamped; none of it
-// is author-writable. Two hostname fields on purpose: `tcp.tls.sni` is
-// the raw observation, `tcp.host` the canonical routing fact detect-tenant
-// reads. Both come from our handshake or from the edge's PROXY header, and
-// the envelope does not say which. On a `;proxy=` listener the socket
-// addresses below are the header's too: the real client, and the address
-// it dialled at the edge.
-func (tcp *TCPController) facts(c *connection) string {
-	payload, _ := sjson.Set("", "_txc.src", "tcp")
-	payload, _ = sjson.Set(payload, "_ts", time.Now().Format(time.RFC3339))
-	payload, _ = sjson.Set(payload, "_txc.rid", c.rid)
+// stamp writes the facts every event on this connection carries: the
+// source, the listener the ingress router keys on, the inlet the
+// listener's handler asks for, the socket addresses, and — on TLS — what
+// the handshake observed. Chassis-stamped; none of it is author-writable,
+// and it goes on after whatever a handler contributed (emit), so none of
+// it is handler-writable either. Two hostname fields on purpose:
+// `tcp.tls.sni` is the raw observation, `tcp.host` the canonical routing
+// fact detect-tenant reads. Both come from our handshake or from the
+// edge's PROXY header, and the envelope does not say which. On a
+// `;proxy=` listener the socket addresses below are the header's too: the
+// real client, and the address it dialled at the edge.
+func (tcp *TCPController) stamp(b *jsonx.Builder, c *connection, src string) {
+	b.Set("_txc.src", src)
+	b.Set("_ts", time.Now().Format(time.RFC3339))
+	b.Set("_txc.rid", c.rid)
 	// Listener name is what the ingress router keys on when there is no
 	// hostname. Operator names come from `name=addr` entries in
 	// --tcp-listen-addrs; bare addresses keep the back-compat "default".
-	payload, _ = sjson.Set(payload, "_txc.tcp.listener", c.spec.Name)
+	b.Set("_txc.tcp.listener", c.spec.Name)
+	// With a hostname, the router enters that stack's inlet for the
+	// listener's protocol: `_tcp`, or `_NAME` under `;handler=NAME`.
+	b.Set("_txc.tcp.inlet", handlerInlet(c.spec.Handler))
 	// Private-fields plumbing: same pattern as the web inlet — chassis
 	// config decides whether to stamp.
 	if tcp.pu.Conf.DebugPrivate {
-		payload, _ = sjson.Set(payload, "_txc.flag_private", true)
+		b.Set("_txc.flag_private", true)
 	}
 	if ra, ok := c.RemoteAddr().(*net.TCPAddr); ok {
-		payload, _ = sjson.Set(payload, "_txc.client.ip", ra.IP.String())
-		payload, _ = sjson.Set(payload, "_txc.tcp.remote.port", ra.Port)
+		b.Set("_txc.client.ip", ra.IP.String())
+		b.Set("_txc.tcp.remote.port", ra.Port)
 	}
 	// Local addr (port and ip the client connected TO). Rules that want
 	// to route on the raw port without operator-side YAML read these.
 	if la, ok := c.LocalAddr().(*net.TCPAddr); ok {
-		payload, _ = sjson.Set(payload, "_txc.tcp.local.ip", la.IP.String())
-		payload, _ = sjson.Set(payload, "_txc.tcp.local.port", la.Port)
+		b.Set("_txc.tcp.local.ip", la.IP.String())
+		b.Set("_txc.tcp.local.port", la.Port)
 	}
-	payload, _ = sjson.Set(payload, "_txc.tcp.tls.enabled", c.tls.enabled)
+	b.Set("_txc.tcp.tls.enabled", c.tls.enabled)
 	if c.tls.enabled {
-		payload, _ = sjson.Set(payload, "_txc.tcp.tls.version", c.tls.version)
+		b.Set("_txc.tcp.tls.version", c.tls.version)
 		if c.tls.alpn != "" {
-			payload, _ = sjson.Set(payload, "_txc.tcp.tls.alpn", c.tls.alpn)
+			b.Set("_txc.tcp.tls.alpn", c.tls.alpn)
 		}
 		if c.tls.sni != "" {
-			payload, _ = sjson.Set(payload, "_txc.tcp.tls.sni", c.tls.sni)
+			b.Set("_txc.tcp.tls.sni", c.tls.sni)
 		}
 	}
-	if host, ok := tenants.CanonicalizeHost(c.host); ok {
-		payload, _ = sjson.Set(payload, "_txc.tcp.host", host)
+	if c.canonHost != "" {
+		b.Set("_txc.tcp.host", c.canonHost)
 	}
-	return payload
 }
 
 // serve owns one admitted connection from handshake to close.
@@ -498,22 +558,28 @@ func (tcp *TCPController) serve(c *connection) {
 			return
 		}
 	}
+	if host, ok := tenants.CanonicalizeHost(c.host); ok {
+		c.canonHost = host
+	}
 
-	payload := tcp.facts(c)
+	b := jsonx.New()
+	tcp.stamp(b, c, "tcp")
+	payload := b.String()
 	if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
 		tcp.pu.Logger.Debug("tcp connection", zap.String("payload", payload))
 	}
 
 	// Connect run: the stack's first look at the connection, before any
-	// line, and the one place the connection is routed. The head trusts
-	// the bus loop's DispatchResult for the outcome, never the envelope.
-	// Accept is implicit — the connection stays open unless the run left
-	// it in _sys (unrouted: fail closed), was denied, failed, or asked to
-	// close — so adding a listener never forces every stack to write an
-	// accept rule. A `@tcp.res.write` here is the greeting; nothing else
-	// is echoed.
-	res, ok := tcp.dispatch(c, payload, tcp.lim.connectTimeout)
-	if !ok {
+	// protocol byte, and the one place the connection is routed — whatever
+	// the listener's handler, this is a `tcp` event answered on
+	// `@tcp.res.*`. The head trusts the bus loop's DispatchResult for the
+	// outcome, never the envelope. Accept is implicit — the connection
+	// stays open unless the run left it in _sys (unrouted: fail closed),
+	// was denied, failed, or asked to close — so adding a listener never
+	// forces every stack to write an accept rule. A `@tcp.res.write` here
+	// is the greeting; nothing else is echoed.
+	res, err := tcp.dispatch(c, "tcp", payload, tcp.lim.connectTimeout)
+	if err != nil {
 		tcp.decided(c, "failed")
 		return
 	}
@@ -522,66 +588,175 @@ func (tcp *TCPController) serve(c *connection) {
 		tcp.decided(c, "unrouted")
 		return
 	}
+	v := verdictWriter{
+		conn: c, rid: c.rid, logger: tcp.pu.Logger, timeout: tcp.lim.respTimeout,
+		hidePrivate: !strings.Contains(tcp.pu.Conf.WebDebug, "SHOW_PRIVATE_VARS"),
+	}
 	c.tenant, c.stack = res.Tenant, res.Stack
 	if !tcp.reserve(c.tenant) {
 		c.tenant = "" // never reserved; unregister must not release
-		tcp.write(c, []byte("503 too many connections\n"))
+		v.write([]byte("503 too many connections\n"))
 		tcp.decided(c, "capped")
 		return
 	}
-	if why := tcp.apply(c, res.Payload.Raw, false); why != "" {
+	// Shared admission gate denial: TCP has no standard rejection, so
+	// write a short "<status> <reason>" line and close.
+	if status, reason, denied := admission.Denied(res.Payload.Raw); denied {
+		v.write([]byte(strconv.Itoa(status) + " " + reason + "\n"))
+		tcp.decided(c, "denied")
+		return
+	}
+	if why := v.apply(res.Payload.Raw, false); why != "" {
 		tcp.decided(c, why)
 		return
 	}
+	tcp.pin(c, res)
 	tcp.decided(c, "accepted")
 
-	// Read loop: one reader for the life of the connection (a fresh one
-	// per line would drop whatever it had buffered past the newline).
-	r := bufio.NewReader(c)
-	for {
-		if err := c.SetReadDeadline(time.Now().Add(tcp.lim.idleTimeout)); err != nil {
-			return
-		}
-		line, over, err := readLine(r, tcp.lim.maxLine)
-		if err != nil {
-			var ne net.Error
-			switch {
-			case errors.As(err, &ne) && ne.Timeout():
-				tcp.pu.Logger.Warn("tcp read error", zap.String("rid", c.rid), zap.String("err", "timeout"))
-			case errors.Is(err, io.EOF):
-				tcp.pu.Logger.Debug("tcp peer closed", zap.String("rid", c.rid))
-			default:
-				tcp.pu.Logger.Warn("tcp read error", zap.String("rid", c.rid), zap.String("err", err.Error()))
-			}
-			return
-		}
-		if over {
-			tcp.pu.Logger.Warn("tcp line over limit; dropped",
-				zap.String("rid", c.rid), zap.Int("max_bytes", tcp.lim.maxLine))
-			continue
-		}
-		tcp.pu.Logger.Debug("tcp read message", zap.String("rid", c.rid))
+	// From here the bytes are the handler's.
+	ctx := context.WithValue(tcp.ctx, config.CtxKeyRid, c.rid)
+	why := "done"
+	if err := tcp.serveProtocol(ctx, c); err != nil {
+		why = err.Error()
+	}
+	tcp.pu.Logger.Info("tcp connection closed", zap.String("rid", c.rid),
+		zap.String("handler", c.spec.Handler), zap.String("why", why))
+}
 
-		pl, _ := sjson.Set(payload, "_txc.client.body", base64.StdEncoding.EncodeToString(line))
-		res, ok := tcp.dispatch(c, pl, tcp.lim.respTimeout)
-		if !ok {
-			return
+// serveProtocol runs the listener's handler on an accepted connection. A
+// handler is protocol code reading a stranger's bytes; if it panics, that
+// connection is lost, not the chassis.
+func (tcp *TCPController) serveProtocol(ctx context.Context, c *connection) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			tcp.pu.Logger.Error("tcp handler panicked", zap.String("rid", c.rid),
+				zap.String("handler", c.spec.Handler), zap.Any("panic", r),
+				zap.ByteString("stack", debug.Stack()))
+			err = errors.New("handler panicked")
 		}
-		// A line belongs to the stack the connect run pinned. If routing
-		// now says otherwise — the `_tcp` inlet was deactivated, the
-		// hostname re-bound or revoked mid-connection — hang up rather
-		// than echo whatever _sys/boot (or a different tenant) produced.
-		if res.Tenant != c.tenant || res.Stack != c.stack {
-			tcp.pu.Logger.Info("tcp connection closed", zap.String("rid", c.rid), zap.String("why", "rerouted"),
-				zap.String("tenant", c.tenant), zap.String("stack", c.stack),
-				zap.String("now_tenant", res.Tenant), zap.String("now_stack", res.Stack))
-			return
-		}
-		if why := tcp.apply(c, res.Payload.Raw, true); why != "" {
-			tcp.pu.Logger.Info("tcp connection closed", zap.String("rid", c.rid), zap.String("why", why))
-			return
+	}()
+	return c.handler.ServeConn(ctx, tcp.routedConn(c))
+}
+
+// pin records the route the connect run chose. Every later event on the
+// connection carries it pre-stamped (emit), so an event under a handler's
+// own `@src` lands in the same stack without detect-tenant having to know
+// that source, and what the head checked is what runs.
+//
+// Pinning must not outlive the opt-in, though: if the resolver vouches
+// for this route now, it is asked again before each event, and the
+// connection closes once it stops agreeing — the inlet deactivated, the
+// hostname revoked or re-bound. A route the resolver does not reproduce
+// came from an operator's own `_sys/boot` rule; nothing here can re-check
+// that, so it stands for the connection's life, like a websocket
+// session's.
+func (tcp *TCPController) pin(c *connection, res event.DispatchResult) {
+	c.route = RouteStamp{
+		Tenant: res.Tenant, Stack: res.Stack,
+		Ingress: res.Ingress, HostnameVerified: res.HostnameVerified,
+	}
+	stands, err := tcp.routeStands(c)
+	c.revalidate = stands && err == nil
+}
+
+// routeKey is the key detect-tenant resolved the connect run with.
+func (c *connection) routeKey() ingress.RouteKey {
+	return ingress.RouteKey{
+		Src:      "tcp",
+		Hostname: c.canonHost,
+		Listener: c.spec.Name,
+		Inlet:    handlerInlet(c.spec.Handler),
+	}
+}
+
+// routeStands asks the resolver whether the connection's pinned route is
+// still the answer. err is a transient lookup failure: not evidence
+// either way.
+func (tcp *TCPController) routeStands(c *connection) (bool, error) {
+	if tcp.resolver == nil {
+		return false, nil
+	}
+	t, ok, err := tcp.resolver.ResolveErr(c.routeKey())
+	if err != nil {
+		return false, err
+	}
+	return ok && t.Tenant == c.route.Tenant && t.Stack == c.route.Stack, nil
+}
+
+func (tcp *TCPController) routedConn(c *connection) RoutedConn {
+	rc := RoutedConn{
+		Conn:       c,
+		RID:        c.rid,
+		Listener:   c.spec.Name,
+		Tenant:     c.route.Tenant,
+		Stack:      c.route.Stack,
+		Host:       c.canonHost,
+		TLS:        c.tls.enabled,
+		ALPN:       c.tls.alpn,
+		TLSVersion: c.tls.version,
+		Route:      c.route,
+		Emit: func(ctx context.Context, ev Event) (event.DispatchResult, error) {
+			return tcp.emit(ctx, c, ev)
+		},
+	}
+	if ra, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+		rc.ClientIP, rc.RemotePort = ra.IP.String(), ra.Port
+	}
+	if la, ok := c.LocalAddr().(*net.TCPAddr); ok {
+		rc.LocalPort = la.Port
+	}
+	return rc
+}
+
+// emit is RoutedConn.Emit: one event on a pinned connection.
+func (tcp *TCPController) emit(ctx context.Context, c *connection, ev Event) (event.DispatchResult, error) {
+	src := handlerSrc(c.spec.Handler)
+	if src == "tcp" && len(ev.Facts) > 0 {
+		return event.DispatchResult{}, errors.New("tcp: the line handler has no facts of its own; @tcp.* is the head's")
+	}
+	if c.revalidate {
+		// A transient lookup failure is not evidence the route changed;
+		// the next event asks again.
+		if stands, err := tcp.routeStands(c); err == nil && !stands {
+			return event.DispatchResult{}, ErrRerouted
 		}
 	}
+
+	// Handler facts first, the head's on top: nothing a handler passes can
+	// displace a chassis-stamped field.
+	b := jsonx.New()
+	for k, val := range ev.Facts {
+		b.Set("_txc."+src+"."+k, val)
+	}
+	if ev.Body != nil {
+		b.Set("_txc.client.body", base64.StdEncoding.EncodeToString(ev.Body))
+	}
+	tcp.stamp(b, c, src)
+	// Pre-stamped the websocket head's way: detect-tenant sees a route
+	// already proposed and leaves it, boot/100 promotes it.
+	b.Set("_txc.route.tenant", c.route.Tenant)
+	b.Set("_txc.route.stack", c.route.Stack)
+	b.Set("_txc.route.ingress", c.route.Ingress)
+	b.Set("_txc.route.hostname_verified", c.route.HostnameVerified)
+	b.Set("_txc.route.to", c.route.Stack+"/0")
+
+	res, err := tcp.dispatchCtx(ctx, c, src, b.String(), tcp.lim.respTimeout)
+	if err != nil {
+		return event.DispatchResult{}, err
+	}
+	// The run is the last word: a tenant removed since the last event
+	// never leaves _sys, and whatever _sys/boot produced is not this
+	// connection's answer.
+	if res.Tenant != c.route.Tenant || res.Stack != c.route.Stack {
+		tcp.pu.Logger.Info("tcp event rerouted", zap.String("rid", c.rid),
+			zap.String("tenant", c.route.Tenant), zap.String("stack", c.route.Stack),
+			zap.String("now_tenant", res.Tenant), zap.String("now_stack", res.Stack))
+		return event.DispatchResult{}, ErrRerouted
+	}
+	if status, reason, denied := admission.Denied(res.Payload.Raw); denied {
+		return event.DispatchResult{}, &DeniedError{Status: status, Reason: reason}
+	}
+	return res, nil
 }
 
 // decided is the one structured line per connection at accept-decision
@@ -590,62 +765,49 @@ func (tcp *TCPController) decided(c *connection, decision string) {
 	tcp.pu.Logger.Info("tcp connection "+decision,
 		zap.String("rid", c.rid),
 		zap.String("listener", c.spec.Name),
+		zap.String("handler", c.spec.Handler),
 		zap.String("remote", c.RemoteAddr().String()),
 		zap.Bool("tls", c.tls.enabled),
 		zap.String("host", c.host),
 		zap.String("host_source", c.hostSource),
 		zap.String("tenant", c.tenant),
+		zap.String("stack", c.stack),
 		zap.String("decision", decision))
 }
 
-// readLine returns the next newline-terminated line INCLUDING its
-// terminator, byte for byte as sent (a body of "asdf\r\n" stays that
-// way). A line longer than max is consumed to its newline and reported
-// as over=true with no bytes kept, so one oversized line costs a
-// bounded buffer, not the whole line in memory.
-func readLine(r *bufio.Reader, max int) (line []byte, over bool, err error) {
-	for {
-		frag, e := r.ReadSlice('\n')
-		if !over {
-			if len(line)+len(frag) > max {
-				over, line = true, nil
-			} else {
-				line = append(line, frag...)
-			}
-		}
-		switch {
-		case e == nil:
-			return line, over, nil
-		case errors.Is(e, bufio.ErrBufferFull):
-			continue
-		default:
-			return nil, over, e
-		}
-	}
-}
+var (
+	errStopping   = errors.New("shutdown")
+	errRunTimeout = errors.New("response timeout")
+	errRunFailed  = errors.New("run failed")
+)
 
 // dispatch runs one event through the bus and waits for the bus loop's
-// DispatchResult. ok=false means the connection is finished: the run
+// DispatchResult. An error means the connection is finished: the run
 // timed out, the chassis is shutting down, or the pipeline failed.
-func (tcp *TCPController) dispatch(c *connection, payload string, timeout time.Duration) (event.DispatchResult, bool) {
+func (tcp *TCPController) dispatch(c *connection, src, payload string, timeout time.Duration) (event.DispatchResult, error) {
+	return tcp.dispatchCtx(tcp.ctx, c, src, payload, timeout)
+}
+
+// dispatchCtx is dispatch under a handler's context, which derives from
+// tcp.ctx so chassis shutdown cancels an in-flight wait either way.
+func (tcp *TCPController) dispatchCtx(parent context.Context, c *connection, src, payload string, timeout time.Duration) (event.DispatchResult, error) {
 	if tcp.stopping.Load() {
-		return event.DispatchResult{}, false
+		return event.DispatchResult{}, errStopping
 	}
-	// Inherit tcp.ctx so chassis shutdown cancels an in-flight wait.
-	ctx, cancel := context.WithTimeout(tcp.ctx, timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	ctx = context.WithValue(ctx, config.CtxKeyRid, c.rid)
 
 	// Buffered: an answer that lands after our timeout is dropped instead
 	// of parking the bus loop on a send nobody reads.
 	resCh := make(chan event.DispatchResult, 1)
-	env := event.PackageJSON(ctx, payload, nil, "tcp")
+	env := event.PackageJSON(ctx, payload, nil, src)
 	env.ResultCh = resCh
 	select {
 	case tcp.pu.Bus <- env:
 	case <-ctx.Done():
 		tcp.pu.Logger.Info("tcp dispatch abandoned", zap.String("rid", c.rid), zap.String("err", ctx.Err().Error()))
-		return event.DispatchResult{}, false
+		return event.DispatchResult{}, tcp.waitErr()
 	}
 	if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
 		tcp.pu.Logger.Debug("sent to processors", zap.String("payload", payload))
@@ -654,64 +816,24 @@ func (tcp *TCPController) dispatch(c *connection, payload string, timeout time.D
 	case res := <-resCh:
 		if res.Err != nil {
 			tcp.pu.Logger.Warn("tcp run failed", zap.String("rid", c.rid), zap.String("err", res.Err.Error()))
-			return event.DispatchResult{}, false
+			return event.DispatchResult{}, errRunFailed
 		}
 		if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
 			tcp.pu.Logger.Debug("tcp res", zap.String("response", res.Payload.Raw),
 				zap.String("tenant", res.Tenant), zap.String("stack", res.Stack))
 		}
-		return res, true
+		return res, nil
 	case <-ctx.Done():
-		if tcp.ctx.Err() != nil {
-			tcp.pu.Logger.Info("tcp shutdown", zap.String("rid", c.rid))
-		} else {
-			tcp.pu.Logger.Info("tcp response timeout", zap.String("rid", c.rid))
-		}
-		return event.DispatchResult{}, false
+		return event.DispatchResult{}, tcp.waitErr()
 	}
 }
 
-// apply renders the stack's verdict for one run onto the socket. The
-// verdict lives in the author-writable `_txc.tcp.res.*` subtree plus the
-// shared admission marker:
-//
-//	@tcp.res.write   base64 bytes to write, as-is
-//	@tcp.res.action  "close" hangs up after any write; anything else keeps going
-//
-// echo says whether a run with no explicit write gets the default JSON
-// projection of the envelope — line runs do, the connect run does not.
-// Returns "" to keep going, else why the connection closes.
-func (tcp *TCPController) apply(c *connection, out string, echo bool) string {
-	// Shared admission gate denial: TCP has no standard rejection, so
-	// write a short "<status> <reason>" line and close.
-	if status, reason, ok := admission.Denied(out); ok {
-		tcp.write(c, []byte(strconv.Itoa(status)+" "+reason+"\n"))
-		return "denied"
+// waitErr names why a wait on the bus ended early.
+func (tcp *TCPController) waitErr() error {
+	if tcp.ctx.Err() != nil {
+		return errStopping
 	}
-	if echo || gjson.Get(out, "_txc.tcp.res.write").String() != "" {
-		hidePrivate := !strings.Contains(tcp.pu.Conf.WebDebug, "SHOW_PRIVATE_VARS")
-		b, err := getOutput(out, hidePrivate)
-		if err != nil {
-			tcp.pu.Logger.Warn("error getting output", zap.String("rid", c.rid), zap.String("err", err.Error()))
-			return "bad_output"
-		}
-		if len(b) > 0 && !tcp.write(c, b) {
-			return "write_failed"
-		}
-	}
-	if gjson.Get(out, "_txc.tcp.res.action").String() == "close" {
-		return "closed_by_stack"
-	}
-	return ""
-}
-
-func (tcp *TCPController) write(c *connection, b []byte) bool {
-	_ = c.SetWriteDeadline(time.Now().Add(tcp.lim.respTimeout))
-	if _, err := c.Write(b); err != nil {
-		tcp.pu.Logger.Error("write error", zap.String("rid", c.rid), zap.String("err", err.Error()))
-		return false
-	}
-	return true
+	return errRunTimeout
 }
 
 // Stop closes the listeners, then every open connection, and waits for
