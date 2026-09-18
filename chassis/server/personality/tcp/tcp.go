@@ -567,6 +567,16 @@ func (tcp *TCPController) serve(c *connection) {
 		if !ok {
 			return
 		}
+		// A line belongs to the stack the connect run pinned. If routing
+		// now says otherwise — the `_tcp` inlet was deactivated, the
+		// hostname re-bound or revoked mid-connection — hang up rather
+		// than echo whatever _sys/boot (or a different tenant) produced.
+		if res.Tenant != c.tenant || res.Stack != c.stack {
+			tcp.pu.Logger.Info("tcp connection closed", zap.String("rid", c.rid), zap.String("why", "rerouted"),
+				zap.String("tenant", c.tenant), zap.String("stack", c.stack),
+				zap.String("now_tenant", res.Tenant), zap.String("now_stack", res.Stack))
+			return
+		}
 		if why := tcp.apply(c, res.Payload.Raw, true); why != "" {
 			tcp.pu.Logger.Info("tcp connection closed", zap.String("rid", c.rid), zap.String("why", why))
 			return

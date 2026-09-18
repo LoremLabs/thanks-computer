@@ -40,6 +40,14 @@ func newDBResolverTestStore(t *testing.T) *sql.DB {
 		CREATE UNIQUE INDEX tenant_hostnames_active_hostname_idx
 		    ON tenant_hostnames(hostname)
 		    WHERE revoked_at IS NULL;
+		CREATE TABLE stacks (
+			stack_id        TEXT PRIMARY KEY,
+			tenant_id       TEXT NOT NULL,
+			name            TEXT NOT NULL,
+			active_version  INTEGER,
+			created_at      TEXT NOT NULL,
+			UNIQUE(tenant_id, name)
+		);
 	`); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
@@ -62,6 +70,22 @@ func seedHostname(t *testing.T, db *sql.DB, id, hostname, tenantID, stack string
 		 VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z')`,
 		id, hostname, tenantID, stack); err != nil {
 		t.Fatalf("seed hostname: %v", err)
+	}
+}
+
+// seedStack inserts a stack row; active=false leaves it without an
+// active version (pushed as a draft, or deactivated).
+func seedStack(t *testing.T, db *sql.DB, tenantID, name string, active bool) {
+	t.Helper()
+	var ver any
+	if active {
+		ver = 1
+	}
+	if _, err := db.Exec(
+		`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at)
+		 VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z')`,
+		"stk_"+tenantID+"_"+name, tenantID, name, ver); err != nil {
+		t.Fatalf("seed stack: %v", err)
 	}
 }
 
@@ -174,12 +198,13 @@ func TestDBResolverTCPHostname(t *testing.T) {
 	seedHostnameFull(t, db, "thn_v", "irc.verified.local", "tnt_db", "db-tenant/irc", "2026-01-02T00:00:00Z", "")
 	seedHostname(t, db, "thn_u", "irc.unverified.local", "tnt_db", "db-tenant/irc")
 	seedHostname(t, db, "thn_l", "raw", "tnt_db", "db-tenant/nope")
+	seedStack(t, db, "tnt_db", "db-tenant/irc/_tcp", true) // the stack opted in
 	yaml := &listenerStub{listener: "raw", target: RouteTarget{Tenant: "yaml-tenant", Stack: "yaml-tenant/raw", Ingress: "raw", Verified: true}}
 	r := NewDBResolver(yaml, db, nil, false) // permissive chassis policy
 
 	got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "irc", Hostname: "IRC.verified.local."})
-	if !ok || got.Tenant != "db-tenant" || got.Stack != "db-tenant/irc" || got.Ingress != "host:irc.verified.local" || !got.Verified {
-		t.Errorf("verified hostname: got %+v ok=%v", got, ok)
+	if !ok || got.Tenant != "db-tenant" || got.Stack != "db-tenant/irc/_tcp" || got.Ingress != "host:irc.verified.local" || !got.Verified {
+		t.Errorf("verified hostname must route into the stack's _tcp inlet: got %+v ok=%v", got, ok)
 	}
 	if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "irc", Hostname: "irc.unverified.local"}); ok {
 		t.Errorf("unverified hostname must not route a connection even in permissive mode; got %+v", got)
@@ -201,6 +226,93 @@ func TestDBResolverTCPHostname(t *testing.T) {
 	}
 	if _, ok := r.Resolve(RouteKey{Src: "cron", Job: "irc.verified.local"}); ok {
 		t.Errorf("cron source must not match DB hostnames")
+	}
+}
+
+// TestDBResolverTCPIsOptIn — a verified hostname is not a TCP endpoint
+// until its stack has an ACTIVE `_tcp` inlet. HTTP on the same hostname
+// is untouched either way. Checked through both lookup paths: per-request
+// SQL, and the route cache (with a nil DB, proving no SQL fallback).
+func TestDBResolverTCPIsOptIn(t *testing.T) {
+	db := newDBResolverTestStore(t)
+	seedTenant(t, db, "tnt_a", "acme")
+	seedTenant(t, db, "tnt_b", "other")
+	for i, h := range []struct{ host, stack string }{
+		{"irc.acme.example", "chat"},     // chat/_tcp active        → routes
+		{"www.acme.example", "shop"},     // no _tcp at all          → closed
+		{"draft.acme.example", "beta"},   // beta/_tcp never activated → closed
+		{"lookalike.acme.example", "ch"}, // `ch` has no inlet; LIKE's `_` wildcard must not invent one
+		{"irc.other.example", "chat"},    // same stack name, another tenant, no inlet of its own
+	} {
+		tid := "tnt_a"
+		if h.host == "irc.other.example" {
+			tid = "tnt_b"
+		}
+		seedHostnameFull(t, db, "thn_"+string(rune('a'+i)), h.host, tid, h.stack, "2026-01-02T00:00:00Z", "")
+	}
+	seedStack(t, db, "tnt_a", "chat", true)
+	seedStack(t, db, "tnt_a", "chat/_tcp", true)
+	seedStack(t, db, "tnt_a", "shop", true)
+	seedStack(t, db, "tnt_a", "shop/_mail", true) // a different inlet is not a TCP opt-in
+	seedStack(t, db, "tnt_a", "beta", true)
+	seedStack(t, db, "tnt_a", "beta/_tcp", false)
+	seedStack(t, db, "tnt_a", "ch", true)
+	seedStack(t, db, "tnt_a", "ch/xtcp", true)
+	seedStack(t, db, "tnt_b", "chat", true)
+
+	cache := NewHostRouteCache()
+	if err := cache.Rebuild(db); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	cached := NewDBResolverFunc(nil, func() *sql.DB { return nil }, nil, false)
+	cached.SetHostRouteCache(cache)
+
+	for name, r := range map[string]*DBResolver{"sql": NewDBResolver(nil, db, nil, false), "cache": cached} {
+		got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "edge", Hostname: "irc.acme.example"})
+		if !ok || got.Tenant != "acme" || got.Stack != "chat/_tcp" {
+			t.Errorf("%s: opted-in stack: got %+v ok=%v", name, got, ok)
+		}
+		for _, host := range []string{"www.acme.example", "draft.acme.example", "lookalike.acme.example", "irc.other.example"} {
+			if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "edge", Hostname: host}); ok {
+				t.Errorf("%s: %s has no active _tcp inlet and must not route; got %+v", name, host, got)
+			}
+		}
+		if got, ok := r.Resolve(RouteKey{Src: "http", Hostname: "www.acme.example"}); !ok || got.Stack != "shop" {
+			t.Errorf("%s: http routing must not depend on a _tcp inlet: got %+v ok=%v", name, got, ok)
+		}
+	}
+}
+
+// TestHostRouteCacheInletQueryFailureKeepsHosts — HTTP host routing must
+// never hang on the inlet query: if it fails, the fresh host map is still
+// published and inlet checks fall back to per-request SQL.
+func TestHostRouteCacheInletQueryFailureKeepsHosts(t *testing.T) {
+	db := newDBResolverTestStore(t)
+	seedTenant(t, db, "tnt_a", "acme")
+	seedHostnameFull(t, db, "thn_a", "irc.acme.example", "tnt_a", "chat", "2026-01-02T00:00:00Z", "")
+	seedStack(t, db, "tnt_a", "chat/_tcp", true)
+
+	broken := newDBResolverTestStore(t) // same hosts, but no stacks table
+	seedTenant(t, broken, "tnt_a", "acme")
+	seedHostnameFull(t, broken, "thn_a", "irc.acme.example", "tnt_a", "chat", "2026-01-02T00:00:00Z", "")
+	if _, err := broken.Exec(`DROP TABLE stacks`); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := NewHostRouteCache()
+	if err := cache.Rebuild(broken); err == nil {
+		t.Fatal("Rebuild must report the inlet query failure")
+	}
+	if _, found, ready := cache.lookup("irc.acme.example"); !ready || !found {
+		t.Fatalf("hosts must be published despite the inlet failure (found=%v ready=%v)", found, ready)
+	}
+	if _, ready := cache.inletActive("acme", "chat/_tcp"); ready {
+		t.Fatal("inlets must report not-ready after a failed inlet query")
+	}
+	r := NewDBResolver(nil, db, nil, false)
+	r.SetHostRouteCache(cache)
+	if got, ok := r.Resolve(RouteKey{Src: "tcp", Hostname: "irc.acme.example"}); !ok || got.Stack != "chat/_tcp" {
+		t.Errorf("not-ready inlets must fall back to SQL: got %+v ok=%v", got, ok)
 	}
 }
 

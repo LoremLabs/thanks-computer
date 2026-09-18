@@ -50,18 +50,49 @@ terminated TLS itself (`;tls`) or a trusted edge did and reported it
 ## Routing
 
 A connection is routed once, on the connect event, through the same
-`_sys/boot` path as every other source:
+`_sys/boot` path as every other source (`txco://detect-tenant`):
 
-1. `@tcp.host` (the SNI — ours, or the one a trusted edge reported) is matched against the tenant's **verified**
-   hostnames — the same gate a certificate needs, whatever
-   `--require-hostname-verification` says for HTTP.
+1. `@tcp.host` (the SNI — ours, or the one a trusted edge reported) is
+   matched against the tenant's **verified** hostnames — the same gate a
+   certificate needs, whatever `--require-hostname-verification` says for
+   HTTP — and the connection enters that hostname's stack's **`_tcp`
+   inlet**: hostname → stack `shop` → `shop/_tcp`.
 2. Otherwise the listener name is matched against `ingress.tcp.listeners`
-   in the [routing YAML](../../routing.md) — the single-destination case.
+   in the [routing YAML](../../routing.md) — the single-destination case,
+   where the operator names the stack outright.
 3. Otherwise the connection is **closed** before any line is read. An
    unknown hostname never lands in a default tenant.
 
-Every later line on the connection is an event in the tenant the connect
-run chose.
+Every later line on the connection is an event in the stack the connect
+run chose; if routing ever answers differently mid-connection (the inlet
+deactivated, the hostname re-bound), the connection closes.
+
+### Opting in: the `_tcp` inlet
+
+TCP is **opt-in per stack**. A verified hostname that serves a stack over
+HTTP is not a TCP endpoint until that stack has an active `_tcp` inlet —
+a nested stack beside its other channels, like `_mail`:
+
+```text
+OPS/shop/0100_…            ← the stack's HTTP rules: never see a TCP event
+OPS/shop/_tcp/0100_GREET/greet.txcl
+```
+
+```txcl
+# OPS/shop/_tcp/0100_GREET/greet.txcl — the connect run (no line yet)
+WHEN @client.body == ""
+  EMIT @tcp.res.write = "aGVsbG8K"
+```
+
+```sh
+txco push shop/_tcp        # a nested inlet is its own stack: push it by name
+```
+
+No `_tcp` inlet → step 1 misses and the connection is closed without a
+single rule running, so opening a TCP port never exposes the stacks that
+did not ask for it. Deactivating the inlet closes the door again. The
+inlet shares its parent's hostname, and everything in it is
+`@src == "tcp"` by construction — no source guards needed.
 
 ## TLS
 
@@ -98,7 +129,8 @@ one thing: a **PROXY protocol v2** header ahead of the stream, carrying
 | `PP2_TYPE_SSL` (+ `SSL_VERSION`) | `@tcp.tls.enabled`, `@tcp.tls.version` |
 
 `;proxy=` lists the networks the edge connects from (`|`-separated CIDRs
-or IPs). The listener is an **edge-only door**: the header is required
+or IPs — never spaces or commas inside an entry: both separate *entries*,
+on the flag and in `TXCO_TCP_LISTEN_ADDRS`). The listener is an **edge-only door**: the header is required
 from those networks, and a connection from anywhere else — or one that
 skips or stalls the header — is closed before any event runs. A header an
 outsider sends is never parsed. Keep the port off the public internet

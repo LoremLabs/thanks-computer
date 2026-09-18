@@ -308,12 +308,27 @@ func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
 // listener that has none. Hostname routing for tcp is STRICT — verified
 // rows only, whatever --require-hostname-verification says — matching
 // the tls-ask gate: a name that could not get a certificate must not
-// route a connection either.
+// route a connection either — and OPT-IN: the target is the hostname's
+// stack's `_tcp` inlet, and a stack without an active one is a miss (the
+// head then closes the connection). Without that gate, opening a TCP port
+// would turn every HTTP hostname on the chassis into a TCP endpoint.
 func (r *DBResolver) resolveTCP(key RouteKey) (RouteTarget, bool, error) {
 	if key.Hostname != "" {
 		t, ok, err := r.resolveHost(key.Hostname, true)
-		if ok || err != nil {
-			return t, ok, err
+		if err != nil {
+			return RouteTarget{}, false, err
+		}
+		if ok {
+			// Opt-in: the hostname names a stack, but a connection only
+			// enters its `_tcp` inlet, and only if the stack has one.
+			t.Stack += "/" + TCPInletStack
+			active, err := r.inletActive(t.Tenant, t.Stack)
+			if err != nil {
+				return RouteTarget{}, false, err
+			}
+			if active {
+				return t, true, nil
+			}
 		}
 	}
 	if r.inner != nil {
@@ -322,6 +337,52 @@ func (r *DBResolver) resolveTCP(key RouteKey) (RouteTarget, bool, error) {
 		}
 	}
 	return RouteTarget{}, false, nil
+}
+
+// TCPInletStack is the nested stack a hostname-routed TCP connection
+// enters: `<stack>/_tcp`, beside `<stack>/_mail`. Its existence IS the
+// opt-in — a stack that never declared one is not reachable over TCP just
+// because its hostname is verified for HTTP.
+const TCPInletStack = "_tcp"
+
+// inletActive reports whether tenant has an active stack named stack.
+// Route cache first (no mirror round trip on the connect path); the
+// mirror query is the not-ready fallback. err is a transient lookup
+// failure, never a miss.
+func (r *DBResolver) inletActive(tenant, stack string) (bool, error) {
+	if r.hostCache != nil {
+		if active, ready := r.hostCache.inletActive(tenant, stack); ready {
+			return active, nil
+		}
+	}
+	if r.dbFn == nil {
+		return false, nil
+	}
+	db := r.dbFn()
+	if db == nil {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	var one int
+	err := db.QueryRowContext(ctx,
+		`SELECT 1
+		   FROM stacks s
+		   JOIN tenants t ON t.tenant_id = s.tenant_id
+		  WHERE t.slug = ?
+		    AND t.revoked_at IS NULL
+		    AND s.name = ?
+		    AND s.active_version IS NOT NULL
+		  LIMIT 1`, tenant, stack).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		r.logger.Warn("ingress db inlet lookup failed",
+			zap.String("tenant", tenant), zap.String("stack", stack), zap.Error(err))
+		return false, err
+	}
+	return true, nil
 }
 
 // resolveHost is the hostname → (tenant, stack) lookup shared by the http

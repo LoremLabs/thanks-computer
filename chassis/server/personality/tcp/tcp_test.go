@@ -426,6 +426,42 @@ func TestUnroutedConnectionClosed(t *testing.T) {
 	expectEOF(t, r)
 }
 
+// TestLineRunReroutedCloses — the connect run pins the connection to one
+// tenant and stack. A later line that routing sends anywhere else (the
+// `_tcp` inlet deactivated, the hostname re-bound) ends the connection;
+// nothing from that run reaches the client.
+func TestLineRunReroutedCloses(t *testing.T) {
+	for name, elsewhere := range map[string]event.DispatchResult{
+		"unrouted":       {Payload: verdict("leak\n", ""), Tenant: "_sys"},
+		"another tenant": {Payload: verdict("leak\n", ""), Tenant: "t2", Stack: "t1/tcp"},
+		"another stack":  {Payload: verdict("leak\n", ""), Tenant: "t1", Stack: "t1/other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var lines atomic.Int32
+			h := newHarness(t, nil, nil, func(env *event.Envelope) event.DispatchResult {
+				if isConnect(env) || lines.Add(1) == 1 {
+					return greetThenUpper(env)
+				}
+				return elsewhere
+			})
+			c, r := dial(t, h.addr)
+			if got := readLineT(t, r); got != "hello\n" {
+				t.Fatalf("greeting = %q", got)
+			}
+			if _, err := c.Write([]byte("one\n")); err != nil {
+				t.Fatal(err)
+			}
+			if got := readLineT(t, r); got != "ONE\n" {
+				t.Fatalf("echo = %q", got)
+			}
+			if _, err := c.Write([]byte("two\n")); err != nil {
+				t.Fatal(err)
+			}
+			expectEOF(t, r)
+		})
+	}
+}
+
 // TestRouteUnavailableClosed — a transient routing failure is not a
 // route: the connection closes instead of guessing a tenant.
 func TestRouteUnavailableClosed(t *testing.T) {

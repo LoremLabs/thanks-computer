@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"database/sql"
+	"fmt"
 	"sync/atomic"
 )
 
@@ -32,12 +33,31 @@ import (
 // (ResolveRecipient/AcceptMailDomain) keeps the per-request SQL path: it
 // is low-volume and matches a different row set (unattached rows route
 // mail; the zone fallback needs live SQL).
+//
+// It also carries the set of active nested INLET stacks (`<stack>/_tcp`,
+// …) — the opt-in a hostname-routed connection needs before it may enter
+// a stack (see DBResolver.resolveTCP). Same reload, same freshness: a
+// stack activation funnels through a mirror reload like a hostname write.
 type HostRouteCache struct {
-	// hosts is nil until the first successful Rebuild — lookup reports
+	// snap is nil until the first successful Rebuild — lookup reports
 	// not-ready and the resolver falls back to per-request SQL, which is
 	// exactly the pre-cache behavior.
-	hosts atomic.Pointer[map[string]hostRouteRow]
+	snap atomic.Pointer[routeSnapshot]
 }
+
+// routeSnapshot is one reload's worth of routing facts, swapped whole so
+// a hostname and the inlets of the stack it names are never from two
+// different mirrors.
+type routeSnapshot struct {
+	hosts map[string]hostRouteRow
+	// inlets holds inletKey(tenant, stack) for every active nested inlet
+	// stack. nil ⇒ that query failed on this reload: hosts still serve
+	// (HTTP routing must never hang on the inlet query), and inlet checks
+	// fall back to per-request SQL.
+	inlets map[string]struct{}
+}
+
+func inletKey(tenant, stack string) string { return tenant + "\x00" + stack }
 
 // hostRouteRow is one active, attached tenant_hostnames row, reduced to
 // what routing needs. Verified mirrors `verified_at IS NOT NULL`; the
@@ -92,8 +112,42 @@ func (c *HostRouteCache) Rebuild(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	c.hosts.Store(&fresh)
+	inlets, ierr := loadInletStacks(db)
+	c.snap.Store(&routeSnapshot{hosts: fresh, inlets: inlets})
+	if ierr != nil {
+		return fmt.Errorf("inlet stacks (hosts published; inlet checks fall back to SQL): %w", ierr)
+	}
 	return nil
+}
+
+// loadInletStacks returns every active nested inlet stack — a name of
+// the form `<stack>/_<inlet>` with an active version, under a live
+// tenant. The LIKE is a coarse prefilter (its `_` is a wildcard); the
+// exact name is matched at lookup.
+func loadInletStacks(db *sql.DB) (map[string]struct{}, error) {
+	rows, err := db.Query(
+		`SELECT t.slug, s.name
+		   FROM stacks s
+		   JOIN tenants t ON t.tenant_id = s.tenant_id
+		  WHERE s.active_version IS NOT NULL
+		    AND s.name LIKE '%/_%'
+		    AND t.revoked_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var slug, name string
+		if err := rows.Scan(&slug, &name); err != nil {
+			return nil, err
+		}
+		out[inletKey(slug, name)] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // lookup returns the cached row for a canonical hostname. ready=false
@@ -102,10 +156,21 @@ func (c *HostRouteCache) Rebuild(db *sql.DB) error {
 // caller must NOT fall back to SQL, or the hot path regains the mirror
 // dependency the cache exists to remove).
 func (c *HostRouteCache) lookup(canonical string) (row hostRouteRow, found, ready bool) {
-	m := c.hosts.Load()
-	if m == nil {
+	s := c.snap.Load()
+	if s == nil {
 		return hostRouteRow{}, false, false
 	}
-	row, found = (*m)[canonical]
+	row, found = s.hosts[canonical]
 	return row, found, true
+}
+
+// inletActive reports whether tenant has an active stack named stack
+// (an inlet such as `shop/_tcp`). ready=false ⇒ use the SQL path.
+func (c *HostRouteCache) inletActive(tenant, stack string) (active, ready bool) {
+	s := c.snap.Load()
+	if s == nil || s.inlets == nil {
+		return false, false
+	}
+	_, active = s.inlets[inletKey(tenant, stack)]
+	return active, true
 }
