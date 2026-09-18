@@ -24,6 +24,7 @@ type enrollChoices struct {
 	sshAgent  bool
 	sshKey    string
 	newKey    bool
+	identity  string // who the id_token says is signing in; shown before "name your space"
 }
 
 // resolveEnrollEndpoint picks the FULL enroll URL: the cloud's advertised
@@ -82,6 +83,7 @@ func performEnroll(endpoint, idToken, profile string, ec enrollChoices, stdout, 
 	res, err := auth.OAuthEnroll(auth.OAuthEnrollOptions{
 		EndpointURL: endpoint,
 		IDToken:     idToken,
+		Identity:    ec.identity,
 		Profile:     profile,
 		TenantSlug:  ec.tenant,
 		AssumeYes:   ec.assumeYes,
@@ -209,10 +211,58 @@ Flags:
 		sshAgent:  *sshAgent,
 		sshKey:    *sshKey,
 		newKey:    *newKey,
+		identity:  tok.Subject,
+	}
+	// Re-enrolling a profile means re-enrolling ITS key. Without this the
+	// default key (~/.ssh/id_ed25519-txco) would be presented instead — a
+	// different key, so a different actor — and the profile would be rebound
+	// to it, leaving the actor the user was trying to repair untouched.
+	if m, ok := alreadyEnrolled(profile); ok && sameChassisHost(m.ChassisURL, endpoint) &&
+		!ec.sshAgent && ec.sshKey == "" && !ec.newKey {
+		ec.sshKey, ec.sshAgent = auth.ExistingKeyChoice(m, profile)
+		fmt.Fprintf(stderr, "re-enrolling profile %q with the key it already has\n", profile)
 	}
 	if _, err := performEnroll(endpoint, tok.IDToken, profile, ec, stdout, stderr); err != nil {
 		auth.PrintCLIErrorf(stderr, "cloud enroll: %v\n  endpoint: %s", err, endpoint)
 		return 1
 	}
 	return 0
+}
+
+// signBackIn is login's step for a profile that is already enrolled on this
+// chassis: present the fresh id_token with the profile's own key, which lifts
+// the "signed out in the admin UI — sign in again" marker. Returns a non-zero
+// exit code only when the user picked the wrong account; a chassis that cannot
+// be reached degrades to a warning, because the cloud sign-in itself worked.
+func signBackIn(endpoint, idToken, profile, signedInAs string, m *auth.Meta, stderr io.Writer) (*auth.OAuthReauthResult, int) {
+	res, err := auth.OAuthReauth(auth.OAuthReauthOptions{
+		EnrollEndpointURL: endpoint,
+		IDToken:           idToken,
+		Profile:           profile,
+	})
+	if err == nil {
+		return res, 0
+	}
+	var mismatch *auth.ReauthMismatchError
+	if errors.As(err, &mismatch) {
+		who := mismatch.SignedInAs
+		if who == "" {
+			who = signedInAs
+		}
+		auth.PrintCLIErrorf(stderr, "login: you signed in as %s, but profile %q was enrolled with a different account", who, profile)
+		fmt.Fprintf(stderr, "  this machine's key belongs to %s on %s\n", spaceName(m.DefaultTenant), m.ChassisURL)
+		fmt.Fprintf(stderr, "  nothing was changed — run `txco login --profile %s` again and choose the account that created it\n", profile)
+		return nil, 1
+	}
+	auth.PrintCLIErrorf(stderr, "login: signed in, but couldn't confirm it with the chassis: %v", err)
+	fmt.Fprintf(stderr, "  if `txco ui` still says you are signed out, run `txco login --profile %s` again\n", profile)
+	return nil, 0
+}
+
+// spaceName renders a tenant slug for a sentence, tolerating an unknown one.
+func spaceName(slug string) string {
+	if strings.TrimSpace(slug) == "" {
+		return "its cloud space"
+	}
+	return fmt.Sprintf("the %q space", slug)
 }

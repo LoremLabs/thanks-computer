@@ -913,6 +913,51 @@ func (c *Client) OAuthEnroll(ctx context.Context, endpointURL string, req OAuthE
 	return &out, nil
 }
 
+// OAuthReauthRequest is the body for POST /auth/oauth/reauth. IDToken is a
+// bearer secret — do not log this struct.
+type OAuthReauthRequest struct {
+	IDToken   string `json:"id_token"`
+	PublicKey string `json:"public_key"`
+}
+
+// OAuthReauthResponse mirrors the reauth endpoint's success body.
+type OAuthReauthResponse struct {
+	ActorID    string `json:"actor_id"`
+	TenantSlug string `json:"tenant_slug"`
+	SignedInAs string `json:"signed_in_as"`
+}
+
+// OAuthReauth POSTs to the full reauth endpoint URL: an already-enrolled key
+// signing back in after an admin-UI sign-out. It clears the actor's re-auth
+// marker and creates nothing. Unsigned; the id_token is the credential. A
+// non-200 is an *HTTPError: 403 `identity_not_enrolled` / `identity_mismatch`
+// carry Detail["signed_in_as"]; a 404 with no code is a chassis that predates
+// the endpoint.
+func (c *Client) OAuthReauth(ctx context.Context, endpointURL string, req OAuthReauthRequest) (*OAuthReauthResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out OAuthReauthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode oauth-reauth: %w", err)
+	}
+	return &out, nil
+}
+
 // --- tenants ---------------------------------------------------------------
 
 // Tenant mirrors the server's tenant row for listing.

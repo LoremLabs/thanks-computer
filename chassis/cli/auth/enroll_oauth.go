@@ -21,6 +21,7 @@ import (
 type OAuthEnrollOptions struct {
 	EndpointURL string // full URL, e.g. https://admin.thanks.computer/auth/oauth/enroll
 	IDToken     string // bearer secret — never logged
+	Identity    string // the id_token's subject, for display only ("email:you@…")
 	Profile     string // CLI profile name to write + activate (default "cloud")
 	Label       string
 	TenantSlug  string // explicit --tenant; empty means "let the server suggest"
@@ -129,6 +130,18 @@ func OAuthEnroll(opts OAuthEnrollOptions) (*OAuthEnrollResult, error) {
 				return nil, fmt.Errorf("could not settle on an available tenant slug after %d attempts", attempt)
 			}
 			if isTTY && !opts.AssumeYes {
+				// Say WHICH account is about to get a new space. Someone who
+				// expected to land in an existing one picked the wrong account
+				// at the provider, and this is the only place they can tell.
+				if attempt == 0 && he.Code == "tenant_slug_required" {
+					who := strings.TrimSpace(opts.Identity)
+					if who == "" {
+						who = "this account"
+					}
+					fmt.Fprintf(stderr, "\nYou're signed in as %s, which has no cloud space here yet.\n"+
+						"  Naming one creates a NEW space. If you expected an existing one, press Ctrl-C\n"+
+						"  and sign in with the account that created it.\n\n", who)
+				}
 				chosen, _, perr := promptLine(stderr, "Name your cloud space", suggested)
 				if perr != nil {
 					ek.CleanupOnFailure()

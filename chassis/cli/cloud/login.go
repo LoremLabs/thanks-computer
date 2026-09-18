@@ -174,6 +174,23 @@ Flags:
 	if tr.ExpiresIn > 0 {
 		tok.Expiry = obtainedAt.Add(time.Duration(tr.ExpiresIn) * time.Second)
 	}
+
+	// A profile that is already enrolled on this chassis is SIGNING BACK IN,
+	// not enrolling: tell the chassis, with the profile's own key, that its
+	// user just proved a fresh identity-provider login (signBackIn). Done
+	// before the token is stored so that the wrong account — refused, nothing
+	// changed — does not also replace the right account's cloud session.
+	endpoint := resolveEnrollEndpoint(cfg, *chassisFlag, *dev)
+	enrolled, isEnrolled := alreadyEnrolled(profile)
+	signingBackIn := isEnrolled && !*noEnroll && sameChassisHost(enrolled.ChassisURL, endpoint)
+	var back *auth.OAuthReauthResult
+	if signingBackIn {
+		var code int
+		if back, code = signBackIn(endpoint, tr.IDToken, profile, sub, enrolled, stderr); code != 0 {
+			return code
+		}
+	}
+
 	if err := SaveCloudToken(profile, tok); err != nil {
 		auth.PrintCLIErrorf(stderr, "login: store token: %v", err)
 		return 1
@@ -198,10 +215,13 @@ Flags:
 		fmt.Fprintf(stdout, "\nSkipped chassis enrollment (--no-enroll). Run `txco cloud enroll` when ready.\n")
 		return 0
 	}
-	endpoint := resolveEnrollEndpoint(cfg, *chassisFlag, *dev)
 	if m, ok := alreadyEnrolled(profile); ok {
 		if sameChassisHost(m.ChassisURL, endpoint) {
 			fmt.Fprintf(stdout, "\nAlready enrolled — profile %q targets %s.\n", profile, m.ChassisURL)
+			if back != nil {
+				fmt.Fprintf(stdout, "This machine is signed in to %s; `txco ui --profile %s` opens the admin UI.\n",
+					spaceName(back.TenantSlug), profile)
+			}
 			return 0
 		}
 		// The profile name is bound to a DIFFERENT chassis (e.g. a local
@@ -219,6 +239,7 @@ Flags:
 		sshAgent:  *sshAgent,
 		sshKey:    *sshKey,
 		newKey:    *newKey,
+		identity:  sub,
 	}
 	if _, err := performEnroll(endpoint, tr.IDToken, profile, ec, stdout, stderr); err != nil {
 		// Login succeeded; surface the partial failure (with the endpoint it

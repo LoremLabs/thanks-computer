@@ -121,6 +121,18 @@ Flags:
 
 	c := client.New(target)
 	resp, err := c.BootstrapBrowserAuth(context.Background(), *label)
+	// Signed out in the admin UI: the key is fine, the chassis wants a fresh
+	// identity-provider login first. Do that here rather than send the user
+	// off to find the right command — they asked to open the UI — then ask
+	// once more.
+	if reauthRequired(err) && Reauthenticate != nil {
+		fmt.Fprintln(stdout, "You signed out of the admin UI, so this machine has to sign in again first.")
+		if code := Reauthenticate(resolvedProfile, *noOpen, stdout, stderr); code != 0 {
+			return code
+		}
+		fmt.Fprintln(stdout)
+		resp, err = c.BootstrapBrowserAuth(context.Background(), *label)
+	}
 	if err != nil {
 		// Most likely failure: the chassis can't find this key (key
 		// not enrolled, or wrong tenant). Translate the typed error
@@ -142,7 +154,8 @@ Flags:
 				// the wrong problem entirely.
 				if he.Code == "reauth_required" {
 					PrintCLIError(stderr, "auth login: signed out — this machine needs to authenticate again")
-					fmt.Fprintf(stderr, "  run `txco login` to sign in through your identity provider\n")
+					fmt.Fprintf(stderr, "  run `txco login --profile %s` to sign in through your identity provider,\n"+
+						"  with the account this profile was enrolled with\n", resolvedProfile)
 					return 1
 				}
 				PrintCLIErrorf(stderr, "auth login: forbidden (%s)", he.Code)
@@ -171,6 +184,19 @@ Flags:
 	fmt.Fprintf(stdout, "Opened %s in your browser.\n",
 		resp.URL)
 	return 0
+}
+
+// Reauthenticate signs the user in through the identity provider again for
+// an enrolled profile, returning 0 once the chassis has accepted it. The cli
+// package installs it: the cloud sign-in lives in a package that imports this
+// one, so it cannot be called from here directly. nil (a build without the
+// cloud flow) leaves the printed instructions as the only path.
+var Reauthenticate func(profile string, noOpen bool, stdout, stderr io.Writer) int
+
+// reauthRequired reports the chassis's "signed out — prove a fresh login" 403.
+func reauthRequired(err error) bool {
+	var he *client.HTTPError
+	return errors.As(err, &he) && he.StatusCode == http.StatusForbidden && he.Code == "reauth_required"
 }
 
 // loginIdentitySummary returns a one-line "who am I opening the UI as"

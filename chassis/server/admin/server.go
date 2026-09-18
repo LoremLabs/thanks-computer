@@ -292,6 +292,10 @@ func (c *Controller) Start() {
 	if c.oauthIssuer != "" {
 		r.Handle("/auth/oauth/enroll",
 			throttled(http.HandlerFunc(c.handleOAuthEnroll))).Methods(http.MethodPost)
+		// Signing back in after an admin-UI sign-out: clears the actor's
+		// re-auth marker and nothing else (oauth_reauth.go).
+		r.Handle("/auth/oauth/reauth",
+			throttled(http.HandlerFunc(c.handleOAuthReauth))).Methods(http.MethodPost)
 	}
 
 	// Retired flat routes — return 410 regardless of auth so an

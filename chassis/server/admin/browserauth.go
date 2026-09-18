@@ -117,7 +117,7 @@ func (c *Controller) handleBrowserBootstrap(w http.ResponseWriter, r *http.Reque
 	// Signed out in the browser? Then holding the signing key is no
 	// longer enough to mint a new session — the actor has to prove a
 	// fresh identity-provider login first (which clears the marker at
-	// /auth/oauth/enroll). This is what makes "Sign out" mean something
+	// /auth/oauth/reauth). This is what makes "Sign out" mean something
 	// to a CLI that still has the key on disk.
 	//
 	// Fail CLOSED on a lookup error: the whole point of the marker is to
@@ -132,7 +132,7 @@ func (c *Controller) handleBrowserBootstrap(w http.ResponseWriter, r *http.Reque
 			zap.String("actor", ac.ActorID),
 			zap.String("tenant", ac.TenantID))
 		writeJSONError(w, http.StatusForbidden, "reauth_required", map[string]any{
-			"hint": "this machine was signed out in the admin UI; run `txco login` to sign in again",
+			"hint": "this machine was signed out in the admin UI; `txco ui` signs it in again through your identity provider (or run `txco login --profile <profile>`)",
 		})
 		return
 	}
@@ -439,7 +439,7 @@ func (c *Controller) handleBrowserSessionDelete(w http.ResponseWriter, r *http.R
 // Two guards, both load-bearing:
 //
 //   - No OAuth issuer configured means there is no way to CLEAR the
-//     marker (only /auth/oauth/enroll clears it), so stamping it would
+//     marker (only /auth/oauth/reauth and /enroll clear it), so stamping it would
 //     lock a self-hosted operator out of their own admin UI. Leave
 //     open-core behaviour exactly as it was.
 //   - No ActorID means an open-dev or basic-auth context, which has no

@@ -119,7 +119,43 @@ func applyTargetSelector(targetSel string, url, profile *string) {
 // the bare name "cloud"; every other cloud gets a "cloud-" prefix. An empty
 // name means "no profile named", which cloud login resolves to its own default.
 func isCloudProfile(p string) bool {
-	return p == "" || p == "cloud" || strings.HasPrefix(p, "cloud-")
+	if p == "" || p == "cloud" || strings.HasPrefix(p, "cloud-") {
+		return true
+	}
+	// `txco login --profile <name>` enrolls the cloud under any name; such a
+	// profile is known by the cloud session stored beside it.
+	_, err := cloud.LoadCloudToken(p)
+	return err == nil
+}
+
+// `txco ui` on a machine the admin UI signed out: the chassis refuses the
+// signed bootstrap until the user has been through the identity provider
+// again. auth login calls this, then retries.
+func init() { auth.Reauthenticate = reauthViaCloudLogin }
+
+func reauthViaCloudLogin(profile string, noOpen bool, stdout, stderr io.Writer) int {
+	cloud.ClientVersion = Build.Version
+	return cloud.Dispatch(cloudLoginArgs(profile, noOpen), stdout, stderr)
+}
+
+// cloudLoginArgs is the `txco login` invocation that signs `profile` back in
+// against the cloud it was enrolled with: the local dev cloud for "cloud-dev",
+// else whichever cloud its stored session names, else the default.
+func cloudLoginArgs(profile string, noOpen bool) []string {
+	args := []string{"login"}
+	if profile != "" {
+		args = append(args, "--profile", profile)
+	}
+	switch tok, err := cloud.LoadCloudToken(profile); {
+	case profile == "cloud-dev":
+		args = append(args, "--dev")
+	case err == nil && tok != nil && strings.TrimSpace(tok.CloudURL) != "":
+		args = append(args, "--cloud", tok.CloudURL)
+	}
+	if noOpen {
+		args = append(args, "--no-open")
+	}
+	return args
 }
 
 // forceCloudLogin runs the cloud OAuth sign-in for the profile `txco ui` is
@@ -136,15 +172,8 @@ func forceCloudLogin(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	loginArgs := []string{"login"}
-	if profile != "" {
-		loginArgs = append(loginArgs, "--profile", profile)
-	}
 	// "cloud-dev" is cloud.derivedCloudProfile's name for the local dev cloud.
 	// Without --dev, cloud login would default to the PROD cloud base and sign
-	// the dev profile in against the wrong issuer.
-	if profile == "cloud-dev" {
-		loginArgs = append(loginArgs, "--dev")
-	}
-	return cloud.Dispatch(loginArgs, stdout, stderr)
+	// the dev profile in against the wrong issuer (cloudLoginArgs).
+	return cloud.Dispatch(cloudLoginArgs(profile, false), stdout, stderr)
 }
