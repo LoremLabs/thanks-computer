@@ -2,8 +2,10 @@ package ipp
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -249,5 +251,68 @@ func TestLeaseCommittedIsExclusive(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("job %s leased %d times", id, n)
 		}
+	}
+}
+
+// The printer's URI path rides the row, so a job that came in through the
+// shared front door (/p/<handle>/<printer>) can be described to the stack by
+// a dispatcher on another node that never saw the request.
+func TestURIPathRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	j, err := s.CreateJob(ctx, NewJob{Tenant: "acme", Printer: "paris", Host: "ipp.stacks.example:443", URIPath: "/p/core-abc123/paris"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetJobByID(ctx, j.ID)
+	if err != nil || got.URIPath != "/p/core-abc123/paris" || got.Host != "ipp.stacks.example:443" {
+		t.Fatalf("round trip: %+v %v", got, err)
+	}
+	_, _ = s.SetCommitted(ctx, j.ID, sha, 1, "application/pdf", "")
+	leased, _ := s.LeaseCommitted(ctx, "node", 1)
+	if len(leased) != 1 || leased[0].URIPath != "/p/core-abc123/paris" {
+		t.Fatalf("a leased job lost its URI path: %+v", leased)
+	}
+}
+
+// A job table created before uri_path existed gains the column on the next
+// boot, and its old rows read back with the empty default.
+func TestEnsureSchemaAddsURIPathToAnOldTable(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=rwc&_journal_mode=WAL&_busy_timeout=15000&_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The first shipped shape: everything but uri_path.
+	old := strings.Replace(schema[0], "\t   uri_path        TEXT NOT NULL DEFAULT '',\n", "", 1)
+	if old == schema[0] {
+		t.Fatal("test is stale: uri_path line not found in the schema")
+	}
+	if _, err := db.Exec(old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO ipp_jobs (id, tenant, printer, job_number, state, created_at, updated_at)
+	                      VALUES ('ipj_old', 'acme', 'paris', 1, 'delivered', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(db, nil)
+	for i := 0; i < 2; i++ { // idempotent
+		if err := s.EnsureSchema(ctx); err != nil {
+			t.Fatalf("EnsureSchema #%d: %v", i, err)
+		}
+	}
+	got, err := s.GetJobByID(ctx, "ipj_old")
+	if err != nil || got.URIPath != "" || got.State != StateDelivered {
+		t.Fatalf("old row after migration: %+v %v", got, err)
+	}
+	// The old table's tenant had already been handed job number 1.
+	if _, err := db.Exec(`INSERT INTO ipp_job_seq (tenant, next_number) VALUES ('acme', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.CreateJob(ctx, NewJob{Tenant: "acme", Printer: "paris", URIPath: "/p/paris"})
+	if err != nil || j.Number != 2 || j.URIPath != "/p/paris" {
+		t.Fatalf("CreateJob on the migrated table: %+v %v", j, err)
 	}
 }

@@ -4,6 +4,7 @@
 // delivered by CAS reference.
 //
 //	ipps://ipp.<zone>:443/p/<printer>
+//	ipps://ipp.<structured suffix>:443/p/<handle>/<printer>   (a tenant with no zone)
 //
 // IPP is HTTP (POST application/ipp: a binary attribute block, then the
 // document), so this head binds no listener of its own — the web head mounts
@@ -108,6 +109,11 @@ type Controller struct {
 	authIP     *throttle.Throttle
 	authTenant *throttle.Throttle
 
+	// sharedZone is the platform's structured-host suffix, bare
+	// ("stacks.example"): `ipp.<sharedZone>` is the front door every tenant
+	// without a zone of its own shares — see ippTarget.
+	sharedZone string
+
 	formats        []string
 	maxBytes       int64
 	maxInflight    int
@@ -159,6 +165,7 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chipp.Store, 
 		return c
 	}
 	conf := pu.Conf
+	c.sharedZone = normalizeZone(conf.StructuredHostSuffix)
 	if f := cleanFormats(conf.IPPFormats); len(f) > 0 {
 		c.formats = f
 	}
@@ -244,6 +251,7 @@ func (c *Controller) Start() {
 	c.pu.Logger.Info("ipp controller started",
 		zap.Strings("formats", c.formats), zap.Int64("max_job_bytes", c.maxBytes),
 		zap.Bool("insecure_auth", c.insecureAuth), zap.Bool("anonymous_attributes", c.anonAttrs),
+		zap.String("shared_front_door", sharedDoor(c.sharedZone)),
 		zap.String("node", c.nodeID))
 }
 
@@ -270,6 +278,14 @@ func (c *Controller) noteJob(outcome string) {
 	if c.jobs != nil {
 		c.jobs.Add(context.Background(), 1, metric.WithAttributes(attribute.String("txco.ipp.outcome", outcome)))
 	}
+}
+
+// sharedDoor names the shared front door for the startup log ("" = none).
+func sharedDoor(zone string) string {
+	if zone == "" {
+		return ""
+	}
+	return "ipp." + zone + PathPrefix + "/<handle>/<printer>"
 }
 
 func cleanFormats(in []string) []string {

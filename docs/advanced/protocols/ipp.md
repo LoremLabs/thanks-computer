@@ -8,7 +8,8 @@ File → Print → "research" in any application is one run of the tenant's
 implements the printer; the stack decides what printing means._
 
 ```
-ipps://ipp.<zone>:443/p/<printer>
+ipps://ipp.<zone>:443/p/<printer>                          a tenant with a zone of its own
+ipps://ipp.<structured suffix>:443/p/<handle>/<printer>    any tenant (the shared front door)
 ```
 
 Print is already in every desktop application. Nobody has to find the
@@ -69,6 +70,38 @@ a subdomain of —
 Behind a front proxy that issues certificates on demand, the chassis's
 `tls-ask` endpoint authorizes `ipp.<X>` under the same two rules.
 
+### The shared front door
+
+A tenant with no zone of its own lives under the platform's structured-host
+suffix (`--structured-host-suffix`), as `<handle>.<suffix>` — say
+`core-hmhzx2isby.stacks.example`. That zone belongs to nobody, so
+`ipp.<suffix>` cannot take its tenant from the zone; it takes it from the
+**path**, as the handle of any hostname the tenant has under the suffix:
+
+```
+ipps://ipp.stacks.example:443/p/core-hmhzx2isby/research
+                               └─ handle ─────┘ └ printer
+```
+
+The handle is resolved through that hostname's own verified binding —
+exactly as `ipp.<hostname>` would be — and then everything is the same:
+that tenant's `_ipp` stack, that tenant's `IPP_PASSWORD`, the same one 404
+for a handle that names nothing. The stack still sees only the printer
+label; the handle is addressing, like the hostname it stands in for.
+
+It exists because of certificates. `ipp.<suffix>` is ONE label under the
+suffix, so the suffix's wildcard certificate and wildcard DNS already cover
+it: every tenant gets a printer URL with no zone, no record and no
+certificate of its own. The obvious alternative, `ipp.<handle>.<suffix>`,
+is two labels deep, where no wildcard certificate reaches (and `tls-ask`
+never issues under the suffix). The handle form exists only on
+`ipp.<suffix>`; on a tenant's own zone a second path segment is a 404.
+The handle must be a single DNS label, so a path cannot name a host at
+another depth. Under `txco dev` the suffix is `localhost`, which makes
+`ipp.localhost` both this door (`/p/<minted handle>/<printer>`) and the
+ordinary front door of the bound hostname `localhost` (`/p/<printer>`);
+the two are told apart by the shape of the path.
+
 A stack whose name sanitizes to the label `ipp` cannot have `ipp.<zone>` as
 its hostname — that name is the front door — and gets a structured host
 instead.
@@ -115,7 +148,7 @@ been told the job completed.
 | `@ipp.requesting_user` | who the client **claims** printed it — untrusted |
 | `@ipp.document.sha256` | the document, as a blob reference |
 | `@ipp.document.size`, `.format`, `.name` | bytes, MIME type, file name if sent |
-| `@ipp.host`, `@ipp.printer_uri` | the host and URI the job arrived on |
+| `@ipp.host`, `@ipp.printer_uri` | the host and URI the job arrived on (through the shared front door the URI keeps its `/p/<handle>/…`) |
 | `@ipp.submitted_at`, `@ipp.attempt`, `@ipp.node` | when, which delivery attempt, which node |
 | `@client.ip` | the submitter's address |
 

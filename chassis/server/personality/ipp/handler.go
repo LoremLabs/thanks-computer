@@ -28,7 +28,7 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	t, ok := ippTarget(r.Host, r.URL.Path)
+	t, ok := ippTarget(r.Host, r.URL.Path, c.sharedZone)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -326,7 +326,7 @@ func (c *Controller) newJob(r *http.Request, req *goipp.Message, site printerSit
 	return chipp.NewJob{
 		Tenant: site.tenant, Printer: t.printer,
 		RequestingUser: clip(user, 255), JobName: clip(name, 255), DocumentName: clip(doc, 255),
-		DocumentFormat: format, Host: hostWithPort(r, t), ClientIP: clientIP(r),
+		DocumentFormat: format, Host: hostWithPort(r, t), URIPath: t.uriPath(), ClientIP: clientIP(r),
 	}
 }
 
@@ -405,7 +405,7 @@ func printerURI(r *http.Request, t target) string {
 	if secure(r) {
 		scheme = "ipps"
 	}
-	return scheme + "://" + hostWithPort(r, t) + PathPrefix + "/" + t.printer
+	return scheme + "://" + hostWithPort(r, t) + t.uriPath()
 }
 
 // hostWithPort is the canonical ipp host plus whatever port the client named.
@@ -431,7 +431,7 @@ func uriAgrees(req *goipp.Message, t target) bool {
 		if err != nil {
 			return false
 		}
-		if u.Path != PathPrefix+"/"+t.printer && !strings.HasPrefix(u.Path, PathPrefix+"/"+t.printer+"/jobs/") {
+		if u.Path != t.uriPath() && !strings.HasPrefix(u.Path, t.uriPath()+"/jobs/") {
 			return false
 		}
 	}
@@ -472,7 +472,7 @@ func (c *Controller) wireLog(r *http.Request, t target, op goipp.Op, req *goipp.
 	}
 	c.pu.Logger.Info("ipp wire",
 		zap.String("op", op.String()), zap.String("version", req.Version.String()),
-		zap.String("host", t.host), zap.String("printer", t.printer),
+		zap.String("host", t.host), zap.String("printer", t.printer), zap.Bool("shared_front_door", t.handle != ""),
 		zap.Strings("operation_attrs", names(req.Operation)),
 		zap.Strings("job_attrs", names(req.Job)),
 		zap.Strings("requested", chipp.OpStrings(req, "requested-attributes")),

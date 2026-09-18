@@ -27,6 +27,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas/filestore"
 	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
 
 // --- fakes ----------------------------------------------------------------------
@@ -939,18 +940,35 @@ func TestDispatcher(t *testing.T) {
 }
 
 func TestTargetParsing(t *testing.T) {
+	const shared = "stacks.example"
 	ok := map[[2]string]target{
-		{"ipp.dripl.it", "/p/research"}:           {x: "dripl.it", host: "ipp.dripl.it", printer: "research"},
-		{"IPP.Dripl.IT:443", "/p/research/"}:      {x: "dripl.it", host: "ipp.dripl.it", printer: "research"},
-		{"ipp.dripl.it", "/p/research/jobs/42"}:   {x: "dripl.it", host: "ipp.dripl.it", printer: "research", job: 42},
-		{"ipp.localhost:8443", "/p/a.b-c_1"}:      {x: "localhost", host: "ipp.localhost", printer: "a.b-c_1"},
-		{"ipp.pony.acme.example", "/p/summarize"}: {x: "pony.acme.example", host: "ipp.pony.acme.example", printer: "summarize"},
+		{"ipp.dripl.it", "/p/research"}:           {x: "dripl.it", host: "ipp.dripl.it", base: "/p", printer: "research"},
+		{"IPP.Dripl.IT:443", "/p/research/"}:      {x: "dripl.it", host: "ipp.dripl.it", base: "/p", printer: "research"},
+		{"ipp.dripl.it", "/p/research/jobs/42"}:   {x: "dripl.it", host: "ipp.dripl.it", base: "/p", printer: "research", job: 42},
+		{"ipp.localhost:8443", "/p/a.b-c_1"}:      {x: "localhost", host: "ipp.localhost", base: "/p", printer: "a.b-c_1"},
+		{"ipp.pony.acme.example", "/p/summarize"}: {x: "pony.acme.example", host: "ipp.pony.acme.example", base: "/p", printer: "summarize"},
+		{"ipp.dripl.it", "/p/jobs"}:               {x: "dripl.it", host: "ipp.dripl.it", base: "/p", printer: "jobs"}, // a printer may be called anything
+		// The shared front door: the tenant rides the path as the HANDLE of a
+		// hostname it has under the suffix, and that hostname decides the tenant.
+		{"ipp.stacks.example", "/p/core-hmhzx2isby/paris"}: {
+			x: "core-hmhzx2isby.stacks.example", host: "ipp.stacks.example", handle: "core-hmhzx2isby", base: "/p/core-hmhzx2isby", printer: "paris"},
+		{"ipp.stacks.example:443", "/p/core-hmhzx2isby/paris/jobs/7"}: {
+			x: "core-hmhzx2isby.stacks.example", host: "ipp.stacks.example", handle: "core-hmhzx2isby", base: "/p/core-hmhzx2isby", printer: "paris", job: 7},
+		{"ipp.stacks.example", "/p/core-hmhzx2isby/jobs"}: {
+			x: "core-hmhzx2isby.stacks.example", host: "ipp.stacks.example", handle: "core-hmhzx2isby", base: "/p/core-hmhzx2isby", printer: "jobs"},
+		// The plain form still parses on the shared host (whether the suffix
+		// itself names a tenant is the lookup's question — under `txco dev`
+		// it does: the suffix is `localhost`, which is also a bound hostname).
+		{"ipp.stacks.example", "/p/research"}: {x: "stacks.example", host: "ipp.stacks.example", base: "/p", printer: "research"},
 	}
 	for in, want := range ok {
-		got, valid := ippTarget(in[0], in[1])
+		got, valid := ippTarget(in[0], in[1], shared)
 		if !valid || got != want {
 			t.Errorf("ippTarget(%q,%q) = %+v,%v want %+v", in[0], in[1], got, valid, want)
 		}
+	}
+	if got, _ := ippTarget("ipp.stacks.example", "/p/core-hmhzx2isby/paris", shared); got.uriPath() != "/p/core-hmhzx2isby/paris" {
+		t.Errorf("shared uriPath = %q", got.uriPath())
 	}
 	for _, in := range [][2]string{
 		{"dripl.it", "/p/research"},            // not an ipp host
@@ -961,17 +979,171 @@ func TestTargetParsing(t *testing.T) {
 		{"ipp.dripl.it", "/p/"},                //
 		{"ipp.dripl.it", "/p/Research"},        // labels are lowercase
 		{"ipp.dripl.it", "/p/-bad"},            //
-		{"ipp.dripl.it", "/p/a/b"},             //
+		{"ipp.dripl.it", "/p/a/b"},             // the handle form exists ONLY on the shared door
+		{"ipp.dripl.it", "/p/a/b/jobs/3"},      //
 		{"ipp.dripl.it", "/p/a/jobs/0"},        //
 		{"ipp.dripl.it", "/p/a/jobs/x"},        //
 		{"ipp.dripl.it", "/p/../etc"},          //
 		{"ipp.dripl.it", "/printers/research"}, //
+		// On the shared door the handle is ONE dns label: a dot would let the
+		// path name a host at another depth (or climb out of the suffix).
+		{"ipp.stacks.example", "/p/a.b/paris"},               //
+		{"ipp.stacks.example", "/p/evil.example.com/paris"},  //
+		{"ipp.stacks.example", "/p/-bad/paris"},              //
+		{"ipp.stacks.example", "/p/UPPER/paris"},             //
+		{"ipp.stacks.example", "/p/core-abc/paris/extra"},    //
+		{"ipp.stacks.example", "/p/core-abc/Paris"},          //
+		{"ipp.core-abc.stacks.example", "/p/core-abc/paris"}, // two labels under the suffix is not the door
 	} {
-		if got, valid := ippTarget(in[0], in[1]); valid {
+		if got, valid := ippTarget(in[0], in[1], shared); valid {
 			t.Errorf("ippTarget(%q,%q) accepted: %+v", in[0], in[1], got)
 		}
 	}
+	// No structured suffix configured: there is no shared door at all.
+	if got, valid := ippTarget("ipp.stacks.example", "/p/core-abc/paris", ""); valid {
+		t.Errorf("handle form accepted with no shared zone: %+v", got)
+	}
+	if normalizeZone(".Stacks.Example.") != "stacks.example" || normalizeZone("") != "" {
+		t.Error("normalizeZone")
+	}
 	if !IsIPPHost("ipp.dripl.it:443") || IsIPPHost("dripl.it") || IsIPPHost("ipp-dripl.it") {
 		t.Error("IsIPPHost")
+	}
+}
+
+// The shared front door end to end: a tenant with no zone of its own prints
+// through `ipp.<suffix>/p/<handle>/<printer>`. The handle picks the tenant
+// (through the hostname the tenant has under the suffix), the credential is
+// THAT tenant's, the URIs the client gets back keep the handle, and the
+// stack still sees only the printer label.
+func TestSharedFrontDoor(t *testing.T) {
+	h := newHarness(t, config.Config{StructuredHostSuffix: ".stacks.example"})
+	h.ctrl.Start()
+	const door = "ipp.stacks.example"
+	// The harness's tenant lookup is keyed by the hostname that decides the
+	// tenant: for the shared door that is <handle>.<suffix>.
+	h.zones["core-abc123.stacks.example"] = tenant
+	h.zones["web-zzz999.stacks.example"] = "other"
+
+	_, m := h.do(request{host: door, path: "/p/core-abc123/paris", op: goipp.OpGetPrinterAttributes})
+	if m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("Get-Printer-Attributes through the door: %v", m)
+	}
+	if u, _ := attr(m.Printer, "printer-uri-supported"); u.Values[0].V.String() != "ipps://"+door+"/p/core-abc123/paris" {
+		t.Fatalf("printer-uri-supported = %v", u.Values)
+	}
+	if n, _ := attr(m.Printer, "printer-name"); n.Values[0].V.String() != "paris" {
+		t.Fatalf("printer-name = %v (the handle is not part of the printer's name)", n.Values)
+	}
+
+	_, m = h.do(request{host: door, path: "/p/core-abc123/paris", op: goipp.OpPrintJob, doc: pdfDoc,
+		opAttrs: []goipp.Attribute{pdfFormat(), str("job-name", goipp.TagName, "Quarterly report.pdf")}})
+	if m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("Print-Job through the door: %v", m)
+	}
+	jobNo := intOf(t, m.Job, "job-id")
+	if u, _ := attr(m.Job, "job-uri"); u.Values[0].V.String() != "ipps://"+door+"/p/core-abc123/paris/jobs/1" {
+		t.Fatalf("job-uri = %v", u.Values)
+	}
+	// The job URL the client was handed works as an address.
+	if _, m = h.do(request{host: door, path: "/p/core-abc123/paris/jobs/1", op: goipp.OpGetJobAttributes}); m == nil || status(m) != goipp.StatusOk || intOf(t, m.Job, "job-id") != jobNo {
+		t.Fatalf("job by its shared-door URL: %v", m)
+	}
+
+	waitFor(t, "delivery", func() bool { return len(h.envelopes()) == 1 })
+	env := h.envelopes()[0]
+	for path, want := range map[string]string{
+		"_txc.ipp.tenant":      tenant,
+		"_txc.ipp.printer":     "paris", // the stack never sees the handle
+		"_txc.ipp.host":        door,
+		"_txc.ipp.printer_uri": "ipps://" + door + "/p/core-abc123/paris",
+	} {
+		if got := gjson.Get(env, path).String(); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+
+	// Every way the door can be wrong is the SAME 404, before any credential.
+	for name, rq := range map[string]request{
+		"no handle (the suffix is nobody's zone)": {path: "/p/paris"},
+		"unknown handle":    {path: "/p/nobody-000000/paris"},
+		"handle with a dot": {path: "/p/core-abc123.stacks/paris"},
+	} {
+		rq.host, rq.op = door, goipp.OpGetJobs
+		if resp, _ := h.do(rq); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: HTTP %d, want 404", name, resp.StatusCode)
+		}
+	}
+	// A handle selects its OWN tenant: this tenant's password opens nothing
+	// behind another tenant's handle.
+	if resp, _ := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobs}); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("another tenant's handle with our password: %d, want 401", resp.StatusCode)
+	}
+	if _, m := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobs, pass: "others-password"}); m == nil || status(m) != goipp.StatusOk {
+		t.Errorf("the other tenant's own password was refused: %v", m)
+	}
+	// …and its jobs are invisible across handles.
+	if _, m := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobAttributes, pass: "others-password",
+		opAttrs: []goipp.Attribute{goipp.MakeAttribute("job-id", goipp.TagInteger, goipp.Integer(jobNo))}}); status(m) != goipp.StatusErrorNotFound {
+		t.Errorf("a job seen through another tenant's handle: %v", status(m))
+	}
+}
+
+// Under `txco dev` the structured suffix is `localhost`, so `ipp.localhost`
+// is BOTH the shared door and the ordinary front door of the bound hostname
+// `localhost`. The path shape tells them apart; both must work.
+func TestSharedDoorCoexistsWithPlainHost(t *testing.T) {
+	h := newHarness(t, config.Config{StructuredHostSuffix: ".localhost"})
+	h.zones["localhost"] = tenant              // `txco dev` auto-binds localhost
+	h.zones["demo-abc123.localhost"] = "other" // a minted structured host
+
+	if _, m := h.do(request{host: "ipp.localhost:8443", path: "/p/research", op: goipp.OpGetJobs}); m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("plain form on the dev host: %v", m)
+	}
+	if _, m := h.do(request{host: "ipp.localhost:8443", path: "/p/demo-abc123/research", op: goipp.OpGetJobs, pass: "others-password"}); m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("handle form on the dev host: %v", m)
+	}
+}
+
+// fakeResolver is the ingress resolver's hostname → (tenant, verified) table.
+type fakeResolver map[string]ingress.RouteTarget
+
+func (f fakeResolver) ResolveErr(key ingress.RouteKey) (ingress.RouteTarget, bool, error) {
+	if key.Src != "http" {
+		return ingress.RouteTarget{}, false, nil
+	}
+	t, ok := f[key.Hostname]
+	return t, ok, nil
+}
+
+// The REAL lookup (the other tests replace it with a table): a handle on the
+// shared door reaches its tenant only through a VERIFIED hostname row —
+// the same strictness tls-ask applies — and a name with no row is nobody's.
+func TestLookupTenantThroughHostnameRows(t *testing.T) {
+	pu := &processor.Unit{Conf: config.Config{Personalities: "web,ipp", StructuredHostSuffix: ".stacks.example"}, Logger: zap.NewNop()}
+	c := NewController(context.Background(), pu, nil, fakeResolver{
+		"core-abc123.stacks.example": {Tenant: "onepony", Stack: "core", Verified: true},
+		"unproven.stacks.example":    {Tenant: "sneaky", Stack: "web", Verified: false},
+	})
+	ctx := context.Background()
+
+	slug, key, ok, err := c.lookupTenant(ctx, "core-abc123.stacks.example")
+	if err != nil || !ok || slug != "onepony" || key != "host:core-abc123.stacks.example" {
+		t.Fatalf("verified row: %q %q %v %v", slug, key, ok, err)
+	}
+	if _, _, ok, _ := c.lookupTenant(ctx, "unproven.stacks.example"); ok {
+		t.Fatal("an UNVERIFIED hostname row routed a print job")
+	}
+	if _, _, ok, _ := c.lookupTenant(ctx, "nobody.stacks.example"); ok {
+		t.Fatal("a hostname with no row named a tenant")
+	}
+	// The suffix itself is nobody's: the plain form on the shared host finds
+	// no tenant (in production its zone belongs to the system tenant, which
+	// site() refuses as well).
+	if _, _, ok, _ := c.lookupTenant(ctx, "stacks.example"); ok {
+		t.Fatal("the shared zone itself named a tenant")
+	}
+	if c.sharedZone != "stacks.example" {
+		t.Fatalf("sharedZone = %q", c.sharedZone)
 	}
 }

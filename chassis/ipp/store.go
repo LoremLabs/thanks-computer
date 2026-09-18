@@ -93,6 +93,7 @@ var schema = []string{
 	   attempts        INTEGER NOT NULL DEFAULT 0,
 	   rid             TEXT,
 	   host            TEXT NOT NULL DEFAULT '',
+	   uri_path        TEXT NOT NULL DEFAULT '',
 	   client_ip       TEXT NOT NULL DEFAULT '',
 	   created_at      TEXT NOT NULL,
 	   updated_at      TEXT NOT NULL,
@@ -113,6 +114,21 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	for _, q := range schema {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("ipp: ensure schema: %w", err)
+		}
+	}
+	// Additive columns, for a table that predates them. CREATE TABLE IF NOT
+	// EXISTS leaves an existing table alone, and the two engines disagree
+	// about ALTER ... ADD COLUMN IF NOT EXISTS (Postgres has it, SQLite does
+	// not), so the portable move is to PROBE and then add (the drive store's
+	// idiom).
+	for _, c := range []struct{ table, column, ddl string }{
+		{"ipp_jobs", "uri_path", `ALTER TABLE ipp_jobs ADD COLUMN uri_path TEXT NOT NULL DEFAULT ''`},
+	} {
+		if _, err := s.db.ExecContext(ctx, `SELECT `+c.column+` FROM `+c.table+` WHERE 1 = 0`); err == nil {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("ipp: add %s.%s: %w", c.table, c.column, err)
 		}
 	}
 	return nil

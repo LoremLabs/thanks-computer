@@ -158,7 +158,14 @@ func buildEnvelope(j chipp.Job, rid, node string, now time.Time) string {
 	}
 	b.Set("_txc.ipp.host", j.Host)
 	b.Set("_txc.ipp.printer", j.Printer)
-	b.Set("_txc.ipp.printer_uri", "ipps://"+j.Host+PathPrefix+"/"+j.Printer)
+	// The URI the client configured: through the shared front door the path
+	// carries the tenant's handle, so it is stored, not rebuilt. (A row from
+	// before the column existed has the plain form.)
+	uriPath := j.URIPath
+	if uriPath == "" {
+		uriPath = PathPrefix + "/" + j.Printer
+	}
+	b.Set("_txc.ipp.printer_uri", "ipps://"+j.Host+uriPath)
 	b.Set("_txc.ipp.job_id", j.ID)
 	b.Set("_txc.ipp.job_number", j.Number)
 	b.Set("_txc.ipp.requesting_user", j.RequestingUser) // client-claimed: untrusted
