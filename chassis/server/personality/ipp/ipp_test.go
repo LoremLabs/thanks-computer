@@ -933,9 +933,9 @@ func TestDispatcher(t *testing.T) {
 	if got, _ := h.store.GetJobByID(ctx, a.ID); got.State != chipp.StateDelivered || got.Rid == "" {
 		t.Fatalf("not delivered: %+v", got)
 	}
-	if n := len(h.envelopes()); n != 1 {
-		t.Fatalf("bus saw %d envelopes", n)
-	}
+	// "Delivered" is the bus TAKING the envelope; the fake bus records it a
+	// moment after the receive, so wait for the record rather than race it.
+	waitFor(t, "the bus to record the envelope", func() bool { return len(h.envelopes()) == 1 })
 }
 
 func TestTargetParsing(t *testing.T) {

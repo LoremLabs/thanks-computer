@@ -37,7 +37,7 @@ in `.txco/dev/`, and `ipp.localhost` belongs to this tenant because
 ```
 U=ipps://print:<password>@ipp.localhost:8443/p/research
 T=/usr/share/cups/ipptool
-ipptool -t ipps://ipp.localhost:8443/p/research get-printer-attributes.test   # anonymous, as Add Printer does
+ipptool -t $U get-printer-attributes.test                                    # challenged first: nothing is anonymous
 ipptool -t -f $T/document-letter.pdf $U validate-job.test
 ipptool -t -f $T/document-letter.pdf $U print-job.test
 ipptool -t -f $T/document-letter.pdf $U create-job.test                      # Create-Job + Send-Document

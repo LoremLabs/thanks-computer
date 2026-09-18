@@ -90,9 +90,10 @@ lpadmin -p research -E -v ipps://ipp.acme.example:443/p/research -m everywhere
 ```
 
 Give the **port**. IPP's default is 631, which this head does not listen
-on; CUPS treats port 443 as always-TLS, so `:443` is IPPS. The first print
-asks for the username and password and offers to keep them in the
-Keychain.
+on; CUPS treats port 443 as always-TLS, so `:443` is IPPS. Nothing is
+answered without the password, so **adding** the printer already asks for
+the username and password (`lpadmin` prompts in the terminal) and offers to
+keep them in the Keychain; printing then asks no more.
 
 `<printer>` is any label you like (`a-z 0-9 . _ -`, lowercase). The chassis
 keeps **no list of printers**: the label reaches the stack as
@@ -212,13 +213,17 @@ is `server-error-operation-not-supported`.
 
 ## Authentication, precisely
 
-Basic over TLS. A request over plaintext is refused (`403`) before a
-credential is read, unless `--ipp-insecure-auth` (dev). Get-Printer-
-Attributes is answered without credentials by default
-(`--ipp-anonymous-attributes`): a print client asks what a printer can do
-while *adding* it, before it has a password to offer, and the answer holds
-nothing about the tenant — the fixed capability set and the label from the
-URL. Every other operation authenticates. Verifications are throttled per
+Basic over TLS, for **every** operation: nothing on an `ipp.` host is
+answered without the password. A request over plaintext is refused (`403`)
+before a credential is read, unless `--ipp-insecure-auth` (dev). A bare
+request is challenged (`401`) and the client authenticates and asks again —
+CUPS does this on its own. `--ipp-anonymous-attributes` (default off) is the
+one escape hatch: it lets Get-Printer-Attributes alone through without
+credentials, for a print client that insists on querying a printer's
+capabilities while *adding* it, before it has a password to offer. That
+answer holds nothing about the tenant (the fixed capability set and the
+label from the URL) but it does confirm a printer exists at that hostname,
+which is why it is off. Verifications are throttled per
 client IP and per tenant (`--ipp-auth-rate`), counting only logins that are
 not already verified, so a client that re-authenticates on every request
 costs nothing while a guesser is capped — correct guess included.
@@ -244,7 +249,7 @@ before answering.
 | `--ipp-max-job-bytes` | 256 MiB | per document |
 | `--ipp-max-inflight` | 4 | concurrent uploads per tenant |
 | `--ipp-auth-rate` | 30/min | verifications per IP and per tenant, cache misses only |
-| `--ipp-anonymous-attributes` | true | Get-Printer-Attributes without credentials |
+| `--ipp-anonymous-attributes` | false | let Get-Printer-Attributes (only) through without credentials |
 | `--ipp-insecure-auth` | false | Basic over plaintext (dev) |
 | `--ipp-store`, `--ipp-db-path` | `sqlite`, `./chassis/data/ipp.db` | the job store (its own file, never the runtime DB) |
 | `--ipp-poll-interval` | 1 s | dispatcher retry cadence (a new job also wakes it) |
@@ -278,7 +283,7 @@ sends. `ipp.localhost` resolves to loopback and belongs to the tenant
 ```
 U=ipps://print:<password>@ipp.localhost:8443/p/research
 T=/usr/share/cups/ipptool
-ipptool -t ipps://ipp.localhost:8443/p/research get-printer-attributes.test
+ipptool -t $U get-printer-attributes.test
 ipptool -t -f $T/document-letter.pdf $U validate-job.test
 ipptool -t -f $T/document-letter.pdf $U print-job.test
 ipptool -t -f $T/document-letter.pdf $U create-job.test
@@ -308,6 +313,7 @@ Recorded with `--ipp-wire-debug`. CUPS 2.3.4 `ipptool`:
 - sends `copies=1` in its job ticket.
 
 Still to record from the macOS print dialog itself: whether Add Printer
-queries attributes anonymously, whether it uses Print-Job or Create-Job +
+can add a printer that challenges its attribute query (if not:
+`--ipp-anonymous-attributes`), whether it uses Print-Job or Create-Job +
 Send-Document, whether the dialog needs `image/urf` advertised before it
 offers a driverless queue, and what Safari sends.
