@@ -49,11 +49,15 @@ func newDBResolverTestStore(t *testing.T) *sql.DB {
 			created_at      TEXT NOT NULL,
 			UNIQUE(tenant_id, name)
 		);
-		CREATE TABLE stack_files (
-			version_id  INTEGER NOT NULL,
-			path        TEXT NOT NULL,
-			content     TEXT NOT NULL,
-			PRIMARY KEY (version_id, path)
+		-- The materialised ops the processor runs. Deliberately NO
+		-- stack_files table here: a Postgres-backed mirror carries only its
+		-- FILES/ and DATASETS/ rows, so routing must never depend on it.
+		CREATE TABLE ops (
+			stack       TEXT,
+			scope       INTEGER,
+			name        TEXT NOT NULL DEFAULT '',
+			txcl        TEXT,
+			tenant_id   TEXT
 		);
 	`); err != nil {
 		t.Fatalf("schema: %v", err)
@@ -84,16 +88,16 @@ func seedHostname(t *testing.T, db *sql.DB, id, hostname, tenantID, stack string
 // active version (pushed as a draft, or deactivated).
 var seedVersionID atomic.Int64
 
-// seedStack inserts a stack; active gives it an active version holding one
-// rule file.
+// seedStack inserts a stack; active gives it an active version with one
+// materialised op.
 func seedStack(t *testing.T, db *sql.DB, tenantID, name string, active bool) {
 	t.Helper()
 	var ver any
 	if active {
 		id := seedVersionID.Add(1)
 		ver = id
-		if _, err := db.Exec(`INSERT INTO stack_files (version_id, path, content) VALUES (?, '0100_X/x.txcl', 'EMIT .x = 1')`, id); err != nil {
-			t.Fatalf("seed stack file: %v", err)
+		if _, err := db.Exec(`INSERT INTO ops (stack, scope, name, txcl, tenant_id) VALUES (?, 100, 'x', 'EMIT .x = 1', ?)`, name, tenantID); err != nil {
+			t.Fatalf("seed op: %v", err)
 		}
 	}
 	if _, err := db.Exec(
@@ -105,7 +109,7 @@ func seedStack(t *testing.T, db *sql.DB, tenantID, name string, active bool) {
 }
 
 // seedRetiredStack is a stack after `txco deactivate`: its active version
-// is set, and empty.
+// is set, and empty — activation left it no ops.
 func seedRetiredStack(t *testing.T, db *sql.DB, tenantID, name string) {
 	t.Helper()
 	if _, err := db.Exec(

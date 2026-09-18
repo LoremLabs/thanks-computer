@@ -124,12 +124,19 @@ func (c *HostRouteCache) Rebuild(db *sql.DB) error {
 // the form `<stack>/_<inlet>` with an active version, under a live
 // tenant. The LIKE is a coarse prefilter (its `_` is a wildcard); the
 // exact name is matched at lookup.
-// inletHasFiles is the other half of "active": `txco deactivate` retires a
+// inletHasOps is the other half of "active": `txco deactivate` retires a
 // stack by activating an EMPTY version, so active_version stays set. An
-// inlet whose active version has no files is withdrawn, not opted in —
-// and on a head where accept is implicit (tcp), an empty stack would
-// otherwise accept every connection.
-const inletHasFiles = `EXISTS (SELECT 1 FROM stack_files f WHERE f.version_id = s.active_version)`
+// inlet with no materialised ops is withdrawn, not opted in — and on a
+// head where accept is implicit (tcp), an empty stack would otherwise
+// accept every connection.
+//
+// It reads `ops`, NOT `stack_files`: ops is what the processor itself runs
+// from the mirror, so every mirror carries it whole, and "has an op" is
+// exactly "something would run". A Postgres-backed mirror copies only the
+// FILES/ and DATASETS/ rows of stack_files (the rule sources are the bulk
+// of that table and no hot reader needed them), so a stack_files probe
+// sees every inlet as empty there.
+const inletHasOps = `EXISTS (SELECT 1 FROM ops o WHERE o.tenant_id = s.tenant_id AND o.stack = s.name)`
 
 func loadInletStacks(db *sql.DB) (map[string]struct{}, error) {
 	rows, err := db.Query(
@@ -139,7 +146,7 @@ func loadInletStacks(db *sql.DB) (map[string]struct{}, error) {
 		  WHERE s.active_version IS NOT NULL
 		    AND s.name LIKE '%/_%'
 		    AND t.revoked_at IS NULL
-		    AND ` + inletHasFiles)
+		    AND ` + inletHasOps)
 	if err != nil {
 		return nil, err
 	}

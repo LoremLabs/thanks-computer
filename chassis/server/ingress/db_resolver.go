@@ -371,7 +371,7 @@ func tcpInlet(name string) (string, bool) {
 }
 
 // inletActive reports whether tenant has an active, non-empty stack named
-// stack (a deactivated stack has an empty active version: inletHasFiles).
+// stack (a deactivated stack has an empty active version: inletHasOps).
 // Route cache first (no mirror round trip on the connect path); the
 // mirror query is the not-ready fallback. err is a transient lookup
 // failure, never a miss.
@@ -399,7 +399,7 @@ func (r *DBResolver) inletActive(tenant, stack string) (bool, error) {
 		    AND t.revoked_at IS NULL
 		    AND s.name = ?
 		    AND s.active_version IS NOT NULL
-		    AND `+inletHasFiles+`
+		    AND `+inletHasOps+`
 		  LIMIT 1`, tenant, stack).Scan(&one)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
