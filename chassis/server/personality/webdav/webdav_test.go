@@ -14,6 +14,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/apppass"
@@ -218,6 +220,37 @@ func TestThrottle(t *testing.T) {
 	if resp.Header.Get("Retry-After") == "" {
 		t.Error("no Retry-After")
 	}
+}
+
+// A mount never stops asking (a PROPFIND keepalive, an app retrying a
+// refused save), and every request carries Basic auth: only the requests
+// that checked a password log a line, refusals log every time.
+func TestLoginLogsOncePerCheck(t *testing.T) {
+	var conf config.Config
+	insecure(&conf)
+	h := newHarness(t, conf)
+	core, logs := observer.New(zapcore.InfoLevel)
+	h.ctrl.pu.Logger = zap.New(core)
+	for i := 0; i < 5; i++ {
+		resp, _ := h.do(t, "PROPFIND", "/drive/", nil, hdr("Depth", "0"))
+		want(t, resp, http.StatusMultiStatus, "cached login")
+	}
+	for i := 0; i < 2; i++ {
+		resp, _ := h.do(t, "PROPFIND", "/drive/", nil, auth("paris@pony.example.com", "wrong"))
+		want(t, resp, http.StatusUnauthorized, "wrong password")
+	}
+	if got := loginLines(logs); got["ok"] != 1 || got["failed"] != 2 || len(got) != 2 {
+		t.Errorf("webdav login lines = %v, want ok:1 failed:2", got)
+	}
+}
+
+// loginLines tallies the "webdav login" lines by outcome.
+func loginLines(logs *observer.ObservedLogs) map[string]int {
+	n := map[string]int{}
+	for _, e := range logs.FilterMessage("webdav login").All() {
+		n[e.ContextMap()["outcome"].(string)]++
+	}
+	return n
 }
 
 func TestFileLifecycle(t *testing.T) {

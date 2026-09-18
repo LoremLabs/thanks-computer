@@ -221,7 +221,8 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		return deny("failed")
 	}
 	key := apppass.LoginKey(acct.Username, acct.PwHash, pass)
-	if !c.cache.Hit(key) {
+	cached := c.cache.Hit(key)
+	if !cached {
 		if throttled() {
 			return tooMany()
 		}
@@ -257,7 +258,15 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		// answer as a wrong password, so nothing is learned.
 		return deny("wrong_tenant")
 	}
-	c.noteLogin("ok", username, ip)
+	if cached {
+		// Every request carries Basic auth and an address book polls its collections, so a
+		// hit is the same client's next request, not a new login. It is
+		// counted; the line is logged once per password check, i.e. once
+		// per cache TTL per node. Refusals above log every time.
+		c.countLogin("ok")
+	} else {
+		c.noteLogin("ok", username, ip)
+	}
 	return principal{tenant: tenant, username: acct.Username, acct: acct, clientIP: ip}, true
 }
 

@@ -16,6 +16,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/apppass"
@@ -545,6 +547,38 @@ func TestPolicyLanesAndRewrite(t *testing.T) {
 	if resp, _ := h.do(t, req{method: "PUT", path: books + "asked/u.vcf", user: user, pass: pw, body: appleCard("U-1", "x", "u@x.io", "1")}); resp.StatusCode != 503 {
 		t.Errorf("unsubscribed stack policy = %d", resp.StatusCode)
 	}
+}
+
+// A client polls, and every request carries Basic auth: only the
+// requests that checked a password log a line, refusals log every time.
+func TestLoginLogsOncePerCheck(t *testing.T) {
+	h := newHarness(t, config.Config{})
+	core, logs := observer.New(zapcore.InfoLevel)
+	h.ctrl.pu.Logger = zap.New(core)
+	h.account(t, "acme", user, pw)
+	h.book(t, "acme", user, "senders", "")
+	for i := 0; i < 5; i++ {
+		if resp, _ := h.do(t, req{method: "OPTIONS", path: base, user: user, pass: pw}); resp.StatusCode >= 400 {
+			t.Fatalf("login %d = %d", i, resp.StatusCode)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if resp, _ := h.do(t, req{method: "OPTIONS", path: "/carddav/", user: user, pass: "wrong"}); resp.StatusCode != 401 {
+			t.Fatalf("wrong password %d = %d", i, resp.StatusCode)
+		}
+	}
+	if got := loginLines(logs); got["ok"] != 1 || got["failed"] != 2 || len(got) != 2 {
+		t.Errorf("contacts login lines = %v, want ok:1 failed:2", got)
+	}
+}
+
+// loginLines tallies the "contacts login" lines by outcome.
+func loginLines(logs *observer.ObservedLogs) map[string]int {
+	n := map[string]int{}
+	for _, e := range logs.FilterMessage("contacts login").All() {
+		n[e.ContextMap()["outcome"].(string)]++
+	}
+	return n
 }
 
 func TestThrottleCountsMissesOnly(t *testing.T) {

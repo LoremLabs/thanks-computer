@@ -38,7 +38,7 @@ All state is local files — back **these** up.
 | Path                                | What                                              |
 | ----------------------------------- | ------------------------------------------------- |
 | `./chassis/data/db/runtime-$env.db` | Runtime SQLite DB (rules, tenants, hostnames)     |
-| `./chassis/data/db/auth-$env.db`    | Auth SQLite DB (actors, keys, invitations)        |
+| `./chassis/data/db/auth-$env.db`    | Auth SQLite DB: admin actors, keys, invitations — and your stacks' [users and credentials](./users.md), which every node opens |
 | `./chassis/data/kv/`                | KV store (BoltDB by default)                      |
 | `./chassis/data/secrets/txco-master.key` | Secret-store master key — back up separately; see the [secret-store runbook](./runbook-secret-store.md) |
 | `./chassis/data/continuations/`     | Suspended-run state (`--continuation-store=file`) |

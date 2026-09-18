@@ -26,6 +26,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/attach"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/bgservice"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
@@ -995,7 +996,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store, driveStore *chdrive.Store, ippStore *chipp.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store, driveStore *chdrive.Store, ippStore *chipp.Store, identityStore *authn.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1670,6 +1671,32 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			logger.Warn("invalid --notebook-sweep-period; expired notebook entries stay invisible but are not reclaimed",
 				zap.String("value", conf.NotebookSweepPeriod))
 		}
+	}
+
+	// Stack-plane identity ops (txco://user/{create,get,disable},
+	// txco://credential/{create,list,revoke}): the users, bindings and
+	// credentials a tenant's stacks manage, in auth.db (chassis/authn). The
+	// app opens that store on every node — not only with the admin
+	// personality — and registers the ops unconditionally, so a node where it
+	// failed to open answers `txco_user_disabled` and a stack can branch.
+	// The tenant comes from the pinned scope (resolved to its id against the
+	// mirror snapshot); the calling stack from processor.StackScope, which is
+	// what stamps and enforces "only the creating stack manages a principal".
+	// See chassis/server/identity.go.
+	identityD := identityDeps{store: identityStore, snap: dbc.Snapshot}
+	for name, fn := range map[string]func(context.Context, identityDeps, []byte) (event.Payload, error){
+		"txco://user/create":       userCreate,
+		"txco://user/get":          userGet,
+		"txco://user/disable":      userDisable,
+		"txco://credential/create": credentialCreate,
+		"txco://credential/list":   credentialList,
+		"txco://credential/revoke": credentialRevoke,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, identityD, in)
+			}))
 	}
 
 	// IMAP mailbox store ops (txco://imap/{account,append}): provisioning

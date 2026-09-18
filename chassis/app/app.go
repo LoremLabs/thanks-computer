@@ -32,6 +32,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/cli"
 	"github.com/loremlabs/thanks-computer/chassis/config"
@@ -313,10 +314,12 @@ func Run(bi BuildInfo) int {
 		}
 	}
 
-	// auth.db is identity-side only. Data-plane-only chassis (no admin
-	// personality) never open it — they have no actors, sessions, or
-	// invitations to read or write. An HA control plane points
-	// --db-auth-dsn at a shared Postgres so every replica sees the same
+	// auth.db holds two planes. The ACCOUNT plane (actors, keys, memberships,
+	// sessions, invitations) belongs to the admin personality: data-plane-only
+	// chassis never open it for that, and `authDB` stays nil there — several
+	// things read that nil as "no account plane on this node" (the
+	// control-event applier skips auth-row events on it). An HA control plane
+	// points --db-auth-dsn at a shared Postgres so every replica sees the same
 	// actors/keys/memberships/sessions.
 	var authDB *sql.DB
 	authDialect := registry.SQLite
@@ -326,8 +329,29 @@ func Run(bi BuildInfo) int {
 		applyMigrationsOrDie(ctx, logger, authDB, authDialect, schemaFS,
 			authSchemaRoot(schemaBase, authDialect), "txco-db-changeset-auth", "auth")
 	} else {
-		logger.Info("skipping auth.db open — admin personality not active",
+		logger.Info("auth.db account plane not opened — admin personality not active",
 			zap.String("personalities", conf.Personalities))
+	}
+
+	// The STACK plane (users, principal bindings, credentials — chassis/authn)
+	// lives in the same database but belongs to every node: txco://user/* and
+	// txco://credential/* run wherever a stack runs, and the protocol heads
+	// authenticate against it. It gets its own handle, deliberately NOT
+	// `authDB`, so opening it changes nothing about the account plane above.
+	//
+	// With the admin personality it shares the pool already open. Without, it
+	// is one store among several: a node that cannot open it keeps serving —
+	// the identity ops answer `txco_user_disabled`, and DNS or a web request
+	// that never touches a user is unaffected.
+	var identityStore *authn.Store
+	if authDB != nil {
+		identityStore = authn.NewStore(authDB, authDialect)
+	} else if db, dialect, err := openIdentityDB(ctx, logger, conf.DbAuthDsn, schemaFS, schemaBase); err != nil {
+		logger.Warn("identity store not opened on this node: txco://user/* and txco://credential/* answer txco_user_disabled until restart",
+			zap.String("dsn", config.RedactDSN(conf.DbAuthDsn)), zap.String("err", err.Error()))
+	} else {
+		defer db.Close()
+		identityStore = authn.NewStore(db, dialect)
 	}
 
 	// scheduled_events DB — the durable queue the `scheduled` personality
@@ -686,7 +710,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore, driveStore, ippStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore, driveStore, ippStore, identityStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)
@@ -876,6 +900,18 @@ func runtimeSchemaSource(sqliteFS fs.FS, schemaBase string, d registry.Dialect, 
 const sqliteBusyTimeoutMs = 30000
 
 func openSQLiteOrDie(logger *zap.Logger, dsn, kind string) *sql.DB {
+	db, err := openSQLite(dsn, kind)
+	if err != nil {
+		logger.Fatal("db open err",
+			zap.String("kind", kind),
+			zap.String("dsn", dsn),
+			zap.String("dberr", err.Error()))
+	}
+	return db
+}
+
+// openSQLite is openSQLiteOrDie returning the error.
+func openSQLite(dsn, kind string) (*sql.DB, error) {
 	full := fmt.Sprintf("%s?mode=rwc&_journal_mode=WAL&_busy_timeout=%d", dsn, sqliteBusyTimeoutMs)
 	if kind == "runtime" {
 		// The runtime DB is the only one with concurrent writers (admin apply
@@ -886,14 +922,7 @@ func openSQLiteOrDie(logger *zap.Logger, dsn, kind string) *sql.DB {
 		// via this helper) have no such path, so they stay deferred.
 		full += "&_txlock=immediate"
 	}
-	db, err := sql.Open("sqlite3", full)
-	if err != nil {
-		logger.Fatal("db open err",
-			zap.String("kind", kind),
-			zap.String("dsn", dsn),
-			zap.String("dberr", err.Error()))
-	}
-	return db
+	return sql.Open("sqlite3", full)
 }
 
 // Pool bounds for a shared-Postgres auth DB (HA control plane). The
@@ -924,14 +953,24 @@ func openAuthDBOrDie(logger *zap.Logger, dsn string) (*sql.DB, registry.Dialect)
 //
 // The DSN is logged redacted (it may carry a Postgres password).
 func openSharedDBOrDie(logger *zap.Logger, dsn, kind string) (*sql.DB, registry.Dialect) {
+	db, d, err := openSharedDB(logger, dsn, kind)
+	if err != nil {
+		logger.Fatal("db open err",
+			zap.String("kind", kind),
+			zap.String("dsn", config.RedactDSN(dsn)),
+			zap.String("dberr", err.Error()))
+	}
+	return db, d
+}
+
+// openSharedDB is openSharedDBOrDie for a caller that can carry on without
+// the database: it returns the error instead of ending the process.
+func openSharedDB(logger *zap.Logger, dsn, kind string) (*sql.DB, registry.Dialect, error) {
 	d := registry.DialectForDSN(dsn)
 	if d == registry.Postgres {
 		db, err := sql.Open("pgx", dsn)
 		if err != nil {
-			logger.Fatal("db open err",
-				zap.String("kind", kind),
-				zap.String("dsn", config.RedactDSN(dsn)),
-				zap.String("dberr", err.Error()))
+			return nil, d, err
 		}
 		// Bound the pool. database/sql defaults to unlimited open
 		// connections; against a shared managed Postgres, N
@@ -953,17 +992,32 @@ func openSharedDBOrDie(logger *zap.Logger, dsn, kind string) (*sql.DB, registry.
 		pingCtx, cancel := context.WithTimeout(context.Background(), authPGPingTimeout)
 		defer cancel()
 		if perr := db.PingContext(pingCtx); perr != nil {
-			logger.Fatal("shared Postgres unreachable",
-				zap.String("kind", kind),
-				zap.String("dsn", config.RedactDSN(dsn)),
-				zap.String("dberr", perr.Error()))
+			_ = db.Close()
+			return nil, d, fmt.Errorf("shared Postgres unreachable: %w", perr)
 		}
 		logger.Info(kind+".db on shared Postgres (HA control plane)",
 			zap.String("dsn", config.RedactDSN(dsn)),
 			zap.Int("max_open_conns", authPGMaxOpenConns))
-		return db, d
+		return db, d, nil
 	}
-	return openSQLiteOrDie(logger, dsn, kind), registry.SQLite
+	db, err := openSQLite(dsn, kind)
+	return db, registry.SQLite, err
+}
+
+// openIdentityDB opens and migrates auth.db on a node WITHOUT the admin
+// personality, for the stack-plane identity tables (chassis/authn). Every
+// failure is returned, never fatal: see the call site.
+func openIdentityDB(ctx context.Context, logger *zap.Logger, dsn string, schemaFS fs.FS, schemaBase string) (*sql.DB, registry.Dialect, error) {
+	db, dialect, err := openSharedDB(logger, dsn, "auth")
+	if err != nil {
+		return nil, dialect, err
+	}
+	if err := applyMigrationsRetrying(ctx, logger, db, dialect, schemaFS,
+		authSchemaRoot(schemaBase, dialect), "txco-db-changeset-auth", "auth"); err != nil {
+		_ = db.Close()
+		return nil, dialect, err
+	}
+	return db, dialect, nil
 }
 
 // applyMigrationsOrDie sweeps a per-DB migration directory once and
@@ -972,6 +1026,49 @@ func openSharedDBOrDie(logger *zap.Logger, dsn, kind string) (*sql.DB, registry.
 // fails fast — there's no recovery from a partially-applied migration.
 func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 	dialect registry.Dialect, fsys fs.FS, root, changesetVar, kind string) {
+	if err := applyMigrationsRetrying(ctx, logger, db, dialect, fsys, root, changesetVar, kind); err != nil {
+		logger.Fatal("db migration failed",
+			zap.String("kind", kind), zap.String("dberr", err.Error()))
+	}
+}
+
+// applyMigrationsRetrying runs applyMigrations, and runs it again if it fails.
+//
+// On a fleet every node migrates the shared Postgres databases at boot —
+// the runtime DB always, and auth.db too now that the identity tables belong
+// to every node. Two nodes booting together can race a new migration: both
+// read the old changeset, and the loser's transaction fails (a serialization
+// failure, or a duplicate from CREATE TABLE IF NOT EXISTS racing itself). By
+// then the winner has committed, so the retry reads the new changeset and
+// finds nothing to do. Each file is atomic with its changeset bump, so a
+// re-run is always safe; a migration that is genuinely broken fails every
+// attempt and the error comes back a few seconds later than it would have.
+func applyMigrationsRetrying(ctx context.Context, logger *zap.Logger, db *sql.DB,
+	dialect registry.Dialect, fsys fs.FS, root, changesetVar, kind string) error {
+	const attempts = 3
+	for i := 1; ; i++ {
+		err := applyMigrations(ctx, logger, db, dialect, fsys, root, changesetVar, kind)
+		if err == nil || i == attempts {
+			return err
+		}
+		logger.Warn("db migration failed; retrying (another node may have applied it)",
+			zap.String("kind", kind), zap.Int("attempt", i), zap.String("err", err.Error()))
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(i) * time.Second):
+		}
+	}
+}
+
+// applyMigrations is one pass of the runner, returning the error: for the
+// retry above, and for a caller that can carry on without this database
+// (auth.db on a node without the admin personality — openIdentityDB). Each migration file
+// applies in its own transaction with its changeset bump, so a failure
+// leaves the DB at the last file that fully applied, and a re-run resumes
+// from there.
+func applyMigrations(ctx context.Context, logger *zap.Logger, db *sql.DB,
+	dialect registry.Dialect, fsys fs.FS, root, changesetVar, kind string) error {
 
 	if dialect == nil {
 		dialect = registry.SQLite
@@ -982,8 +1079,7 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 	if _, err := db.ExecContext(ctx,
 		`CREATE TABLE IF NOT EXISTS varvals (var TEXT, val TEXT, UNIQUE(var));`,
 	); err != nil {
-		logger.Fatal("db bootstrap err",
-			zap.String("kind", kind), zap.String("dberr", err.Error()))
+		return fmt.Errorf("db bootstrap: %w", err)
 	}
 
 	var current int
@@ -994,16 +1090,14 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 	case err == sql.ErrNoRows:
 		current = 0
 	case err != nil:
-		logger.Fatal("db changeset err",
-			zap.String("kind", kind), zap.String("dberr", err.Error()))
+		return fmt.Errorf("read db changeset: %w", err)
 	}
 	logger.Info("database at ChangeId",
 		zap.String("kind", kind), zap.Int("dbChangeId", current))
 
 	files, err := fs.ReadDir(fsys, root)
 	if err != nil {
-		logger.Fatal("db changeset file err",
-			zap.String("kind", kind), zap.String("migrationErr", err.Error()))
+		return fmt.Errorf("read migration dir %s: %w", root, err)
 	}
 
 	sort.Slice(files, func(i, j int) bool {
@@ -1035,14 +1129,12 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 
 		body, err := fs.ReadFile(fsys, path.Join(root, f.Name()))
 		if err != nil {
-			logger.Fatal("can't read db migration",
-				zap.String("kind", kind), zap.String("schemaFile", f.Name()))
+			return fmt.Errorf("read db migration %s: %w", f.Name(), err)
 		}
 
 		tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
-			logger.Fatal("Db migration transaction start error",
-				zap.String("kind", kind), zap.String("err", err.Error()))
+			return fmt.Errorf("db migration %s: begin: %w", f.Name(), err)
 		}
 		// Run the migration SQL and the varvals upsert THROUGH `tx`, not
 		// the parent `db`. The earlier shape — db.Exec(body) + tx.Commit
@@ -1054,9 +1146,7 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 		// `tx` makes the rollback meaningful and keeps migration atomic.
 		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 			_ = tx.Rollback()
-			logger.Fatal("db setup err",
-				zap.String("kind", kind), zap.String("dberr", err.Error()),
-				zap.String("schemaFile", f.Name()))
+			return fmt.Errorf("db migration %s: %w", f.Name(), err)
 		}
 		// Portable upsert: `ON CONFLICT(var) DO UPDATE` is valid on both
 		// SQLite (≥3.24, the bundled version) and Postgres — replaces
@@ -1071,12 +1161,10 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 			changesetVar, strconv.Itoa(fileID),
 		); err != nil {
 			_ = tx.Rollback()
-			logger.Fatal("db update varval err",
-				zap.String("kind", kind), zap.String("dberr", err.Error()))
+			return fmt.Errorf("db migration %s: update changeset: %w", f.Name(), err)
 		}
 		if err := tx.Commit(); err != nil {
-			logger.Fatal("db commit err",
-				zap.String("kind", kind), zap.String("dberr", err.Error()))
+			return fmt.Errorf("db migration %s: commit: %w", f.Name(), err)
 		}
 		logger.Info("migrated db",
 			zap.String("kind", kind),
@@ -1084,6 +1172,7 @@ func applyMigrationsOrDie(ctx context.Context, logger *zap.Logger, db *sql.DB,
 			zap.String("schemaFile", f.Name()))
 		current = fileID
 	}
+	return nil
 }
 
 // imapStoreMode decides whether to open the IMAP mailbox index on this

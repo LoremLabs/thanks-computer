@@ -147,10 +147,22 @@ func GeneratePassword() string {
 	return b.String()
 }
 
-func generateSecret(n int) string {
-	// Rejection sampling: 256 is not a multiple of the alphabet size, so a
-	// plain modulo would bias the low characters.
-	const limit = 256 - (256 % len(passwordAlphabet))
+func generateSecret(n int) string { return GenerateFrom(Alphabet, n) }
+
+// Alphabet is the character set generated passwords draw from (see
+// passwordAlphabet: nothing that reads ambiguously when typed).
+const Alphabet = passwordAlphabet
+
+// GenerateFrom returns n characters drawn uniformly from alphabet (1-256
+// distinct bytes) using crypto/rand. chassis/authn uses it for the parts of
+// an issued password: the credential's short id and a machine secret.
+func GenerateFrom(alphabet string, n int) string {
+	if len(alphabet) == 0 || len(alphabet) > 256 {
+		panic("apppass: alphabet must hold 1-256 bytes")
+	}
+	// Rejection sampling: 256 is rarely a multiple of the alphabet size, so
+	// a plain modulo would bias the low characters.
+	limit := 256 - (256 % len(alphabet))
 	out := make([]byte, 0, n)
 	buf := make([]byte, n*2)
 	for len(out) < n {
@@ -161,7 +173,7 @@ func generateSecret(n int) string {
 			if int(c) >= limit {
 				continue
 			}
-			out = append(out, passwordAlphabet[int(c)%len(passwordAlphabet)])
+			out = append(out, alphabet[int(c)%len(alphabet)])
 			if len(out) == n {
 				break
 			}

@@ -54,8 +54,11 @@ txco dev --contacts       # http://<dev host>:<web port>/carddav/, Basic auth ov
 Add the account in Contacts (macOS) with **Add Account → Other Contacts
 Account → CardDAV → Advanced**: server = the bound host, port = the web
 port, SSL off, path `/carddav/`; in Thunderbird, **Address Book → New
-CardDAV Address Book** with the same server and username. Every Basic-auth
-attempt logs one `contacts login` line with its outcome.
+CardDAV Address Book** with the same server and username. Every refused
+login logs one `contacts login` line with its outcome; a successful one logs
+only when it checks the password (once per 5-minute login cache per node),
+not on every request a polling client makes. The
+`chassis.contacts.logins` metric still counts every outcome, cache hits included.
 
 ## Accounts: `txco://contacts/account`
 

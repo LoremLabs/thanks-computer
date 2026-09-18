@@ -138,12 +138,19 @@ func (c *Controller) Stop() {}
 // Handler is the http.Handler the web head mounts on Prefix()/.
 func (c *Controller) Handler() http.Handler { return c }
 
+// noteLogin counts a login outcome and logs one line for it.
 func (c *Controller) noteLogin(outcome, username, ip string) {
-	if c.logins != nil {
-		c.logins.Add(context.Background(), 1, metric.WithAttributes(attribute.String("txco.webdav.outcome", outcome)))
-	}
+	c.countLogin(outcome)
 	if c.pu != nil && c.pu.Logger != nil {
 		c.pu.Logger.Info("webdav login", zap.String("outcome", outcome), zap.String("user", username), zap.String("ip", ip))
+	}
+}
+
+// countLogin counts a login outcome without logging it: the metric sees
+// every request, the log only the ones worth a line.
+func (c *Controller) countLogin(outcome string) {
+	if c.logins != nil {
+		c.logins.Add(context.Background(), 1, metric.WithAttributes(attribute.String("txco.webdav.outcome", outcome)))
 	}
 }
 

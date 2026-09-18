@@ -251,7 +251,8 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		return deny("failed")
 	}
 	key := apppass.LoginKey(acct.Username, acct.PwHash, pass)
-	if !c.cache.Hit(key) {
+	cached := c.cache.Hit(key)
+	if !cached {
 		if throttled() {
 			return tooMany()
 		}
@@ -299,7 +300,16 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		http.NotFound(w, r)
 		return principal{}, false
 	}
-	c.noteLogin("ok", username, ip)
+	if cached {
+		// Every request carries Basic auth, and a mounted drive never stops
+		// asking (a PROPFIND keepalive, an app's retried save), so a hit is
+		// the same client's next request, not a new login. It is counted;
+		// the line is logged once per password check, i.e. once per cache
+		// TTL per node. Refusals above log every time.
+		c.countLogin("ok")
+	} else {
+		c.noteLogin("ok", username, ip)
+	}
 	return principal{
 		tenant: tenant, username: acct.Username, acct: acct, coll: coll, clientIP: ip,
 		prefix: c.mountPrefix(coll, r.URL.Path),

@@ -171,6 +171,11 @@ of an object (S3) sends only that part through the server.
 | `--drive-login-rate` (30/min) | per client IP and per username, counted only on verified-login-cache misses; over it is 429 |
 | `--drive-sweep-period` (15 min) | on `webdav` nodes: superseded versions and the objects of failed writes are reclaimed after `--drive-sweep-grace` (1 h); tombstones are hard-deleted after `--drive-tombstone-retention` (7 d) |
 
+Every refused login logs one `webdav login` line with its outcome; a
+successful one logs only when it checks the password (once per 5-minute
+login cache per node), not on every request a mounted drive makes. The
+`chassis.webdav.logins` metric still counts every outcome, cache hits included.
+
 A PUT streams straight to the object store — memory is not the bound —
 with a read deadline that scales with the declared size, so a 4 GiB upload
 gets its two hours while an abandoned stream is still reaped.

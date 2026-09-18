@@ -50,8 +50,11 @@ txco dev --calendar       # http://<dev host>:<web port>/dav/, Basic auth over p
 Add the account in Calendar (macOS) with **Other CalDAV Account →
 Advanced**: server = the bound host, port = the web port, SSL off, path
 `/dav/`; in Thunderbird, a network calendar at
-`http://<host>:<port>/dav/<username>/calendars/<name>/`. Every Basic-auth
-attempt logs one `calendar login` line with its outcome.
+`http://<host>:<port>/dav/<username>/calendars/<name>/`. Every refused
+login logs one `calendar login` line with its outcome; a successful one logs
+only when it checks the password (once per 5-minute login cache per node),
+not on every request a polling client makes. The
+`chassis.calendar.logins` metric still counts every outcome, cache hits included.
 
 ## Accounts: `txco://calendar/account`
 

@@ -197,6 +197,13 @@ var ctxKeyTenant = ctxKeyType{name: "tenant-scope"}
 // See SourceScope — txco://relay gates on it.
 var ctxKeySource = ctxKeyType{name: "source-scope"}
 
+// ctxKeyStack carries the stack of the RULE being dispatched (`op.Stack`, e.g.
+// "web" or its slot "web/canary"). Unlike the tenant and source pins it is
+// not request-wide: it is set per op, at dispatch, because a request crosses
+// stacks (boot → service, a cross-stack `_txc.goto`). It answers "whose rule
+// is calling me" from the deployed rule itself — see StackScope.
+var ctxKeyStack = ctxKeyType{name: "stack-scope"}
+
 // ctxKeyResumeRun carries the identity of an already-created run while a
 // continuation is being resumed. When present, suspendBarrierScope reuses
 // this run (a later async barrier on the SAME run = new stage docs, not a
@@ -305,6 +312,28 @@ func sourceScope(ctx context.Context) string {
 // mutable `_txc.src` envelope field, which a rule could rewrite via `SET @src`.
 // Privileged egress ops (e.g. txco://relay) gate on it.
 func SourceScope(ctx context.Context) string { return sourceScope(ctx) }
+
+// WithStack pins the dispatching rule's stack into context. Exposed for tests
+// and out-of-band callers; the data plane pins it itself in dispatch.
+func WithStack(ctx context.Context, stack string) context.Context {
+	return context.WithValue(ctx, ctxKeyStack, stack)
+}
+
+// StackScope exposes the stack whose rule dispatched the running op, or "" if
+// unknown. It is the trusted answer to "which stack is calling": it comes
+// from the deployed rule (`op.Stack`), NOT from `_txc.op`, which is an
+// envelope field — the chassis overwrites that one right before dispatch, but
+// parsing it back is fragile (names contain slashes) and a handler should
+// never take identity from the envelope. A slot is baked into the name
+// ("web/canary"); callers that mean "the deployed stack" reduce it (see
+// authn.BaseStack). The identity ops use it to stamp and check which stack
+// owns a principal.
+func StackScope(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxKeyStack).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // tenantExists reports whether a non-revoked tenant with this slug
 // exists in the opstack snapshot. Used to validate a boot re-tenant
@@ -2786,6 +2815,10 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 
 	ctx, span := pu.Mc.Tracer.Start(ctx, `exec-`+opName)
 	defer span.End()
+
+	// Pin the firing rule's stack for the handler (StackScope). ctx is this
+	// dispatch's own, so parallel ops of different stacks never share it.
+	ctx = WithStack(ctx, op.Stack)
 
 	// Stamp the firing rule's identity on the envelope before any handler
 	// sees it. Transport-agnostic: every dispatching branch (txco://, HTTP
