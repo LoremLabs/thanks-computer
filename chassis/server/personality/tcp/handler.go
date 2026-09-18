@@ -70,6 +70,13 @@ type RoutedConn struct {
 	// runs on every event. Any error means the connection is over:
 	// ErrRerouted, a *DeniedError, a timeout, a failed run, shutdown.
 	Emit func(ctx context.Context, ev Event) (event.DispatchResult, error)
+
+	// AddFuel charges the connection for work the handler does itself,
+	// outside any run — answering a keepalive, parsing, fan-out. The head
+	// already charges the connect and every byte through Conn; all of it
+	// is billed on the connection's next event (see meter). Costs follow
+	// docs/advanced/fuel.md: 1 fuel ≈ 100µs of chassis work.
+	AddFuel func(fuel int64)
 }
 
 // RouteStamp is a connection's pinned route: what `_txc.route.*` carries

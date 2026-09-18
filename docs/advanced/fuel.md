@@ -43,11 +43,17 @@ the chassis-wide cap.
 | Blob put / get, per MiB moved | 100        |
 | Notebook read / export, per MiB returned | 100 |
 | KV mget / list with values, per MiB returned; mset, per MiB written | 100 |
+| TCP connection accepted (`--tcp-conn-fuel`) | 100 |
+| TCP bytes through a connection, per MiB (exact, not rounded up) | 100 |
 
 Calibration: 1 fuel ≈ 100 µs of typical chassis work. So a 1 ms
 nano-op costs 35 total (25 dispatch + 10 compute); an op wrapping a
 1-second LLM call costs ~10,000 — meaning the default cap tolerates
 roughly ten such calls per request before cutting off.
+
+A TCP connection's own cost has no run to be counted in, so it is
+carried onto the connection's **next** run as that run's starting
+`_txc.fuel_used` — see [tcp](./protocols/tcp.md#fuel).
 
 The final fuel value is logged on the per-request `usage` line
 (`fuel=N`) — single-tenant deployments can ignore it; tenant-aware

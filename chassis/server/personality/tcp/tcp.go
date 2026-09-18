@@ -44,6 +44,8 @@ type limits struct {
 	maxConns          int           // open connections on this node; 0 = unlimited
 	maxConnsPerTenant int           // open connections per routed tenant; 0 = unlimited
 	maxLine           int           // longest accepted line, bytes
+	connFuel          int64         // fuel charged per accepted connection; 0 = none
+	maxRunFuel        int64         // --max-fuel-per-request; bounds what one run is pre-charged
 }
 
 // TCPController is the raw socket head. It owns every accepted net.Conn
@@ -112,6 +114,8 @@ type connection struct {
 	// before each one (pin).
 	route      RouteStamp
 	revalidate bool
+
+	meter meter
 }
 
 // CloseWrite half-closes the stream — the peer reads EOF while we can
@@ -194,6 +198,8 @@ func parseLimits(pu *processor.Unit) limits {
 		maxConns:          conf.TCPMaxConns,
 		maxConnsPerTenant: conf.TCPMaxConnsPerTenant,
 		maxLine:           MAX_MESSAGE_SIZE,
+		connFuel:          int64(max(conf.TCPConnFuel, 0)),
+		maxRunFuel:        int64(max(conf.MaxFuelPerRequest, 0)),
 	}
 }
 
@@ -564,6 +570,10 @@ func (tcp *TCPController) serve(c *connection) {
 
 	b := jsonx.New()
 	tcp.stamp(b, c, "tcp")
+	// The connection's own cost rides its runs (meter): accepting it is
+	// charged here, on the connect run.
+	c.meter.add(tcp.lim.connFuel)
+	tcp.precharge(b, c)
 	payload := b.String()
 	if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
 		tcp.pu.Logger.Debug("tcp connection", zap.String("payload", payload))
@@ -619,8 +629,11 @@ func (tcp *TCPController) serve(c *connection) {
 	if err := tcp.serveProtocol(ctx, c); err != nil {
 		why = err.Error()
 	}
+	in, out, fuel, unbilled := c.meter.totals()
 	tcp.pu.Logger.Info("tcp connection closed", zap.String("rid", c.rid),
-		zap.String("handler", c.spec.Handler), zap.String("why", why))
+		zap.String("handler", c.spec.Handler), zap.String("why", why),
+		zap.Int64("bytes_in", in), zap.Int64("bytes_out", out),
+		zap.Int64("conn_fuel", fuel), zap.Int64("conn_fuel_unbilled", unbilled))
 }
 
 // serveProtocol runs the listener's handler on an accepted connection. A
@@ -698,6 +711,7 @@ func (tcp *TCPController) routedConn(c *connection) RoutedConn {
 		Emit: func(ctx context.Context, ev Event) (event.DispatchResult, error) {
 			return tcp.emit(ctx, c, ev)
 		},
+		AddFuel: c.meter.add,
 	}
 	if ra, ok := c.RemoteAddr().(*net.TCPAddr); ok {
 		rc.ClientIP, rc.RemotePort = ra.IP.String(), ra.Port
@@ -732,6 +746,7 @@ func (tcp *TCPController) emit(ctx context.Context, c *connection, ev Event) (ev
 		b.Set("_txc.client.body", base64.StdEncoding.EncodeToString(ev.Body))
 	}
 	tcp.stamp(b, c, src)
+	tcp.precharge(b, c)
 	// Pre-stamped the websocket head's way: detect-tenant sees a route
 	// already proposed and leaves it, boot/100 promotes it.
 	b.Set("_txc.route.tenant", c.route.Tenant)

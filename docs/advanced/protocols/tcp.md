@@ -232,8 +232,38 @@ func (h *ircHandler) ServeConn(ctx context.Context, rc tcp.RoutedConn) error {
   subtree (`@irc.res.*`), allow-listed alongside `tcp.res` when the
   handler lands. Names another head owns (`mail`, `http`, `cron`, …) are
   refused at registration.
-- There is no per-connection budget yet: each event is bounded like any
-  other run, a connection's lifetime total is not.
+- Work a handler does itself, outside any run, is charged with
+  `rc.AddFuel(n)` (see [Fuel](#fuel)); the connect and every byte through
+  `rc.Conn` are charged for it already.
+- There is no per-connection *budget*: each event is bounded like any
+  other run, a connection's lifetime total is metered but not capped.
+
+## Fuel
+
+Every run on a connection — the connect run, each line, each handler
+event — is an ordinary metered run with its own `usage` line. What a
+connection costs *between* runs has no run to be counted in, so the head
+meters it and carries it onto the connection's **next** run, as that
+run's starting `_txc.fuel_used`. It lands on the same usage event,
+attributed to the same tenant, as everything else the run cost.
+
+| Charged | Fuel | Lands on |
+|---|---|---|
+| Accepting the connection (`--tcp-conn-fuel`) | 100 | the connect run |
+| Bytes in and out, per MiB (exact; fractions carried) | 100 | the next event |
+| Handler work (`rc.AddFuel`) | what the handler says | the next event |
+
+- A connection that is never routed is nobody's: its connect fee reaches
+  no tenant.
+- At most half of `--max-fuel-per-request` is carried onto one run, so a
+  connection that moved a lot between events never makes its next run
+  arrive exhausted; the rest follows on later runs.
+- Time is not charged. An idle socket does no work; what it holds is
+  capacity, which `--tcp-max-conns` and `--tcp-max-conns-per-tenant` bound.
+- The close log line carries the lifetime figures — `bytes_in`,
+  `bytes_out`, `conn_fuel`, and `conn_fuel_unbilled`: whatever accrued
+  after the last run (a final response's bytes, a handler that never
+  emits) and so reached no usage event.
 
 ## Timeouts and limits
 
@@ -244,5 +274,6 @@ func (h *ircHandler) ServeConn(ctx context.Context, rc tcp.RoutedConn) error {
 | `--tcp-max-idle-timeout` | `5s` | Silence between lines (`echo`: between reads) |
 | `--tcp-max-conns` | `0` (unlimited) | Open connections on this node, all listeners |
 | `--tcp-max-conns-per-tenant` | `0` (unlimited) | Open connections per tenant, counted once the connect run has routed |
+| `--tcp-conn-fuel` | `100` | Fuel charged per accepted connection ([Fuel](#fuel)); `0` = none |
 | `--tcp-handshake-timeout` | `5s` | The TLS handshake on a `;tls` listener, or the PROXY header on a `;proxy=` one |
 | `--tcp-drain-timeout` | `5s` | How long shutdown waits for open connections to unwind after closing them |
