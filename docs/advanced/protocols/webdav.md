@@ -103,8 +103,24 @@ never overwrites a version it has not seen. This is what a lock can
 honestly be on a fleet with no shared lock state; it also keeps the head
 stateless across nodes — a LOCK, a PUT and an UNLOCK may each land on a
 different machine, and none of them consults lock state, so none of them
-can disagree. A LOCK on a path that does not exist creates an empty file,
-as the RFC requires and as Finder expects before its first PUT.
+can disagree.
+
+**A LOCK on a path that does not exist creates nothing.** It answers 200
+with a token, as it would for a file that exists, and the file comes into
+being when the client writes it. RFC 4918 says such a LOCK must create an
+empty resource, and this head once did — which left ghosts. A stack that
+files a document away moves it out from under a client that still has the
+old name cached; macOS takes a write lock even to *preview* a file, so the
+next glance at the stale name LOCKed it and the name came back as a
+zero-byte file nothing would ever clean up. A lock that reserves nothing
+should not write anything either. Clients are built for this: a lock on a
+missing name was only ever a reservation on servers with RFC 2518's
+lock-null resources (Apache), RFC 4918 appendix D tells clients to expect
+either model, and macOS does not depend on it at all — it creates a file
+with a zero-byte PUT *before* it locks. The stale-name case now ends the
+way it should: LOCK 200, GET 404, and the client drops the entry. The lock
+still refuses what the write would refuse — a missing parent directory is
+409, a tree whose policy denies `write` is 403.
 
 Because the etag is the guarantee, the conditional headers are parsed as
 RFC 7232 writes them rather than as the one bare etag most clients send:
@@ -172,9 +188,10 @@ the tree. A file the stack chooses not to parse is still there for the
 client — **stored, not indexed** is a valid state, and the stack's own
 status record is where it says so.
 
-What a client does maps onto events like this: Finder creates a file as
-LOCK (→ `created`, size 0), a zero-byte PUT (no event), then the bytes (→
-`updated`); `cp` and rclone send the bytes at once (→ `created`). Finder
+What a client does maps onto events like this: macOS creates a file as a
+zero-byte PUT (→ `created`, size 0), a LOCK (no event — a lock never
+writes), then the bytes (→ `updated`) and an UNLOCK; curl and rclone send
+the bytes at once (→ `created`). Finder
 also writes `.DS_Store` and `._*` sidecars into every folder it touches; a
 consumer that indexes files should skip any segment starting with a dot.
 

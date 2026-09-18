@@ -431,24 +431,59 @@ func TestLockUnlock(t *testing.T) {
 	h := newHarness(t, conf)
 	lockBody := `<?xml version="1.0" encoding="utf-8"?><D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner><D:href>mailto:paris@pony.example.com</D:href></D:owner></D:lockinfo>`
 
-	// LOCK on an unmapped URL creates an empty file (Finder's new-file
-	// dance) and answers 201 with a token.
+	// LOCK on an unmapped URL reserves the name and CREATES NOTHING: a token,
+	// 200, and no file until the client writes one.
 	resp, out := h.do(t, "LOCK", "/drive/new.txt", body(lockBody), hdr("Timeout", "Second-600"), hdr("Content-Type", "application/xml"))
-	want(t, resp, http.StatusCreated, "lock new")
+	want(t, resp, http.StatusOK, "lock new")
 	token := resp.Header.Get("Lock-Token")
 	if !strings.HasPrefix(token, "<opaquelocktoken:") || !strings.Contains(out, token[1:len(token)-1]) ||
 		!strings.Contains(out, "mailto:paris@pony.example.com") || !strings.Contains(out, "<D:timeout>Second-600</D:timeout>") ||
 		!strings.Contains(out, "<D:lockroot><D:href>/drive/new.txt</D:href></D:lockroot>") {
 		t.Errorf("lock = %s %s", token, out)
 	}
-	if got, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "new.txt"); !ok || got.Size != 0 {
-		t.Fatalf("lock-null: %+v ok=%v", got, ok)
+	if _, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "new.txt"); ok {
+		t.Fatal("a LOCK on an unmapped URL created a file")
 	}
-	// PUT, then UNLOCK: 204.
+	// Finder's new-file dance: LOCK, a ZERO-BYTE PUT (which is what creates
+	// the file), the bytes, UNLOCK.
+	resp, _ = h.do(t, http.MethodPut, "/drive/new.txt", body(""), hdr("If", "("+token+")"))
+	want(t, resp, http.StatusCreated, "zero-byte put under lock")
 	resp, _ = h.do(t, http.MethodPut, "/drive/new.txt", body("data"), hdr("If", "("+token+")"))
 	want(t, resp, http.StatusNoContent, "put under lock")
 	resp, _ = h.do(t, "UNLOCK", "/drive/new.txt", nil, hdr("Lock-Token", token))
 	want(t, resp, http.StatusNoContent, "unlock")
+	if got, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "new.txt"); !ok || got.Size != 4 {
+		t.Fatalf("after the dance: %+v ok=%v", got, ok)
+	}
+
+	// THE GHOST (prod, 2026-09-18): a stack moves a file a client still has
+	// cached under its old name; the client previews it — LOCK, GET, UNLOCK
+	// on the OLD path. Nothing may come back to life there.
+	if _, err := h.store.Move(context.Background(), h.coll.ID, "new.txt", "filed.txt", false); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	resp, _ = h.do(t, "LOCK", "/drive/new.txt", body(lockBody), hdr("Content-Type", "application/xml"))
+	want(t, resp, http.StatusOK, "lock the stale name")
+	stale := resp.Header.Get("Lock-Token")
+	resp, _ = h.do(t, http.MethodGet, "/drive/new.txt", nil)
+	want(t, resp, http.StatusNotFound, "get the stale name")
+	resp, _ = h.do(t, "UNLOCK", "/drive/new.txt", nil, hdr("Lock-Token", stale))
+	want(t, resp, http.StatusNoContent, "unlock the stale name")
+	if _, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "new.txt"); ok {
+		t.Fatal("locking a stale name re-created it")
+	}
+	if got, ok, _ := h.store.Stat(context.Background(), h.coll.ID, "filed.txt"); !ok || got.Size != 4 {
+		t.Fatalf("the moved file: %+v ok=%v", got, ok)
+	}
+	// What the write would refuse, the lock refuses: a missing directory…
+	resp, _ = h.do(t, "LOCK", "/drive/nowhere/new.txt", body(lockBody), hdr("Content-Type", "application/xml"))
+	want(t, resp, http.StatusConflict, "lock under a missing directory")
+	// …and a file where a directory should be.
+	resp, _ = h.do(t, "LOCK", "/drive/filed.txt/new.txt", body(lockBody), hdr("Content-Type", "application/xml"))
+	want(t, resp, http.StatusConflict, "lock under a file")
+	if _, err := h.store.Move(context.Background(), h.coll.ID, "filed.txt", "new.txt", false); err != nil {
+		t.Fatalf("move back: %v", err)
+	}
 	// LOCK an existing file: 200, refresh keeps the token.
 	resp, _ = h.do(t, "LOCK", "/drive/new.txt", body(lockBody), hdr("Content-Type", "application/xml"))
 	want(t, resp, http.StatusOK, "lock existing")
@@ -594,8 +629,8 @@ func TestCollectionPolicy(t *testing.T) {
 	// time that it cannot save, and then retrying until the mount stalls.
 	resp, _ = h.do(t, "LOCK", "/drive/Knowledge/ai/keep.pdf", nil)
 	want(t, resp, http.StatusForbidden, "lock in a reserved tree")
-	// A lock on an unmapped URL would CREATE the file, so it is refused too
-	// (and must not leave the empty file behind).
+	// A lock is a WRITE lock, so a tree that refuses writes refuses it — on
+	// an unmapped URL too (and it leaves nothing behind).
 	resp, _ = h.do(t, "LOCK", "/drive/Knowledge/ghost.pdf", nil)
 	want(t, resp, http.StatusForbidden, "lock creating in a reserved tree")
 	if _, ok, _ := h.store.Stat(ctx, h.coll.ID, "Knowledge/ghost.pdf"); ok {
@@ -605,10 +640,14 @@ func TestCollectionPolicy(t *testing.T) {
 	// locking is untouched.
 	resp, _ = h.do(t, "LOCK", "/drive/Input/drop.txt", nil)
 	want(t, resp, http.StatusOK, "lock outside the reserved tree")
-	// Finder locks a sidecar before its first PUT, so this one is a create
-	// (201) — and the exemption has to cover that, not just the overwrite.
+	// Finder locks a sidecar before its first PUT, while the name is still
+	// unmapped — the exemption has to cover that lock, not just the write.
+	// It reserves the name and creates nothing.
 	resp, _ = h.do(t, "LOCK", "/drive/Knowledge/ai/._keep.pdf", nil)
-	want(t, resp, http.StatusCreated, "lock an AppleDouble sidecar")
+	want(t, resp, http.StatusOK, "lock an AppleDouble sidecar")
+	if _, ok, _ := h.store.Stat(ctx, h.coll.ID, "Knowledge/ai/._keep.pdf"); ok {
+		t.Fatal("a LOCK on an unmapped sidecar created it")
+	}
 
 	// The stack itself is never subject to the policy — that asymmetry is
 	// the whole point, and it is what keeps ingest able to place a file.

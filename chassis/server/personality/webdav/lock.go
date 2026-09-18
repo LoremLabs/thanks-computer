@@ -24,10 +24,27 @@ import (
 // If-Match / If-None-Match, which the store enforces on every write.
 //
 // This is honest about what a lock can be on a fleet with no shared lock
-// state and makes the head stateless across nodes by construction. A
-// LOCK on an unmapped URL creates an empty file first (RFC 4918 §9.10.4
-// requires it; Finder LOCKs a new file before its first PUT) and answers
-// 201.
+// state and makes the head stateless across nodes by construction.
+//
+// A LOCK ON AN UNMAPPED URL CREATES NOTHING. It answers 200 with a token,
+// exactly as it would for a file that exists, and the file comes into being
+// when the client writes it. RFC 4918 §9.10.4 says such a LOCK MUST create
+// an empty resource, and until 2026-09-18 this head did — which is how a
+// stack that moves a file left a ghost behind: Finder still had the OLD
+// name cached, previewed it (macOS takes a write lock even to read), and
+// that LOCK re-created the name as a zero-byte file nobody would ever clean
+// up (prod: a document dropped into a pony's Input/Knowledge/ and filed
+// into Knowledge/ by the stack reappeared in the drop zone, empty). A lock
+// that reserves nothing should not write anything either.
+//
+// What clients actually do agrees. Finder's new-file dance is LOCK → a
+// ZERO-BYTE PUT → the bytes → UNLOCK: the zero-byte PUT is how a client
+// materializes a file on a server where a lock on a missing name is only a
+// reservation (RFC 2518's lock-null resources — Apache mod_dav, which
+// webdavfs grew up against), and RFC 4918 appendix D tells clients to be
+// ready for either model. So the file still appears at the same moment, by
+// the client's own hand; and a client that locks a name it merely BELIEVES
+// exists gets a token, then a 404 on its GET, and drops the stale entry.
 
 // lockInfo is the LOCK request body (RFC 4918 §14.11); only owner is
 // echoed back.
@@ -87,7 +104,6 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 			}
 		}
 	}
-	created := false
 	res, found, err := c.store.Stat(r.Context(), pr.coll.ID, rel)
 	if err != nil {
 		serveStoreError(w, err)
@@ -98,12 +114,32 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 			http.Error(w, "no such resource", http.StatusNotFound)
 			return
 		}
-		if _, err := c.store.Put(r.Context(), pr.coll.ID, rel, strings.NewReader(""), 0, chdrive.PutOpts{}); err != nil {
-			serveStoreError(w, err)
+		// Reserve the name; create nothing (see the file comment). The
+		// one thing the write WOULD have refused is still refused here, so
+		// a client learns it at the lock and not at the save: the name must
+		// be a legal one inside a directory that exists (RFC 4918 §9.10.4:
+		// 409 when an ancestor is missing).
+		norm, nerr := chdrive.NormalizePath(rel)
+		if nerr != nil || norm == "" {
+			serveStoreError(w, chdrive.ErrBadPath)
 			return
 		}
-		res, _, _ = c.store.Stat(r.Context(), pr.coll.ID, rel)
-		created = true
+		if parent := chdrive.ParentOf(norm); parent != "" {
+			dir, ok, perr := c.store.Stat(r.Context(), pr.coll.ID, parent)
+			if perr != nil {
+				serveStoreError(w, perr)
+				return
+			}
+			if !ok {
+				serveStoreError(w, chdrive.ErrNoParent)
+				return
+			}
+			if !dir.IsDir() {
+				serveStoreError(w, chdrive.ErrNotDirectory)
+				return
+			}
+		}
+		res = chdrive.Resource{Path: norm, Kind: chdrive.KindFile}
 	}
 	if token == "" {
 		token = "opaquelocktoken:" + uuid.NewString()
@@ -133,11 +169,7 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 
 	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
 	w.Header().Set("Lock-Token", "<"+token+">")
-	if created {
-		w.WriteHeader(http.StatusCreated)
-	} else {
-		w.WriteHeader(http.StatusOK)
-	}
+	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, b.String())
 }
 
