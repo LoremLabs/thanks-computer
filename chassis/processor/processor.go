@@ -45,6 +45,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/runtime"
@@ -3082,7 +3083,13 @@ func (pu *Unit) resolveWith(res *resonator.Resonator, env runtime.Env) (string, 
 	}
 	for k, v := range unwrappedWith {
 		var serr error
-		meta, serr = sjson.Set(meta, k, v)
+		meta, serr = txcguard.BoundedSet(meta, k, v)
+		if errors.Is(serr, txcguard.ErrArrayPad) {
+			// A WITH key is a path too (`WITH a.2000000 = 1`). Fail the
+			// clause like an unresolvable value, rather than fall back to
+			// the flat marshal below and run the op with mangled params.
+			return "{}", fmt.Errorf("WITH %s: %w", k, serr)
+		}
 		if serr != nil {
 			// Fall back to flat marshal for this op so
 			// existing semantics aren't worse than before.
@@ -3491,17 +3498,17 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 				// default-substitution case (which is always a
 				// literal we can json-marshal cleanly).
 				if rawVal != "" {
-					if altered, err := sjson.SetRaw(op.Input, dstPath, rawVal); err == nil {
+					if altered, err := txcguard.BoundedSetRaw(op.Input, dstPath, rawVal); err == nil {
 						op.Input = altered
 					}
-					if altered, err := sjson.SetRaw(projected, dstPath, rawVal); err == nil {
+					if altered, err := txcguard.BoundedSetRaw(projected, dstPath, rawVal); err == nil {
 						projected = altered
 					}
 				} else {
-					if altered, err := sjson.Set(op.Input, dstPath, goVal); err == nil {
+					if altered, err := txcguard.BoundedSet(op.Input, dstPath, goVal); err == nil {
 						op.Input = altered
 					}
-					if altered, err := sjson.Set(projected, dstPath, goVal); err == nil {
+					if altered, err := txcguard.BoundedSet(projected, dstPath, goVal); err == nil {
 						projected = altered
 					}
 				}
@@ -3561,7 +3568,14 @@ func (pu *Unit) DecorateInput(input string, overrides []resonator.BranchValue) (
 			if err != nil {
 				return input, fmt.Errorf("decorate %s: %w", override.Path, err)
 			}
-			altered, _ := sjson.Set(input, branch, val) // TODO: should branch be escaped ?
+			// BoundedSet: an author path is also a size (a numeric key pads an
+			// array out to its index). A refused or malformed path leaves the
+			// input as it was — it used to blank it.
+			altered, serr := txcguard.BoundedSet(input, branch, val)
+			if serr != nil {
+				pu.Logger.Debug("set: dropped write", zap.String("path", override.Path), zap.String("err", serr.Error()))
+				continue
+			}
 			input = altered
 		}
 		// exists, no change
@@ -3657,7 +3671,7 @@ func (pu *Unit) overlayResponse(env, output string, overrides []resonator.Branch
 				continue
 			}
 			clamped := clampTTL(env, requested)
-			altered, err := sjson.Set(output, branch, clamped)
+			altered, err := sjson.Set(output, "_txc.ttl", clamped)
 			if err == nil {
 				output = altered
 			}
@@ -3666,7 +3680,7 @@ func (pu *Unit) overlayResponse(env, output string, overrides []resonator.Branch
 		// SYSTEM-authored rules (boot pipeline, `_sys` pin) may propose
 		// routes — the operator-hook contract. See systemMayWriteTxc.
 		if systemAuthored && systemMayWriteTxc(branch) {
-			altered, err := sjson.Set(output, branch, val)
+			altered, err := txcguard.BoundedSet(output, branch, val)
 			if err == nil {
 				output = altered
 			}
@@ -3683,7 +3697,7 @@ func (pu *Unit) overlayResponse(env, output string, overrides []resonator.Branch
 				zap.String("path", branch))
 			continue
 		}
-		altered, err := sjson.Set(output, branch, val)
+		altered, err := txcguard.BoundedSet(output, branch, val)
 		if err != nil {
 			pu.Logger.Debug("emit overlay", zap.String("path", override.Path), zap.String("err", err.Error()))
 			continue

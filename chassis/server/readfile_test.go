@@ -370,3 +370,26 @@ func TestReadFileTenantCAS(t *testing.T) {
 		t.Fatalf("missing-hash CAS must yield found=false; raw=%s", pay.Raw)
 	}
 }
+
+// TestReadFileDigitAliasIsAnObjectKey — `_files` is an OBJECT keyed by the
+// alias (see TestReadFileInlineDefaults). An alias in digits used to be read
+// as an array index instead, which sjson pads out to: `as = "2000000"` was a
+// 10 MB response. The key is forced, so it is an object key like any other.
+func TestReadFileDigitAliasIsAnObjectKey(t *testing.T) {
+	ix := inlineIndex(t)
+	pay, err := runReadFile(t, ix, nil, "", "hello",
+		`{"files":[{"path":"_mail/welcome.html","as":"2000000"}]}`, 1<<20)
+	if err != nil {
+		t.Fatalf("err: %v meta=%s", err, pay.Meta)
+	}
+	if len(pay.Raw) > 4096 {
+		t.Fatalf("response grew to %d bytes — the alias was read as an array index", len(pay.Raw))
+	}
+	g := gjson.Parse(pay.Raw)
+	if !g.Get("_files").IsObject() {
+		t.Fatalf("_files must be an object; raw=%s", pay.Raw)
+	}
+	if got := g.Get("_files.2000000.content").String(); got != "HELLO-MAIL" {
+		t.Fatalf("content=%q raw=%s", got, pay.Raw)
+	}
+}

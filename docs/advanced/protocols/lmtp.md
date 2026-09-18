@@ -270,7 +270,7 @@ Once an envelope is routed into your stack, the LMTP fields are stamped under `_
         "text":        "Hi support,\n\nMy wifi…",
         "html":        "<p>Hi support…</p>",
         "headers":     { "received": ["…","…"], "authentication-results": ["…"] },
-        "attachments": [{"name":"…","type":"…","size":…,"sha256":"…","content":"b64:…"}],
+        "attachments": [{"name":"…","type":"…","size":…,"sha256":"…","content":"b64:…","inline":false}],
         "calendar":    {"method":"REPLY","uid":"…","partstat":"ACCEPTED","attendee":"bob@…","start":"2026-09-09T12:00:00Z","end":"…","sequence":0},   // only when an iTIP part is present; start/end are RFC3339 UTC (a COUNTER's proposed time)
         "raw":         "b64:…"
       }
@@ -283,6 +283,12 @@ Once an envelope is routed into your stack, the LMTP fields are stamped under `_
 - `_txc.lmtp.rcpt` is the **group sublist** — only the RCPTs that resolved to this envelope's `(tenant, stack)`. Use `_txc.lmtp.transaction_rcpt` to see every recipient on the original delivery.
 
 `_txc.lmtp.msg.raw` is the full RFC 5322 bytes (b64), always present — the safe escape hatch for rules that want to re-deliver or archive the unmodified message. The parsed fields are best-effort and built from `raw`; a parse failure logs and falls through.
+
+`attachments[]` lists the parts a person **attached** first (`inline: false`), then the parts the HTML body **displays** (`inline: true`: a `cid:` image — the logo in a signature, a pasted screenshot). An op that files what someone sent should skip inline parts; a message whose only parts are inline has attached nothing:
+
+```txcl
+WHEN @lmtp.msg.attachments.0.name != "" && @lmtp.msg.attachments.0.inline != true
+```
 
 Header keys are lowercased and sorted for stable rule selectors and deterministic envelope hashes. Multi-valued headers (`Received`, `DKIM-Signature`) preserve order.
 

@@ -37,7 +37,7 @@ is a shorthand for `_txc.` Note that this shorthand is for chassis `txcl`, opera
 | Head | Namespace highlights |
 |---|---|
 | web | `@web.req.method`, `@web.req.url.{path,hostname,port,full,query.<k>.0,query.raw}`, `@web.req.headers.<name>.0` (arrays), `@web.req.cookies.*`, `@web.req.body` (base64), `@web.req.host`, `@web.req.proto` |
-| lmtp | `@lmtp.rcpt[]`, `@lmtp.msg.{subject,text,html,from[].addr,to[],headers.*,attachments[],raw}` (`text`/`html` are the parsed bodies; `raw` is the b64 original), `@lmtp.listener`; spam verdict under `@mail.spam.{score,verdict}` when an upstream Rspamd stamped it |
+| lmtp | `@lmtp.rcpt[]`, `@lmtp.msg.{subject,text,html,from[].addr,to[],headers.*,attachments[],raw}` (`text`/`html` are the parsed bodies; `attachments[]` entries are `{name,type,size,sha256,content,inline}`, attached parts first; `raw` is the b64 original), `@lmtp.listener`; spam verdict under `@mail.spam.{score,verdict}` when an upstream Rspamd stamped it |
 | cron | `@cron.job`, `@cron.tenant` |
 | source | `@source.msg.*` (same shape as `@lmtp.msg.*`), `@source.id`, `@source.key`, `@source.stack`, `@source.meta.{uid,flags}` — a message pulled from a watched remote mailbox |
 | ipp | `@ipp.printer` (the label after `/p/` — the operation selector), `@ipp.job_id`, `@ipp.job_number`, `@ipp.job_name`, `@ipp.requesting_user` (client-claimed, untrusted), `@ipp.document.{sha256,size,format,name}`, `@ipp.host`, `@ipp.printer_uri`, `@ipp.submitted_at`, `@ipp.attempt`, `@ipp.node` — all read-only; the document is a blob reference (`txco://blob/put from_sha` / `txco://blob/get sha256`), never bytes, and there is no `@ipp.res` |

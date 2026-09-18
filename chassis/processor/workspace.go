@@ -76,7 +76,7 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		return empty, err
 	}
 
-	into := normalizeEnvelopePath(gjson.Get(op.Meta, "into").String())
+	into := boundedInto(gjson.Get(op.Meta, "into").String())
 	if into == "" {
 		into = workspaceDefaultInto
 	}

@@ -157,30 +157,38 @@ func escapeKey(k string) string {
 	return strings.ReplaceAll(k, ".", `\.`)
 }
 
-// attachmentsJSON serializes Attachments + Inlines as a JSON array. Each
-// entry: {name, type, size, sha256, content (b64)}.
+// attachmentsJSON serializes Attachments + Inlines as a JSON array, the
+// attachments first. Each entry: {name, type, size, sha256, content (b64),
+// inline}.
 //
-// Inlines (cid: references in HTML) and Attachments (Content-Disposition:
-// attachment) are both surfaced — rules that care about the distinction can
-// read the message's `content-disposition` header.
+// `inline` is true for a part the message body DISPLAYS (a cid: image in the
+// HTML — the logo in a signature, a pasted screenshot) and false for one it
+// ATTACHES (Content-Disposition: attachment). An op that files what a person
+// sent — "learn this document" — wants the second kind; the first is
+// decoration, and a message whose only parts are inline has attached nothing.
+// The per-message `content-disposition` header cannot say which part is
+// which; this flag is the only per-part answer.
 func attachmentsJSON(env *enmime.Envelope) string {
-	all := make([]*enmime.Part, 0, len(env.Attachments)+len(env.Inlines))
-	all = append(all, env.Attachments...)
-	all = append(all, env.Inlines...)
-	if len(all) == 0 {
+	if len(env.Attachments)+len(env.Inlines) == 0 {
 		return ""
 	}
 	out := jsonx.NewArray()
-	for _, p := range all {
+	add := func(p *enmime.Part, inline bool) {
 		sum := sha256.Sum256(p.Content)
-		entry := map[string]interface{}{
+		out.Set("-1", map[string]interface{}{
 			"name":    p.FileName,
 			"type":    p.ContentType,
 			"size":    len(p.Content),
 			"sha256":  hex.EncodeToString(sum[:]),
 			"content": base64.StdEncoding.EncodeToString(p.Content),
-		}
-		out.Set("-1", entry)
+			"inline":  inline,
+		})
+	}
+	for _, p := range env.Attachments {
+		add(p, false)
+	}
+	for _, p := range env.Inlines {
+		add(p, true)
 	}
 	return out.String()
 }

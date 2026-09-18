@@ -382,3 +382,69 @@ END:VEVENT
 END:VCALENDAR
 --m1--
 `
+
+// fixtureInlineAndAttached is what a mail client sends when someone attaches a
+// document to a message whose signature carries a logo: the logo is a cid:
+// part the HTML displays, the report is an attachment.
+const fixtureInlineAndAttached = `From: Dana <dana@example.com>
+To: pony@your.tenant
+Subject: please learn this
+Date: Mon, 25 May 2026 16:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="MIXED"
+
+--MIXED
+Content-Type: multipart/related; boundary="REL"
+
+--REL
+Content-Type: text/html; charset=utf-8
+
+<p>Here it is.</p><img src="cid:logo@example">
+--REL
+Content-Type: image/png; name="logo.png"
+Content-Disposition: inline; filename="logo.png"
+Content-ID: <logo@example>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--REL--
+--MIXED
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjcK
+--MIXED--
+`
+
+func TestParseMessage_InlineFlag(t *testing.T) {
+	out, err := ParseMessage([]byte(crlf(fixtureInlineAndAttached)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	atts := gjson.Get(out, "attachments").Array()
+	if len(atts) != 2 {
+		t.Fatalf("attachments len = %d, want 2: %s", len(atts), gjson.Get(out, "attachments").Raw)
+	}
+	// Attachments first, inline parts after, each marked.
+	for i, want := range []struct {
+		name   string
+		inline bool
+	}{{"report.pdf", false}, {"logo.png", true}} {
+		a := atts[i]
+		if a.Get("name").String() != want.name || !a.Get("inline").Exists() || a.Get("inline").Bool() != want.inline {
+			t.Errorf("attachments[%d] = %s, want name %q inline %v", i, a.Raw, want.name, want.inline)
+		}
+	}
+
+	// A message that only displays a logo has attached nothing, and says so.
+	only := strings.Replace(fixtureInlineAndAttached, "--MIXED\nContent-Type: application/pdf", "--IGNORED\nContent-Type: application/pdf", 1)
+	out, err = ParseMessage([]byte(crlf(only)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	first := gjson.Get(out, "attachments.0")
+	if first.Get("name").String() != "logo.png" || first.Get("inline").Bool() != true {
+		t.Errorf("inline-only message: attachments.0 = %s", first.Raw)
+	}
+}

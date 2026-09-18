@@ -451,13 +451,13 @@ func mcpFailPayload(opName, phase string, status int, err error) event.Payload {
 
 // opsKey makes an op's `name` usable as a JSON object key inside
 // `_txc._ops`. Empty names fall back to "_anonymous" so the value
-// is reachable from rules; dotted names would otherwise be parsed
-// as nested paths by sjson.
+// is reachable from rules; sjsonKey escapes path metacharacters and
+// forces an object key, so a name in digits is not an array index.
 func opsKey(name string) string {
 	if name == "" {
 		return "_anonymous"
 	}
-	return name
+	return sjsonKey(name)
 }
 
 // jsonStringLit returns the JSON-encoded literal for a string,

@@ -20,6 +20,7 @@ package jsonx
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 
 	"github.com/tidwall/sjson"
@@ -150,14 +151,78 @@ func splitPath(path string) ([]pathSeg, bool) {
 	return segs, true
 }
 
-// PathKeys returns the object keys an sjson path addresses, one per
-// segment, exactly as sjson.Set/Delete will resolve them: '\' escapes
-// are applied and a segment's leading ':' (force-key) is dropped. ok is
-// false for a path sjson rejects ("" or an unescaped '*' '?' '#').
+// PathKey is one resolved segment of an sjson path.
+type PathKey struct {
+	Name  string // the key, with '\' escapes applied
+	Force bool   // a leading ':' — sjson treats Name as an object key even if numeric
+	Raw   string // the segment as written, minus that ':' — what sjson hands gjson.Get to find an existing value
+}
+
+// Index reports whether sjson treats the key as an ARRAY INDEX, and which:
+// every byte a digit and no ':' force-prefix (leading zeros count: `020` is
+// 20; escapes do not exempt it: `\20` is 20). huge is set, with n
+// meaningless, when the digits overflow an int — sjson's own conversion wraps
+// there, so a caller bounding n must treat it as unbounded. An empty key is
+// index 0, exactly as sjson's atoui has it.
+func (k PathKey) Index() (n int, isIndex, huge bool) {
+	if k.Force {
+		return 0, false, false
+	}
+	for i := 0; i < len(k.Name); i++ {
+		c := k.Name[i]
+		if c < '0' || c > '9' {
+			return 0, false, false
+		}
+		if !huge {
+			d := int(c - '0')
+			if n > (math.MaxInt-d)/10 {
+				huge = true
+				continue
+			}
+			n = n*10 + d
+		}
+	}
+	return n, true, huge
+}
+
+// PathSegments resolves an sjson path into its keys, exactly as
+// sjson.Set/Delete will: '\' escapes are applied and a segment's leading ':'
+// (force-key) is lifted into Force. ok is false for a path sjson rejects (""
+// or an unescaped '*' '?' '#').
 //
-// It exists for path GUARDS (chassis/txcguard): a policy check has to
-// judge the keys sjson will really write, not the spelling the author
-// chose — `\_txc.tenant` and `:_txc.tenant` both address `_txc.tenant`.
+// It exists for path GUARDS (chassis/txcguard): a policy check has to judge
+// the keys sjson will really write, not the spelling the author chose —
+// `\_txc.tenant` and `:_txc.tenant` both address `_txc.tenant`.
+func PathSegments(path string) ([]PathKey, bool) {
+	segs, ok := splitPath(path)
+	if !ok {
+		return nil, false
+	}
+	keys := make([]PathKey, len(segs))
+	start := 0
+	for i, s := range segs {
+		// The segment's raw text runs to the next UNESCAPED '.'.
+		end := start
+		for end < len(path) && path[end] != '.' {
+			if path[end] == '\\' {
+				end++
+			}
+			end++
+		}
+		if end > len(path) {
+			end = len(path)
+		}
+		raw := path[start:end]
+		if s.force {
+			raw = raw[1:]
+		}
+		keys[i] = PathKey{Name: s.name, Force: s.force, Raw: raw}
+		start = end + 1
+	}
+	return keys, true
+}
+
+// PathKeys is PathSegments without the force flags — the bare key names.
 func PathKeys(path string) ([]string, bool) {
 	segs, ok := splitPath(path)
 	if !ok {

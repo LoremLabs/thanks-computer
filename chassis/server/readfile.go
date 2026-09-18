@@ -127,7 +127,9 @@ func readFile(ctx context.Context, ix *static.Index, fcas filecas.Store, in []by
 		}
 		seen[as] = struct{}{}
 
-		base := into + "." + as
+		// ':' forces an object key: `as` may be all digits, and unforced that
+		// is an array index sjson pads out to (`as = "2000000"`).
+		base := into + ".:" + as
 
 		r, ok := ix.Asset(tenant, stack, path)
 		var body []byte

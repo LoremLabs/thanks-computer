@@ -14,7 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 )
 
 // PR 3 shipped the pilots (&uuid, &now) end-to-end so the parser →
@@ -377,7 +378,9 @@ func setFn(args []any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("&set: %w", err)
 	}
-	out, serr := sjson.Set(js, path, args[2])
+	// BoundedSet: the path is a runtime value, and a numeric key in it is an
+	// array index sjson pads out to — `&set(o, "a.2000000", 1)` is a 10 MB value.
+	out, serr := txcguard.BoundedSet(js, path, args[2])
 	if serr != nil {
 		return nil, fmt.Errorf("&set: %w", serr)
 	}

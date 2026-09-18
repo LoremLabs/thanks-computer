@@ -232,7 +232,15 @@ func AuthorTarget(raw string) (path string, ok bool) {
 	if path == "" {
 		return "", true
 	}
-	return path, !danglingEscape(path) && AuthorMayWrite(path)
+	return path, targetShapeOK(path) && AuthorMayWrite(path)
+}
+
+// targetShapeOK holds the two checks a target needs beyond the `_txc` policy:
+// no dangling escape, and no numeric key that would pad an array past
+// MaxArrayPad. An op builds its result in a fresh `{}`, so that is the
+// document the path is judged against.
+func targetShapeOK(path string) bool {
+	return !danglingEscape(path) && !PadsArray("{}", path)
 }
 
 // danglingEscape reports whether path ends in an unpaired `\`. Handlers build
@@ -260,5 +268,5 @@ func ComputedTarget(raw string) (path string, ok bool) {
 	if path == "" {
 		return "", true
 	}
-	return path, !danglingEscape(path) && mayTouch(path, authorKeys, computedKeys)
+	return path, targetShapeOK(path) && mayTouch(path, authorKeys, computedKeys)
 }

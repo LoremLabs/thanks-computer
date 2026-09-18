@@ -157,6 +157,11 @@ For a key that contains a character the bare run can't carry — notably a liter
 .headers."content-type".0
 ```
 
+**A segment in digits is an array index when you write.** `EMIT .rows.3 = "r"` makes `rows` an array and fills slots 0–2 with `null`; `.rows.-1` appends. That holds wherever a rule names a path to write — `SET`, `EMIT`, `LOOP SET`, `SELECT … AS`, a `WITH` key, the path argument of `&set`, and a builtin's `into` / `to` / `output_path`. Two consequences:
+
+- A write that would pad an array by more than 65,535 slots is refused: `EMIT`, `SET`, `SELECT` and `into` drop it (logged, not fatal), while `&set`, a `WITH` key and `txco://copy` fail. Before this limit, `EMIT .a.2000000 = 1` built a 10 MB envelope.
+- To use digits as an **object key** — an id, a timestamp — under something that doesn't exist yet, force it with a leading `:`. In a txcl path that needs the quotes, `.by_id.":1690000000"`; in a string path it doesn't, `&set(.o, "by_id.:1690000000", v)`. Plain digits are already a key under an object that exists in the document being written — but `EMIT` writes into the op's own response, which starts empty, so force it there.
+
 ### Regexes
 
 Regex literals are bounded by `/`, used only as the right-hand side of `=~` (matches) or `!~` (does not match):

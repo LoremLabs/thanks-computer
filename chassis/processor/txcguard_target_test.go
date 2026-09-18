@@ -14,11 +14,17 @@ import (
 // and returns the propagated envelope.
 func runOneRule(t *testing.T, stack, rule, envelope string) string {
 	t.Helper()
+	return runNamedRule(t, stack, "rule", rule, envelope)
+}
+
+// runNamedRule is runOneRule with the op's name chosen by the caller.
+func runNamedRule(t *testing.T, stack, name, rule, envelope string) string {
+	t.Helper()
 	pu, _ := newTestUnit(t)
 	pu.Handle([]byte("txco://copy"), event.OpsHandlerFunc(ops.Copy))
 	if _, err := pu.Dbc.Db.Exec(
 		`INSERT INTO ops (stack, scope, name, txcl, mock_req, mock_res) VALUES (?, ?, ?, ?, '', '')`,
-		stack, 0, "rule", rule); err != nil {
+		stack, 0, name, rule); err != nil {
 		t.Fatalf("seed op: %v", err)
 	}
 	resCh := make(chan event.Payload, 1)

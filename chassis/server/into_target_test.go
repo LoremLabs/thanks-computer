@@ -29,6 +29,11 @@ func TestIntoPath(t *testing.T) {
 		{"@computed.sig_valid", "_kv"}, // a verdict path: only the auth helpers
 		{"_txc", "_kv"},
 		{`@web.res\`, "_kv"}, // a dangling escape would swallow the appended '.'
+		// a target is also a size: a numeric key pads an array out to its index
+		{".rows.2000000", "_kv"},
+		{`rows.\2000000`, "_kv"},
+		{".rows.3", "rows.3"},               // a small index is fine
+		{".rows.:2000000", "rows.:2000000"}, // forced to an object key
 	}
 	for _, c := range cases {
 		meta := []byte(`{}`)

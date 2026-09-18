@@ -31,6 +31,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/runtime"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -200,10 +201,10 @@ passes:
 							zap.String("name", op.Name), zap.String("path", path))
 						continue
 					}
-					if nv, serr := sjson.Set(view, path, val); serr == nil {
+					if nv, serr := txcguard.BoundedSet(view, path, val); serr == nil {
 						view = nv
 					}
-					if ni, serr := sjson.Set(in, path, val); serr == nil {
+					if ni, serr := txcguard.BoundedSet(in, path, val); serr == nil {
 						in = ni
 					}
 				}
@@ -349,9 +350,12 @@ func (pu *Unit) dropLoopsOutsideRequest(ctx context.Context, ops []operation.Ope
 
 // sjsonKey escapes one path component so an op name containing path
 // metacharacters (`.`, `*`, `?`, `|`, `#`, `@`, `:`) addresses a single
-// key rather than a nested path or a wildcard.
+// key rather than a nested path or a wildcard. The leading ':' is sjson's
+// force-key prefix: an op may be NAMED in digits (`2000000` is a valid op
+// name), and unforced that key is an array index sjson pads out to.
 func sjsonKey(name string) string {
 	var b strings.Builder
+	b.WriteByte(':')
 	for _, r := range name {
 		switch r {
 		case '\\', '.', '*', '?', '|', '#', '@', ':':

@@ -1161,3 +1161,25 @@ func TestTzOffsets_Errors(t *testing.T) {
 		}
 	}
 }
+
+// A path is also a size: sjson pads an array out to a numeric key, so
+// `&set(o, "a.2000000", 1)` would build a 10 MB value. It fails like any
+// other bad &set (a rule can catch it with &try_*), while the same digits as
+// an OBJECT key still work.
+func TestSet_RefusesArrayPad(t *testing.T) {
+	for _, path := range []string{"a.2000000", `a.\2000000`, "a.99999999999999999999999", "a.40000.b.40000"} {
+		if v, err := Call("set", []any{map[string]any{}, path, 1}); err == nil {
+			t.Errorf("&set(%q) = %.60v, want an error", path, v)
+		}
+	}
+	v, err := Call("set", []any{map[string]any{"by_id": map[string]any{}}, "by_id.1690000000", "u"})
+	if err != nil {
+		t.Fatalf("numeric object key refused: %v", err)
+	}
+	if got := v.(map[string]any)["by_id"].(map[string]any)["1690000000"]; got != "u" {
+		t.Errorf("got %v", v)
+	}
+	if _, err := Call("set", []any{map[string]any{}, "fresh.:1690000000", "u"}); err != nil {
+		t.Errorf("forced object key refused: %v", err)
+	}
+}

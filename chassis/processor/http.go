@@ -182,7 +182,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	// the envelope's top level. Falls back to the raw body if the
 	// response isn't valid JSON.
 	out := string(body)
-	if into := normalizeEnvelopePath(metaFields[4].String()); into != "" {
+	if into := boundedInto(metaFields[4].String()); into != "" {
 		if wrapped, werr := sjson.SetRaw("{}", into, out); werr == nil {
 			out = wrapped
 		}
@@ -197,6 +197,20 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 // leading `@` (txcl sugar for `._txc.`) expands, and a leading `.` is
 // dropped. "" stays "" (no path).
 func normalizeEnvelopePath(p string) string { return txcguard.NormalizePath(p) }
+
+// boundedInto resolves `WITH into` for a transport the processor runs itself
+// (http(s)://, workspace://). Those are author-controlled, so a reserved
+// `_txc` target is stripped by the output sanitizer afterwards — but the
+// target is also a SIZE: a numeric key pads an array out to its index
+// (txcguard.PadsArray). Such a target is dropped, and the caller falls back
+// as if none was given.
+func boundedInto(raw string) string {
+	into := normalizeEnvelopePath(raw)
+	if into != "" && txcguard.PadsArray("{}", into) {
+		return ""
+	}
+	return into
+}
 
 // formEncode serializes a JSON value into an
 // application/x-www-form-urlencoded body using bracket notation for
@@ -380,7 +394,8 @@ func applySecretOverlays(
 				body = []byte("{}")
 			}
 			var err error
-			body, err = sjson.SetBytes(body, jsonPath, value)
+			// The path comes from the rule (`WITH secrets.body.<path>.secret`).
+			body, err = txcguard.BoundedSetBytes(body, jsonPath, value)
 			if err != nil {
 				return body, fmt.Errorf("body overlay at %q: %w", ref.Path, err)
 			}
