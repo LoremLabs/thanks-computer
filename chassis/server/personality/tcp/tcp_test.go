@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pires/go-proxyproto"
+	"github.com/pires/go-proxyproto/tlvparse"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
@@ -611,5 +613,191 @@ func TestWantsManagedTLS(t *testing.T) {
 		if got := NewController(context.Background(), pu).WantsManagedTLS(); got != tc.want {
 			t.Errorf("%v: WantsManagedTLS = %v, want %v", tc.addrs, got, tc.want)
 		}
+	}
+}
+
+// --- `;proxy=` listeners: the edge terminated TLS and vouches for the
+// connection in a PROXY v2 header (chassis/edgeproxy). ---
+
+// edgeHeader is what the edge adapter writes ahead of the stream: the
+// real client, the address it dialled, and the AUTHORITY/ALPN/SSL TLVs.
+func edgeHeader(t *testing.T, authority string) []byte {
+	t.Helper()
+	h := proxyproto.HeaderProxyFromAddrs(2,
+		&net.TCPAddr{IP: net.ParseIP("176.151.108.50"), Port: 51000},
+		&net.TCPAddr{IP: net.ParseIP("203.0.113.7"), Port: 6697})
+	ssl, err := tlvparse.PP2SSL{
+		Client: tlvparse.PP2_BITFIELD_CLIENT_SSL,
+		Verify: 1,
+		TLV:    []proxyproto.TLV{{Type: proxyproto.PP2_SUBTYPE_SSL_VERSION, Value: []byte("TLS 1.3")}},
+	}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlvs := []proxyproto.TLV{{Type: proxyproto.PP2_TYPE_ALPN, Value: []byte("irc")}, ssl}
+	if authority != "" {
+		tlvs = append(tlvs, proxyproto.TLV{Type: proxyproto.PP2_TYPE_AUTHORITY, Value: []byte(authority)})
+	}
+	if err := h.SetTLVs(tlvs); err != nil {
+		t.Fatal(err)
+	}
+	b, err := h.Format()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func proxyListener(trusted string) func(*config.Config) {
+	return func(c *config.Config) {
+		c.TCPListenAddrs = []string{"edge=127.0.0.1:0;proxy=" + trusted}
+		c.TCPHandshakeTimeout = "300ms"
+	}
+}
+
+// TestProxyListenerStampsEdgeFacts — behind the edge the envelope is the
+// one a `;tls` listener would have produced (same fields, no hint of who
+// terminated TLS), with the header's client as the client.
+func TestProxyListenerStampsEdgeFacts(t *testing.T) {
+	got := make(chan string, 1)
+	h := newHarness(t, proxyListener("127.0.0.0/8"), nil, func(env *event.Envelope) event.DispatchResult {
+		if isConnect(env) {
+			got <- env.Payload.Raw
+			return routed(verdict("hello\n", ""))
+		}
+		return routed(verdict(strings.ToUpper(lineOf(env)), ""))
+	})
+	c, r := dial(t, h.addr)
+	if _, err := c.Write(append(edgeHeader(t, "IRC.Foo.local.thanks.computer"), "abc\n"...)); err != nil {
+		t.Fatal(err)
+	}
+	if line := readLineT(t, r); line != "hello\n" {
+		t.Fatalf("greeting = %q", line)
+	}
+	// The stream starts after the header: the line is a line, not TLVs.
+	if line := readLineT(t, r); line != "ABC\n" {
+		t.Fatalf("echo = %q", line)
+	}
+	env := <-got
+	for path, want := range map[string]any{
+		"_txc.tcp.listener":    "edge",
+		"_txc.tcp.host":        "irc.foo.local.thanks.computer",
+		"_txc.tcp.tls.sni":     "IRC.Foo.local.thanks.computer",
+		"_txc.tcp.tls.enabled": true,
+		"_txc.tcp.tls.alpn":    "irc",
+		"_txc.tcp.tls.version": "TLS 1.3",
+		"_txc.client.ip":       "176.151.108.50",
+		"_txc.tcp.remote.port": float64(51000),
+		"_txc.tcp.local.ip":    "203.0.113.7",
+		"_txc.tcp.local.port":  float64(6697),
+	} {
+		if v := gjson.Get(env, path).Value(); v != want {
+			t.Errorf("%s = %v, want %v", path, v, want)
+		}
+	}
+	for _, path := range []string{"_txc.tcp.host_source", "_txc.tcp.edge", "_txc.tcp.proxy"} {
+		if gjson.Get(env, path).Exists() {
+			t.Errorf("%s leaked into the envelope", path)
+		}
+	}
+}
+
+// TestProxyListenerNoAuthority — a header with no hostname still vouches
+// for the client address; the run just has no @tcp.host to route on (the
+// YAML listener entry is the only way in).
+func TestProxyListenerNoAuthority(t *testing.T) {
+	got := make(chan string, 1)
+	h := newHarness(t, proxyListener("127.0.0.0/8"), nil, func(env *event.Envelope) event.DispatchResult {
+		got <- env.Payload.Raw
+		return event.DispatchResult{Payload: verdict("", ""), Tenant: "_sys"}
+	})
+	c, r := dial(t, h.addr)
+	if _, err := c.Write(edgeHeader(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	expectEOF(t, r)
+	env := <-got
+	if gjson.Get(env, "_txc.tcp.host").Exists() || gjson.Get(env, "_txc.tcp.tls.sni").Exists() {
+		t.Errorf("host facts without an AUTHORITY: %s", env)
+	}
+	if ip := gjson.Get(env, "_txc.client.ip").String(); ip != "176.151.108.50" {
+		t.Errorf("client.ip = %q", ip)
+	}
+}
+
+// TestProxyListenerIsEdgeOnly — nobody reaches the pipeline through a
+// `;proxy=` listener without a header from the trusted networks: not an
+// outsider (whose forged header is never parsed), not a trusted peer that
+// skips it, not one that stalls.
+func TestProxyListenerIsEdgeOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		trusted string
+		send    func(t *testing.T) []byte
+	}{
+		"outsider with a forged header": {"10.0.0.0/8", func(t *testing.T) []byte { return edgeHeader(t, "irc.victim.example") }},
+		"outsider, plain":               {"10.0.0.0/8", func(*testing.T) []byte { return []byte("NICK moo\n") }},
+		"trusted peer, no header":       {"127.0.0.0/8", func(*testing.T) []byte { return []byte("NICK moo\n") }},
+		"trusted peer, silent":          {"127.0.0.0/8", func(*testing.T) []byte { return nil }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, proxyListener(tc.trusted), nil, func(env *event.Envelope) event.DispatchResult {
+				t.Errorf("a pipeline run was spent on it: %s", env.Payload.Raw)
+				return routed(verdict("", ""))
+			})
+			c, _ := dial(t, h.addr)
+			if b := tc.send(t); len(b) > 0 {
+				if _, err := c.Write(b); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Closed without a byte. (Unread input can turn the close
+			// into a reset; either way nothing was served.)
+			if b, _ := io.ReadAll(c); len(b) != 0 {
+				t.Fatalf("got %q, want nothing", b)
+			}
+		})
+	}
+}
+
+// TestProxyListenerRefusalOffTheAcceptLoop — refusing on a `;proxy=`
+// listener has to wait for the peer's header before it can write, and
+// that wait must not happen on the accept loop: a silent peer would
+// otherwise hold up everyone behind it.
+func TestProxyListenerRefusalOffTheAcceptLoop(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		proxyListener("127.0.0.0/8")(c)
+		c.TCPHandshakeTimeout = "5s"
+	}, nil, func(env *event.Envelope) event.DispatchResult {
+		t.Error("a draining node must not spend a pipeline run on the connection")
+		return routed(verdict("", ""))
+	})
+	admission.SetDraining(true)
+	t.Cleanup(func() { admission.SetDraining(false) })
+
+	dial(t, h.addr) // silent: never sends its header
+	c, r := dial(t, h.addr)
+	_ = c.SetDeadline(time.Now().Add(700 * time.Millisecond))
+	if _, err := c.Write(edgeHeader(t, "irc.foo.local.thanks.computer")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLineT(t, r); got != "503 draining\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// TestTLSListenerRefusesSilently — a `;tls` listener refuses by closing:
+// no plaintext line into a TLS client's handshake, and no handshake spent.
+func TestTLSListenerRefusesSilently(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.TCPListenAddrs = []string{"irc=127.0.0.1:0;tls"}
+	}, func(c *TCPController) { c.SetTLSConfig(devTLS(t)) }, func(env *event.Envelope) event.DispatchResult {
+		t.Error("a draining node must not spend a pipeline run on the connection")
+		return routed(verdict("", ""))
+	})
+	admission.SetDraining(true)
+	t.Cleanup(func() { admission.SetDraining(false) })
+	c, _ := dial(t, h.addr)
+	if b, _ := io.ReadAll(c); len(b) != 0 {
+		t.Fatalf("got %q, want a bare close", b)
 	}
 }

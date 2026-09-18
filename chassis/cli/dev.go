@@ -85,7 +85,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	webAddr := fs.String("web-addr", "", "override the spawned chassis web inlet listen addr (e.g. \":8090\"). Lets you run side-by-side dev instances without port clashes.")
 	workspace := fs.String("workspace", ".", "workspace root (defaults to cwd)")
 	uiDev := fs.Bool("ui", false, "also start the admin-ui Vite dev server on "+adminUIDevPort+" (HMR; opens admin-ui/ found by walking up from the workspace)")
-	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050). Disabled by default — most workflows only need web + cron + admin.")
+	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050; override with TXCO_TCP_LISTEN_ADDRS, e.g. 'irc=127.0.0.1:6697;self-signed' for a TLS/SNI listener). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
 	allowLocalWorkspace := fs.Bool("allow-local-workspace", false, "enable workspace:// ops backed by the local provider: commands run as YOUR uid, unsandboxed, under .txco/dev/workspaces/<tenant>/<stack>/<name>. Off by default and never implied by anything else; the chassis logs a WARN pair when it is on.")
@@ -1067,8 +1067,15 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	if err := requirePortFree(webAddr, "web inlet"); err != nil {
 		return "", "", err
 	}
-	tcpAddr := ":5050"
-	if tcpHead {
+	// TXCO_TCP_LISTEN_ADDRS in the parent env replaces the :5050 default
+	// (e.g. "irc=127.0.0.1:6697;self-signed" for a TLS/SNI listener). It
+	// is a full listener spec, not an address, so the free-port precheck
+	// is skipped; the chassis itself fails loudly on a bind conflict.
+	tcpAddr, tcpOverridden := ":5050", false
+	if v := strings.TrimSpace(os.Getenv("TXCO_TCP_LISTEN_ADDRS")); v != "" {
+		tcpAddr, tcpOverridden = v, true
+	}
+	if tcpHead && !tcpOverridden {
 		if err := requirePortFree(tcpAddr, "TCP inlet"); err != nil {
 			return "", "", err
 		}

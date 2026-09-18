@@ -21,6 +21,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
@@ -39,7 +40,7 @@ type limits struct {
 	respTimeout       time.Duration // each line's rule response (and our write)
 	idleTimeout       time.Duration // silence between lines
 	drainTimeout      time.Duration // Stop() waits this long for handlers to unwind
-	handshakeTimeout  time.Duration // TLS handshake on a ;tls listener
+	handshakeTimeout  time.Duration // TLS handshake (;tls) or PROXY header (;proxy=)
 	maxConns          int           // open connections on this node; 0 = unlimited
 	maxConnsPerTenant int           // open connections per routed tenant; 0 = unlimited
 	maxLine           int           // longest accepted line, bytes
@@ -53,8 +54,10 @@ type limits struct {
 // shuts down.
 //
 // A `;tls` listener terminates TLS here and stamps the SNI hostname as
-// `@tcp.host`, the connection's routing fact — the same field a trusted
-// edge fills in from its PROXY header. Routing itself stays in
+// `@tcp.host`, the connection's routing fact. A `;proxy=` listener sits
+// behind an edge that already terminated TLS and fills the same fields
+// from the edge's PROXY v2 header (chassis/edgeproxy), so a stack never
+// sees which side did the handshake. Routing itself stays in
 // `_sys/boot`: detect-tenant reads `@tcp.host`, route promotes it, and
 // the head only learns the outcome (event.DispatchResult).
 type TCPController struct {
@@ -88,10 +91,16 @@ type connection struct {
 	spec listenerSpec
 	tls  tlsFacts
 
+	// host is the hostname the client asked for, raw: the SNI we saw or
+	// the edge's AUTHORITY. hostSource ("sni" | "edge") is for the log
+	// only — it never reaches the envelope.
+	host, hostSource string
+
 	tenant, stack string // "" until the connect run routed
 }
 
-// tlsFacts is what the handshake observed; provenance for @tcp.tls.*.
+// tlsFacts is what the handshake observed — ours, or the one the edge
+// reported; provenance for @tcp.tls.*.
 type tlsFacts struct {
 	enabled bool
 	sni     string
@@ -148,11 +157,13 @@ func parseLimits(pu *processor.Unit) limits {
 	}
 }
 
-// dataDir is where the bundled stores live (every *DBPath defaults under
-// ./chassis/data); the dev certificate sits beside them.
+// dataDir is where the bundled stores live: the parent of --db-root-dir
+// (./chassis/data by default, .txco/dev under `txco dev`). The dev
+// certificate sits beside them, so it survives restarts and never lands
+// in a workspace's source tree.
 func dataDir(conf config.Config) string {
-	if p := strings.TrimSpace(conf.IMAPDBPath); p != "" {
-		return filepath.Dir(p)
+	if p := strings.TrimSpace(conf.DbRoot); p != "" {
+		return filepath.Dir(filepath.Clean(p))
 	}
 	return "./chassis/data"
 }
@@ -234,6 +245,9 @@ func (tcp *TCPController) Start() {
 				zap.String("err", err.Error()),
 				zap.String("hint", "lsof -iTCP"+spec.Addr+" -sTCP:LISTEN"))
 		}
+		// A no-op without `;proxy=`. The header read shares the handshake
+		// budget: both are "the peer has this long to say who it is".
+		l = edgeproxy.Wrap(l, spec.Proxy, tcp.lim.handshakeTimeout)
 		if cfg != nil {
 			l = tls.NewListener(l, cfg)
 		}
@@ -245,7 +259,8 @@ func (tcp *TCPController) Start() {
 		tcp.pu.Logger.Info("tcp controller started",
 			zap.String("listen", spec.Addr),
 			zap.String("name", spec.Name),
-			zap.Bool("tls", spec.TLS))
+			zap.Bool("tls", spec.TLS),
+			zap.Bool("proxy", len(spec.Proxy) > 0))
 
 		tcp.wg.Add(1)
 		go tcp.acceptLoop(l, spec)
@@ -286,18 +301,28 @@ func (tcp *TCPController) acceptLoop(l net.Listener, spec listenerSpec) {
 // admit is the accept-time gate. It runs BEFORE the TLS handshake and
 // the connect event so a draining or full node answers in one line
 // instead of spending a handshake and a pipeline run on a connection it
-// is about to drop. (On a TLS listener the refusal line goes out inside
-// the handshake attempt the client started; it still ends the
-// connection.)
+// is about to drop.
 func (tcp *TCPController) admit(c net.Conn, spec listenerSpec) {
+	// Off the accept loop: on a `;proxy=` listener the first Write (and
+	// RemoteAddr) waits for the peer's PROXY header, and a silent peer
+	// must not stall accepts. A `;tls` listener gets no line at all — it
+	// would cost the handshake we are refusing to spend, and a plaintext
+	// line is noise to a TLS client; the close says enough.
 	refuse := func(line, why string) {
-		_ = c.SetWriteDeadline(time.Now().Add(time.Second))
-		_, _ = c.Write([]byte(line + "\n"))
-		_ = c.Close()
-		tcp.pu.Logger.Info("tcp connection refused",
-			zap.String("listener", spec.Name),
-			zap.String("remote", c.RemoteAddr().String()),
-			zap.String("why", why))
+		tcp.wg.Add(1)
+		go func() {
+			defer tcp.wg.Done()
+			if !spec.TLS {
+				_ = c.SetDeadline(time.Now().Add(time.Second))
+				_, _ = c.Write([]byte(line + "\n"))
+			}
+			remote := c.RemoteAddr().String()
+			_ = c.Close()
+			tcp.pu.Logger.Info("tcp connection refused",
+				zap.String("listener", spec.Name),
+				zap.String("remote", remote),
+				zap.String("why", why))
+		}()
 	}
 	if tcp.stopping.Load() || admission.IsDraining() {
 		refuse("503 draining", "draining")
@@ -370,6 +395,36 @@ func (tcp *TCPController) handshake(c *connection) error {
 		alpn:    cs.NegotiatedProtocol,
 		version: tls.VersionName(cs.Version),
 	}
+	if cs.ServerName != "" {
+		c.host, c.hostSource = cs.ServerName, "sni"
+	}
+	return nil
+}
+
+// errNotFronted closes a `;proxy=` connection nobody vouched for.
+var errNotFronted = errors.New("no PROXY header from a trusted edge")
+
+// edgeFacts is handshake's counterpart on a `;proxy=` listener: the edge
+// terminated TLS and its PROXY v2 header says what it observed. The
+// listener is an edge-only door, so a connection without a header from
+// the trusted networks — an outsider, or the edge's own LOCAL probe — is
+// closed here, before any pipeline run. (A header an outsider sends is
+// never parsed; see edgeproxy.Wrap.)
+func (tcp *TCPController) edgeFacts(c *connection) error {
+	f, err := edgeproxy.Read(c.Conn)
+	if err != nil {
+		return err
+	}
+	if !f.Present {
+		return errNotFronted
+	}
+	c.tls = tlsFacts{enabled: f.TLS, alpn: f.ALPN, version: f.TLSVersion}
+	if f.TLS {
+		c.tls.sni = f.Authority
+	}
+	if f.Authority != "" {
+		c.host, c.hostSource = f.Authority, "edge"
+	}
 	return nil
 }
 
@@ -378,8 +433,10 @@ func (tcp *TCPController) handshake(c *connection) error {
 // and — on TLS — what the handshake observed. Chassis-stamped; none of it
 // is author-writable. Two hostname fields on purpose: `tcp.tls.sni` is
 // the raw observation, `tcp.host` the canonical routing fact detect-tenant
-// reads (a trusted edge fills the same two fields from its PROXY header,
-// so a stack never sees which one terminated TLS).
+// reads. Both come from our handshake or from the edge's PROXY header, and
+// the envelope does not say which. On a `;proxy=` listener the socket
+// addresses below are the header's too: the real client, and the address
+// it dialled at the edge.
 func (tcp *TCPController) facts(c *connection) string {
 	payload, _ := sjson.Set("", "_txc.src", "tcp")
 	payload, _ = sjson.Set(payload, "_ts", time.Now().Format(time.RFC3339))
@@ -411,10 +468,10 @@ func (tcp *TCPController) facts(c *connection) string {
 		}
 		if c.tls.sni != "" {
 			payload, _ = sjson.Set(payload, "_txc.tcp.tls.sni", c.tls.sni)
-			if host, ok := tenants.CanonicalizeHost(c.tls.sni); ok {
-				payload, _ = sjson.Set(payload, "_txc.tcp.host", host)
-			}
 		}
+	}
+	if host, ok := tenants.CanonicalizeHost(c.host); ok {
+		payload, _ = sjson.Set(payload, "_txc.tcp.host", host)
 	}
 	return payload
 }
@@ -425,9 +482,17 @@ func (tcp *TCPController) serve(c *connection) {
 	defer tcp.unregister(c)
 	defer func() { _ = c.Close() }()
 
-	if c.spec.TLS {
+	switch {
+	case c.spec.TLS:
 		if err := tcp.handshake(c); err != nil {
 			tcp.pu.Logger.Info("tcp tls handshake failed",
+				zap.String("rid", c.rid), zap.String("listener", c.spec.Name),
+				zap.String("remote", c.RemoteAddr().String()), zap.String("err", err.Error()))
+			return
+		}
+	case len(c.spec.Proxy) > 0:
+		if err := tcp.edgeFacts(c); err != nil {
+			tcp.pu.Logger.Info("tcp connection not from the edge; closed",
 				zap.String("rid", c.rid), zap.String("listener", c.spec.Name),
 				zap.String("remote", c.RemoteAddr().String()), zap.String("err", err.Error()))
 			return
@@ -517,7 +582,8 @@ func (tcp *TCPController) decided(c *connection, decision string) {
 		zap.String("listener", c.spec.Name),
 		zap.String("remote", c.RemoteAddr().String()),
 		zap.Bool("tls", c.tls.enabled),
-		zap.String("host", c.tls.sni),
+		zap.String("host", c.host),
+		zap.String("host_source", c.hostSource),
 		zap.String("tenant", c.tenant),
 		zap.String("decision", decision))
 }

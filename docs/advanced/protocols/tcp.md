@@ -34,22 +34,25 @@ heads: `@tcp.*` holds facts the chassis observed (read-only),
 |---|---|
 | `@tcp.listener` | Listener name (`--tcp-listen-addrs=webhooks=:5050,iot=:5051`; bare addresses are `default`) |
 | `@tcp.local.{ip,port}` | The address the client connected *to* — route on raw port without any ingress config |
-| `@tcp.remote.port` | The peer's port (`@client.ip` is its address) |
-| `@client.ip` | Peer address |
+| `@tcp.remote.port` | The client's port (`@client.ip` is its address) |
+| `@client.ip` | Client address — behind a trusted edge, the real client's, not the edge's |
 | `@client.body` | The incoming line, base64-encoded (absent on the connect event) |
 | `@tcp.res.write` | Verdict: base64 bytes to write to the socket |
 | `@tcp.res.action` | Verdict: `"close"` hangs up after any write |
-
 | `@tcp.host` | The connection's canonical hostname (TLS SNI, lower-cased, port and trailing dot dropped) — the routing fact detect-tenant reads |
-| `@tcp.tls.enabled` | Whether the listener terminated TLS |
+| `@tcp.tls.enabled` | Whether the client's connection is TLS |
 | `@tcp.tls.{sni,alpn,version}` | What the handshake observed (`sni` is the raw name; `host` above is its canonical form) |
+
+The `@tcp.host` / `@tcp.tls.*` facts read the same whether the chassis
+terminated TLS itself (`;tls`) or a trusted edge did and reported it
+(`;proxy=`, below). A stack never needs to know which.
 
 ## Routing
 
 A connection is routed once, on the connect event, through the same
 `_sys/boot` path as every other source:
 
-1. `@tcp.host` (from SNI) is matched against the tenant's **verified**
+1. `@tcp.host` (the SNI — ours, or the one a trusted edge reported) is matched against the tenant's **verified**
    hostnames — the same gate a certificate needs, whatever
    `--require-hostname-verification` says for HTTP.
 2. Otherwise the listener name is matched against `ingress.tcp.listeners`
@@ -77,6 +80,37 @@ beside the data dir) instead — never for a public deployment.
 openssl s_client -connect 127.0.0.1:6697 -servername irc.moo.local.thanks.computer
 ```
 
+## Behind a TLS-terminating edge
+
+```text
+--tcp-listen-addrs "edge=:16697;proxy=172.16.0.0/12|fdaa::/8"
+```
+
+When an edge proxy terminates TLS in front of the chassis, the chassis
+never sees the handshake — so the edge says what it saw. The contract is
+one thing: a **PROXY protocol v2** header ahead of the stream, carrying
+
+| Header part | Becomes |
+|---|---|
+| source / destination address | `@client.ip`, `@tcp.remote.port`, `@tcp.local.{ip,port}` |
+| `PP2_TYPE_AUTHORITY` (the SNI) | `@tcp.tls.sni`, and canonicalised, `@tcp.host` |
+| `PP2_TYPE_ALPN` | `@tcp.tls.alpn` |
+| `PP2_TYPE_SSL` (+ `SSL_VERSION`) | `@tcp.tls.enabled`, `@tcp.tls.version` |
+
+`;proxy=` lists the networks the edge connects from (`|`-separated CIDRs
+or IPs). The listener is an **edge-only door**: the header is required
+from those networks, and a connection from anywhere else — or one that
+skips or stalls the header — is closed before any event runs. A header an
+outsider sends is never parsed. Keep the port off the public internet
+anyway; the CIDR list is the trust boundary, not a substitute for one.
+
+`;proxy=` does not combine with `;tls`: a listener either observes the
+handshake or trusts an edge that did. Any proxy that writes this header
+works (HAProxy's `send-proxy-v2-ssl` + `proxy-v2-options authority`
+does); for Caddy, whose layer4 proxy sends no TLVs, the
+[`caddy/proxytlv`](https://github.com/loremlabs/thanks-computer/tree/main/caddy/proxytlv)
+module adds them.
+
 ## Timeouts and limits
 
 | Flag | Default | Guards |
@@ -86,5 +120,5 @@ openssl s_client -connect 127.0.0.1:6697 -servername irc.moo.local.thanks.comput
 | `--tcp-max-idle-timeout` | `5s` | Silence between lines |
 | `--tcp-max-conns` | `0` (unlimited) | Open connections on this node, all listeners |
 | `--tcp-max-conns-per-tenant` | `0` (unlimited) | Open connections per tenant, counted once the connect run has routed |
-| `--tcp-handshake-timeout` | `5s` | The TLS handshake on a `;tls` listener |
+| `--tcp-handshake-timeout` | `5s` | The TLS handshake on a `;tls` listener, or the PROXY header on a `;proxy=` one |
 | `--tcp-drain-timeout` | `5s` | How long shutdown waits for open connections to unwind after closing them |

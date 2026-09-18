@@ -1,16 +1,11 @@
 package imap
 
 import (
-	"crypto/tls"
-	"net"
 	"testing"
-	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
-
-	"github.com/pires/go-proxyproto"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
 )
@@ -18,9 +13,9 @@ import (
 // The login line has to distinguish two situations a bare `tls` bool
 // collapses: a client on IMAPS whose TLS a front proxy terminated (safe,
 // tls=false proxied=true) and a client that really did send credentials in
-// the clear (tls=false proxied=false). These cover both halves — the
-// listener/proxied fields reaching the log, and the proxy detection that
-// feeds them.
+// the clear (tls=false proxied=false). This covers the listener/proxied
+// fields reaching the log; the proxy detection that feeds them is
+// chassis/edgeproxy's (TestFrontedUnderTLS and friends).
 
 func TestLoginLineNamesTheListener(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
@@ -51,53 +46,4 @@ func TestLoginLineNamesTheListener(t *testing.T) {
 			t.Errorf("%s = %v, want %v", field, got[field], want)
 		}
 	}
-}
-
-func TestFrontedByProxy(t *testing.T) {
-	// A PROXY v1 header from the front proxy, as the edge sends it.
-	const header = "PROXY TCP4 176.151.108.50 10.0.0.1 51000 1143\r\n"
-
-	// proxied(t) hands back a proxyproto.Conn whose peer has written the
-	// header. net.Pipe is unbuffered, so the write has to be concurrent
-	// with the read ProxyHeader() performs.
-	proxied := func(t *testing.T) *proxyproto.Conn {
-		t.Helper()
-		srv, cli := net.Pipe()
-		t.Cleanup(func() { _ = srv.Close(); _ = cli.Close() })
-		go func() {
-			_ = cli.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			_, _ = cli.Write([]byte(header))
-		}()
-		return proxyproto.NewConn(srv)
-	}
-
-	t.Run("bare connection", func(t *testing.T) {
-		srv, cli := net.Pipe()
-		t.Cleanup(func() { _ = srv.Close(); _ = cli.Close() })
-		if frontedByProxy(srv) {
-			t.Error("a connection nobody fronted reported as proxied")
-		}
-	})
-
-	t.Run("plaintext listener behind the proxy", func(t *testing.T) {
-		pc := proxied(t)
-		if !frontedByProxy(pc) {
-			t.Fatal("PROXY header present but not reported")
-		}
-		// The same header is what makes the logged ip the client's.
-		host, _, err := net.SplitHostPort(pc.RemoteAddr().String())
-		if err != nil || host != "176.151.108.50" {
-			t.Errorf("remote = %v err=%v, want the header's source", pc.RemoteAddr(), err)
-		}
-	})
-
-	t.Run("IMAPS listener behind the proxy", func(t *testing.T) {
-		// tls.NewListener wraps the proxyproto listener, so the session
-		// sees a *tls.Conn and the header is one layer down. No handshake
-		// happens here: only NetConn() is touched.
-		tc := tls.Client(proxied(t), &tls.Config{InsecureSkipVerify: true})
-		if !frontedByProxy(tc) {
-			t.Error("PROXY header under TLS not reported")
-		}
-	})
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 )
@@ -448,8 +449,8 @@ func TestTrustedProxy(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPProxyProtocol: []string{"10.0.0.0/8", "192.168.1.5", "bogus"}})
 	for addr, want := range map[string]bool{"10.1.2.3:44": true, "192.168.1.5:1": true, "192.168.1.6:1": false, "127.0.0.1:9": false} {
 		tcp, _ := net.ResolveTCPAddr("tcp", addr)
-		if got := h.ctrl.trustedProxy(tcp); got != want {
-			t.Errorf("trustedProxy(%s) = %v, want %v", addr, got, want)
+		if got := edgeproxy.Trusted(h.ctrl.proxy, tcp); got != want {
+			t.Errorf("trusted(%s) = %v, want %v", addr, got, want)
 		}
 	}
 }

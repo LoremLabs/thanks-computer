@@ -17,8 +17,10 @@ lint:
 	cd ./chassis && make lint
 test:
 	cd ./chassis && make test
+	cd ./caddy/proxytlv && go test -race ./...
 qtest:
 	cd ./chassis && make qtest
+	cd ./caddy/proxytlv && go test -race ./...
 cover:
 	cd ./chassis && make cover
 

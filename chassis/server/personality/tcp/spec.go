@@ -2,23 +2,34 @@ package tcp
 
 import (
 	"fmt"
+	"net"
 	"strings"
+
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 )
 
 // listenerSpec is one parsed --tcp-listen-addrs entry:
 //
-//	name=addr[;tls][;self-signed]
+//	name=addr[;tls][;self-signed][;proxy=CIDR|CIDR…]
 //
-// Options follow the address, ';'-separated (',' is the flag's own list
-// separator, so it can never appear inside an entry). `tls` terminates
-// TLS on the listener with the bundled cert manager and makes the SNI
-// hostname the connection's routing fact (@tcp.host); `self-signed`
-// serves the dev certificate instead and implies tls.
+// Options follow the address, ';'-separated, and a list inside an option
+// is '|'-separated (',' is the flag's own list separator, so it can never
+// appear inside an entry). `tls` terminates TLS on the listener with the
+// bundled cert manager and makes the SNI hostname the connection's
+// routing fact (@tcp.host); `self-signed` serves the dev certificate
+// instead and implies tls.
+//
+// `proxy=` makes the listener an edge-only door: the edge already
+// terminated TLS and says what it saw in a PROXY v2 header, which is
+// REQUIRED from the listed networks; a connection from anywhere else is
+// closed. It never combines with `tls` — a listener either observes the
+// handshake itself or trusts an edge that did, not both.
 type listenerSpec struct {
 	Name       string
 	Addr       string
 	TLS        bool
 	SelfSigned bool
+	Proxy      []*net.IPNet
 }
 
 // parseTCPListenSpec splits one `--tcp-listen-addrs` entry into its
@@ -63,8 +74,22 @@ func parseListenerSpec(spec string) (listenerSpec, error) {
 		case "self-signed":
 			ls.TLS, ls.SelfSigned = true, true
 		default:
-			return ls, fmt.Errorf("tcp listener %q: unknown option %q (want tls, self-signed)", spec, opt)
+			list, ok := strings.CutPrefix(opt, "proxy=")
+			if !ok {
+				return ls, fmt.Errorf("tcp listener %q: unknown option %q (want tls, self-signed, proxy=CIDR|CIDR)", spec, opt)
+			}
+			nets, bad := edgeproxy.ParseTrusted(strings.Split(list, "|"))
+			if len(bad) > 0 {
+				return ls, fmt.Errorf("tcp listener %q: proxy= entry %q is not a CIDR or an IP", spec, bad[0])
+			}
+			if len(nets) == 0 {
+				return ls, fmt.Errorf("tcp listener %q: proxy= needs at least one trusted CIDR", spec)
+			}
+			ls.Proxy = append(ls.Proxy, nets...)
 		}
+	}
+	if ls.TLS && len(ls.Proxy) > 0 {
+		return ls, fmt.Errorf("tcp listener %q: proxy= and tls do not combine (the edge terminates TLS on a proxy= listener)", spec)
 	}
 	return ls, nil
 }

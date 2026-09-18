@@ -13,10 +13,10 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
-	"github.com/pires/go-proxyproto"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/apppass"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 )
 
@@ -67,25 +67,13 @@ func newSession(c *Controller, conn *imapserver.Conn, listener string) *session 
 		} else {
 			s.ip = nc.RemoteAddr().String()
 		}
-		s.proxied = frontedByProxy(nc)
+		// bind() REQUIREs the header from --imap-proxy-protocol sources
+		// and SKIPs it for everyone else, so a parsed header is proof the
+		// session came through the front door — the same reason s.ip
+		// above is the real client's address and not the proxy's.
+		s.proxied = edgeproxy.Fronted(nc)
 	}
 	return s
-}
-
-// frontedByProxy reports whether a trusted front proxy presented a PROXY
-// header on this connection. bind() REQUIREs the header from
-// --imap-proxy-protocol sources and SKIPs it for everyone else, so a
-// parsed header is proof the session came through the front door — the
-// same reason s.ip above is the real client's address and not the
-// proxy's. Unwraps one layer of TLS because the IMAPS listeners wrap the
-// proxyproto listener, not the other way round.
-func frontedByProxy(nc net.Conn) bool {
-	if tc, ok := nc.(*tls.Conn); ok {
-		nc = tc.NetConn()
-	}
-	pc, ok := nc.(*proxyproto.Conn)
-	// ProxyHeader parses at most once; RemoteAddr above already did it.
-	return ok && pc != nil && pc.ProxyHeader() != nil
 }
 
 func (s *session) ctx() context.Context {

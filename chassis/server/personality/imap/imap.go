@@ -34,13 +34,13 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
-	"github.com/pires/go-proxyproto"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
@@ -100,17 +100,11 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chimap.Store)
 		c.loginAcct = throttle.New(pu.Conf.IMAPLoginRate, time.Minute)
 		c.conns = newConnCounter(pu.Conf.IMAPMaxConnsPerAccount)
 		c.lanes = newLanes(ctx, pu)
-		for _, cidr := range nonEmpty(pu.Conf.IMAPProxyProtocol) {
-			if _, n, err := net.ParseCIDR(cidr); err == nil {
-				c.proxy = append(c.proxy, n)
-			} else if ip := net.ParseIP(cidr); ip != nil {
-				bits := 32
-				if ip.To4() == nil {
-					bits = 128
-				}
-				c.proxy = append(c.proxy, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
-			} else if pu.Logger != nil {
-				pu.Logger.Warn("imap: ignoring unparseable --imap-proxy-protocol entry", zap.String("entry", cidr))
+		var bad []string
+		c.proxy, bad = edgeproxy.ParseTrusted(pu.Conf.IMAPProxyProtocol)
+		for _, entry := range bad {
+			if pu.Logger != nil {
+				pu.Logger.Warn("imap: ignoring unparseable --imap-proxy-protocol entry", zap.String("entry", entry))
 			}
 		}
 	}
@@ -215,21 +209,12 @@ func (c *Controller) Start() {
 				zap.String("addr", addr), zap.Bool("tls", secure), zap.String("err", err.Error()),
 				zap.String("hint", "lsof -iTCP"+addr+" -sTCP:LISTEN"))
 		}
-		if len(c.proxy) > 0 {
-			// PROXY header (v1/v2) from a trusted front proxy carries the
-			// real client address; from anyone else the connection is
-			// served as-is and a header is not honoured. Wraps BEFORE
-			// TLS: the header precedes the handshake.
-			ln = &proxyproto.Listener{
-				Listener: ln,
-				ConnPolicy: func(o proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
-					if c.trustedProxy(o.Upstream) {
-						return proxyproto.REQUIRE, nil
-					}
-					return proxyproto.SKIP, nil
-				},
-			}
-		}
+		// PROXY header (v1/v2) from a trusted front proxy carries the
+		// real client address; from anyone else the connection is served
+		// as-is and a header is not honoured. Wraps BEFORE TLS: the
+		// header precedes the handshake. A no-op without
+		// --imap-proxy-protocol.
+		ln = edgeproxy.Wrap(ln, c.proxy, 0)
 		if secure {
 			ln = tls.NewListener(ln, c.tlsConfig)
 		}
@@ -298,28 +283,6 @@ func parseSyncInterval(v string, log *zap.Logger) time.Duration {
 		return 15 * time.Second
 	}
 	return d
-}
-
-// trustedProxy reports whether a peer address is inside
-// --imap-proxy-protocol.
-func (c *Controller) trustedProxy(a net.Addr) bool {
-	if a == nil {
-		return false
-	}
-	host, _, err := net.SplitHostPort(a.String())
-	if err != nil {
-		host = a.String()
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	for _, n := range c.proxy {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }
 
 // boundAddrs returns the actual bound addresses (tests bind ":0").
