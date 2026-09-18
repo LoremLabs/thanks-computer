@@ -63,7 +63,7 @@ EXEC "txco://drive/account"
 
 ## Operations
 
-All ten are `txco://drive/*`, tenant-scoped, and answer at `into` (default
+All eleven are `txco://drive/*`, tenant-scoped, and answer at `into` (default
 `_drive`, private to the flow). Errors are `<into>.error.{code, message}`
 with the op's own result absent — handle with `WHEN ._drive.error`. A
 collection is always addressed by `collection` (its name); a resource by
@@ -81,6 +81,7 @@ collection is always addressed by `collection` (its name); a resource by
 | `drive/mkdir` | `collection`, `path`; `parents` | `{resource_id, path, created, modseq}` — an existing directory is `created: false` |
 | `drive/move` | `collection`, `path`, `to`; `overwrite`; `parents` (for `to`) | `{resource_id, path, from, kind, etag, modseq}` — the id is kept |
 | `drive/copy` | `collection`, `path`, `to`; `overwrite`; `parents` | the same shape; a NEW id (every descendant too) |
+| `drive/sign` | `collection`; `path` XOR `resource_id`; `ttl` (seconds, default 600, at most 3600) | `{url, expires_at, ttl, resource_id, path, name, size, content_type, sha256}` — a short-lived URL for that exact document; see [signed URLs](#signed-urls-a-file-by-reference) |
 
 Every item of `list`, and `stat`'s `resource`, is
 `{resource_id, kind (file | dir), path, name, parent, size, content_type,
@@ -90,11 +91,65 @@ Bytes through the ops are buffered JSON, capped by `--drive-op-max-bytes`
 (32 MiB): a larger file is stored and served by the head but an op reads it
 only up to the cap (`txco_drive_too_large`, or lower with `max_bytes`).
 `put` and `get` pay `FuelCostDrivePerMiB` per MiB moved on top of the
-dispatch fuel; the head is not fuel-metered.
+dispatch fuel (`sign` pays it for the read it authorizes); the head is not
+fuel-metered.
 
 Error codes: `txco_drive_{no_tenant, disabled, invalid_arg, not_found,
 exists, no_parent, is_directory, not_directory, precondition, quota,
-too_large, cycle, not_empty, username_taken, domain_not_owned, store}`.
+too_large, cycle, not_empty, username_taken, domain_not_owned,
+sign_unavailable, store}`.
+
+## Signed URLs: a file by reference
+
+`drive/get` puts a file's bytes IN the run, base64, under the op cap. That
+is the wrong shape for a document on its way to something outside the
+chassis — a parser, a transcoder, a model that takes a URL: the bytes ride
+every envelope between the read and the call, and a large file cannot make
+the trip at all. `drive/sign` hands out a reference instead:
+
+```txcl
+EXEC "txco://drive/sign"
+  WITH collection = ._ing.slug, resource_id = ._ing.resource_id, into = "_sig"
+# → _sig = {url: "https://…/_txc/signed/v1.…", expires_at, ttl: 600,
+#           resource_id, path, name, size, content_type, sha256}
+
+EXEC "op://parse_doc"
+  WITH content_url = ._sig.url, content_sha256 = ._sig.sha256, …
+```
+
+The URL answers `GET` and `HEAD` (ranges included) on the web head, with no
+other credential: **whoever holds it can read that document until it
+expires.** What keeps that narrow:
+
+- **One document, exactly.** The URL names the file's content (`sha256`) as
+  well as its address. If the file is rewritten the URL answers `410 Gone`
+  — it never reads bytes that were not there when it was signed. A rename
+  keeps the `resource_id`, so the URL survives it; a delete ends it.
+- **Short-lived.** Ten minutes by default, an hour at most. The fetch must
+  *start* inside the window; a download already streaming is not cut off.
+- **Nothing to guess.** Malformed, forged, expired, deleted, and "that
+  tenant is suspended" are the same bare `404`.
+- **Inert.** The path answers on every ordinary hostname the web head
+  serves, so the response is always an attachment — `nosniff`, sandboxed,
+  `no-store` — and can never render as a page on someone's origin.
+- **Stateless.** The token is the claims and an HMAC under a key derived
+  from the secret store's master key; nothing is stored, and any node of a
+  fleet sharing that key serves any node's URLs. No master key on the node ⇒
+  `txco_drive_sign_unavailable`. Rotating the master key ends every live URL.
+
+The fetcher should verify what it received against `sha256`: the URL
+guarantees it, but the fetcher is the one who can prove it.
+
+Treat the URL as a secret for its lifetime. The chassis keeps the token out
+of its access log (`/_txc/signed/<redacted>`), but the op's result is part of
+the run like any other value — it appears in the trace — so keep `ttl` short
+and `EMIT @delete` the URL once the call that needed it has been made.
+
+`--signed-url-base` is the public origin the URLs are minted on
+(`https://files.example.com`): any name that reaches the web head works,
+because the token, not the hostname, decides what is read. Empty derives
+from `--continuation-callback-base-url`, then `--fqdn` and the web
+listener, which is right for a single node and rarely right behind a proxy.
 
 ## Reserving a subtree for the stack
 
@@ -174,6 +229,7 @@ is enqueued after commit and boot says so.
 | `--drive-max-file-bytes` | 4 GiB | one file |
 | `--drive-max-collection-bytes` / `--drive-max-resources` | 0 (unlimited) | per collection |
 | `--drive-op-max-bytes` | 32 MiB | `put` / `get` through the ops |
+| `--signed-url-base` | derived | public origin `drive/sign` mints URLs on |
 | `--drive-sweep-period` / `--drive-sweep-grace` / `--drive-tombstone-retention` | 900 s / 1 h / 7 d | the sweeper, on `webdav` nodes |
 
 An object backend implements `Put`, `Get`, `Stat`, `List`, `Delete`. It may

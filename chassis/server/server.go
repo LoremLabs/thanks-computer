@@ -91,6 +91,7 @@ import (
 	webdavp "github.com/loremlabs/thanks-computer/chassis/server/personality/webdav"
 	websocketp "github.com/loremlabs/thanks-computer/chassis/server/personality/websocket"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
+	"github.com/loremlabs/thanks-computer/chassis/signedurl"
 	chsource "github.com/loremlabs/thanks-computer/chassis/source"
 	_ "github.com/loremlabs/thanks-computer/chassis/source/imapsource" // registers the "imap" source kind
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
@@ -1756,15 +1757,30 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			}))
 	}
 
+	// Signed URLs (txco://drive/sign → GET /_txc/signed/<token>): keyed from
+	// the secret store's master key, so every node of a fleet that shares the
+	// key verifies every other node's URLs with nothing to provision. No
+	// master key ⇒ no signer: the op answers txco_drive_sign_unavailable and
+	// the route stays unmounted.
+	var driveSigner *signedurl.Signer
+	if secretsResolver != nil && secretsResolver.Store() != nil {
+		if key, ver, kerr := secrets.DeriveKey(secretsResolver.Store().MK, signedurl.KeyLabel); kerr != nil {
+			pu.Logger.Warn("txco://drive/sign disabled: " + kerr.Error())
+		} else if driveSigner, kerr = signedurl.New(key, ver); kerr != nil {
+			pu.Logger.Warn("txco://drive/sign disabled: " + kerr.Error())
+		}
+	}
+
 	// Drive store ops (txco://drive/{collection,account,put,get,stat,list,
-	// delete,mkdir,move,copy}): the mutable document store the `webdav`
+	// delete,mkdir,move,copy,sign}): the mutable document store the `webdav`
 	// personality serves — a stack provisions a collection + login, writes
 	// and reads files, and lists changes since a sync token. Registered
 	// unconditionally so a node without the store answers `_drive.error
 	// txco_drive_disabled`. See chassis/server/drive.go + chassis/drive +
 	// docs/advanced/drive.md.
 	drvD := driveDeps{store: driveStore, snap: dbc.Snapshot, ix: blobIndex, fcas: fcas,
-		maxBytes: int64(conf.DriveOpMaxBytes), prefix: conf.DrivePathPrefix} // nil dialect ⇒ SQLite (the mirror)
+		maxBytes: int64(conf.DriveOpMaxBytes), prefix: conf.DrivePathPrefix, // nil dialect ⇒ SQLite (the mirror)
+		signer: driveSigner, signBase: signedURLBase(conf)}
 	for name, fn := range map[string]func(context.Context, driveDeps, []byte) (event.Payload, error){
 		"txco://drive/collection": driveCollection,
 		"txco://drive/account":    driveAccount,
@@ -1776,6 +1792,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		"txco://drive/mkdir":      driveMkdir,
 		"txco://drive/move":       driveMove,
 		"txco://drive/copy":       driveCopy,
+		"txco://drive/sign":       driveSign,
 	} {
 		fn := fn
 		pu.Handle([]byte(name), event.OpsHandlerFunc(
@@ -2066,6 +2083,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		return ctx, nil, lerr
 	}
 	webCtrl.SetLLMGateway(llmGateway.HandleMessages, llmGateway.HandleCountTokens)
+
+	// The serving half of txco://drive/sign. Mounted only when this node can
+	// both verify a token and read the store — otherwise the path is an
+	// ordinary one the catch-all answers.
+	if driveStore != nil && driveSigner != nil {
+		webCtrl.SetSignedHandler(signedHandler(driveStore, driveSigner, pu.Admission, pu.Logger))
+	}
 
 	// Calendar personality (CalDAV + ICS feeds on the web head under
 	// --calendar-path-prefix). The controller owns the store, the login

@@ -18,11 +18,12 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	"github.com/loremlabs/thanks-computer/chassis/signedurl"
 )
 
 // drive.go holds the shared plumbing for the drive store ops
 // (txco://drive/{collection,account,put,get,stat,list,delete,mkdir,move,
-// copy}): the mutable document store the `webdav` personality serves. A
+// copy,sign}): the mutable document store the `webdav` personality serves. A
 // stack provisions a collection and an account, writes and reads files by
 // path or resource id, and lists changes since a sync token; a WebDAV
 // client sees the same collection at https://<host>/drive/.
@@ -50,6 +51,11 @@ type driveDeps struct {
 	// txco_drive_disabled.
 	ix   blob.Index
 	fcas filecas.Store
+	// signer + signBase mint `drive/sign` URLs (drive_sign.go): the fleet
+	// key's signer and the public origin the URLs live on. A nil signer ⇒
+	// txco_drive_sign_unavailable (no master key on this node).
+	signer   *signedurl.Signer
+	signBase string
 }
 
 // driveEnsureParents creates the missing ancestors of path (`parents =

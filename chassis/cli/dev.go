@@ -1252,6 +1252,10 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		"TXCO_LOG_LEVEL":         "info",
 		"TXCO_DEBUG_BREAKPOINTS": "true",
 		"TXCO_DEBUG_PRIVATE":     "true",
+		// txco://drive/sign mints its URLs on the dev web inlet, by the name
+		// everything else in dev uses — not this machine's hostname, which a
+		// laptop often cannot resolve.
+		"TXCO_SIGNED_URL_BASE": "http://localhost" + webAddr,
 		// Unauthenticated admin on loopback — the documented dev posture.
 		// `basic` mode IGNORES request signatures and, with no basic
 		// creds set, treats every caller as open-dev (admin:all). Without

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/loremlabs/thanks-computer/chassis/signedurl"
 )
 
 type LogEntry struct {
@@ -154,7 +156,7 @@ func (web *WebController) LogFromRequest(crw *contextResponseWriter, r *http.Req
 		Host:        r.Host,
 		UserIp:      userIp,
 		Method:      r.Method,
-		URL:         r.RequestURI,
+		URL:         redactURI(r.RequestURI),
 		Status:      crw.status,
 		Size:        crw.length,
 		UserAgent:   r.Header.Get("User-Agent"),
@@ -166,6 +168,16 @@ func (web *WebController) LogFromRequest(crw *contextResponseWriter, r *http.Req
 	// ctx, _ = tag.New(ctx, tag.Upsert(metrics.KeyWebServerStatus, strconv.Itoa(crw.status)))
 	// ctx, _ = tag.New(ctx, tag.Upsert(metrics.KeyWebSubsys, subsys))
 	// stats.Record(ctx, metrics.WebRequest.M(1))
+}
+
+// redactURI keeps bearer material out of the access log: a signed URL's
+// token IS the credential, so the log records that one was used, never
+// which.
+func redactURI(uri string) string {
+	if strings.HasPrefix(uri, signedurl.PathPrefix) {
+		return signedurl.PathPrefix + "<redacted>"
+	}
+	return uri
 }
 
 func (web *WebController) Log(entry LogEntry) {

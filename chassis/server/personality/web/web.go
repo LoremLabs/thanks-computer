@@ -26,6 +26,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	websocketp "github.com/loremlabs/thanks-computer/chassis/server/personality/websocket"
+	"github.com/loremlabs/thanks-computer/chassis/signedurl"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -49,6 +50,11 @@ type WebController struct {
 	// other request.
 	llmHandler      http.HandlerFunc
 	llmCountHandler http.HandlerFunc
+
+	// signedHandler, when set (via SetSignedHandler), serves GET/HEAD
+	// /_txc/signed/<token>: the by-reference read of one drive document
+	// (txco://drive/sign). Nil ⇒ the path falls through to the catch-all.
+	signedHandler http.HandlerFunc
 
 	// davMounts, when set (via MountDAV / SetCalendar), serve a DAV
 	// personality — the calendar's CalDAV + ICS feeds, the contacts' CardDAV
@@ -88,6 +94,13 @@ func (web *WebController) SetLLMGateway(messages, countTokens http.HandlerFunc) 
 	web.llmHandler = messages
 	web.llmCountHandler = countTokens
 }
+
+// SetSignedHandler wires the signed-URL endpoint onto GET/HEAD
+// /_txc/signed/<token>. Call before Start. The token is the whole
+// authorization, so the route bypasses the operator BasicAuth wrapper and
+// the opstack bus like the continuation callback does; the access log
+// redacts the token (redactURI).
+func (web *WebController) SetSignedHandler(h http.HandlerFunc) { web.signedHandler = h }
 
 // hostMount is one personality's claim on a whole CLASS of hostnames — the
 // inverse of a davMount, which claims a path on every hostname.
@@ -306,6 +319,14 @@ func (web *WebController) Start() {
 				r.MatcherFunc(func(req *http.Request, _ *mux.RouteMatch) bool {
 					return match(req.Host)
 				}).Handler(m.handler)
+			}
+
+			// Signed URLs (txco://drive/sign): a capability in the path, served
+			// on every ORDINARY hostname — after the host mounts, so a host a
+			// personality claims outright stays entirely that head's.
+			if web.signedHandler != nil {
+				r.PathPrefix(signedurl.PathPrefix).HandlerFunc(web.signedHandler).
+					Methods(http.MethodGet, http.MethodHead)
 			}
 
 			// DAV personalities (calendar: CalDAV + ICS feeds; contacts:
