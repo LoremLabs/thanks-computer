@@ -63,6 +63,7 @@ require (
 )
 
 require (
+	github.com/OpenPrinting/goipp v1.2.0
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/emersion/go-ical v0.0.0-20240127095438-fc1c9d8fb2b6

@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — printing is a chassis built-in (the `ipp`
+# personality); the workspace ships only operations.

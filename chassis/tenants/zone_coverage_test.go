@@ -80,3 +80,26 @@ func TestTenantForMailZoneSkipsRevoked(t *testing.T) {
 		t.Fatal("revoked zone must not count as covered")
 	}
 }
+
+// TenantForZone exposes WHICH zone matched, so a caller that must not accept
+// a subdomain (the ipp front door is exactly `ipp.<origin>`) can insist on
+// origin == the name it asked about.
+func TestTenantForZoneReturnsOrigin(t *testing.T) {
+	s, ctx := seedZoneCoverage(t)
+	cases := []struct {
+		domain, wantSlug, wantOrigin string
+		wantOK                       bool
+	}{
+		{"example.com", "acme", "example.com", true},
+		{"mail.example.com", "acme", "example.com", true}, // covered, but origin != domain
+		{"sub.example.com", "beta", "sub.example.com", true},
+		{"x.sub.example.com", "beta", "sub.example.com", true},
+		{"nope.org", "", "", false},
+	}
+	for _, c := range cases {
+		slug, origin, ok, err := TenantForZone(ctx, s.DB, c.domain, nil)
+		if err != nil || ok != c.wantOK || slug != c.wantSlug || origin != c.wantOrigin {
+			t.Errorf("TenantForZone(%q)=%q,%q,%v,%v want %q,%q,%v", c.domain, slug, origin, ok, err, c.wantSlug, c.wantOrigin, c.wantOK)
+		}
+	}
+}

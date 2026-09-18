@@ -356,6 +356,37 @@ func TestDetectTenantBodyIMAP(t *testing.T) {
 	}
 }
 
+// TestDetectTenantBodyIPP: a committed print job the ipp head dispatches
+// (src=ipp with a trusted _txc.ipp.tenant — the tenant of the `ipp.<zone>`
+// host) proposes a route into that tenant's _ipp/0. The printer label is an
+// operation selector for the stack, never part of the route. A client cannot
+// steer it: another src carrying the same stamp routes nowhere.
+func TestDetectTenantBodyIPP(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"ipp","ipp":{"tenant":"driplit","printer":"research","job_id":"ipj_1","document":{"sha256":"ab"}}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_ipp/0" {
+		t.Errorf("_txc.route.to = %q, want _ipp/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "driplit" {
+		t.Errorf("_txc.route.tenant = %q, want driplit", got)
+	}
+	if got := gjson.Get(body, "_txc.route.stack").String(); got != "_ipp" {
+		t.Errorf("_txc.route.stack = %q, want _ipp", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "ipp" {
+		t.Errorf("_txc.route.ingress = %q, want ipp", got)
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified must be true (chassis-stamped)")
+	}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"ipp","ipp":{"printer":"research"}}}`)); body != "{}" {
+		t.Errorf("ipp body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"http","ipp":{"tenant":"driplit"}}}`)); body != "{}" {
+		t.Errorf("http request carrying an ipp tenant stamp routed: %q", body)
+	}
+}
+
 // TestDetectTenantBodyCalendar: a client mutation the calendar head
 // dispatches (src=calendar with a trusted _txc.calendar.tenant from the
 // account row) proposes a route into that tenant's _calendar/0; without the

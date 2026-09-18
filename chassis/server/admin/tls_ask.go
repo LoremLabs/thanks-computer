@@ -65,6 +65,24 @@ func (c *Controller) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), tlsAskTimeout)
 	defer cancel()
 
+	// The print front door: `ipp.<X>` gets a certificate when X is EXACTLY a
+	// verified zone origin we are authoritative for (delegation is the proof
+	// of control), or exactly a verified, stack-attached hostname. Exact
+	// only — `ipp.<sub>.<origin>` never matches — so this rule cannot be
+	// used to burn the CA's per-registered-domain quota with invented SNIs:
+	// the set of names it can authorize is bounded by real zones and rows.
+	lookup := canon
+	if x, isIPP := strings.CutPrefix(canon, tenants.IPPHostLabel+"."); isIPP && x != "" {
+		if _, origin, ok, err := tenants.TenantForZone(ctx, db, x, nil); err == nil && ok && origin == x {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+			return
+		}
+		// Not a zone origin: fall through to the hostname-row predicate
+		// below, applied to X instead of to `ipp.X` itself.
+		lookup = x
+	}
+
 	var one int
 	// Same predicate the resolver routes on, PLUS verified_at is
 	// mandatory here regardless of the resolver's permissive/strict
@@ -78,7 +96,7 @@ func (c *Controller) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 		    AND h.stack != ''
 		    AND h.verified_at IS NOT NULL
 		    AND t.revoked_at IS NULL
-		  LIMIT 1`, canon).Scan(&one)
+		  LIMIT 1`, lookup).Scan(&one)
 	if err != nil {
 		// sql.ErrNoRows or any transient error → deny (fail closed).
 		http.Error(w, "deny", http.StatusNotFound)

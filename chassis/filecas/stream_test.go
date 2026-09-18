@@ -121,3 +121,74 @@ func (s *streamStore) GetReader(ctx context.Context, hash string) (io.ReadCloser
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
+
+// errAfter yields its bytes, then fails — a client that drops mid-upload.
+type errAfter struct {
+	data []byte
+	err  error
+}
+
+func (e *errAfter) Read(p []byte) (int, error) {
+	if len(e.data) == 0 {
+		return 0, e.err
+	}
+	n := copy(p, e.data)
+	e.data = e.data[n:]
+	return n, nil
+}
+
+// TestPutStreamFallback: a backend with no StreamPutter still commits an
+// unknown-hash stream (spool → hash → PutReader), through the LRU decorator;
+// the limit is inclusive; and every failure leaves NOTHING behind.
+func TestPutStreamFallback(t *testing.T) {
+	ctx := context.Background()
+	backend := newMemStore()
+	wrapped := newCachedStore(backend, 1<<20, 1<<20)
+
+	data := []byte("a document whose hash nobody knew up front")
+	hash, n, err := PutStream(ctx, wrapped, bytes.NewReader(data), 0)
+	if err != nil || hash != streamHash(data) || n != int64(len(data)) {
+		t.Fatalf("PutStream: hash=%s n=%d err=%v", hash, n, err)
+	}
+	if got, err := wrapped.Get(ctx, hash); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("stored bytes differ: %q err=%v", got, err)
+	}
+	// Re-put of identical content is a dedup success.
+	if h2, _, err := PutStream(ctx, wrapped, bytes.NewReader(data), 0); err != nil || h2 != hash {
+		t.Fatalf("dedup re-put: %s %v", h2, err)
+	}
+
+	// Exactly the limit is accepted; one byte more is refused and stores nothing.
+	exact := []byte("0123456789")
+	if _, _, err := PutStream(ctx, wrapped, bytes.NewReader(exact), int64(len(exact))); err != nil {
+		t.Fatalf("stream of exactly limit bytes refused: %v", err)
+	}
+	over := []byte("0123456789X")
+	if _, _, err := PutStream(ctx, wrapped, bytes.NewReader(over), 10); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("over-limit: err=%v, want ErrTooLarge", err)
+	}
+	if ok, _ := backend.Exists(ctx, streamHash(over)); ok {
+		t.Fatal("over-limit stream became visible")
+	}
+
+	// A reader that fails mid-stream stores nothing (not even the prefix).
+	boom := errors.New("client went away")
+	prefix := []byte("partial upload")
+	if _, _, err := PutStream(ctx, wrapped, &errAfter{data: append([]byte(nil), prefix...), err: boom}, 0); !errors.Is(err, boom) {
+		t.Fatalf("reader error: %v", err)
+	}
+	if ok, _ := backend.Exists(ctx, streamHash(prefix)); ok {
+		t.Fatal("partial stream became visible")
+	}
+
+	// A cancelled context aborts before anything lands.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	gone := []byte("never stored")
+	if _, _, err := PutStream(cctx, wrapped, bytes.NewReader(gone), 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled ctx: %v", err)
+	}
+	if ok, _ := backend.Exists(ctx, streamHash(gone)); ok {
+		t.Fatal("cancelled stream became visible")
+	}
+}

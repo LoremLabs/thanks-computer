@@ -1,0 +1,8 @@
+# Anything this stack did not answer: 404, not `200 {}`. That includes
+# /p/<printer> on THIS hostname — printers live on `ipp.<host>` only, so on
+# an ordinary hostname /p/… is the stack's own path like any other.
+WHEN @src == "http"
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.body = &b64encode(&to_json(&object("error", "not_found"))),
+       @halt = true

@@ -56,6 +56,9 @@ type WebController struct {
 	// Empty ⇒ the paths fall through to the catch-all like any other
 	// request.
 	davMounts []davMount
+	// hostMounts are the hostname classes a personality claims outright
+	// (MountHost): matched before every path-based route.
+	hostMounts []hostMount
 
 	// ws, when set (via SetWebSocket) and enabled, makes the catch-all
 	// handler stamp `_txc.websocket.upgrade` + a minted session id on every
@@ -84,6 +87,31 @@ func (web *WebController) SetTLSConfig(c *tls.Config) { web.tlsConfig = c }
 func (web *WebController) SetLLMGateway(messages, countTokens http.HandlerFunc) {
 	web.llmHandler = messages
 	web.llmCountHandler = countTokens
+}
+
+// hostMount is one personality's claim on a whole CLASS of hostnames — the
+// inverse of a davMount, which claims a path on every hostname.
+type hostMount struct {
+	match   func(host string) bool
+	handler http.Handler
+}
+
+// MountHost sends EVERY request whose Host satisfies match to h, whatever
+// the path, and none whose Host does not. It exists for a protocol that has
+// a hostname of its own rather than a path on everyone's: the ipp head
+// answers on `ipp.<zone>` and nowhere else, so a tenant's own `/p/…` routes
+// on its ordinary hostnames are untouched. Call before Start.
+//
+// match runs on every web request, so it must be a pure, allocation-light
+// predicate over the Host header — no lookups. Like a DAV mount the handler
+// bypasses the operator BasicAuth wrapper (it authenticates itself) and the
+// envelope path entirely: the request body is never buffered by the web
+// head, which is the point for a protocol whose body is a document.
+func (web *WebController) MountHost(match func(host string) bool, h http.Handler) {
+	if match == nil || h == nil {
+		return
+	}
+	web.hostMounts = append(web.hostMounts, hostMount{match: match, handler: h})
 }
 
 // davMount is one DAV personality's reservation on every hostname.
@@ -268,6 +296,16 @@ func (web *WebController) Start() {
 			}
 			if web.llmCountHandler != nil {
 				r.Path("/v1/messages/count_tokens").HandlerFunc(web.llmCountHandler).Methods(http.MethodPost)
+			}
+
+			// Host-claimed personalities (ipp: `ipp.<zone>`): the whole
+			// hostname belongs to the head. Registered BEFORE the DAV prefixes
+			// and the catch-all so nothing else answers on such a host.
+			for _, m := range web.hostMounts {
+				match := m.match
+				r.MatcherFunc(func(req *http.Request, _ *mux.RouteMatch) bool {
+					return match(req.Host)
+				}).Handler(m.handler)
 			}
 
 			// DAV personalities (calendar: CalDAV + ICS feeds; contacts:

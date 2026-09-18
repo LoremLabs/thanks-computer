@@ -41,6 +41,7 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/drive/filestore" // registers the "file" drive object backend
 	"github.com/loremlabs/thanks-computer/chassis/drive/scheduledsink"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
+	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
@@ -494,6 +495,23 @@ func Run(bi BuildInfo) int {
 		logger.Info("skipping drive store open — webdav personality not active and --drive-store=sqlite",
 			zap.String("personalities", conf.Personalities))
 	}
+	// IPP job store: one row per print job (receiving → committed →
+	// delivered). Only a node running the `ipp` head opens it — no op reads
+	// it — and there it is fatal: a printer that cannot record a job must not
+	// accept one. Own file, never the runtime DB (a job row is written
+	// several times per print; the dbcache watcher reloads the whole mirror
+	// on any runtime-file write). Documents are not stored here: they stream
+	// into the file CAS.
+	var ippStore *chipp.Store
+	if conf.HasPersonality("ipp") {
+		st, ierr := chipp.Open(conf.IPPStore, chipp.Config{DBPath: conf.IPPDBPath})
+		if ierr != nil {
+			logger.Fatal("ipp job store open failed", zap.String("store", conf.IPPStore), zap.String("err", ierr.Error()))
+		}
+		defer st.Close()
+		ippStore = st
+		logger.Info("ipp job store opened", zap.String("store", conf.IPPStore))
+	}
 	// Notebook store — the append-only record behind txco://notebook/*.
 	// Own file (never the runtime DB: the dbcache watcher reloads the
 	// mirror on every runtime-file write, and a notebook is written on
@@ -668,7 +686,7 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore, driveStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore, driveStore, ippStore)
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)

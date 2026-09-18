@@ -54,6 +54,9 @@ const devLMTPListenAddr = ":2424"
 const (
 	devIMAPListenAddr = "127.0.0.1:1143"
 	devIMAPTLSAddr    = "127.0.0.1:1993"
+	// devIPPTLSAddr is the HTTPS listener `txco dev --ipp` adds to the web
+	// head: print clients speak IPPS, and the plain web port cannot.
+	devIPPTLSAddr = "127.0.0.1:8443"
 )
 
 // devMailRelayAddr is where `txco dev --lmtp` relays OUTBOUND mail by
@@ -94,6 +97,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	calendarHead := fs.Bool("calendar", false, "start the calendar personality (CalDAV + ICS feeds) on the web head with dev defaults: served under http://<dev host>:<web port>/dav/ with Basic auth allowed over plaintext, index at .txco/dev/calendar.db — so a stack can provision an account with txco://calendar/account and a calendar app can open it (server <bound-host>, port = the web port, SSL off, path /dav/). Disabled by default. Override TXCO_CALENDAR_DB_PATH/CALENDAR_PATH_PREFIX.")
 	contactsHead := fs.Bool("contacts", false, "start the contacts personality (CardDAV) on the web head with dev defaults: served under http://<dev host>:<web port>/carddav/ with Basic auth allowed over plaintext, index at .txco/dev/contacts.db — so a stack can provision an account with txco://contacts/account and a contacts app can open it (server <bound-host>, port = the web port, SSL off, path /carddav/). Disabled by default. Override TXCO_CONTACTS_DB_PATH/CONTACTS_PATH_PREFIX.")
 	webdavHead := fs.Bool("webdav", false, "start the webdav personality (the drive store as a mountable folder) on the web head with dev defaults: served under http://<dev host>:<web port>/drive/ with Basic auth allowed over plaintext, index at .txco/dev/drive.db and the bytes under .txco/dev/drive/ — so a stack can provision an account with txco://drive/collection + txco://drive/account and Finder / rclone can mount it (server <bound-host>, port = the web port, SSL off, path /drive/). Disabled by default. Override TXCO_DRIVE_DB_PATH/DRIVE_OBJECTS_FILE_DIR/DRIVE_PATH_PREFIX.")
+	ippHead := fs.Bool("ipp", false, "start the ipp personality (a stack presented as a PRINTER) with dev defaults: the web head also listens on "+devIPPTLSAddr+" (HTTPS, self-signed certificate kept at .txco/dev/web-selfsigned.crt) and answers IPP on hosts named ipp.<bound-host> — ipps://ipp.localhost:8443/p/<printer>; job store at .txco/dev/ipp.db; every request's operation and attribute NAMES are logged. A tenant has printers only once it has an active `_ipp` stack AND the IPP_PASSWORD secret. Disabled by default. Override TXCO_WEB_TLS_ADDR/IPP_DB_PATH/IPP_WIRE_DEBUG.")
 	lmtpHead := fs.Bool("lmtp", false, "start the LMTP mail head with dev defaults: binds "+devLMTPListenAddr+", relays outbound mail to a local sink ("+devMailRelayAddr+", TLS off — MailHog/Mailpit), and auto-loads ./ingress.yaml from the workspace when present (the local stand-in for minted hostnames). Disabled by default. Override any of TXCO_LMTP_LISTEN_ADDRS/MAIL_RELAY_ADDR/MAIL_RELAY_TLS/INGRESS_CONFIG.")
 	watch := fs.Bool("watch", true, "watch sources and hot-reload: compute edits rebuild + reactivate; OPS edits push to a per-stack draft. On by default (that's what `dev` is for); pass --watch=false to disable.")
 	watchIgnore := fs.StringArray("watch-ignore", nil, "glob pattern (repeatable) whose matching directories are pruned from the watcher — CPU saver in big workspaces. A pattern with `/` matches a dir's path under OPS/ (e.g. `publications/*/FILES`); a bare name matches anywhere (e.g. `node_modules`). Per-stack FILES/ trees are pruned by default; add `dev.watch.includeFiles: true` to txco.yaml to watch them.")
@@ -273,7 +277,7 @@ Flags:
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *sourceHead, *imapHead, *calendarHead, *contactsHead, *webdavHead, *allowLocalWorkspace, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *sourceHead, *imapHead, *calendarHead, *contactsHead, *webdavHead, *ippHead, *allowLocalWorkspace, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -504,6 +508,18 @@ Flags:
 			fmt.Fprintf(stdout, "[txco]          security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n", certPath)
 			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://imap/account\" WITH username = \"you@<bound-host>\"`, then add the account in Mail/Thunderbird:")
 			fmt.Fprintln(stdout, "[txco]        server <bound-host> (e.g. pony.local.thanks.computer), port 1993, SSL on")
+		}
+		if *ippHead {
+			certPath := filepath.Join(dir, ".txco", "dev", "web-selfsigned.crt")
+			fmt.Fprintf(stdout, "[txco]   ipp head: ipps://ipp.localhost%s/p/<printer> (also ipps://ipp.<bound-host>%s/…), self-signed certificate at %s\n", devIPPTLSAddr[strings.LastIndex(devIPPTLSAddr, ":"):], devIPPTLSAddr[strings.LastIndex(devIPPTLSAddr, ":"):], certPath)
+			fmt.Fprintln(stdout, "[txco]        a tenant has printers once it has BOTH an active `_ipp` stack (OPS/_ipp/0/…) and the credential:")
+			fmt.Fprintln(stdout, "[txco]          txco auth tenant secrets set IPP_PASSWORD --tenant default dev     (username: print, or set IPP_USERNAME)")
+			fmt.Fprintln(stdout, "[txco]        add it (CUPS trusts a self-signed certificate on first use):")
+			fmt.Fprintf(stdout, "[txco]          lpadmin -p pony -E -v ipps://ipp.localhost%s/p/research -m everywhere\n", devIPPTLSAddr[strings.LastIndex(devIPPTLSAddr, ":"):])
+			fmt.Fprintln(stdout, "[txco]        if the Add Printer dialog refuses the certificate, trust it once (cupsd runs as root, so the System keychain too):")
+			fmt.Fprintf(stdout, "[txco]          security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n", certPath)
+			fmt.Fprintf(stdout, "[txco]          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain %s\n", certPath)
+			fmt.Fprintln(stdout, "[txco]        every request's operation + attribute names are logged (`ipp wire`): that log is the record of what a client sends")
 		}
 		if *calendarHead {
 			fmt.Fprintf(stdout, "[txco]   calendar head: %s/dav/ (CalDAV, Basic auth over plaintext) and /.well-known/caldav; index at .txco/dev/calendar.db\n", webURL)
@@ -1036,7 +1052,7 @@ func isVersionNotDraftErr(err error) bool {
 // included. Off by default — most dev workflows use only web + cron +
 // admin, and the extra binds otherwise cause spurious "port in use"
 // failures on machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, sourceHead, imapHead, calendarHead, contactsHead, webdavHead, allowLocalWorkspace, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, sourceHead, imapHead, calendarHead, contactsHead, webdavHead, ippHead, allowLocalWorkspace, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
@@ -1083,6 +1099,11 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	dnsAddr := devDNSListenAddr
 	if dnsHead {
 		if err := requirePortFree(dnsAddr, "DNS inlet"); err != nil {
+			return "", "", err
+		}
+	}
+	if ippHead {
+		if err := requirePortFree(devIPPTLSAddr, "IPPS (web TLS) listener"); err != nil {
 			return "", "", err
 		}
 	}
@@ -1201,6 +1222,11 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		env = append(env, "TXCO_DRIVE_DB_PATH="+filepath.Join(devDir, "drive.db"))
 		env = append(env, "TXCO_DRIVE_OBJECTS_FILE_DIR="+filepath.Join(devDir, "drive"))
 	}
+	if ippHead {
+		heads = append(heads, "ipp")
+		env = append(env, "TXCO_WEB_TLS_ADDR="+devIPPTLSAddr)
+		env = append(env, "TXCO_IPP_DB_PATH="+filepath.Join(devDir, "ipp.db"))
+	}
 	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
 	if allowLocalWorkspace {
 		// Unconditional (NOT a devDefault): the local provider runs
@@ -1296,6 +1322,18 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	}
 	if webdavHead {
 		devDefaults["TXCO_DRIVE_INSECURE_AUTH"] = "true"
+	}
+	// IPP dev defaults: the HTTPS listener serves a self-signed certificate
+	// kept under .txco/dev (there is no dns head or CA in dev — without this
+	// the ACME manager would be built and every handshake would fail), the
+	// plain web port also accepts Basic auth (so `ipp://…:8080` works for
+	// ipptool/curl), and the wire log is on: recording what a print client
+	// actually sends is what dev mode is FOR. Serve defaults stay off.
+	if ippHead {
+		devDefaults["TXCO_WEB_TLS_SELF_SIGNED"] = "true"
+		devDefaults["TXCO_WEB_TLS_SELF_SIGNED_CERT_DIR"] = devDir
+		devDefaults["TXCO_IPP_INSECURE_AUTH"] = "true"
+		devDefaults["TXCO_IPP_WIRE_DEBUG"] = "true"
 	}
 	if contactsHead {
 		devDefaults["TXCO_CONTACTS_INSECURE_AUTH"] = "true"

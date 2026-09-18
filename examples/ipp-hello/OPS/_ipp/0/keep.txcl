@@ -1,0 +1,24 @@
+# The `_ipp` stack is what makes this tenant a printer: while it is active
+# (and the IPP_PASSWORD secret is set) `ipps://ipp.<zone>/p/<anything>` is a
+# printer, and every job printed to it arrives here — AFTER the client was
+# told the job completed. The chassis's work ended when this run started;
+# what happens to the document from here on is this rule's business.
+#
+# Facts ride under @ipp.* (all read-only): printer, job_id, job_number,
+# job_name, requesting_user (client-claimed — untrusted), submitted_at, and
+# document{sha256, size, format, name}. There are NO bytes in the envelope:
+# the document is already in the tenant's blob store, addressed by sha256.
+# There is no @ipp.copies either — this printer has no paper.
+#
+# @ipp.printer is the label after /p/ in the printer URL. The chassis keeps
+# no list of printers: a label is an operation selector, and this stack
+# decides what it means. Here every printer files its documents under its
+# own name — print to /p/research and the page lands in research/<job id>.
+# `from_sha` adopts the already-stored object; nothing is copied.
+WHEN @src == "ipp"
+  EXEC "txco://blob/put"
+    WITH name = &concat(@ipp.printer, "/", @ipp.job_id),
+         from_sha = @ipp.document.sha256,
+         content_type = @ipp.document.format,
+         filename = @ipp.job_name,
+         into = "_kept"

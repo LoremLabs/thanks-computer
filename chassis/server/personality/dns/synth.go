@@ -108,6 +108,12 @@ type SynthConfig struct {
 	// `_carddavs._tcp` SRV + TXT "path=/.well-known/carddav" at the same
 	// owners, never on the wildcard.
 	CardDAVSPort uint16
+	// IPP, when true, adds `ipp.<origin>` A/AAAA (the edge IPs) to every
+	// pattern zone: the hostname the ipp personality answers on
+	// (ipps://ipp.<zone>/p/<printer>). A boolean, not a port: no synthesized
+	// record carries the port today, so a port here would be config that
+	// changes nothing. It becomes a port the day an `_ipps._tcp` SRV exists.
+	IPP bool
 	// StructuredSuffix is the platform's default structured-host suffix
 	// (TXCO_STRUCTURED_HOST_SUFFIX), bare (no leading dot), e.g.
 	// "stacks.thanks.computer". When a served zone's origin equals it, the
@@ -151,6 +157,7 @@ func SynthConfigFrom(conf config.Config) SynthConfig {
 		IMAPSPort:    uint16(imaps),
 		CalDAVSPort:  uint16(caldavs),
 		CardDAVSPort: uint16(carddavs),
+		IPP:          conf.DNSIPP,
 		StructuredSuffix: strings.ToLower(strings.TrimSuffix(
 			strings.TrimPrefix(strings.TrimSpace(conf.StructuredHostSuffix), "."), ".")),
 	}
@@ -203,15 +210,16 @@ func EffectiveSynthConfig(db *sql.DB, flagDefaults SynthConfig) SynthConfig {
 		MXPriority:  uint16(pri),
 		TTL:         uint32(ttl),
 		// dns_settings carries no mail-auth/suffix/port columns; keep the
-		// flag values so SPF/DMARC, the structured suffix and the IMAPS /
-		// CalDAV / CardDAV SRVs stay configured even when an operator sets a
-		// settings row. (Prod 2026-09-06: a row existed and the CardDAV port
+		// flag values so SPF/DMARC, the structured suffix, the IMAPS /
+		// CalDAV / CardDAV SRVs and the ipp host stay configured even when an
+		// operator sets a settings row. (Prod 2026-09-06: a row existed and the CardDAV port
 		// was not carried here, so no `_carddavs._tcp` was ever synthesized.)
 		SPFOverride:      flagDefaults.SPFOverride,
 		DMARC:            flagDefaults.DMARC,
 		IMAPSPort:        flagDefaults.IMAPSPort,
 		CalDAVSPort:      flagDefaults.CalDAVSPort,
 		CardDAVSPort:     flagDefaults.CardDAVSPort,
+		IPP:              flagDefaults.IPP,
 		StructuredSuffix: flagDefaults.StructuredSuffix,
 	}
 }
@@ -256,6 +264,15 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 	}
 	out = append(out, mkCalDAVS("_caldavs._tcp."+z.originFQDN, ttl, cfg.CalDAVSPort, z.originFQDN)...)
 	out = append(out, mkCardDAVS("_carddavs._tcp."+z.originFQDN, ttl, cfg.CardDAVSPort, z.originFQDN)...)
+	// ipp.<origin>: the print front door (the ipp personality answers only on
+	// this name). One owner per ZONE, not per stack — the tenant comes from
+	// the zone and the printer rides the path. Emitted BEFORE the
+	// default-suffix early return below so both zone kinds carry it (the
+	// suffix zone's wildcard would answer it anyway; the explicit owner keeps
+	// the two symmetric). The zone's wildcard certificate covers it.
+	if cfg.IPP {
+		out = append(out, mkAddrs(dns.Fqdn(tenants.IPPHostLabel+"."+z.origin), ttl, cfg.EdgeIPs)...)
+	}
 
 	// Apex mail-auth TXT (SPF + DMARC), emitted alongside the MX (mail
 	// enabled). SPF is softfail (~all) so it never hard-rejects a tenant's
@@ -315,7 +332,10 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 			continue
 		}
 		label := tenants.StackLabel(s.name)
-		if label == "" {
+		if label == "" || tenants.ReservedZoneLabel(label) {
+			// A reserved label (ipp.<origin>) belongs to a chassis front
+			// door, never to a stack — the mint path refuses it too, so
+			// the resolved name and the routing host still never diverge.
 			continue
 		}
 		owner := dns.Fqdn(label + "." + z.origin)

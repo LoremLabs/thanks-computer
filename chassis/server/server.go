@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,7 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/filecas/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
+	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	kvstore "github.com/loremlabs/thanks-computer/chassis/kv"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
@@ -78,6 +80,7 @@ import (
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
 	imapp "github.com/loremlabs/thanks-computer/chassis/server/personality/imap"
+	ippp "github.com/loremlabs/thanks-computer/chassis/server/personality/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
 	mailmapp "github.com/loremlabs/thanks-computer/chassis/server/personality/mailmap"
 	scheduledp "github.com/loremlabs/thanks-computer/chassis/server/personality/scheduled"
@@ -169,12 +172,13 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
 		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant",
-		"_txc.source.tenant", "_txc.source.stack")
+		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
 	dnsTenant, imapTenant, calendarTenant, contactsTenant := fields[9], fields[10], fields[11], fields[12]
 	sourceTenant, sourceStack := fields[13], fields[14]
+	ippTenant := fields[15]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -308,6 +312,26 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "imap")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_imap/0")
+			return b.String()
+		}
+	}
+	// Print job. The ipp head dispatches a COMMITTED job (the document is
+	// already in the CAS and owned by the tenant) into the tenant whose zone
+	// the `ipp.<zone>` host named, stamping the slug in `_txc.ipp.tenant`
+	// (trusted: resolved by the head from dns_zones / a verified hostname,
+	// never client input). Propose a route into that tenant's `_ipp/0` — the
+	// same sanctioned _sys→tenant pin as imap and dns. `@ipp.printer` is the
+	// operation selector the stack reads; the head only accepts jobs for
+	// tenants with an active `_ipp` stack, so a 404 here is a stack
+	// deactivated between acceptance and delivery.
+	if src.String() == "ipp" {
+		if it := ippTenant.String(); it != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", it)
+			b.Set("_txc.route.stack", "_ipp")
+			b.Set("_txc.route.ingress", "ipp")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_ipp/0")
 			return b.String()
 		}
 	}
@@ -970,7 +994,7 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store, driveStore *chdrive.Store) (modCtx context.Context, stop func(reason string), err error) {
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store, driveStore *chdrive.Store, ippStore *chipp.Store) (modCtx context.Context, stop func(reason string), err error) {
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -2066,6 +2090,18 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	if wdCtrl.Enabled() {
 		webCtrl.MountDAV("", wdCtrl.Prefix(), wdCtrl.Handler())
 	}
+	// IPP personality (a stack presented as a PRINTER): it claims whole
+	// hostnames — `ipp.<zone>` — rather than a path on everyone's, so it is a
+	// host mount, not a DAV mount. Documents stream into the file CAS; the
+	// v1 credential is a tenant secret (IPP_PASSWORD), read through the same
+	// resolver ops use, `_ipp`-scoped with the tenant-wide fallback.
+	ippCtrl := ippp.NewController(ctx, pu, ippStore, resolver)
+	ippCtrl.SetFileCAS(fcas)
+	ippCtrl.SetBlobIndex(blobIndex)
+	ippCtrl.SetSecretSource(ippSecretSource(secretsResolver))
+	if ippCtrl.Enabled() {
+		webCtrl.MountHost(ippp.IsIPPHost, ippCtrl.Handler())
+	}
 
 	// Bundled TLS: when --web-tls-addr is set the chassis terminates TLS
 	// itself, obtaining + renewing wildcard certs for delegated zones via
@@ -2103,8 +2139,33 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		}
 		imapCtrl.SetTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
 	}
+	// --web-tls-self-signed (txco dev --ipp) serves --web-tls-addr with a
+	// certificate minted on disk and, like --imap-self-signed, must not pull
+	// the ACME manager in: in dev there is no dns head or CA behind it. The
+	// file is kept across restarts so a print client trusts it ONCE.
+	webWantsManagedCert := strings.TrimSpace(conf.WebTLSAddr) != "" && !conf.WebTLSSelfSigned
+	if strings.TrimSpace(conf.WebTLSAddr) != "" && conf.WebTLSSelfSigned {
+		dir := strings.TrimSpace(conf.WebTLSSelfSignedCertDir)
+		if dir == "" {
+			dir = "./chassis/data"
+		}
+		if merr := os.MkdirAll(dir, 0o755); merr != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("web self-signed TLS: %w", merr)
+		}
+		hosts := append(append([]string{}, txtls.DevSelfSignedHosts...), nonEmptyStrings(conf.WebTLSSelfSignedHosts)...)
+		t, minted, serr := txtls.LoadOrMintSelfSigned(filepath.Join(dir, "web-selfsigned.crt"), filepath.Join(dir, "web-selfsigned.key"), hosts)
+		if serr != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("web self-signed TLS: %w", serr)
+		}
+		t.NextProtos = []string{"h2", "http/1.1"}
+		webCtrl.SetTLSConfig(t)
+		logger.Warn("web head is serving a SELF-SIGNED certificate (--web-tls-self-signed): dev only — a client must be told to trust it",
+			zap.String("cert", filepath.Join(dir, "web-selfsigned.crt")), zap.Bool("minted", minted), zap.Strings("hosts", hosts))
+	}
 	var certMgr *txtls.Manager
-	if strings.TrimSpace(conf.WebTLSAddr) != "" || imapWantsManagedCert || tcpWantsManagedCert {
+	if webWantsManagedCert || imapWantsManagedCert || tcpWantsManagedCert {
 		if !strings.Contains(conf.Personalities, "dns") {
 			logger.Warn("bundled TLS requested without the 'dns' personality: ACME DNS-01 has no authoritative server to answer challenges — enable 'dns', terminate TLS at a front proxy, or (imap) pass cert files")
 		}
@@ -2126,7 +2187,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			return nil, nil, fmt.Errorf("bundled TLS: %w", mErr)
 		}
 		certMgr = m
-		if strings.TrimSpace(conf.WebTLSAddr) != "" {
+		if webWantsManagedCert {
 			webCtrl.SetTLSConfig(certMgr.TLSConfig())
 		}
 		if imapWantsManagedCert {
@@ -2171,6 +2232,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		calCtrl,
 		conCtrl,
 		wdCtrl,
+		ippCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),
 	}
@@ -2574,4 +2636,26 @@ func nonEmptyStrings(in []string) []string {
 		}
 	}
 	return out
+}
+
+// ippSecretSource adapts the chassis secret resolver to the ipp head's seam:
+// `_ipp`-scoped first with the tenant-wide fallback the resolver already
+// implements (so a tenant may scope IPP_PASSWORD to the `_ipp` stack or set
+// it tenant-wide), and the store's not-found mapped to found=false — which
+// for the head means "this tenant has not turned printing on". A nil
+// resolver (some embedders/tests) reads as "no tenant has".
+func ippSecretSource(r *secrets.Resolver) ippp.SecretSource {
+	return func(ctx context.Context, tenantSlug, name string) ([]byte, bool, error) {
+		if r == nil {
+			return nil, false, nil
+		}
+		cleartext, _, err := r.MaterializeForOpSlug(ctx, tenantSlug, ippp.SubscriptionStack, name)
+		if errors.Is(err, secrets.ErrSecretNotFound) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		return cleartext, true, nil
+	}
 }

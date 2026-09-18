@@ -248,6 +248,13 @@ func TestActivationHelpers(t *testing.T) {
 	if host2 != host {
 		t.Fatalf("not idempotent: %q vs %q", host2, host)
 	}
+	// `ipp.<origin>` is the chassis's print front door: a stack whose label
+	// is `ipp` is refused (the caller falls through to the structured mint).
+	for _, stack := range []string{"ipp", "IPP"} {
+		if h, err := EnsureZoneHostnameTx(ctx, tx, "t1", stack, origin, "2026-05-29T14:32:07Z", nil); !errors.Is(err, ErrReservedZoneLabel) || h != "" {
+			t.Fatalf("stack %q must be refused the reserved label: %q err=%v", stack, h, err)
+		}
+	}
 	var verifiedAt sql.NullString
 	if err := tx.QueryRowContext(ctx,
 		`SELECT verified_at FROM tenant_hostnames WHERE hostname = ? AND created_by = ?`,

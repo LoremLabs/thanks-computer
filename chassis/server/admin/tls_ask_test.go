@@ -82,3 +82,52 @@ func TestTLSAskDeniesStructuredHostSuffix(t *testing.T) {
 		t.Fatalf("custom host alongside suffix guard: got %d, want 200", got)
 	}
 }
+
+func insertZone(t *testing.T, c *Controller, id, origin, verifiedAt string) {
+	t.Helper()
+	var ver any
+	if verifiedAt != "" {
+		ver = verifiedAt
+	}
+	if _, err := c.pu.RuntimeDB.Exec(
+		`INSERT INTO dns_zones (id, tenant_id, origin, mname, rname, created_at, updated_at, verified_at)
+		 VALUES (?, 'tnt_default', ?, 'ns1.test.', 'hostmaster.test.', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?)`,
+		id, origin, ver); err != nil {
+		t.Fatalf("insert zone %q: %v", origin, err)
+	}
+}
+
+// The print front door `ipp.<X>` gets a certificate when X is EXACTLY a
+// verified zone origin or a verified, attached hostname — never for a
+// subdomain of one, an unverified one, or anything under the structured
+// suffix (that apex is on the wildcard cert).
+func TestTLSAskIPPFrontDoor(t *testing.T) {
+	c := newTestController(t, config.Config{
+		Personalities:        "admin",
+		StructuredHostSuffix: ".stacks.thanks.computer",
+	})
+	insertZone(t, c, "dz_ok", "dripl.example", "2026-05-19T00:00:00Z")
+	insertZone(t, c, "dz_pending", "pending.example", "") // NS not verified yet
+	insertHostname(t, c, "h_ok", "pony.acme.example", "shop", "", "2026-05-19T00:00:00Z")
+	insertHostname(t, c, "h_unver", "unverified.acme.example", "shop", "", "")
+	insertHostname(t, c, "h_struct", "web-ab2cd3.stacks.thanks.computer", "web", "", "2026-05-19T00:00:00Z")
+
+	cases := map[string]int{
+		"ipp.dripl.example":                     http.StatusOK,       // exact verified zone origin
+		"IPP.Dripl.Example":                     http.StatusOK,       // canonicalized
+		"ipp.sub.dripl.example":                 http.StatusNotFound, // covered by the zone, but not its origin
+		"ipp.pending.example":                   http.StatusNotFound, // zone not verified
+		"ipp.pony.acme.example":                 http.StatusOK,       // exact verified, attached hostname
+		"ipp.unverified.acme.example":           http.StatusNotFound, // row not verified
+		"ipp.never.seen.example":                http.StatusNotFound, // nothing behind it
+		"ipp.stacks.thanks.computer":            http.StatusNotFound, // suffix apex: wildcard cert, never on-demand
+		"ipp.web-ab2cd3.stacks.thanks.computer": http.StatusNotFound, // two labels under the suffix: never on-demand
+		"notipp.dripl.example":                  http.StatusNotFound, // only the ipp label is special
+		"dripl.example":                         http.StatusNotFound, // the rule authorizes ipp.<origin>, not the origin
+	}
+	for domain, want := range cases {
+		if got := askStatus(t, c, domain); got != want {
+			t.Errorf("ask(domain=%q) = %d, want %d", domain, got, want)
+		}
+	}
+}

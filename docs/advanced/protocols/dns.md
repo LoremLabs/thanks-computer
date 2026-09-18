@@ -79,6 +79,7 @@ a warning. Minimum config, settable by flag or at runtime via
 | SPF override | `--dns-spf` | Replaces the auto-derived SPF |
 | IMAPS port | `--dns-imaps-port` (default 0 = off) | Publishes `_imaps._tcp` SRV records pointing each name at itself on this port; the default-suffix wildcard zone points at `imap.<suffix>` |
 | CalDAV port | `--dns-caldavs-port` (default 0 = off) | Publishes `_caldavs._tcp` SRV records (and the `path=` TXT) pointing each name at itself on this port; set 443 when the `calendar` personality serves every hostname of the zone |
+| IPP host | `--dns-ipp` (default false) | Publishes `ipp.<zone>` A/AAAA at the edge IPs for every pattern zone — the hostname the [`ipp`](./ipp.md) personality answers on. Zones created before the flag was set get it too (synthesis is computed at reload, never stored). A switch, not a port: no synthesized record carries the port |
 | CardDAV port | `--dns-carddavs-port` (default 0 = off) | Publishes `_carddavs._tcp` SRV records (and the `path=` TXT) the same way; set 443 when the `contacts` personality serves every hostname of the zone |
 
 ## Zones
@@ -115,6 +116,10 @@ For zone `ai.example.com`:
   (longest-match: per-structured-host key, then zone key).
 - **DMARC**: `_dmarc.ai.example.com` is published as
   `v=DMARC1; p=none` — monitor-only and **not yet configurable**.
+- **Print front door**: with `--dns-ipp`, `ipp.ai.example.com` A/AAAA at
+  the edge IPs — one name per zone (the printer rides the URL path, the
+  tenant comes from the zone). `ipp` is therefore a reserved label: a
+  stack named `ipp` gets a structured host instead of `ipp.<zone>`.
 - **Per-stack hosts**: each active stack gets
   `<stack>.ai.example.com` A/AAAA + MX, driven by the activations
   table — activate a stack, its hostname resolves.

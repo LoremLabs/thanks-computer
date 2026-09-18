@@ -1,0 +1,8 @@
+WHEN ._printed.names != null
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "printer", @web.req.url.query.printer.0,
+         "count", ._printed.count,
+         "printed", ._printed.names))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

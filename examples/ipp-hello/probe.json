@@ -1,0 +1,35 @@
+{
+  "note": "IPP head: with `txco dev --ipp` the tenant's `_ipp` stack makes it a printer at ipps://ipp.localhost:8443/p/<printer> once the IPP_PASSWORD secret is set. The probe cannot speak IPP or set a secret (HTTP checks only), so it covers what rides the web head: the listing route answers, and /p/<printer> on the ORDINARY hostname is the stack's own path — printers exist only on `ipp.<host>`. Printing itself is exercised by the Go tests (chassis/server/personality/ipp) and by hand with ipptool — see the README. Binds localhost → ipp-demo; `ipp.localhost` then resolves to this tenant through that binding.",
+  "dev_flags": [
+    "--ipp"
+  ],
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "ipp-demo"
+    }
+  ],
+  "checks": [
+    {
+      "name": "nothing printed yet",
+      "method": "GET",
+      "path": "/ipp/printed?printer=research",
+      "status": 200,
+      "contains": "\"count\":0"
+    },
+    {
+      "name": "/p/<printer> on an ordinary hostname is the stack's path, not a printer",
+      "method": "POST",
+      "path": "/p/research",
+      "status": 404,
+      "contains": "not_found"
+    },
+    {
+      "name": "unhandled paths are 404, not 200 {}",
+      "method": "GET",
+      "path": "/anything",
+      "status": 404,
+      "contains": "not_found"
+    }
+  ]
+}

@@ -166,6 +166,46 @@ func (fs *FileStore) PutReader(ctx context.Context, hash string, r io.Reader, si
 	return nil
 }
 
+// spoolDir is where PutStream parks a stream whose hash is not known yet.
+// Under the store root so the final os.Link never crosses a filesystem.
+const spoolDir = ".spool"
+
+// PutStream implements filecas.StreamPutter: spool to a temp file under
+// <root>/.spool while hashing, and only at EOF — when the content address
+// finally exists — os.Link it into the sharded path. Same
+// never-observe-a-partial-object discipline as PutReader; the temp is
+// removed on every path, and a link collision is dedup.
+func (fs *FileStore) PutStream(ctx context.Context, r io.Reader, limit int64) (string, int64, error) {
+	dir := filepath.Join(fs.root, spoolDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", 0, err
+	}
+	tmp, err := os.CreateTemp(dir, "in-*")
+	if err != nil {
+		return "", 0, err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	hash, n, werr := filecas.SpoolAndHash(ctx, tmp, r, limit)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return "", 0, werr
+	}
+	dest := fs.hashPath(hash)
+	if dest == "" {
+		return "", 0, fmt.Errorf("filecas: malformed hash %q", hash)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", 0, err
+	}
+	if lerr := os.Link(tmpName, dest); lerr != nil && !errors.Is(lerr, os.ErrExist) {
+		return "", 0, lerr
+	}
+	return hash, n, nil
+}
+
 // GetReader implements filecas.ReaderGetter: an open read handle on the
 // content-addressed file itself.
 func (fs *FileStore) GetReader(ctx context.Context, hash string) (io.ReadCloser, int64, error) {
@@ -206,6 +246,7 @@ func (fs *FileStore) BlobPath(hash string) (string, bool) {
 var (
 	_ filecas.Store        = (*FileStore)(nil)
 	_ filecas.ReaderPutter = (*FileStore)(nil)
+	_ filecas.StreamPutter = (*FileStore)(nil)
 	_ filecas.ReaderGetter = (*FileStore)(nil)
 	_ filecas.PathProvider = (*FileStore)(nil)
 )

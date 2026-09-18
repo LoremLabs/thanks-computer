@@ -2300,6 +2300,16 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 				return nil
 			}
 			if _, e := tenants.EnsureZoneHostnameTx(ctx, tx, tenantID, stackName, origin, now, c.pu.RuntimeDialect); e != nil {
+				if errors.Is(e, tenants.ErrReservedZoneLabel) {
+					// The stack's label is a chassis front door
+					// (`ipp.<origin>`). Not a failure: the zone simply does
+					// not apply to this stack, so it gets a structured host
+					// below like a tenant without a zone would.
+					zoneApplies = false
+					c.pu.Logger.Warn("zone hostname label is reserved; minting a structured host instead",
+						zap.String("tenant", tenantID), zap.String("stack", stackName), zap.String("origin", origin))
+					return nil
+				}
 				return fmt.Errorf("zone hostname mint (origin %s): %w", origin, e)
 			}
 			return nil

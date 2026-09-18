@@ -322,6 +322,14 @@ func (c *Controller) reconcileZoneHostnames(ctx context.Context, tx *sql.Tx, ten
 		if label == "" {
 			continue
 		}
+		if tenants.ReservedZoneLabel(label) {
+			// Same rule as EnsureZoneHostnameTx + the dns synthesis loop:
+			// `ipp.<origin>` is the chassis's print front door, never a
+			// stack's routing host.
+			c.pu.Logger.Warn("zone reconcile: reserved zone label skipped (zone op unaffected)",
+				zap.String("tenant", tenantID), zap.String("stack", s), zap.String("label", label))
+			continue
+		}
 		canon, ok := tenants.CanonicalizeHost(label + "." + suffix)
 		if !ok || !tenants.IsValidHostname(canon) {
 			c.pu.Logger.Warn("zone reconcile: invalid host label skipped (zone op unaffected)",

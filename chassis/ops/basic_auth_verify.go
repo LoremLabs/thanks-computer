@@ -1,17 +1,14 @@
 package ops
 
 import (
-	"bytes"
 	"context"
-	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
+	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
@@ -113,29 +110,11 @@ func BasicAuthVerify(ctx context.Context, opName string, in, _ []byte) (event.Pa
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }
 
-// basicAuthMatches parses `Basic <token>` (RFC 7617: scheme
-// case-insensitive, token = base64(user-id ":" password), user-id may
-// not contain a colon) and compares both halves in constant time. Both
-// comparisons always run so timing does not reveal which half failed;
-// length differences are the one thing ConstantTimeCompare reveals,
-// the same trade-off hmac.Equal makes.
+// basicAuthMatches is the shared static-credential check (constant time,
+// both halves always compared, decoded bytes zeroed) — see
+// apppass.BasicHeaderMatches, which the ipp head uses too.
 func basicAuthMatches(header, user string, password []byte) bool {
-	fields := strings.Fields(header)
-	if len(fields) != 2 || !strings.EqualFold(fields[0], "Basic") {
-		return false
-	}
-	raw, err := base64.StdEncoding.DecodeString(fields[1])
-	if err != nil {
-		return false
-	}
-	defer secrets.Zero(raw)
-	colon := bytes.IndexByte(raw, ':')
-	if colon < 0 {
-		return false
-	}
-	u := subtle.ConstantTimeCompare(raw[:colon], []byte(user))
-	p := subtle.ConstantTimeCompare(raw[colon+1:], password)
-	return u&p == 1
+	return apppass.BasicHeaderMatches(header, user, password)
 }
 
 func basicAuthVerifyErr(msg string) event.Payload {

@@ -24,6 +24,34 @@ import (
 // ErrZoneExists signals an active dns_zones row already covers the origin.
 var ErrZoneExists = errors.New("dns zone already exists")
 
+// IPPHostLabel is the leftmost label of a zone's print front door:
+// `ipp.<origin>`. The dns head synthesizes it, the ipp personality answers
+// on it, and tls-ask authorizes a certificate for it — one constant so the
+// three can never drift.
+const IPPHostLabel = "ipp"
+
+// ErrReservedZoneLabel is returned by EnsureZoneHostnameTx when a stack's
+// label collides with a chassis front door (`ipp.<origin>`). The activation
+// path logs it and falls through to the structured-host mint, so the stack
+// still gets a URL — just not one the chassis owns.
+var ErrReservedZoneLabel = errors.New("tenants: zone label is reserved")
+
+// reservedZoneLabels are the leftmost labels under a delegated zone that
+// belong to the chassis, never to a stack. ONE table, consulted by the dns
+// synthesis loop and by both zone-host mint paths, so the name a stack
+// resolves at and the name it routes at cannot diverge.
+var reservedZoneLabels = map[string]struct{}{
+	IPPHostLabel: {},
+}
+
+// ReservedZoneLabel reports whether `label` (a StackLabel) is reserved.
+// Deliberately not gated on the ipp personality being enabled: a label that
+// flips between reserved and free with a flag would move a live hostname.
+func ReservedZoneLabel(label string) bool {
+	_, ok := reservedZoneLabels[strings.ToLower(label)]
+	return ok
+}
+
 // SystemZoneHostCreatedBy marks a tenant_hostnames row auto-minted for a
 // stack under the tenant's delegated DNS zone (`stack-name.<origin>`).
 // Distinct from SystemStructuredHostCreatedBy so the global-suffix and
@@ -99,24 +127,35 @@ func DomainCoveredByZone(ctx context.Context, db *sql.DB, slug, domain string, d
 // the ingress resolver as a fallback when no tenant_hostnames row exists:
 // "we serve DNS for it" ⟹ route mail to <slug>/_mail.
 func TenantForMailZone(ctx context.Context, db *sql.DB, domain string, d registry.Dialect) (slug string, ok bool, err error) {
+	slug, _, ok, err = TenantForZone(ctx, db, domain, d)
+	return slug, ok, err
+}
+
+// TenantForZone is TenantForMailZone with the matched zone's origin exposed:
+// the tenant whose active, VERIFIED zone covers `domain` (apex or any
+// subdomain, longest origin wins) and which origin that was. Callers that
+// must not accept a subdomain (the ipp front door is exactly `ipp.<origin>`,
+// never `ipp.<sub>.<origin>`) compare the returned origin to what they asked
+// for. The name says nothing about mail because nothing here is mail-specific.
+func TenantForZone(ctx context.Context, db *sql.DB, domain string, d registry.Dialect) (slug, origin string, ok bool, err error) {
 	canon, cok := CanonicalizeHost(domain)
 	if !cok {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	err = db.QueryRowContext(ctx,
-		orSQLite(d).Rebind(`SELECT t.slug FROM dns_zones z
+		orSQLite(d).Rebind(`SELECT t.slug, z.origin FROM dns_zones z
 		   JOIN tenants t ON t.tenant_id = z.tenant_id
 		  WHERE z.revoked_at IS NULL AND t.revoked_at IS NULL
 		    AND z.verified_at IS NOT NULL
 		    AND (z.origin = ? OR ? LIKE '%.' || z.origin)
-		  ORDER BY length(z.origin) DESC LIMIT 1`), canon, canon).Scan(&slug)
+		  ORDER BY length(z.origin) DESC LIMIT 1`), canon, canon).Scan(&slug, &origin)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
-	return slug, true, nil
+	return slug, origin, true, nil
 }
 
 // EnsureZoneHostnameTx makes sure (tenantID, stack) has an active
@@ -133,6 +172,9 @@ func EnsureZoneHostnameTx(ctx context.Context, tx *sql.Tx, tenantID, stack, orig
 	label := StackLabel(stack)
 	if label == "" {
 		return "", nil
+	}
+	if ReservedZoneLabel(label) {
+		return "", ErrReservedZoneLabel
 	}
 	canon, ok := CanonicalizeHost(label + "." + strings.TrimSuffix(origin, "."))
 	if !ok || !IsValidHostname(canon) {

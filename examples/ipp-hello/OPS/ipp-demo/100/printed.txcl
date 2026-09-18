@@ -1,0 +1,6 @@
+# GET /ipp/printed?printer=research — what has been printed to a printer:
+# the names the `_ipp` stack filed (research/<job id>), newest job ids last.
+WHEN @src == "http" && @web.req.url.path == "/ipp/printed"
+  EXEC "txco://blob/list"
+    WITH prefix = &concat(@web.req.url.query.printer.0, "/"),
+         into = "_printed"

@@ -87,6 +87,14 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.websocket.session.state.email", false},
 		{"_txc.websocket.msg.text", false},
 		{"_txc.websocket.res.text", false},
+		// Print jobs: every fact is chassis-stamped, and there is no verdict
+		// subtree either — the client was answered before the run existed, so
+		// a stack has nothing to say back to the printer. A stack must not be
+		// able to repoint the document reference or the routing tenant.
+		{"_txc.ipp.tenant", false},
+		{"_txc.ipp.printer", false},
+		{"_txc.ipp.document.sha256", false},
+		{"_txc.ipp.res", false},
 		// A reserved prefix must not be defeated by a lookalike sibling.
 		{"_txc.web.response", false}, // not "web.res"
 		{"_txc.gotoxyz", false},      // not "goto"
