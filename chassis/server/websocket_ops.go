@@ -43,10 +43,7 @@ type websocketDeps struct {
 }
 
 func websocketInto(meta []byte) string {
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_websocket"
-	}
+	into := intoPath(meta, "_websocket")
 	return into
 }
 

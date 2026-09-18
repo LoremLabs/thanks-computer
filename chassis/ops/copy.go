@@ -26,7 +26,9 @@ import (
 // WITH parameters (op.Meta):
 //
 //	from    = ".text"                 (required: source path on input envelope)
-//	to      = "_txc.web.res.body"     (required: destination path on response)
+//	to      = "_txc.web.res.body"     (required: destination path on response —
+//	                                  your own key, or an author-writable
+//	                                  `_txc` path; a reserved one fails loud)
 //	encode  = "base64"                (optional: "base64" | "" — default "")
 //	fallback = "value"                (optional: literal substituted when
 //	                                  the source path is empty/missing)
@@ -45,18 +47,23 @@ func Copy(ctx context.Context, _ string, in, _ []byte) (event.Payload, error) {
 	meta := []byte(operation.MetaFromContext(ctx))
 
 	fromRaw := gjson.GetBytes(meta, "from").String()
-	toRaw := gjson.GetBytes(meta, "to").String()
 	encode := gjson.GetBytes(meta, "encode").String()
 
 	if fromRaw == "" {
 		return errPayload("copy: missing `from` in WITH"), errors.New("copy: missing `from`")
 	}
-	if toRaw == "" {
+	// `to` is author-chosen and this op's output merges unsanitized (trusted
+	// transport), so the target is checked here: the author's own keys and the
+	// author-writable `_txc` subtrees only — `to = "@tenant"` is refused.
+	to, terr := authorTarget(meta, "to")
+	if terr != nil {
+		return errPayload("copy: " + terr.Error()), terr
+	}
+	if to == "" {
 		return errPayload("copy: missing `to` in WITH"), errors.New("copy: missing `to`")
 	}
 
 	from := normalizePath(fromRaw)
-	to := normalizePath(toRaw)
 
 	// Read the source. `.String()` on a missing path returns "" —
 	// legitimate "copy whatever is there" semantic. For non-string

@@ -62,10 +62,7 @@ type imapDeps struct {
 }
 
 func imapInto(meta []byte) string {
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_imap"
-	}
+	into := intoPath(meta, "_imap")
 	return into
 }
 

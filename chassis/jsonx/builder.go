@@ -150,6 +150,26 @@ func splitPath(path string) ([]pathSeg, bool) {
 	return segs, true
 }
 
+// PathKeys returns the object keys an sjson path addresses, one per
+// segment, exactly as sjson.Set/Delete will resolve them: '\' escapes
+// are applied and a segment's leading ':' (force-key) is dropped. ok is
+// false for a path sjson rejects ("" or an unescaped '*' '?' '#').
+//
+// It exists for path GUARDS (chassis/txcguard): a policy check has to
+// judge the keys sjson will really write, not the spelling the author
+// chose — `\_txc.tenant` and `:_txc.tenant` both address `_txc.tenant`.
+func PathKeys(path string) ([]string, bool) {
+	segs, ok := splitPath(path)
+	if !ok {
+		return nil, false
+	}
+	keys := make([]string, len(segs))
+	for i, s := range segs {
+		keys[i] = s.name
+	}
+	return keys, true
+}
+
 // joinSegs re-encodes segments into an sjson path (used when
 // delegating a descend-into-raw-leaf to real sjson).
 func joinSegs(segs []pathSeg) string {

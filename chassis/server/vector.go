@@ -132,10 +132,7 @@ func vectorSearch(ctx context.Context, vs vector.Store, in []byte) (event.Payloa
 		return vecErrFrom(serr), nil
 	}
 
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_vector.matches"
-	}
+	into := intoPath(meta, "_vector.matches")
 	if matches == nil {
 		matches = []vector.Match{}
 	}
@@ -208,10 +205,7 @@ func vectorUpdate(ctx context.Context, vs vector.Store, in []byte) (event.Payloa
 	if uerr != nil {
 		return vecErrFrom(uerr), nil
 	}
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_vector.updated"
-	}
+	into := intoPath(meta, "_vector.updated")
 	resp, _ := sjson.Set(`{}`, into, n)
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }

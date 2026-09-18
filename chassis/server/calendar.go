@@ -60,10 +60,7 @@ type calendarDeps struct {
 }
 
 func calendarInto(meta []byte) string {
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_calendar"
-	}
+	into := intoPath(meta, "_calendar")
 	return into
 }
 

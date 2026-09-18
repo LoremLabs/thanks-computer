@@ -607,6 +607,14 @@ The convention is **transport-agnostic**: an HTTP op signals control flow by inc
 
 Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise. Each inlet stamps its own read-only facts there too (`@web.req.*`, `@lmtp.*`, `@imap.*`, `@dns.*`, `@websocket.*`); see [protocols](../protocols/README.md).
 
+**What you may write under `_txc`.** Only the response and control fields: `@web.res`, `@lmtp.res`, `@dns.res`, `@imap.res`, `@source.res`, `@calendar.res`, `@contacts.res`, `@tcp.res`, `@goto`, `@halt`, `@delete`, `@telemetry`, and `@llm.{reject,upstream,headers,context}` — plus `@ttl`, downward only. Everything else there is the chassis's: who the request is (`@tenant`, `@src`, `@imap.account`, …), what it may spend (`@fuel_used`, `@_seen`), and what a builtin verified (`@computed.*`). This holds however the write arrives:
+
+- `EMIT`, `SET` after EXEC and `LOOP SET` to a reserved path are dropped (logged, not fatal), as is a reserved field in the response of an `http(s)://`, `op://`, `mcp+…` or mocked op.
+- A builtin's **result target** — `WITH into`, or `txco://copy`'s `to` — follows the same rule. `txco://copy` fails the op; a builtin that takes `into` ignores a reserved target and reports at its default (`_kv`, `_files`, …) instead, because several resolve `into` only after their side effect and failing there would hide a write that already happened.
+- `output_path` / `configured_path` on `txco://hmac-sign`, `hmac-verify`, `basic-auth-encode` and `basic-auth-verify` may additionally sit under `@computed.*` — the value is the builtin's own verdict, never yours. Any other reserved path fails the op.
+
+The check is made on the keys the path resolves to, not on how it is spelled: a `\`-escaped or `:`-prefixed spelling of a reserved path is refused like the plain one.
+
 ## LOOP — repeat an op
 
 An op can re-run its EXEC inside one dispatch until a predicate holds, merging each pass locally and handing the scope **one** payload. The scope does not advance until the loop finishes — the property a `@goto` loop cannot give you, because a goto re-enters the stage and every sibling op fires again.

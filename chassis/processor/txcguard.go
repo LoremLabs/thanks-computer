@@ -1,110 +1,34 @@
 package processor
 
 import (
-	"strings"
-
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 )
 
-// The `_txc.*` namespace is the chassis control plane carried inside every
-// envelope: identity and routing (`_txc.tenant`, `_txc.src`, `_txc.rid`,
-// `_txc.route.*`), budget (`_txc.fuel_used`, `_txc.ttl`, `_txc._seen`), inbound
-// request facts (`_txc.web.req.*`, `_txc.lmtp.*`, `_txc.client.*`), computed
-// auth results (`_txc.computed.*`), and billing telemetry (`_txc.chat.*`).
+// The `_txc.*` write/delete policy — which control-plane paths an
+// author-controlled producer may touch — lives in chassis/txcguard, a leaf
+// package, so the op handlers (chassis/ops, chassis/server) can apply the same
+// policy to an author-chosen output target (`WITH into`, `to`, `output_path`)
+// without importing the processor. The wrappers below keep this package's call
+// sites reading as before; the allowlists and their rationale are there.
 //
-// Most of it must NOT be settable by a tenant author. But a few `_txc.*` paths
-// are legitimately produced by author-controlled code (the rendered response,
-// flow control). authorMayWriteTxc draws that line: it is the single source of
-// truth for "may an author-controlled producer write this envelope path?", used
-// by the Tier-2 output sanitizer, the EMIT overlay, and the `_txc.delete`
-// target guard.
-//
-// The policy is default-CLOSED: only the paths listed here are author-writable
-// under `_txc.`; everything else (including any field added later) is reserved.
-// A false reject is a degraded feature; a missing reservation is a control-plane
-// bypass — so the allowlist is deliberately small and grows only with a test
-// that proves a shipped resonator needs the path.
-var authorWritableTxcPaths = []string{
-	"web.res",      // the rendered HTTP response (status/body/headers)
-	"lmtp.res",     // the SMTP verdict
-	"dns.res",      // the DNS answer for a stack-answered zone (rcode/answer/authority)
-	"imap.res",     // the IMAP answer-lane verdict (ok/msg/code/flags/object_key)
-	"source.res",   // the source inlet verdict: a per-item action override (none/seen/move:<dest>)
-	"calendar.res", // the calendar answer-lane verdict (ok/msg/code/event/ical)
-	"contacts.res", // the contacts answer-lane verdict (ok/msg/code/card/vcard)
-	"tcp.res",      // the tcp head's verdict for one connect/line run (write/action)
-	"goto",         // flow control: jump to another stage
-	"halt",         // flow control: stop the pipeline
-	"delete",       // prune envelope paths (targets are separately guarded)
-	"telemetry",    // tenant metric intents (_txc.telemetry.metrics), consumed post-request
-	"llm.reject",   // AI gateway: stack-shaped rejection (status/type/message)
-	"llm.upstream", // AI gateway: upstream base-URL override
-	"llm.headers",  // AI gateway: extra upstream request headers
-	"llm.context",  // AI gateway: stack-emitted context items the gateway serializes into system blocks
-}
+// authorWritableTxcPaths is the projection's copy of the author-writable
+// subtrees (sanitizeAuthorOutput rebuilds `_txc` from exactly these).
+var authorWritableTxcPaths = txcguard.AuthorWritablePaths()
 
 // authorMayWriteTxc reports whether an author-controlled producer (a Tier-2
 // executor's output, an EMIT overlay, or a `_txc.delete` target) may write the
 // given envelope path. `path` must already be normalized (no leading "."/"@" —
-// see normalizeEnvelopePath). Non-`_txc` paths are always writable; under
-// `_txc.` only the allowlisted subtrees are.
-//
-// `_txc.ttl` is intentionally NOT here: it is writable only via EMIT, and only
-// lowered (the IP-TTL idiom), which OverlayResponse handles as a special case.
-// A remote/compute/mock producer has no legitimate need to touch the chassis
-// budget, so it cannot.
-func authorMayWriteTxc(path string) bool {
-	if path != "_txc" && !strings.HasPrefix(path, "_txc.") {
-		return true // non-_txc keys are the author's own data
-	}
-	sub := strings.TrimPrefix(path, "_txc.")
-	for _, allowed := range authorWritableTxcPaths {
-		if sub == allowed || strings.HasPrefix(sub, allowed+".") {
-			return true
-		}
-	}
-	return false
-}
+// see normalizeEnvelopePath). See txcguard.AuthorMayWrite: the decision is made
+// on the keys sjson will resolve, so an escaped or `:`-forced spelling of a
+// reserved path (`\_txc.tenant`, `:_txc.tenant`) is refused like the plain one.
+func authorMayWriteTxc(path string) bool { return txcguard.AuthorMayWrite(path) }
 
-// authorDeletableTxcPaths are reserved `_txc.*` paths an author may DELETE
-// (via `EMIT @delete`) but never write: inbound request facts the chassis
-// stamped, which an op has consumed and wants out of the envelope before it
-// is copied per step / stored in a continuation payload. `web.req.body` is
-// the raw inbound body (base64, up to --web-max-body-bytes) — after
-// txco://blob/put or a parser has eaten it, carrying 30 MiB through the
-// rest of the flow is pure cost. Deleting a stamped fact can't forge one,
-// so this list is broader than the write allowlist but still explicit.
-var authorDeletableTxcPaths = []string{
-	"web.req.body",       // the inbound HTTP body, consumed by blob/put / parsers
-	"imap.msg.text",      // an appended message's bodies + headers: consumed by the
-	"imap.msg.html",      // _imap stack, then omitted from the trace/continuation
-	"imap.msg.headers",   // payload (the record is in the store already)
-	"calendar.ical",      // a client's calendar object and its parse: consumed by
-	"calendar.event",     // the _calendar stack, then omitted from the trace
-	"calendar.prior",     // (the store holds the bytes)
-	"contacts.vcard",     // a client's card and its parse: consumed by the
-	"contacts.card",      // _contacts stack, then omitted from the trace
-	"contacts.prior",     // (the store holds the bytes)
-	"websocket.msg.text", // an inbound WebSocket message's payload (text, or
-	"websocket.msg.data", // base64 binary): consumed, then out of the trace
-}
-
-// authorMayDeleteTxc is the `_txc.delete` target guard: everything an
-// author may write, plus the delete-only facts above. Same normalized-path
-// contract as authorMayWriteTxc.
-func authorMayDeleteTxc(path string) bool {
-	if authorMayWriteTxc(path) {
-		return true
-	}
-	sub := strings.TrimPrefix(path, "_txc.")
-	for _, allowed := range authorDeletableTxcPaths {
-		if sub == allowed || strings.HasPrefix(sub, allowed+".") {
-			return true
-		}
-	}
-	return false
-}
+// authorMayDeleteTxc is the `_txc.delete` target guard: everything an author
+// may write, plus the delete-only inbound facts (txcguard.AuthorMayDelete).
+func authorMayDeleteTxc(path string) bool { return txcguard.AuthorMayDelete(path) }
 
 // systemMayWriteTxc reports whether a SYSTEM-authored rule — one executing in
 // a run pinned to the `_sys` tenant, i.e. the boot pipeline — may EMIT the
@@ -125,10 +49,7 @@ func authorMayDeleteTxc(path string) bool {
 // `_txc.route_x`) stay reserved. Deliberately NOT merged into
 // authorWritableTxcPaths: that list is shared with the output sanitizer,
 // SET POST, and the delete guards, which all stay closed to `route.*`.
-func systemMayWriteTxc(path string) bool {
-	sub := strings.TrimPrefix(path, "_txc.")
-	return sub == "route" || strings.HasPrefix(sub, "route.")
-}
+func systemMayWriteTxc(path string) bool { return txcguard.SystemMayWrite(path) }
 
 // transportAuthorControlled reports whether output produced by the given
 // dispatch transport (the string Exec stamps on every step) is

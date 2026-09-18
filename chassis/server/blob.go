@@ -61,10 +61,7 @@ func blobErr(code, msg string) event.Payload {
 func blobStoreErr(err error) event.Payload { return blobErr("txco_blob_store", err.Error()) }
 
 func blobInto(meta []byte) string {
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_blob"
-	}
+	into := intoPath(meta, "_blob")
 	return into
 }
 

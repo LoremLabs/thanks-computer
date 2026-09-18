@@ -66,9 +66,9 @@ func HMACSign(ctx context.Context, opName string, in, _ []byte) (event.Payload, 
 	if inputPath == "" {
 		inputPath = "body"
 	}
-	outputPath := gjson.GetBytes(meta, "output_path").String()
-	if outputPath == "" {
-		outputPath = "_txc.computed.hmac"
+	outputPath, terr := computedTarget(meta, "output_path", "_txc.computed.hmac")
+	if terr != nil {
+		return errPayload("hmac-sign: " + terr.Error()), terr
 	}
 	encoding := gjson.GetBytes(meta, "encoding").String()
 	if encoding == "" {

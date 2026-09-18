@@ -17,6 +17,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/static"
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 )
 
 // readFile is the handler body for `txco://read-file`: it reads one or
@@ -65,10 +66,7 @@ func readFile(ctx context.Context, ix *static.Index, fcas filecas.Store, in []by
 			errors.New("read-file: missing `files`")
 	}
 
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_files"
-	}
+	into := intoPath(meta, "_files")
 
 	encode := gjson.GetBytes(meta, "encode").String()
 	if encode == "" {
@@ -213,6 +211,28 @@ func normReadFilePath(p string) string {
 		return "_txc." + strings.TrimPrefix(p, "@")
 	}
 	return strings.TrimPrefix(p, ".")
+}
+
+// intoPath resolves an op's author-chosen result target (`WITH into = …`),
+// falling back to the op's default. Every `txco://` op that takes `into` goes
+// through here: these ops run on the trusted transport, so the processor
+// merges their output WITHOUT the reserved-`_txc` sanitizer, and the target is
+// the only place to stop `into = "@tenant"` from forging a chassis control
+// field. Allowed targets are the author's own keys and the author-writable
+// `_txc` subtrees (txcguard.AuthorMayWrite).
+//
+// A reserved target is REFUSED in favor of the default rather than failing the
+// op: many handlers resolve `into` only after their side effect (kv/incr,
+// kv/cas, vector/update), and an error there would hide a write that already
+// happened — a retry would then repeat it. The result stays visible at the
+// op's documented default instead (same posture as EMIT, which drops a
+// reserved write and carries on).
+func intoPath(meta []byte, dflt string) string {
+	path, ok := txcguard.AuthorTarget(gjson.GetBytes(meta, "into").String())
+	if !ok || path == "" {
+		return dflt
+	}
+	return path
 }
 
 // readFileErr builds a structured error event.Payload (never includes

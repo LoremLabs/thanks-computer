@@ -73,9 +73,9 @@ func HMACVerify(ctx context.Context, opName string, in, _ []byte) (event.Payload
 		inputPath = "body"
 	}
 	expectedPath := gjson.GetBytes(meta, "expected_path").String()
-	outputPath := gjson.GetBytes(meta, "output_path").String()
-	if outputPath == "" {
-		outputPath = "_txc.computed.sig_valid"
+	outputPath, terr := computedTarget(meta, "output_path", "_txc.computed.sig_valid")
+	if terr != nil {
+		return verifyErrPayload("hmac-verify: " + terr.Error()), terr
 	}
 	encoding := gjson.GetBytes(meta, "encoding").String()
 	if encoding == "" {

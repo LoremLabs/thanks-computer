@@ -86,10 +86,7 @@ const driveListMax = 1000
 const driveListDefault = 200
 
 func driveInto(meta []byte) string {
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_drive"
-	}
+	into := intoPath(meta, "_drive")
 	return into
 }
 

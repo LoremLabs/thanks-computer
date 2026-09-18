@@ -118,10 +118,7 @@ func kvGet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error)
 	}
 
 	meta := []byte(operation.MetaFromContext(ctx))
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_kv"
-	}
+	into := intoPath(meta, "_kv")
 	resp := `{}`
 	switch {
 	case found:
@@ -214,10 +211,7 @@ func kvCAS(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error)
 		return kvErr(cerr.Error()), cerr
 	}
 
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_kv"
-	}
+	into := intoPath(meta, "_kv")
 	resp := `{}`
 	resp, _ = sjson.Set(resp, into+".swapped", swapped)
 	if len(current) > 0 {
@@ -264,10 +258,7 @@ func kvIncr(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 	if ierr != nil {
 		return kvErr(ierr.Error()), ierr
 	}
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_kv"
-	}
+	into := intoPath(meta, "_kv")
 	resp, _ := sjson.Set(`{}`, into, n)
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }
@@ -313,10 +304,7 @@ func kvList(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 		valueBytes += int64(len(p.Value))
 	}
 	rows.WriteByte(']')
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_kv"
-	}
+	into := intoPath(meta, "_kv")
 	blob, _ := json.Marshal(keys)
 	resp := jsonx.NewObject()
 	resp.SetRaw(into+".keys", string(blob))
@@ -375,10 +363,7 @@ func kvMGet(ctx context.Context, k *kvstore.KV, in []byte) (event.Payload, error
 	}
 	items.WriteByte(']')
 
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_kv"
-	}
+	into := intoPath(meta, "_kv")
 	resp := jsonx.NewObject()
 	resp.SetRaw(into+".items", items.String())
 	resp.Set(into+".count", len(hits))

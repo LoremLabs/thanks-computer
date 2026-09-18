@@ -64,10 +64,7 @@ type notebookDeps struct {
 }
 
 func notebookInto(meta []byte) string {
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_notebook"
-	}
+	into := intoPath(meta, "_notebook")
 	return into
 }
 

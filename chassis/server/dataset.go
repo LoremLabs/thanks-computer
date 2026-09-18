@@ -142,10 +142,7 @@ func datasetQuery(ctx context.Context, dbc *dbcache.DbCache, dsc *dataset.Cache,
 		return dsErr("txco_dataset_query", fmt.Sprintf("query %q: %v", qname, rerr)), nil
 	}
 
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_dataset"
-	}
+	into := intoPath(meta, "_dataset")
 	resp := jsonx.NewObject()
 	resp.Set(into+".dataset", name)
 	resp.Set(into+".query", qname)

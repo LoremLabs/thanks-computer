@@ -43,9 +43,9 @@ func BasicAuthEncode(ctx context.Context, opName string, in, _ []byte) (event.Pa
 
 	secretRef := gjson.GetBytes(meta, "secrets.password.secret").String()
 	user := gjson.GetBytes(meta, "user").String()
-	outputPath := gjson.GetBytes(meta, "output_path").String()
-	if outputPath == "" {
-		outputPath = "_txc.computed.basic_auth"
+	outputPath, terr := computedTarget(meta, "output_path", "_txc.computed.basic_auth")
+	if terr != nil {
+		return basicAuthErr("basic-auth-encode: " + terr.Error()), terr
 	}
 
 	if secretRef == "" {

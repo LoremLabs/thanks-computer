@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 )
@@ -155,14 +156,38 @@ func TestCopyAcceptsAtSugar(t *testing.T) {
 }
 
 func TestCopyAtSugarWorksOnBothSides(t *testing.T) {
-	// Both `from` and `to` should accept @ sugar.
+	// Both `from` and `to` should accept @ sugar. (`to` must be an
+	// author-writable `_txc` path — see TestCopyRefusesReservedTarget.)
 	in := []byte(`{"_txc":{"src":"http"}}`)
-	out, err := Copy(withMeta(`{"from":"@src","to":"@computed.src"}`), "txco://copy", in, nil)
+	out, err := Copy(withMeta(`{"from":"@src","to":"@web.res.body"}`), "txco://copy", in, nil)
 	if err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
-	if got := gjson.Get(out.Raw, "_txc.computed.src").String(); got != "http" {
+	if got := gjson.Get(out.Raw, "_txc.web.res.body").String(); got != "http" {
 		t.Errorf("@→@ copy = %q, want http (raw=%s)", got, out.Raw)
+	}
+}
+
+// TestCopyRefusesReservedTarget — copy runs on the trusted transport, so its
+// output merges unsanitized; an author-chosen `to` under reserved `_txc` would
+// forge a chassis control field. It fails loud, in every spelling sjson
+// resolves to the reserved path, and writes nothing.
+func TestCopyRefusesReservedTarget(t *testing.T) {
+	in := []byte(`{"claim":"victim"}`)
+	for _, to := range []string{
+		"@tenant", "_txc.tenant", "._txc.tenant", `\_txc.tenant`, ":_txc.tenant", "_txc.:tenant",
+		"@imap.account", "@principal", "@fuel_used", "@route.tenant",
+		"@computed.sig_valid", // a verdict path: only the auth helpers may write it
+		"_txc", "@web", `@web.res\`,
+	} {
+		meta, _ := sjson.Set(`{"from":".claim"}`, "to", to)
+		out, err := Copy(withMeta(meta), "txco://copy", in, nil)
+		if err == nil {
+			t.Errorf("to=%q: want an error, got output %s", to, out.Raw)
+		}
+		if gjson.Get(out.Raw, "_txc").Exists() {
+			t.Errorf("to=%q: refused copy still wrote under _txc: %s", to, out.Raw)
+		}
 	}
 }
 

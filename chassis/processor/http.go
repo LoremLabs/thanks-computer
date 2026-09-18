@@ -21,6 +21,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 )
 
 // ExecHTTP Handles execution of http, https operations.
@@ -195,16 +196,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 // `WITH into=…` value or a `_txc.delete` entry) into an sjson path: a
 // leading `@` (txcl sugar for `._txc.`) expands, and a leading `.` is
 // dropped. "" stays "" (no path).
-func normalizeEnvelopePath(p string) string {
-	p = strings.TrimSpace(p)
-	if p == "" {
-		return ""
-	}
-	if strings.HasPrefix(p, "@") {
-		p = "_txc." + strings.TrimPrefix(p[1:], ".")
-	}
-	return strings.TrimPrefix(p, ".")
-}
+func normalizeEnvelopePath(p string) string { return txcguard.NormalizePath(p) }
 
 // formEncode serializes a JSON value into an
 // application/x-www-form-urlencoded body using bracket notation for

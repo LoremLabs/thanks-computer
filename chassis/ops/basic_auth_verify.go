@@ -69,13 +69,13 @@ func BasicAuthVerify(ctx context.Context, opName string, in, _ []byte) (event.Pa
 	if headerPath == "" {
 		headerPath = "_txc.web.req.headers.Authorization.0"
 	}
-	outputPath := gjson.GetBytes(meta, "output_path").String()
-	if outputPath == "" {
-		outputPath = "_txc.computed.basic_auth_ok"
+	outputPath, terr := computedTarget(meta, "output_path", "_txc.computed.basic_auth_ok")
+	if terr != nil {
+		return basicAuthVerifyErr("basic-auth-verify: " + terr.Error()), terr
 	}
-	configuredPath := gjson.GetBytes(meta, "configured_path").String()
-	if configuredPath == "" {
-		configuredPath = "_txc.computed.basic_auth_configured"
+	configuredPath, terr := computedTarget(meta, "configured_path", "_txc.computed.basic_auth_configured")
+	if terr != nil {
+		return basicAuthVerifyErr("basic-auth-verify: " + terr.Error()), terr
 	}
 
 	if secretRef == "" {

@@ -65,10 +65,7 @@ type contactsDeps struct {
 const syncMaxEntries = 200
 
 func contactsInto(meta []byte) string {
-	into := normReadFilePath(gjson.GetBytes(meta, "into").String())
-	if into == "" {
-		into = "_contacts"
-	}
+	into := intoPath(meta, "_contacts")
 	return into
 }
 

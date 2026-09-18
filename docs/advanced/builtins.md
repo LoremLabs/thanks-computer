@@ -28,7 +28,7 @@
 | `txco://hmac-verify` | Verify an HMAC, constant-time; result lands under `@computed.*`. |
 | `txco://basic-auth-encode` | Encode `user:pass` to a basic-auth header value. |
 | `txco://basic-auth-verify` | Check an inbound `Authorization: Basic …` header against a user and a secret password, constant-time; only the verdict lands under `@computed.*` (`basic_auth_ok`, `basic_auth_configured`). With `secrets.password.optional = true` + `allow_unconfigured = true` an unset secret leaves the route open — the demo/dev shape. |
-| `txco://copy` | Path-to-path copy inside the envelope (what `SET` can't do with computed paths). |
+| `txco://copy` | Path-to-path copy inside the envelope (what `SET` can't do with computed paths). `to` must be your own key or a writable `_txc` field (`@web.res.body`); a reserved one fails the op. |
 | `txco://kv/get` · `kv/set` · `kv/delete` · `kv/incr` · `kv/cas` · `kv/mget` · `kv/mset` · `kv/mdelete` · `kv/list` | Read + write durable state across requests — counters, flags, locks, caches (`boltdb` local / `redis` shared); read, write or delete many keys across namespaces in one dispatch (writes and deletes atomically), or list a namespace a sorted page at a time, with values. See [kv](./kv.md). |
 | `txco://blob/put` · `blob/get` · `blob/stat` · `blob/list` · `blob/delete` | Runtime-writable BYTES under mutable, permissioned names over the content-addressed store — uploads, documents, artifacts; seeded with a stack via `BLOBS/`. See [blobs](./blobs.md). |
 | `txco://notebook/append` · `notebook/read` · `notebook/export` · `notebook/list` · `notebook/delete` | An append-only record per (tenant, namespace, name) — task history, conversation history, audit breadcrumbs — read back by cursor, time window or tail (always oldest first) and exported as NDJSON. A duplicate `object_key` returns the original entry. See [notebooks](./notebooks.md). |
@@ -41,3 +41,7 @@
 
 Builtins pay normal [fuel](./fuel.md) and appear in
 [traces](./trace.md) like any other op.
+
+A builtin writes where you point it (`WITH into`, `to`, `output_path`), but
+not over the chassis's own `_txc` fields — see
+[what you may write under `_txc`](./txcl/txcl.md#control-flow-via-_txc).
