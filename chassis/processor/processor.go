@@ -353,6 +353,10 @@ func (pu *Unit) maybeRetenant(ctx context.Context, resp string) context.Context 
 		Ts: time.Now(), Event: "tenant.retenant",
 		Fields: map[string]any{"from": tenants.SystemTenantSlug, "to": target},
 	})
+	// The routed stack rides next to the tenant on the envelope (routeBody
+	// writes both from the same proposal); record it for the same
+	// out-of-band readers as the tenant pin.
+	tenantObserverFromContext(ctx).observeStack(gjson.Get(resp, "_txc.stack").String())
 	return WithTenant(ctx, target)
 }
 

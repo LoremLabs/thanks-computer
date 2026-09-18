@@ -288,6 +288,9 @@ func (r *DBResolver) Resolve(key RouteKey) (RouteTarget, bool) {
 // lookup deadline and the swallowed error mis-served real hostnames
 // as 404s.
 func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
+	if key.Src == "tcp" {
+		return r.resolveTCP(key)
+	}
 	if r.inner != nil {
 		if t, ok := r.inner.Resolve(key); ok {
 			return t, true, nil
@@ -296,7 +299,36 @@ func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
 	if key.Src != "http" || key.Hostname == "" {
 		return RouteTarget{}, false, nil
 	}
-	canon, ok := canonicalizeHost(key.Hostname)
+	return r.resolveHost(key.Hostname, false)
+}
+
+// resolveTCP routes a connection. The connection hostname (TLS SNI, or a
+// trusted edge's copy of it in `_txc.tcp.host`) wins; the YAML
+// `tcp.listeners` entry is the fallback for a single-destination
+// listener that has none. Hostname routing for tcp is STRICT — verified
+// rows only, whatever --require-hostname-verification says — matching
+// the tls-ask gate: a name that could not get a certificate must not
+// route a connection either.
+func (r *DBResolver) resolveTCP(key RouteKey) (RouteTarget, bool, error) {
+	if key.Hostname != "" {
+		t, ok, err := r.resolveHost(key.Hostname, true)
+		if ok || err != nil {
+			return t, ok, err
+		}
+	}
+	if r.inner != nil {
+		if t, ok := r.inner.Resolve(key); ok {
+			return t, true, nil
+		}
+	}
+	return RouteTarget{}, false, nil
+}
+
+// resolveHost is the hostname → (tenant, stack) lookup shared by the http
+// and tcp paths: route cache first, mirror SQL as the fallback. strict
+// refuses unverified rows regardless of the chassis-level policy.
+func (r *DBResolver) resolveHost(hostname string, strict bool) (RouteTarget, bool, error) {
+	canon, ok := canonicalizeHost(hostname)
 	if !ok {
 		return RouteTarget{}, false, nil
 	}
@@ -312,7 +344,7 @@ func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
 			if !found {
 				return RouteTarget{}, false, nil
 			}
-			t, ok := r.shapeHTTPTarget(row.Tenant, row.Stack, row.Verified, canon)
+			t, ok := r.shapeHTTPTarget(row.Tenant, row.Stack, row.Verified, canon, strict)
 			return t, ok, nil
 		}
 	}
@@ -323,7 +355,7 @@ func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
 	if db == nil {
 		return RouteTarget{}, false, nil
 	}
-	return r.lookupHTTP(db, canon)
+	return r.lookupHTTP(db, canon, strict)
 }
 
 // lookupHTTP runs the resolver query against the dbcache mirror. One
@@ -337,7 +369,7 @@ func (r *DBResolver) ResolveErr(key RouteKey) (RouteTarget, bool, error) {
 //
 // `verified_at` decides routing alongside the chassis-level
 // `requireVerified` flag — see shapeHTTPTarget.
-func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string) (RouteTarget, bool, error) {
+func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string, strict bool) (RouteTarget, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	var slug, stack string
@@ -369,7 +401,7 @@ func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string) (RouteTarget, bool
 			zap.Error(err))
 		return RouteTarget{}, false, err
 	}
-	t, ok := r.shapeHTTPTarget(slug, stack, verifiedAt.Valid, canonical)
+	t, ok := r.shapeHTTPTarget(slug, stack, verifiedAt.Valid, canonical, strict)
 	return t, ok, nil
 }
 
@@ -379,9 +411,11 @@ func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string) (RouteTarget, bool
 //   - requireVerified=false (permissive default): unverified rows
 //     still route; emit a once-per-row WARN.
 //   - requireVerified=true (production): unverified rows miss.
-func (r *DBResolver) shapeHTTPTarget(slug, stack string, verified bool, canonical string) (RouteTarget, bool) {
+//   - strict (tcp): unverified rows miss and no WARN — silence is the
+//     designed outcome, not a misconfiguration.
+func (r *DBResolver) shapeHTTPTarget(slug, stack string, verified bool, canonical string, strict bool) (RouteTarget, bool) {
 	if !verified {
-		if r.requireVerified {
+		if strict || r.requireVerified {
 			return RouteTarget{}, false
 		}
 		// First sight of this unverified row since boot — log once.

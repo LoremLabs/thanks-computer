@@ -517,6 +517,8 @@ func LoadResolverFromFile(path string, opts ...ResolverOption) (Resolver, error)
 //	_txc.web.req.host     → RouteKey.Hostname   (http; the Host header)
 //	_txc.web.req.url.path → RouteKey.Path       (http)
 //	_txc.tcp.listener     → RouteKey.Listener   (tcp)
+//	_txc.tcp.host         → RouteKey.Hostname   (tcp; the canonical connection
+//	                                             hostname — SNI, or the edge's copy of it)
 //	_txc.cron.job         → RouteKey.Job        (cron)
 //
 // LMTP does NOT use this function — its per-RCPT routing happens
@@ -524,13 +526,21 @@ func LoadResolverFromFile(path string, opts ...ResolverOption) (Resolver, error)
 // and each envelope dispatched by the inlet carries a pre-stamped
 // `_txc.route.*` proposal so detectTenantBody no-ops on it.
 func KeyFromEnvelope(raw string) RouteKey {
-	return RouteKey{
-		Src:      gjson.Get(raw, "_txc.src").String(),
-		Hostname: gjson.Get(raw, "_txc.web.req.host").String(),
-		Listener: gjson.Get(raw, "_txc.tcp.listener").String(),
-		Job:      gjson.Get(raw, "_txc.cron.job").String(),
-		Path:     gjson.Get(raw, "_txc.web.req.url.path").String(),
+	f := gjson.GetMany(raw, "_txc.src", "_txc.web.req.host", "_txc.tcp.listener",
+		"_txc.cron.job", "_txc.web.req.url.path", "_txc.tcp.host")
+	key := RouteKey{
+		Src:      f[0].String(),
+		Hostname: f[1].String(),
+		Listener: f[2].String(),
+		Job:      f[3].String(),
+		Path:     f[4].String(),
 	}
+	if key.Src == "tcp" {
+		// The canonical connection hostname only — never `_txc.tcp.tls.sni`,
+		// which is provenance, not the routing fact.
+		key.Hostname = f[5].String()
+	}
+	return key
 }
 
 // StampEnvelope writes the resolver's target onto the envelope as

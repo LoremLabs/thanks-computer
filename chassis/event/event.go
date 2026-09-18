@@ -53,8 +53,26 @@ type Envelope struct {
 	Ctx     context.Context
 	Payload *Payload
 	ResCh   chan Payload
-	Rid     string
-	Src     string
+	// ResultCh, when set, replaces ResCh: the bus loop answers once with
+	// the run's DispatchResult (final payload + trusted tenant/stack)
+	// after the pipeline returns. Streaming responses need ResCh.
+	ResultCh chan DispatchResult
+	Rid      string
+	Src      string
+}
+
+// DispatchResult is the bus loop's trusted summary of one run: the final
+// payload plus the tenant and stack the chassis pinned — read from
+// immutable pipeline state (processor.TenantObserver), never parsed out
+// of the author-visible envelope, whose `_txc.tenant` a stack could
+// rewrite. An inlet that needs the routing outcome (the TCP head deciding
+// whether a connection stays open) sets Envelope.ResultCh and leaves
+// ResCh nil.
+type DispatchResult struct {
+	Payload Payload
+	Tenant  string // "" or "_sys": the run never left the system tenant
+	Stack   string // the routed stack; "" when unrouted
+	Err     error  // pipeline error, if any
 }
 
 type OpsHandler interface {
@@ -93,7 +111,7 @@ func (t Type) String() string {
 
 func PackageJSON(ctx context.Context, raw string, res chan Payload, src string) *Envelope {
 
-  // rid setting, doesn't belong here. does rid even?
+	// rid setting, doesn't belong here. does rid even?
 	rid, ok := ctx.Value(config.CtxKeyRid).(string)
 	if (!ok) || (rid == "") {
 		rid = hxid.NewTimeSort().String()

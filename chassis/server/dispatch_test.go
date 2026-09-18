@@ -545,3 +545,20 @@ func TestEmitNoRouteResponse(t *testing.T) {
 		t.Fatal("emitNoRouteResponse did not send on ResCh")
 	}
 }
+
+// TestDetectTenantBodyTransientErrorTCP — the same lookup failure on a
+// connection has no web response to shape: it halts with
+// `_txc.route.unavailable` and the TCP head closes the socket.
+func TestDetectTenantBodyTransientErrorTCP(t *testing.T) {
+	resolver := &errStubResolver{err: context.DeadlineExceeded}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"tcp","tcp":{"listener":"irc","host":"irc.foo.local"}}}`))
+	if !gjson.Get(body, "_txc.route.unavailable").Bool() || !gjson.Get(body, "_txc.halt").Bool() {
+		t.Fatalf("want route.unavailable + halt; body=%s", body)
+	}
+	if gjson.Get(body, "_txc.web.res").Exists() {
+		t.Errorf("a tcp envelope must not grow a web response; body=%s", body)
+	}
+	if gjson.Get(body, "_txc.route.to").Exists() {
+		t.Errorf("_txc.route.to must not be set on a transient failure")
+	}
+}

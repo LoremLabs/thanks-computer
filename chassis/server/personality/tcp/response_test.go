@@ -24,17 +24,17 @@ func TestGetOutput(t *testing.T) {
 			[]byte(``),
 		},
 		{
-			`{"_txc":{"server":{"write":"YW55ICsgb2xkICYgZGF0YQ==","rid":"2nbbyV9QSyLaCHkji","src":"tcp"}}`,
+			`{"_txc":{"tcp":{"res":{"write":"YW55ICsgb2xkICYgZGF0YQ==","rid":"2nbbyV9QSyLaCHkji","src":"tcp"}}}`,
 			false,
 			[]byte(`any + old & data`),
 		},
 		{
-			`{"_txc":{"server":{"write":"YW55I this isn't a thing {}Csgb2xkICYgZGF0YQ==","rid":"2nbbyV9QSyLaCHkji","src":"tcp"}}`,
+			`{"_txc":{"tcp":{"res":{"write":"YW55I this isn't a thing {}Csgb2xkICYgZGF0YQ==","rid":"2nbbyV9QSyLaCHkji","src":"tcp"}}}`,
 			true,
 			nil,
 		},
 		{
-			`{"_txc":{"server":{"write":"YW55I this isn't a thing {}Csgb2xkICYgZGF0YQ==","rid":"2nbbyV9QSyLaCHkji","src":"tcp"}}`,
+			`{"_txc":{"tcp":{"res":{"write":"YW55I this isn't a thing {}Csgb2xkICYgZGF0YQ==","rid":"2nbbyV9QSyLaCHkji","src":"tcp"}}}`,
 			false,
 			nil,
 		},

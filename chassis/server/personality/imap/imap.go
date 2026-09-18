@@ -44,6 +44,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
 )
 
 const (
@@ -152,14 +153,14 @@ func (c *Controller) Start() {
 		return
 	}
 	if c.tlsConfig == nil && c.pu.Conf.IMAPSelfSigned {
-		hosts := append([]string{}, devSelfSignedHosts...)
+		hosts := append([]string{}, txtls.DevSelfSignedHosts...)
 		if h := strings.TrimSpace(c.pu.Conf.IMAPHostname); h != "" {
 			hosts = append(hosts, h)
 		}
 		// Stable files next to the index so the certificate survives
 		// restarts and can be trusted once in the OS keychain.
 		certPath, keyPath := SelfSignedPaths(c.pu.Conf.IMAPDBPath)
-		t, minted, err := LoadOrMintSelfSigned(certPath, keyPath, hosts)
+		t, minted, err := txtls.LoadOrMintSelfSigned(certPath, keyPath, hosts)
 		if err != nil {
 			c.pu.Logger.Error("imap: self-signed certificate failed; serving plaintext only", zap.String("err", err.Error()))
 		} else {

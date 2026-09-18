@@ -150,17 +150,56 @@ func TestDBResolverMissReturnsFalse(t *testing.T) {
 	}
 }
 
-// TestDBResolverSkipsNonHTTP — TCP and cron sources never hit the DB
-// (the table only carries HTTP hostnames).
-func TestDBResolverSkipsNonHTTP(t *testing.T) {
+// listenerStub is a YAML-shaped resolver with one tcp listener entry.
+type listenerStub struct {
+	listener string
+	target   RouteTarget
+}
+
+func (s *listenerStub) Resolve(key RouteKey) (RouteTarget, bool) {
+	if key.Src == "tcp" && key.Listener == s.listener {
+		return s.target, true
+	}
+	return RouteTarget{}, false
+}
+
+// TestDBResolverTCPHostname — a tcp key routes by its connection hostname:
+// verified rows only (strict, whatever the chassis policy says), the YAML
+// listener entry as the fallback when there is no hostname or no verified
+// row for it. A listener name is never looked up as a hostname; cron never
+// touches the table.
+func TestDBResolverTCPHostname(t *testing.T) {
 	db := newDBResolverTestStore(t)
 	seedTenant(t, db, "tnt_db", "db-tenant")
-	seedHostname(t, db, "thn_1", "tcp-listener", "tnt_db", "db-tenant/tcp")
-	r := NewDBResolver(nil, db, nil, false)
-	if _, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "tcp-listener"}); ok {
-		t.Errorf("TCP source must not match DB hostnames")
+	seedHostnameFull(t, db, "thn_v", "irc.verified.local", "tnt_db", "db-tenant/irc", "2026-01-02T00:00:00Z", "")
+	seedHostname(t, db, "thn_u", "irc.unverified.local", "tnt_db", "db-tenant/irc")
+	seedHostname(t, db, "thn_l", "raw", "tnt_db", "db-tenant/nope")
+	yaml := &listenerStub{listener: "raw", target: RouteTarget{Tenant: "yaml-tenant", Stack: "yaml-tenant/raw", Ingress: "raw", Verified: true}}
+	r := NewDBResolver(yaml, db, nil, false) // permissive chassis policy
+
+	got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "irc", Hostname: "IRC.verified.local."})
+	if !ok || got.Tenant != "db-tenant" || got.Stack != "db-tenant/irc" || got.Ingress != "host:irc.verified.local" || !got.Verified {
+		t.Errorf("verified hostname: got %+v ok=%v", got, ok)
 	}
-	if _, ok := r.Resolve(RouteKey{Src: "cron", Job: "tcp-listener"}); ok {
+	if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "irc", Hostname: "irc.unverified.local"}); ok {
+		t.Errorf("unverified hostname must not route a connection even in permissive mode; got %+v", got)
+	}
+	if got, ok := r.Resolve(RouteKey{Src: "http", Hostname: "irc.unverified.local"}); !ok || got.Verified {
+		t.Errorf("http stays permissive: got %+v ok=%v", got, ok)
+	}
+	if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "raw"}); !ok || got.Tenant != "yaml-tenant" {
+		t.Errorf("no hostname → YAML listener: got %+v ok=%v", got, ok)
+	}
+	if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "raw", Hostname: "irc.unverified.local"}); !ok || got.Tenant != "yaml-tenant" {
+		t.Errorf("unroutable hostname → YAML listener: got %+v ok=%v", got, ok)
+	}
+	if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "raw", Hostname: "irc.verified.local"}); !ok || got.Tenant != "db-tenant" {
+		t.Errorf("hostname wins over the YAML listener: got %+v ok=%v", got, ok)
+	}
+	if _, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "irc"}); ok {
+		t.Errorf("a listener name is not a hostname")
+	}
+	if _, ok := r.Resolve(RouteKey{Src: "cron", Job: "irc.verified.local"}); ok {
 		t.Errorf("cron source must not match DB hostnames")
 	}
 }

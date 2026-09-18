@@ -35,8 +35,14 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.calendar.tenant", false},        // …and the route hint especially
 		{"_txc.contacts.res.ok", true},
 		{"_txc.contacts.res.card.fn", true},
-		{"_txc.contacts.card.fn", false},    // a client's card facts are read-only…
-		{"_txc.contacts.tenant", false},     // …and the route hint especially
+		{"_txc.contacts.card.fn", false}, // a client's card facts are read-only…
+		{"_txc.contacts.tenant", false},  // …and the route hint especially
+		{"_txc.tcp.res.write", true},
+		{"_txc.tcp.res.action", true},
+		{"_txc.tcp.host", false}, // an observed connection fact, never a verdict
+		{"_txc.tcp.listener", false},
+		{"_txc.server.write", false}, // the old server.* outlet name is NOT an alias
+		{"_txc.server.hangup", false},
 		{"_txc.imap.msg.text", false},       // an appended message's facts are read-only…
 		{"_txc.imap.tenant", false},         // …and the route hint especially
 		{"_txc.dns.proposed.answer", false}, // the head's proposal is read-only

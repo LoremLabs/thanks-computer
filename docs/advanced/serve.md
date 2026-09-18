@@ -19,7 +19,7 @@ delegated zones, required for the built-in ACME TLS path — see
 | Head  | Flag                 | Default | Notes                                                                  |
 | ----- | -------------------- | ------- | ---------------------------------------------------------------------- |
 | web   | `--web-addr`         | `:8080` | Event inlet, plain HTTP. TLS terminates at a front proxy by default.   |
-| tcp   | `--tcp-listen-addrs` | `:5050` | Line-delimited JSON. Comma list of `name=addr` or bare `addr`; a named entry sets `_txc.tcp.listener` for ingress routing. |
+| tcp   | `--tcp-listen-addrs` | `:5050` | Line-delimited JSON. Comma list of `name=addr` or bare `addr`; a named entry sets `_txc.tcp.listener` for ingress routing. `;tls` after the address terminates TLS and routes by SNI hostname (`;self-signed` for dev). |
 | admin | `--admin-addr`       | `:8081` | Mutating API + admin UI — see [admin-api.md](./admin-api.md).          |
 | lmtp  | `--lmtp-listen-addrs`| `:2424` | Only binds when `lmtp` is in `--personalities`.                        |
 | cron  | `--cron-period`      | `60`    | Seconds between ticks.                                                 |

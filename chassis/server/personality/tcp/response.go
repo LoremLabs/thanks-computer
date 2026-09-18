@@ -8,10 +8,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// getOutput convert a body from base64, or return json
+// getOutput renders one run's answer for the socket: the raw bytes a rule
+// put in `_txc.tcp.res.write` (base64-decoded), or, when there are none,
+// the envelope itself as one JSON line.
 func getOutput(output string, hidePrivate bool) ([]byte, error) {
 
-	b64BodyString := gjson.Get(output, "_txc.server.write").String()
+	b64BodyString := gjson.Get(output, "_txc.tcp.res.write").String()
 	if b64BodyString == "" {
 		// no body = return raw output
 
@@ -29,13 +31,13 @@ func getOutput(output string, hidePrivate bool) ([]byte, error) {
 				}
 				return true
 			})
-      if (output == "{}") {
-        output = ""
-      }
-      return []byte(output), nil // without extra newline
+			if output == "{}" {
+				output = ""
+			}
+			return []byte(output), nil // without extra newline
 		}
 
-    return []byte(output + "\n"), nil // with extra newline
+		return []byte(output + "\n"), nil // with extra newline
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(b64BodyString)

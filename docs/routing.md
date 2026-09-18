@@ -105,7 +105,7 @@ Matching is exact-string lookup keyed off the source:
 | Source (`_txc.src`) | Matched against | Field on envelope |
 |---|---|---|
 | `http` | HTTP Host header (with port if non-standard) | `_txc.web.req.host` |
-| `tcp`  | TCP listener name (from `--tcp-listen-addrs`, `name=addr` form; bare addrs use `default`) | `_txc.tcp.listener` |
+| `tcp`  | The connection hostname (TLS SNI on a `;tls` listener) against **verified** tenant hostnames first; then the listener name (from `--tcp-listen-addrs`, `name=addr` form; bare addrs use `default`) against `tcp.listeners`. No match closes the connection. | `_txc.tcp.host`, `_txc.tcp.listener` |
 | `cron` | Cron job name | `_txc.cron.job` |
 | `lmtp` | Each RCPT TO independently — exact addr / `@domain` / verified domain / listener | per-rcpt; [details](./advanced/protocols/lmtp.md) |
 

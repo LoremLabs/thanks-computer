@@ -292,6 +292,16 @@ func TestKeyFromEnvelopeReadsAllSignals(t *testing.T) {
 			want: RouteKey{Src: "tcp", Listener: "smtp-in"},
 		},
 		{
+			name: "tcp with a connection hostname (tcp.host, never tcp.tls.sni)",
+			raw:  `{"_txc":{"src":"tcp","tcp":{"listener":"irc","host":"irc.foo.local","tls":{"sni":"IRC.foo.local."}}}}`,
+			want: RouteKey{Src: "tcp", Listener: "irc", Hostname: "irc.foo.local"},
+		},
+		{
+			name: "http ignores tcp.host",
+			raw:  `{"_txc":{"src":"http","web":{"req":{"host":"acme.local"}},"tcp":{"host":"irc.foo.local"}}}`,
+			want: RouteKey{Src: "http", Hostname: "acme.local"},
+		},
+		{
 			name: "cron",
 			raw:  `{"_txc":{"src":"cron","cron":{"job":"nightly-reconcile"}}}`,
 			want: RouteKey{Src: "cron", Job: "nightly-reconcile"},

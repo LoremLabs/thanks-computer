@@ -372,11 +372,15 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		// rides the envelope so the trace shows why.
 		b := jsonx.NewObject()
 		b.Set("_txc.route.unavailable", true)
-		b.Set("_txc.web.res.status", 503)
-		b.Set("_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
-		b.Set("_txc.web.res.headers.retry-after.0", "1")
-		b.Set("_txc.web.res.body",
-			base64.StdEncoding.EncodeToString([]byte("503 service unavailable\n")))
+		// The web-shaped body is for the web inlet only; another transport
+		// reads `_txc.route.unavailable` itself (the TCP head closes).
+		if src.String() == "http" {
+			b.Set("_txc.web.res.status", 503)
+			b.Set("_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
+			b.Set("_txc.web.res.headers.retry-after.0", "1")
+			b.Set("_txc.web.res.body",
+				base64.StdEncoding.EncodeToString([]byte("503 service unavailable\n")))
+		}
 		b.Set("_txc.halt", true)
 		return b.String()
 	}
@@ -799,11 +803,7 @@ func emitNoRouteResponse(envelope *event.Envelope) {
 	raw, _ = sjson.Set(raw, "_txc.web.res.body",
 		base64.StdEncoding.EncodeToString([]byte("404 not found\n")))
 
-	select {
-	case envelope.ResCh <- event.Payload{Raw: raw, Type: event.JSON}:
-	case <-envelope.Ctx.Done():
-		// Caller already gave up; drop the synthetic response.
-	}
+	respond(envelope, event.Payload{Raw: raw, Type: event.JSON})
 }
 
 // emitDrainResponse answers an envelope with a 503 "draining" response
@@ -817,10 +817,24 @@ func emitDrainResponse(envelope *event.Envelope) {
 		raw = "{}"
 	}
 	raw = admission.DrainResponse(raw)
+	respond(envelope, event.Payload{Raw: raw, Type: event.JSON})
+}
+
+// respond delivers a chassis-built payload (no-route 404, drain 503) to
+// the inlet: as an unrouted DispatchResult on ResultCh when the inlet
+// asked for the trusted outcome, else on ResCh. Drops it if the caller
+// already gave up.
+func respond(envelope *event.Envelope, p event.Payload) {
+	if envelope.ResultCh != nil {
+		select {
+		case envelope.ResultCh <- event.DispatchResult{Payload: p}:
+		case <-envelope.Ctx.Done():
+		}
+		return
+	}
 	select {
-	case envelope.ResCh <- event.Payload{Raw: raw, Type: event.JSON}:
+	case envelope.ResCh <- p:
 	case <-envelope.Ctx.Done():
-		// Caller already gave up; drop the synthetic response.
 	}
 }
 
@@ -871,6 +885,11 @@ func runPipeline(
 					p.Raw = processor.StripBudgetFromOutbound(p.Raw)
 					finalPayload = []byte(p.Raw)
 				}
+				if envelope.ResCh == nil {
+					// ResultCh inlet: the bus loop answers once, after the
+					// run, with the captured payload (see respond/DispatchResult).
+					continue
+				}
 				select {
 				case envelope.ResCh <- p:
 				case <-ctx.Done():
@@ -907,7 +926,7 @@ func runWithTrace(
 	telemetryEnabled bool,
 ) (finalPayload []byte, fuelUsed int64, err error) {
 	_, isNoop := sink.(trace.NoopSink)
-	capture := !isNoop || usageEnabled || telemetryEnabled
+	capture := !isNoop || usageEnabled || telemetryEnabled || envelope.ResultCh != nil
 
 	if isNoop {
 		return runPipeline(ctx, pu, envelope, raw, stage, capture)
@@ -2057,6 +2076,11 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// The IMAP head shares the manager: with `imap` active, --imap-tls-addrs
 	// set and no cert files given, the manager is built even when
 	// --web-tls-addr is empty, and --imap-hostname joins the managed set.
+	// The TCP head shares the manager as well: a `;tls` listener in
+	// --tcp-listen-addrs without `;self-signed` serves managed certificates
+	// by SNI (see tcp.ListenerSpec).
+	tcpCtrl := tcp.NewController(ctx, pu)
+	tcpWantsManagedCert := tcpCtrl.WantsManagedTLS()
 	imapCtrl := imapp.NewController(ctx, pu, imapStore)
 	imapCtrl.SetFileCAS(fcas)
 	imapCtrl.SetBlobIndex(blobIndex)
@@ -2076,7 +2100,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		imapCtrl.SetTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
 	}
 	var certMgr *txtls.Manager
-	if strings.TrimSpace(conf.WebTLSAddr) != "" || imapWantsManagedCert {
+	if strings.TrimSpace(conf.WebTLSAddr) != "" || imapWantsManagedCert || tcpWantsManagedCert {
 		if !strings.Contains(conf.Personalities, "dns") {
 			logger.Warn("bundled TLS requested without the 'dns' personality: ACME DNS-01 has no authoritative server to answer challenges — enable 'dns', terminate TLS at a front proxy, or (imap) pass cert files")
 		}
@@ -2108,6 +2132,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			t.NextProtos = nil
 			imapCtrl.SetTLSConfig(t)
 		}
+		if tcpWantsManagedCert {
+			// No ALPN either: a raw protocol client is not an HTTP client.
+			t := certMgr.TLSConfig().Clone()
+			t.NextProtos = nil
+			tcpCtrl.SetTLSConfig(t)
+		}
 	}
 
 	controllers := []controller{
@@ -2117,7 +2147,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		// 'source' is in --personalities; shares the egress guard so a source
 		// can't be pointed at private space.
 		sourcep.NewController(ctx, pu, sourceStore, guard),
-		tcp.NewController(ctx, pu),
+		tcpCtrl,
 		webCtrl,
 		// websocket: no listener of its own — sessions arrive through the web
 		// head's Upgrade handoff. Off unless 'websocket' AND 'web' are in
@@ -2304,6 +2334,22 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						finalPayload, fuelUsed, runErr := runWithTrace(reqCtx, pu, traceSink, envelope, raw, stage, usageSink != nil, telemetryProc != nil)
 						if runErr != nil {
 							logger.Warn("error adding event", zap.String("err", runErr.Error()))
+						}
+						// Trusted outcome for an inlet that asked for it: tenant +
+						// stack come from the observer the processor pinned into,
+						// never from the envelope a stack could rewrite.
+						if envelope.ResultCh != nil {
+							tenant, _ := tenantObs.Tenant()
+							stack, _ := tenantObs.Stack()
+							select {
+							case envelope.ResultCh <- event.DispatchResult{
+								Payload: event.Payload{Raw: string(finalPayload), Type: event.JSON},
+								Tenant:  tenant,
+								Stack:   stack,
+								Err:     runErr,
+							}:
+							case <-reqCtx.Done():
+							}
 						}
 
 						// calculate response time

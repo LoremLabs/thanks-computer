@@ -1,4 +1,4 @@
-package imap
+package tls
 
 import (
 	"crypto/ecdsa"
@@ -18,12 +18,13 @@ import (
 	"time"
 )
 
-// devSelfSignedHosts are the names a `txco dev --imap` certificate covers:
+// DevSelfSignedHosts are the names a dev certificate covers (`txco dev`
+// IMAP, a `;self-signed` TCP listener):
 // every dev-local hostname pattern the chassis auto-verifies on bind (see
 // tenants.IsDevLocalHostname) plus loopback. A mail client shows the
 // certificate once and the developer trusts it; that is the whole point —
 // desktop clients refuse to even attempt LOGIN over a plaintext port.
-var devSelfSignedHosts = []string{
+var DevSelfSignedHosts = []string{
 	"localhost", "127.0.0.1", "::1",
 	"*.localhost", "*.local", "*.local.thanks.computer",
 }
@@ -36,11 +37,11 @@ var devSelfSignedHosts = []string{
 func SelfSignedTLS(hosts []string) (*tls.Config, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("imap: self-signed key: %w", err)
+		return nil, fmt.Errorf("tls: self-signed key: %w", err)
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
-		return nil, fmt.Errorf("imap: serial: %w", err)
+		return nil, fmt.Errorf("tls: serial: %w", err)
 	}
 	now := time.Now()
 	tmpl := &x509.Certificate{
@@ -69,7 +70,7 @@ func SelfSignedTLS(hosts []string) (*tls.Config, error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		return nil, fmt.Errorf("imap: self-signed cert: %w", err)
+		return nil, fmt.Errorf("tls: self-signed cert: %w", err)
 	}
 	leaf, _ := x509.ParseCertificate(der)
 	return &tls.Config{
@@ -98,17 +99,17 @@ func LoadOrMintSelfSigned(certPath, keyPath string, hosts []string) (*tls.Config
 	}
 	c := cfg.Certificates[0]
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
-		return nil, false, fmt.Errorf("imap: cert dir: %w", err)
+		return nil, false, fmt.Errorf("tls: cert dir: %w", err)
 	}
 	keyDER, err := x509.MarshalECPrivateKey(c.PrivateKey.(*ecdsa.PrivateKey))
 	if err != nil {
-		return nil, false, fmt.Errorf("imap: marshal key: %w", err)
+		return nil, false, fmt.Errorf("tls: marshal key: %w", err)
 	}
 	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
-		return nil, false, fmt.Errorf("imap: write key: %w", err)
+		return nil, false, fmt.Errorf("tls: write key: %w", err)
 	}
 	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Certificate[0]}), 0o644); err != nil {
-		return nil, false, fmt.Errorf("imap: write cert: %w", err)
+		return nil, false, fmt.Errorf("tls: write cert: %w", err)
 	}
 	return cfg, true, nil
 }

@@ -19,9 +19,10 @@ import (
 //
 // Nil-safe so non-server callers (tests, CLI) can ignore it.
 type TenantObserver struct {
-	mu   sync.Mutex
-	slug string
-	set  bool
+	mu    sync.Mutex
+	slug  string
+	set   bool
+	stack string
 }
 
 // NewTenantObserver returns a fresh observer with no tenant recorded yet.
@@ -36,6 +37,28 @@ func (o *TenantObserver) observe(slug string) {
 	o.slug = slug
 	o.set = true
 	o.mu.Unlock()
+}
+
+// observeStack records the stack the boot handoff routed into. Nil-safe.
+func (o *TenantObserver) observeStack(stack string) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	o.stack = stack
+	o.mu.Unlock()
+}
+
+// Stack returns the stack recorded at the _sys->tenant handoff (routeBody
+// stamps `_txc.stack` from the route proposal; maybeRetenant records it
+// here as it rebinds the pin). ok is false when no handoff happened.
+func (o *TenantObserver) Stack() (stack string, ok bool) {
+	if o == nil {
+		return "", false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.stack, o.stack != ""
 }
 
 // Tenant returns the last-recorded tenant slug and whether any pin was

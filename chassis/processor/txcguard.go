@@ -33,6 +33,7 @@ var authorWritableTxcPaths = []string{
 	"source.res",   // the source inlet verdict: a per-item action override (none/seen/move:<dest>)
 	"calendar.res", // the calendar answer-lane verdict (ok/msg/code/event/ical)
 	"contacts.res", // the contacts answer-lane verdict (ok/msg/code/card/vcard)
+	"tcp.res",      // the tcp head's verdict for one connect/line run (write/action)
 	"goto",         // flow control: jump to another stage
 	"halt",         // flow control: stop the pipeline
 	"delete",       // prune envelope paths (targets are separately guarded)

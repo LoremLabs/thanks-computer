@@ -3,11 +3,16 @@ package tcp
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
+	"errors"
+	"io"
 	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -19,407 +24,659 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	"github.com/loremlabs/thanks-computer/chassis/tenants"
+	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
 	"github.com/loremlabs/thanks-computer/chassis/units"
 )
 
-type TCPController struct {
-	ctx      context.Context
-	pu       *processor.Unit
-	shutdown chan bool
-	wg       sync.WaitGroup
-}
-
-// acceptedConn pairs a freshly Accept()-ed connection with the
-// operator-given name of the listener it arrived on, so the
-// connection handler can stamp `_txc.tcp.listener` correctly when
-// the chassis is bound to multiple listeners.
-type acceptedConn struct {
-	conn net.Conn
-	name string
-}
-
-// parseTCPListenSpec splits one `--tcp-listen-addrs` entry into its
-// operator-chosen name and the address to bind. Form `name=addr`
-// picks the name; bare `addr` falls back to `"default"` so existing
-// configs keep stamping `_txc.tcp.listener = "default"` (and any
-// ingress YAML keyed on it keeps matching). Empty input returns
-// ("", "") so callers can drop blank entries (viper's CSV parsing
-// occasionally produces them).
-func parseTCPListenSpec(spec string) (name, addr string) {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return "", ""
-	}
-	if i := strings.Index(spec, "="); i >= 0 {
-		name = strings.TrimSpace(spec[:i])
-		addr = strings.TrimSpace(spec[i+1:])
-		if name == "" {
-			name = "default"
-		}
-		return name, addr
-	}
-	return "default", spec
-}
-
+// MAX_MESSAGE_SIZE is the longest line the head accepts. A longer line is
+// consumed and dropped; the connection stays open.
 const MAX_MESSAGE_SIZE = units.MB * 10
 
+// limits are the parsed --tcp-* knobs.
+type limits struct {
+	connectTimeout    time.Duration // the connect run's rule response
+	respTimeout       time.Duration // each line's rule response (and our write)
+	idleTimeout       time.Duration // silence between lines
+	drainTimeout      time.Duration // Stop() waits this long for handlers to unwind
+	handshakeTimeout  time.Duration // TLS handshake on a ;tls listener
+	maxConns          int           // open connections on this node; 0 = unlimited
+	maxConnsPerTenant int           // open connections per routed tenant; 0 = unlimited
+	maxLine           int           // longest accepted line, bytes
+}
+
+// TCPController is the raw line-delimited socket head. It owns every
+// accepted net.Conn end to end: the accept loop admits it, the connect
+// run through _sys/boot decides whether it stays open (and which tenant
+// it belongs to), and the read loop turns each line into one bounded
+// event until the stack hangs up, the peer goes quiet, or the chassis
+// shuts down.
+//
+// A `;tls` listener terminates TLS here and stamps the SNI hostname as
+// `@tcp.host`, the connection's routing fact — the same field a trusted
+// edge fills in from its PROXY header. Routing itself stays in
+// `_sys/boot`: detect-tenant reads `@tcp.host`, route promotes it, and
+// the head only learns the outcome (event.DispatchResult).
+type TCPController struct {
+	ctx   context.Context
+	pu    *processor.Unit
+	lim   limits
+	specs []listenerSpec
+
+	// tlsConfig serves managed certificates by SNI for `;tls` listeners
+	// (SetTLSConfig, from the bundled cert manager). selfSignedDir is
+	// where a `;self-signed` listener keeps its dev certificate.
+	tlsConfig     *tls.Config
+	selfSigned    *tls.Config
+	selfSignedDir string
+
+	mu        sync.Mutex
+	listeners []net.Listener
+	addrs     []net.Addr
+	conns     map[*connection]struct{}
+	perTenant map[string]int
+
+	wg       sync.WaitGroup // one per accept loop + one per open connection
+	stopping atomic.Bool
+}
+
+// connection is one accepted socket plus the facts the head stamped on it
+// and the tenant the connect run pinned it to.
+type connection struct {
+	net.Conn
+	rid  string
+	spec listenerSpec
+	tls  tlsFacts
+
+	tenant, stack string // "" until the connect run routed
+}
+
+// tlsFacts is what the handshake observed; provenance for @tcp.tls.*.
+type tlsFacts struct {
+	enabled bool
+	sni     string
+	alpn    string
+	version string
+}
+
 func NewController(ctx context.Context, pu *processor.Unit) *TCPController {
-
-	tcp := &TCPController{
-		ctx:      ctx,
-		pu:       pu,
-		shutdown: make(chan bool),
+	specs, err := parseListenerSpecs(pu.Conf.TCPListenAddrs)
+	if err != nil {
+		pu.Logger.Fatal("invalid --tcp-listen-addrs entry", zap.String("err", err.Error()))
 	}
-
-	return tcp
+	return &TCPController{
+		ctx:           ctx,
+		pu:            pu,
+		lim:           parseLimits(pu),
+		specs:         specs,
+		selfSignedDir: dataDir(pu.Conf),
+		conns:         map[*connection]struct{}{},
+		perTenant:     map[string]int{},
+	}
 }
 
+// parseLimits reads the --tcp-* knobs once. A bad duration warns and
+// falls back to its documented default (the websocket head's idiom);
+// config.Load already refuses to boot on an unparsable one, so the
+// fallback only matters for hand-built Units in tests.
+func parseLimits(pu *processor.Unit) limits {
+	conf := pu.Conf
+	dur := func(name, v string, def time.Duration) time.Duration {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return def
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			if pu.Logger != nil {
+				pu.Logger.Warn("invalid "+name+", using default",
+					zap.String("value", v), zap.Duration("default", def))
+			}
+			return def
+		}
+		return d
+	}
+	return limits{
+		connectTimeout:    dur("tcp-connect-resp-timeout", conf.TCPConnectRespTimeout, 3*time.Second),
+		respTimeout:       dur("tcp-resp-timeout", conf.TCPRespTimeout, 10*time.Second),
+		idleTimeout:       dur("tcp-max-idle-timeout", conf.TCPMaxIdleTimeout, 5*time.Second),
+		drainTimeout:      dur("tcp-drain-timeout", conf.TCPDrainTimeout, 5*time.Second),
+		handshakeTimeout:  dur("tcp-handshake-timeout", conf.TCPHandshakeTimeout, 5*time.Second),
+		maxConns:          conf.TCPMaxConns,
+		maxConnsPerTenant: conf.TCPMaxConnsPerTenant,
+		maxLine:           MAX_MESSAGE_SIZE,
+	}
+}
+
+// dataDir is where the bundled stores live (every *DBPath defaults under
+// ./chassis/data); the dev certificate sits beside them.
+func dataDir(conf config.Config) string {
+	if p := strings.TrimSpace(conf.IMAPDBPath); p != "" {
+		return filepath.Dir(p)
+	}
+	return "./chassis/data"
+}
+
+// SetTLSConfig wires the managed certificate source for `;tls` listeners.
+// Call before Start.
+func (tcp *TCPController) SetTLSConfig(t *tls.Config) { tcp.tlsConfig = t }
+
+// WantsManagedTLS reports whether any listener needs the bundled cert
+// manager (`;tls` without `;self-signed`), so the server can build it.
+func (tcp *TCPController) WantsManagedTLS() bool {
+	if !tcp.pu.Conf.HasPersonality("tcp") {
+		return false
+	}
+	for _, s := range tcp.specs {
+		if s.TLS && !s.SelfSigned {
+			return true
+		}
+	}
+	return false
+}
+
+// tlsFor picks the certificate source for one listener, minting the dev
+// certificate once on first use. nil means the listener cannot serve.
+func (tcp *TCPController) tlsFor(spec listenerSpec) *tls.Config {
+	if !spec.SelfSigned {
+		return tcp.tlsConfig
+	}
+	if tcp.selfSigned == nil {
+		certPath := filepath.Join(tcp.selfSignedDir, "tcp-selfsigned.crt")
+		keyPath := filepath.Join(tcp.selfSignedDir, "tcp-selfsigned.key")
+		t, minted, err := txtls.LoadOrMintSelfSigned(certPath, keyPath, txtls.DevSelfSignedHosts)
+		if err != nil {
+			tcp.pu.Logger.Error("tcp: self-signed certificate failed", zap.String("err", err.Error()))
+			return nil
+		}
+		tcp.pu.Logger.Warn("tcp: serving a SELF-SIGNED certificate (;self-signed). Dev only.",
+			zap.String("cert", certPath), zap.Bool("minted", minted), zap.Strings("hosts", txtls.DevSelfSignedHosts))
+		tcp.selfSigned = t
+	}
+	return tcp.selfSigned
+}
+
+// Start binds every --tcp-listen-addrs entry and starts an accept loop
+// per listener. Binding happens synchronously so a port conflict is a
+// clear Fatal before anything logs "started", and so Addrs() is valid
+// the moment Start returns.
 func (tcp *TCPController) Start() {
+	if !tcp.pu.Conf.HasPersonality("tcp") {
+		return
+	}
+	seenNames := map[string]string{} // name -> first addr (for collision warning)
+	for _, spec := range tcp.specs {
+		if prev, dup := seenNames[spec.Name]; dup {
+			// Multiple listeners sharing a name still bind fine, but
+			// ingress can't tell their traffic apart. Most likely a
+			// config typo; warn loudly rather than failing.
+			tcp.pu.Logger.Warn("two tcp listeners share a name; ingress routing cannot distinguish them",
+				zap.String("name", spec.Name),
+				zap.String("first", prev),
+				zap.String("second", spec.Addr),
+				zap.String("hint", "use name=addr form, e.g. webhooks=:5050,iot=:5051"))
+		}
+		seenNames[spec.Name] = spec.Addr
 
-	if strings.Contains(tcp.pu.Conf.Personalities, "tcp") {
-
-		go func() {
-			newConns := make(chan acceptedConn)
-			var listeners []net.Listener
-			seenNames := map[string]string{} // name -> first addr (for collision warning)
-
-			// we start a controller per listen address
-			for i := range tcp.pu.Conf.TCPListenAddrs {
-				name, listen := parseTCPListenSpec(tcp.pu.Conf.TCPListenAddrs[i])
-				if listen == "" {
-					// Skip blank entries — viper's CSV parsing can yield
-					// `[""]` when the flag is set explicitly empty.
-					continue
-				}
-				tcp.wg.Add(1)
-
-				if prev, dup := seenNames[name]; dup {
-					// Multiple listeners sharing a name still bind fine, but
-					// ingress can't tell their traffic apart. Most likely a
-					// config typo; warn loudly rather than failing.
-					tcp.pu.Logger.Warn("two tcp listeners share a name; ingress routing cannot distinguish them",
-						zap.String("name", name),
-						zap.String("first", prev),
-						zap.String("second", listen),
-						zap.String("hint", "use name=addr form, e.g. webhooks=:5050,iot=:5051"))
-				}
-				seenNames[name] = listen
-
-				// Pre-bind BEFORE logging "tcp controller started" so a
-				// port conflict surfaces with a clear, actionable error
-				// before the operator sees anything resembling "ready".
-				// (Previously the start-log preceded the bind check, so a
-				// failed bind appeared as "started, then died" rather
-				// than "couldn't bind".)
-				l, err := net.Listen("tcp", listen)
-				if err != nil {
-					tcp.pu.Logger.Fatal("tcp port already in use (or otherwise unbindable)",
-						zap.String("listen", listen),
-						zap.String("name", name),
-						zap.String("err", err.Error()),
-						zap.String("hint", "lsof -iTCP"+listen+" -sTCP:LISTEN"))
-				}
-				listeners = append(listeners, l)
-				defer func() { _ = l.Close() }()
-
-				tcp.pu.Logger.Info("tcp controller started",
-					zap.String("listen", listen),
-					zap.String("name", name))
-
-				// wait for connections. This is interupted when we terminate the listener
-				go func(l net.Listener, listen, name string) {
-					for {
-						c, err := l.Accept() // blocks
-						if err != nil {
-							if !strings.Contains(err.Error(), "use of closed") {
-								tcp.pu.Logger.Warn("tcp listen error", zap.String("listen", listen), zap.Reflect("err", err.Error()))
-							}
-
-							newConns <- acceptedConn{}
-							break
-						}
-						newConns <- acceptedConn{conn: c, name: name}
-					}
-				}(l, listen, name)
+		var cfg *tls.Config
+		if spec.TLS {
+			if cfg = tcp.tlsFor(spec); cfg == nil {
+				tcp.pu.Logger.Fatal("tcp listener asks for tls but no certificate source is available",
+					zap.String("listen", spec.Addr), zap.String("name", spec.Name),
+					zap.String("hint", "the bundled cert manager needs --web-tls-addr or --imap-tls-addrs (with the dns personality); for local development use ';self-signed'"))
 			}
+		}
+		l, err := net.Listen("tcp", spec.Addr)
+		if err != nil {
+			tcp.pu.Logger.Fatal("tcp port already in use (or otherwise unbindable)",
+				zap.String("listen", spec.Addr),
+				zap.String("name", spec.Name),
+				zap.String("err", err.Error()),
+				zap.String("hint", "lsof -iTCP"+spec.Addr+" -sTCP:LISTEN"))
+		}
+		if cfg != nil {
+			l = tls.NewListener(l, cfg)
+		}
+		tcp.mu.Lock()
+		tcp.listeners = append(tcp.listeners, l)
+		tcp.addrs = append(tcp.addrs, l.Addr())
+		tcp.mu.Unlock()
 
-			for {
-				select {
-				case ac := <-newConns:
-					// new connection, or a zero-value struct if an acceptor
-					// is down — in the latter case we should do something
-					// (respawn, stop when everyone is down or just explode)
-					if ac.conn == nil {
-						tcp.wg.Done()
-						break
-					}
+		tcp.pu.Logger.Info("tcp controller started",
+			zap.String("listen", spec.Addr),
+			zap.String("name", spec.Name),
+			zap.Bool("tls", spec.TLS))
 
-					// create a handler for this connection
-					go func(conn net.Conn, listenerName string) {
-						defer tcp.wg.Done()
-						defer func() { _ = conn.Close() }()
-						tcp.wg.Add(1)
-
-						now := time.Now()
-						rid := hxid.NewTimeSort().String()
-
-						payload, _ := sjson.Set("", "_txc.src", "tcp")
-						payload, _ = sjson.Set(payload, "_ts", now.Format(time.RFC3339))
-						payload, _ = sjson.Set(payload, "_txc.rid", rid)
-						// Listener name is what the ingress router keys on
-						// for TCP. Operator names come from `name=addr`
-						// entries in --tcp-listen-addrs; bare addresses keep
-						// the back-compat "default" name.
-						payload, _ = sjson.Set(payload, "_txc.tcp.listener", listenerName)
-						// Private-fields plumbing: same pattern as the web
-						// inlet — chassis config decides whether to stamp.
-						if tcp.pu.Conf.DebugPrivate {
-							payload, _ = sjson.Set(payload, "_txc.flag_private", true)
-						}
-
-						if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-							payload, _ = sjson.Set(payload, "_txc.client.ip", addr.IP.String())
-						}
-						// Local addr (port and ip the client connected TO).
-						// Rules that want to route on the raw port without
-						// operator-side YAML can read these directly.
-						if la, ok := conn.LocalAddr().(*net.TCPAddr); ok {
-							payload, _ = sjson.Set(payload, "_txc.tcp.local.ip", la.IP.String())
-							payload, _ = sjson.Set(payload, "_txc.tcp.local.port", la.Port)
-						}
-
-						if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
-							tcp.pu.Logger.Debug("tcp connection",
-								zap.String("payload", payload),
-							)
-						}
-
-						// on new connections, we notify that we have a new connection
-						// set any time constraints
-						connectTimeout, err := time.ParseDuration(tcp.pu.Conf.TCPConnectRespTimeout)
-						if err != nil {
-							tcp.pu.Logger.Warn("Unable to parse TCPConnectRespTimeout",
-								zap.Reflect("err", err.Error()),
-							)
-
-							connectTimeout = time.Duration(1) * time.Second
-						}
-
-						// Inherit from tcp.ctx so chassis shutdown cancels any in-flight
-						// connect timer; this matches the response handler at line ~217.
-						ctx, cancel := context.WithTimeout(tcp.ctx, connectTimeout)
-						defer cancel()
-
-						// set rid
-						ctx = context.WithValue(ctx, config.CtxKeyRid, rid)
-
-						// send event for processing
-						var resCh = make(chan event.Payload) // response channel
-						var envelope = event.PackageJSON(ctx, payload, resCh, "tcp")
-
-						tcp.pu.Bus <- envelope
-
-						if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
-							tcp.pu.Logger.Debug("sent connect to processors",
-								zap.String("payload", payload),
-							)
-						}
-
-						// wait for conenct response
-						select {
-						case res := <-resCh:
-							if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
-								tcp.pu.Logger.Debug("tcp connect res", zap.String("response", res.Raw))
-							}
-						case <-ctx.Done():
-							tcp.pu.Logger.Info("tcp connect response timeout")
-							_ = conn.Close()
-							cancel()
-							return
-						case <-tcp.ctx.Done():
-							tcp.pu.Logger.Info("tcp response shutdown")
-							cancel() // shut down the request
-							return
-						}
-
-						// and then see how we should handle reading from the connection
-
-						// via a buffer
-
-						// or a string reader
-
-						for {
-							idleTimeout, err := time.ParseDuration(tcp.pu.Conf.TCPMaxIdleTimeout)
-							if err != nil {
-								tcp.pu.Logger.Warn("Unable to parse TCPMaxIdleTimeout",
-									zap.Reflect("err", err.Error()),
-								)
-
-								idleTimeout = time.Duration(5) * time.Second
-							}
-
-							s := make(chan string)
-							e := make(chan error)
-							go func() {
-								message, err := bufio.NewReader(conn).ReadString('\n')
-								if err != nil {
-									e <- err
-								} else {
-									s <- message
-								}
-								close(s)
-								close(e)
-							}()
-
-							var message string
-							select {
-							case received := <-s:
-								tcp.pu.Logger.Debug("tcp read message", zap.String("rid", rid))
-								message = received
-							case err := <-e:
-								tcp.pu.Logger.Warn("tcp read error", zap.String("rid", rid), zap.Reflect("err", err.Error()))
-								_ = conn.Close()
-								return
-							case <-time.After(idleTimeout):
-								tcp.pu.Logger.Warn("tcp read error", zap.String("rid", rid), zap.String("err", "timeout"))
-								_ = conn.Close()
-								return
-							}
-
-							var pl string
-							if (len(message) > 0) && (len(message) < MAX_MESSAGE_SIZE) {
-								body := base64.StdEncoding.EncodeToString([]byte(message))
-								pl, _ = sjson.Set(payload, "_txc.client.body", body)
-							}
-
-							respTimeout, err := time.ParseDuration(tcp.pu.Conf.TCPRespTimeout)
-							if err != nil {
-								tcp.pu.Logger.Warn("Unable to parse TCPRespTimeout",
-									zap.Reflect("err", err.Error()),
-								)
-
-								respTimeout = time.Duration(10) * time.Second
-							}
-
-							ctx, cancel := context.WithTimeout(tcp.ctx, respTimeout)
-							defer cancel()
-
-							envelope = event.PackageJSON(ctx, pl, resCh, "tcp")
-
-							tcp.pu.Bus <- envelope
-
-							if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
-								tcp.pu.Logger.Debug("sent message to processors",
-									zap.String("payload", pl),
-								)
-							}
-
-							// wait for conenct response
-							var output string
-							select {
-							case res := <-resCh:
-								if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
-									tcp.pu.Logger.Debug("tcp res", zap.String("response", res.Raw))
-								}
-								output = res.Raw
-							case <-ctx.Done():
-								tcp.pu.Logger.Info("tcp response timeout")
-								_ = conn.Close()
-								cancel()
-								return
-							case <-tcp.ctx.Done():
-								tcp.pu.Logger.Info("tcp shutdown")
-								cancel() // shut down the request
-								return
-							}
-
-							// should return a list of commands
-							// gjson.Get(output, "_txc.server.commands").ForEach(func(key, value gjson.Result) bool {
-							// 	return true
-							// })
-
-							// Shared admission gate denial: TCP has no standard
-							// rejection, so write a short "<status> <reason>"
-							// line and close the connection.
-							if status, reason, ok := admission.Denied(output); ok {
-								_, _ = conn.Write([]byte(strconv.Itoa(status) + " " + reason + "\n"))
-								_ = conn.Close()
-								return
-							}
-
-							doHangup := gjson.Get(output, "_txc.server.hangup").Bool()
-							if doHangup {
-								_ = conn.Close()
-								return
-							}
-
-							// if body, then return body
-							// if no body, then return json
-							hidePrivate := !strings.Contains(tcp.pu.Conf.WebDebug, "SHOW_PRIVATE_VARS")
-
-							outputBytes, err := getOutput(output, hidePrivate)
-							if err != nil {
-								tcp.pu.Logger.Warn("error getting output", zap.Reflect("err", err))
-
-								// TODO: ineffassign - who will use this outputBytes variable?
-								//outputBytes = []byte("") // stay silent on error
-								err := conn.Close()
-								if err != nil {
-									// TODO: error handling
-									tcp.pu.Logger.Error("conn.Close error", zap.String("err", err.Error()))
-								}
-								return
-							}
-
-							_, err = conn.Write(outputBytes)
-							if err != nil {
-								// TODO: error handling
-								tcp.pu.Logger.Error("write error", zap.String("err", err.Error()))
-							}
-
-						}
-						// TODO: unreachable code
-						//tcp.pu.Logger.Info("tcp handler closing")
-					}(ac.conn, ac.name)
-
-				// case <-time.After(time.Minute):
-				// 		// timeout branch, no connection for a minute
-				case doshutdown := <-tcp.shutdown:
-					if doshutdown {
-						tcp.pu.Logger.Info("tcp shutdown received")
-						for i := range listeners {
-							err := listeners[i].Close()
-							if err != nil {
-								// TODO: error handling
-								tcp.pu.Logger.Error("listeners close error", zap.String("err", err.Error()))
-								return
-							}
-						}
-						// Don't return: accept goroutines below will see the
-						// closed listener and send a zero-value acceptedConn
-						// into newConns; the newConns case calls wg.Done()
-						// per listener. Exiting here would block those sends.
-						// The outer goroutine effectively leaks until process
-						// exit, which is fine since Stop() blocks on wg, not
-						// on this goroutine.
-						//nolint:staticcheck // SA4011: break is dead but the alternative leaks accept goroutines
-						break
-					}
-				}
-			}
-			// TODO: unreachable code
-			//tcp.pu.Logger.Info("tcp closed listeners")
-		}()
+		tcp.wg.Add(1)
+		go tcp.acceptLoop(l, spec)
 	}
 }
 
-func (tcp *TCPController) Stop() {
-	if strings.Contains(tcp.pu.Conf.Personalities, "tcp") {
-		tcp.pu.Logger.Info("calling tcp controller stop")
+// Addrs reports the bound addresses in --tcp-listen-addrs order, valid
+// once Start has returned. Tests bind ":0" and read the port here.
+func (tcp *TCPController) Addrs() []net.Addr {
+	tcp.mu.Lock()
+	defer tcp.mu.Unlock()
+	return append([]net.Addr(nil), tcp.addrs...)
+}
 
-		// shut down workers
-		tcp.shutdown <- true
+func (tcp *TCPController) acceptLoop(l net.Listener, spec listenerSpec) {
+	defer tcp.wg.Done()
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			if tcp.stopping.Load() || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// A transient accept failure (fd exhaustion, say) must not
+			// spin the loop or kill the listener: back off and retry.
+			tcp.pu.Logger.Warn("tcp accept error",
+				zap.String("listen", spec.Addr), zap.String("err", err.Error()))
+			select {
+			case <-time.After(100 * time.Millisecond):
+			case <-tcp.ctx.Done():
+				return
+			}
+			continue
+		}
+		tcp.admit(c, spec)
+	}
+}
+
+// admit is the accept-time gate. It runs BEFORE the TLS handshake and
+// the connect event so a draining or full node answers in one line
+// instead of spending a handshake and a pipeline run on a connection it
+// is about to drop. (On a TLS listener the refusal line goes out inside
+// the handshake attempt the client started; it still ends the
+// connection.)
+func (tcp *TCPController) admit(c net.Conn, spec listenerSpec) {
+	refuse := func(line, why string) {
+		_ = c.SetWriteDeadline(time.Now().Add(time.Second))
+		_, _ = c.Write([]byte(line + "\n"))
+		_ = c.Close()
+		tcp.pu.Logger.Info("tcp connection refused",
+			zap.String("listener", spec.Name),
+			zap.String("remote", c.RemoteAddr().String()),
+			zap.String("why", why))
+	}
+	if tcp.stopping.Load() || admission.IsDraining() {
+		refuse("503 draining", "draining")
+		return
+	}
+	conn := &connection{Conn: c, rid: hxid.NewTimeSort().String(), spec: spec}
+	if !tcp.register(conn) {
+		refuse("503 too many connections", "capped")
+		return
+	}
+	tcp.wg.Add(1)
+	go tcp.serve(conn)
+}
+
+// register takes a node slot for the connection; false when the cap is
+// hit. 0 = unlimited (the imap connCounter convention).
+func (tcp *TCPController) register(c *connection) bool {
+	tcp.mu.Lock()
+	defer tcp.mu.Unlock()
+	if tcp.lim.maxConns > 0 && len(tcp.conns) >= tcp.lim.maxConns {
+		return false
+	}
+	tcp.conns[c] = struct{}{}
+	return true
+}
+
+// reserve takes a per-tenant slot once the connect run has routed the
+// connection; false when the tenant's cap is hit.
+func (tcp *TCPController) reserve(tenant string) bool {
+	tcp.mu.Lock()
+	defer tcp.mu.Unlock()
+	if tcp.lim.maxConnsPerTenant > 0 && tcp.perTenant[tenant] >= tcp.lim.maxConnsPerTenant {
+		return false
+	}
+	tcp.perTenant[tenant]++
+	return true
+}
+
+func (tcp *TCPController) unregister(c *connection) {
+	tcp.mu.Lock()
+	defer tcp.mu.Unlock()
+	delete(tcp.conns, c)
+	if c.tenant == "" {
+		return
+	}
+	if tcp.perTenant[c.tenant] <= 1 {
+		delete(tcp.perTenant, c.tenant)
+		return
+	}
+	tcp.perTenant[c.tenant]--
+}
+
+// handshake completes TLS on a `;tls` listener under a deadline and
+// records what the ClientHello said. The SNI becomes the routing
+// hostname only after canonicalisation (facts).
+func (tcp *TCPController) handshake(c *connection) error {
+	tc, ok := c.Conn.(*tls.Conn)
+	if !ok {
+		return errors.New("tls listener produced a non-TLS connection")
+	}
+	ctx, cancel := context.WithTimeout(tcp.ctx, tcp.lim.handshakeTimeout)
+	defer cancel()
+	if err := tc.HandshakeContext(ctx); err != nil {
+		return err
+	}
+	cs := tc.ConnectionState()
+	c.tls = tlsFacts{
+		enabled: true,
+		sni:     cs.ServerName,
+		alpn:    cs.NegotiatedProtocol,
+		version: tls.VersionName(cs.Version),
+	}
+	return nil
+}
+
+// facts is the envelope every event on this connection starts from: the
+// source, the listener the ingress router keys on, the socket addresses,
+// and — on TLS — what the handshake observed. Chassis-stamped; none of it
+// is author-writable. Two hostname fields on purpose: `tcp.tls.sni` is
+// the raw observation, `tcp.host` the canonical routing fact detect-tenant
+// reads (a trusted edge fills the same two fields from its PROXY header,
+// so a stack never sees which one terminated TLS).
+func (tcp *TCPController) facts(c *connection) string {
+	payload, _ := sjson.Set("", "_txc.src", "tcp")
+	payload, _ = sjson.Set(payload, "_ts", time.Now().Format(time.RFC3339))
+	payload, _ = sjson.Set(payload, "_txc.rid", c.rid)
+	// Listener name is what the ingress router keys on when there is no
+	// hostname. Operator names come from `name=addr` entries in
+	// --tcp-listen-addrs; bare addresses keep the back-compat "default".
+	payload, _ = sjson.Set(payload, "_txc.tcp.listener", c.spec.Name)
+	// Private-fields plumbing: same pattern as the web inlet — chassis
+	// config decides whether to stamp.
+	if tcp.pu.Conf.DebugPrivate {
+		payload, _ = sjson.Set(payload, "_txc.flag_private", true)
+	}
+	if ra, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+		payload, _ = sjson.Set(payload, "_txc.client.ip", ra.IP.String())
+		payload, _ = sjson.Set(payload, "_txc.tcp.remote.port", ra.Port)
+	}
+	// Local addr (port and ip the client connected TO). Rules that want
+	// to route on the raw port without operator-side YAML read these.
+	if la, ok := c.LocalAddr().(*net.TCPAddr); ok {
+		payload, _ = sjson.Set(payload, "_txc.tcp.local.ip", la.IP.String())
+		payload, _ = sjson.Set(payload, "_txc.tcp.local.port", la.Port)
+	}
+	payload, _ = sjson.Set(payload, "_txc.tcp.tls.enabled", c.tls.enabled)
+	if c.tls.enabled {
+		payload, _ = sjson.Set(payload, "_txc.tcp.tls.version", c.tls.version)
+		if c.tls.alpn != "" {
+			payload, _ = sjson.Set(payload, "_txc.tcp.tls.alpn", c.tls.alpn)
+		}
+		if c.tls.sni != "" {
+			payload, _ = sjson.Set(payload, "_txc.tcp.tls.sni", c.tls.sni)
+			if host, ok := tenants.CanonicalizeHost(c.tls.sni); ok {
+				payload, _ = sjson.Set(payload, "_txc.tcp.host", host)
+			}
+		}
+	}
+	return payload
+}
+
+// serve owns one admitted connection from handshake to close.
+func (tcp *TCPController) serve(c *connection) {
+	defer tcp.wg.Done()
+	defer tcp.unregister(c)
+	defer func() { _ = c.Close() }()
+
+	if c.spec.TLS {
+		if err := tcp.handshake(c); err != nil {
+			tcp.pu.Logger.Info("tcp tls handshake failed",
+				zap.String("rid", c.rid), zap.String("listener", c.spec.Name),
+				zap.String("remote", c.RemoteAddr().String()), zap.String("err", err.Error()))
+			return
+		}
+	}
+
+	payload := tcp.facts(c)
+	if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
+		tcp.pu.Logger.Debug("tcp connection", zap.String("payload", payload))
+	}
+
+	// Connect run: the stack's first look at the connection, before any
+	// line, and the one place the connection is routed. The head trusts
+	// the bus loop's DispatchResult for the outcome, never the envelope.
+	// Accept is implicit — the connection stays open unless the run left
+	// it in _sys (unrouted: fail closed), was denied, failed, or asked to
+	// close — so adding a listener never forces every stack to write an
+	// accept rule. A `@tcp.res.write` here is the greeting; nothing else
+	// is echoed.
+	res, ok := tcp.dispatch(c, payload, tcp.lim.connectTimeout)
+	if !ok {
+		tcp.decided(c, "failed")
+		return
+	}
+	if res.Tenant == "" || res.Tenant == tenants.SystemTenantSlug ||
+		gjson.Get(res.Payload.Raw, "_txc.route.unavailable").Bool() {
+		tcp.decided(c, "unrouted")
+		return
+	}
+	c.tenant, c.stack = res.Tenant, res.Stack
+	if !tcp.reserve(c.tenant) {
+		c.tenant = "" // never reserved; unregister must not release
+		tcp.write(c, []byte("503 too many connections\n"))
+		tcp.decided(c, "capped")
+		return
+	}
+	if why := tcp.apply(c, res.Payload.Raw, false); why != "" {
+		tcp.decided(c, why)
+		return
+	}
+	tcp.decided(c, "accepted")
+
+	// Read loop: one reader for the life of the connection (a fresh one
+	// per line would drop whatever it had buffered past the newline).
+	r := bufio.NewReader(c)
+	for {
+		if err := c.SetReadDeadline(time.Now().Add(tcp.lim.idleTimeout)); err != nil {
+			return
+		}
+		line, over, err := readLine(r, tcp.lim.maxLine)
+		if err != nil {
+			var ne net.Error
+			switch {
+			case errors.As(err, &ne) && ne.Timeout():
+				tcp.pu.Logger.Warn("tcp read error", zap.String("rid", c.rid), zap.String("err", "timeout"))
+			case errors.Is(err, io.EOF):
+				tcp.pu.Logger.Debug("tcp peer closed", zap.String("rid", c.rid))
+			default:
+				tcp.pu.Logger.Warn("tcp read error", zap.String("rid", c.rid), zap.String("err", err.Error()))
+			}
+			return
+		}
+		if over {
+			tcp.pu.Logger.Warn("tcp line over limit; dropped",
+				zap.String("rid", c.rid), zap.Int("max_bytes", tcp.lim.maxLine))
+			continue
+		}
+		tcp.pu.Logger.Debug("tcp read message", zap.String("rid", c.rid))
+
+		pl, _ := sjson.Set(payload, "_txc.client.body", base64.StdEncoding.EncodeToString(line))
+		res, ok := tcp.dispatch(c, pl, tcp.lim.respTimeout)
+		if !ok {
+			return
+		}
+		if why := tcp.apply(c, res.Payload.Raw, true); why != "" {
+			tcp.pu.Logger.Info("tcp connection closed", zap.String("rid", c.rid), zap.String("why", why))
+			return
+		}
+	}
+}
+
+// decided is the one structured line per connection at accept-decision
+// time. Never payload bytes.
+func (tcp *TCPController) decided(c *connection, decision string) {
+	tcp.pu.Logger.Info("tcp connection "+decision,
+		zap.String("rid", c.rid),
+		zap.String("listener", c.spec.Name),
+		zap.String("remote", c.RemoteAddr().String()),
+		zap.Bool("tls", c.tls.enabled),
+		zap.String("host", c.tls.sni),
+		zap.String("tenant", c.tenant),
+		zap.String("decision", decision))
+}
+
+// readLine returns the next newline-terminated line INCLUDING its
+// terminator, byte for byte as sent (a body of "asdf\r\n" stays that
+// way). A line longer than max is consumed to its newline and reported
+// as over=true with no bytes kept, so one oversized line costs a
+// bounded buffer, not the whole line in memory.
+func readLine(r *bufio.Reader, max int) (line []byte, over bool, err error) {
+	for {
+		frag, e := r.ReadSlice('\n')
+		if !over {
+			if len(line)+len(frag) > max {
+				over, line = true, nil
+			} else {
+				line = append(line, frag...)
+			}
+		}
+		switch {
+		case e == nil:
+			return line, over, nil
+		case errors.Is(e, bufio.ErrBufferFull):
+			continue
+		default:
+			return nil, over, e
+		}
+	}
+}
+
+// dispatch runs one event through the bus and waits for the bus loop's
+// DispatchResult. ok=false means the connection is finished: the run
+// timed out, the chassis is shutting down, or the pipeline failed.
+func (tcp *TCPController) dispatch(c *connection, payload string, timeout time.Duration) (event.DispatchResult, bool) {
+	if tcp.stopping.Load() {
+		return event.DispatchResult{}, false
+	}
+	// Inherit tcp.ctx so chassis shutdown cancels an in-flight wait.
+	ctx, cancel := context.WithTimeout(tcp.ctx, timeout)
+	defer cancel()
+	ctx = context.WithValue(ctx, config.CtxKeyRid, c.rid)
+
+	// Buffered: an answer that lands after our timeout is dropped instead
+	// of parking the bus loop on a send nobody reads.
+	resCh := make(chan event.DispatchResult, 1)
+	env := event.PackageJSON(ctx, payload, nil, "tcp")
+	env.ResultCh = resCh
+	select {
+	case tcp.pu.Bus <- env:
+	case <-ctx.Done():
+		tcp.pu.Logger.Info("tcp dispatch abandoned", zap.String("rid", c.rid), zap.String("err", ctx.Err().Error()))
+		return event.DispatchResult{}, false
+	}
+	if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
+		tcp.pu.Logger.Debug("sent to processors", zap.String("payload", payload))
+	}
+	select {
+	case res := <-resCh:
+		if res.Err != nil {
+			tcp.pu.Logger.Warn("tcp run failed", zap.String("rid", c.rid), zap.String("err", res.Err.Error()))
+			return event.DispatchResult{}, false
+		}
+		if tcp.pu.Logger.Core().Enabled(zap.DebugLevel) {
+			tcp.pu.Logger.Debug("tcp res", zap.String("response", res.Payload.Raw),
+				zap.String("tenant", res.Tenant), zap.String("stack", res.Stack))
+		}
+		return res, true
+	case <-ctx.Done():
+		if tcp.ctx.Err() != nil {
+			tcp.pu.Logger.Info("tcp shutdown", zap.String("rid", c.rid))
+		} else {
+			tcp.pu.Logger.Info("tcp response timeout", zap.String("rid", c.rid))
+		}
+		return event.DispatchResult{}, false
+	}
+}
+
+// apply renders the stack's verdict for one run onto the socket. The
+// verdict lives in the author-writable `_txc.tcp.res.*` subtree plus the
+// shared admission marker:
+//
+//	@tcp.res.write   base64 bytes to write, as-is
+//	@tcp.res.action  "close" hangs up after any write; anything else keeps going
+//
+// echo says whether a run with no explicit write gets the default JSON
+// projection of the envelope — line runs do, the connect run does not.
+// Returns "" to keep going, else why the connection closes.
+func (tcp *TCPController) apply(c *connection, out string, echo bool) string {
+	// Shared admission gate denial: TCP has no standard rejection, so
+	// write a short "<status> <reason>" line and close.
+	if status, reason, ok := admission.Denied(out); ok {
+		tcp.write(c, []byte(strconv.Itoa(status)+" "+reason+"\n"))
+		return "denied"
+	}
+	if echo || gjson.Get(out, "_txc.tcp.res.write").String() != "" {
+		hidePrivate := !strings.Contains(tcp.pu.Conf.WebDebug, "SHOW_PRIVATE_VARS")
+		b, err := getOutput(out, hidePrivate)
+		if err != nil {
+			tcp.pu.Logger.Warn("error getting output", zap.String("rid", c.rid), zap.String("err", err.Error()))
+			return "bad_output"
+		}
+		if len(b) > 0 && !tcp.write(c, b) {
+			return "write_failed"
+		}
+	}
+	if gjson.Get(out, "_txc.tcp.res.action").String() == "close" {
+		return "closed_by_stack"
+	}
+	return ""
+}
+
+func (tcp *TCPController) write(c *connection, b []byte) bool {
+	_ = c.SetWriteDeadline(time.Now().Add(tcp.lim.respTimeout))
+	if _, err := c.Write(b); err != nil {
+		tcp.pu.Logger.Error("write error", zap.String("rid", c.rid), zap.String("err", err.Error()))
+		return false
+	}
+	return true
+}
+
+// Stop closes the listeners, then every open connection, and waits for
+// their handlers to unwind, bounded by --tcp-drain-timeout. The server
+// has already run the in-flight drain and cancelled ctx by the time this
+// is called, so any run still waiting on the bus is already unblocking.
+func (tcp *TCPController) Stop() {
+	if !tcp.pu.Conf.HasPersonality("tcp") {
+		return
+	}
+	tcp.pu.Logger.Info("calling tcp controller stop")
+	tcp.stopping.Store(true)
+
+	tcp.mu.Lock()
+	for _, l := range tcp.listeners {
+		if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			tcp.pu.Logger.Error("listeners close error", zap.String("err", err.Error()))
+		}
+	}
+	live := make([]*connection, 0, len(tcp.conns))
+	for c := range tcp.conns {
+		live = append(live, c)
+	}
+	tcp.mu.Unlock()
+	for _, c := range live {
+		_ = c.Close()
+	}
+
+	done := make(chan struct{})
+	go func() {
 		tcp.wg.Wait()
-		tcp.pu.Logger.Info("tcp controller stopped")
+		close(done)
+	}()
+	select {
+	case <-done:
+		tcp.pu.Logger.Info("tcp controller stopped", zap.Int("connections_closed", len(live)))
+	case <-time.After(tcp.lim.drainTimeout):
+		tcp.mu.Lock()
+		left := len(tcp.conns)
+		tcp.mu.Unlock()
+		tcp.pu.Logger.Warn("tcp drain timeout; abandoning stragglers",
+			zap.Duration("drain_timeout", tcp.lim.drainTimeout), zap.Int("connections", left))
 	}
 }
