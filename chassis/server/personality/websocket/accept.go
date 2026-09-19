@@ -2,7 +2,6 @@ package websocket
 
 import (
 	"crypto/rand"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -189,20 +188,8 @@ func offersAny(offered, allowed []string) bool {
 	return false
 }
 
-// clientIP mirrors the web access log: first X-Forwarded-For hop, else the
-// peer address, host part only.
-func clientIP(r *http.Request) string {
-	ip := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		ip = fwd
-		if i := strings.IndexByte(fwd, ','); i >= 0 {
-			ip = strings.TrimSpace(fwd[:i])
-		}
-	}
-	if strings.ContainsRune(ip, ':') {
-		if h, _, err := net.SplitHostPort(ip); err == nil {
-			ip = h
-		}
-	}
-	return ip
-}
+// clientIP is the address of the client that sent r: the socket peer, or —
+// when that peer is one of --web-trusted-proxies — the client the proxies
+// recorded in X-Forwarded-For (edgeproxy.Clients). It is what the session
+// records and its events report.
+func (c *Controller) clientIP(r *http.Request) string { return c.clients.IP(r) }

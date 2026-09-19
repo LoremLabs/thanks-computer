@@ -21,6 +21,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
@@ -37,6 +38,14 @@ type WebController struct {
 	shutdown chan bool
 	wg       sync.WaitGroup
 	server   *http.Server
+
+	// clients resolves a request's client address behind the operator's
+	// HTTP proxies (--web-trusted-proxies) for the access log. The heads
+	// mounted on this listener (calendar, contacts, webdav, ipp, websocket)
+	// each build the same resolver from the same flag; this controller is
+	// the one that reports a bad entry, once, at Start.
+	clients    *edgeproxy.Clients
+	badProxies []string
 
 	// tlsConfig, when set (via SetTLSConfig), enables a second HTTPS
 	// listener on --web-tls-addr that terminates TLS with the bundled cert
@@ -239,6 +248,9 @@ func NewController(ctx context.Context, pu *processor.Unit, sink trace.Sink) *We
 		shutdown: make(chan bool),
 		bound:    make(chan string, 1),
 	}
+	if pu != nil {
+		web.clients, web.badProxies = edgeproxy.NewClients(pu.Conf.WebTrustedProxies)
+	}
 
 	return web
 }
@@ -250,6 +262,13 @@ func (web *WebController) Start() {
 
 		go func() {
 			web.pu.Logger.Info("web controller started")
+			for _, entry := range web.badProxies {
+				web.pu.Logger.Warn("web: ignoring unparseable --web-trusted-proxies entry (it is NOT trusted)", zap.String("entry", entry))
+			}
+			if web.clients.Trusts() {
+				web.pu.Logger.Info("web: client addresses come from X-Forwarded-For when the peer is a trusted proxy",
+					zap.Strings("trusted", web.clients.Networks()))
+			}
 
 			r := mux.NewRouter()
 

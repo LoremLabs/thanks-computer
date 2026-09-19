@@ -90,7 +90,7 @@ func newSession(c *Controller, sid string, a Accept, wc conn, r *http.Request) *
 		conn:        wc,
 		tenant:      a.Tenant,
 		stack:       a.Stack,
-		clientIP:    clientIP(r),
+		clientIP:    c.clientIP(r),
 		host:        r.Host,
 		path:        r.URL.Path,
 		origin:      r.Header.Get("Origin"),

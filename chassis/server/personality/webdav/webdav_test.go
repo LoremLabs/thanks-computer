@@ -230,6 +230,53 @@ func TestThrottle(t *testing.T) {
 	}
 }
 
+// Behind an HTTP proxy every request arrives from the proxy's address. With
+// the proxy named in --web-trusted-proxies the per-IP login budget and the
+// login line follow the client the proxy recorded; without it the header is
+// ignored, whoever sends it, and everyone shares the peer's budget.
+//
+// Each attempt names a different unknown user, so only the per-IP budget
+// fills (the per-user one is keyed by username).
+func TestClientAddressBehindATrustedProxy(t *testing.T) {
+	guess := func(h *harness, n int, xff string) *http.Response {
+		resp, _ := h.do(t, "PROPFIND", "/drive/", nil,
+			auth(fmt.Sprintf("nobody%d@pony.example.com", n), "bcdf-guess"), hdr("X-Forwarded-For", xff))
+		return resp
+	}
+	const clientA, clientB = "203.0.113.7, 127.0.0.1", "198.51.100.9, 127.0.0.1"
+
+	var conf config.Config
+	insecure(&conf)
+	conf.LoginRate = 3
+	conf.WebTrustedProxies = []string{"127.0.0.1"} // where httptest dials from
+	h := newHarness(t, conf)
+	core, logs := observer.New(zapcore.InfoLevel)
+	h.ctrl.pu.Logger = zap.New(core)
+	for i := 0; i < 3; i++ {
+		want(t, guess(h, i, clientA), http.StatusUnauthorized, "client A, within its budget")
+	}
+	want(t, guess(h, 3, clientA), http.StatusTooManyRequests, "client A, over its budget")
+	want(t, guess(h, 4, clientB), http.StatusUnauthorized, "client B has a budget of its own")
+	// What a client types sits LEFT of what the proxy appended: it cannot
+	// buy client A a fresh budget.
+	want(t, guess(h, 5, "10.9.9.9, "+clientA), http.StatusTooManyRequests, "client A behind a forged entry")
+	ips := map[string]int{}
+	for _, e := range logs.FilterMessage("webdav login").All() {
+		ips[e.ContextMap()["ip"].(string)]++
+	}
+	if ips["203.0.113.7"] != 5 || ips["198.51.100.9"] != 1 || len(ips) != 2 {
+		t.Errorf("login lines by ip = %v, want 203.0.113.7:5 198.51.100.9:1", ips)
+	}
+
+	// No trust list: the same header is input, not evidence.
+	conf.WebTrustedProxies = nil
+	h = newHarness(t, conf)
+	for i := 0; i < 3; i++ {
+		want(t, guess(h, i, clientA), http.StatusUnauthorized, "untrusted: within the peer's budget")
+	}
+	want(t, guess(h, 4, clientB), http.StatusTooManyRequests, "untrusted: another header, the same peer, the same budget")
+}
+
 // A mount never stops asking (a PROPFIND keepalive, an app retrying a
 // refused save), and every request carries Basic auth: only the requests
 // that checked a password log a line, refusals log every time.

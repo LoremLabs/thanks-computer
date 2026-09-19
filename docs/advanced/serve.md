@@ -29,6 +29,41 @@ obtaining wildcard certificates via ACME DNS-01 against its own DNS
 head — requires the `dns` personality and `--acme-email`. Empty
 (default) leaves TLS to your reverse proxy.
 
+### Behind a reverse proxy: whose address is it?
+
+Behind a proxy, every HTTP request arrives from the proxy's address. Name
+your proxies and the chassis reads the client's address from
+`X-Forwarded-For` instead:
+
+```sh
+txco serve --web-trusted-proxies "10.0.0.0/8 fd00::/8"   # or TXCO_WEB_TRUSTED_PROXIES
+```
+
+- **Trust is the socket peer, never the header.** The header is read only
+  when the connection comes from one of those CIDRs (or bare IPs). From
+  anyone else it is ignored, so a client cannot choose its own address.
+- **Read from the right.** Each proxy appends the address it accepted the
+  request from, so the header runs from the client towards the chassis. The
+  client is the first address from the right that is not one of your
+  proxies. Anything a client typed into the header sits to the left of that
+  and is never reached — two proxy hops work, and so does a proxy that
+  passes an incoming header along.
+- **What uses it.** The per-IP login limit (`--login-rate`) of the calendar,
+  contacts, webdav and ipp heads and their login lines; the client address
+  those heads and the websocket head put on their events; the `ip` of the
+  web access log.
+- **Left empty** (the default) nobody is trusted and the client is the
+  socket peer. Behind a proxy that means every client shares ONE per-IP
+  login budget, and one app retrying a dead password can use it up for
+  everybody — set the flag on any node that sits behind a proxy. Only list
+  addresses that your proxies alone can connect from.
+- An entry that does not parse is logged at start and not trusted. The
+  chassis logs the trusted list once when the web head starts.
+
+IMAP and the TCP head get the same fact from the PROXY protocol instead
+(`--imap-proxy-protocol`; [imap.md](./protocols/imap.md)). The admin API
+never reads the header.
+
 ## Data on disk
 
 :::note

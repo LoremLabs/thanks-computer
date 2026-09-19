@@ -309,6 +309,7 @@ TXT records (`--dns-caldavs-port`, see [dns](./dns.md)).
 | `--calendar-store` / `--calendar-db-path` | `sqlite` / `./chassis/data/calendar.db` | The index; a non-sqlite backend is shared and opened on every node |
 | `--calendar-insecure-auth` | `false` | Accept Basic auth without TLS (`txco dev --calendar` sets it) |
 | `--login-rate` | `30` | Password checks per minute, per IP and per principal, shared with the IMAP, CardDAV and WebDAV heads (cache misses only) |
+| `--web-trusted-proxies` | (empty) | CIDRs of the HTTP proxies in front of the web head: behind one, "per IP" means the client the proxy recorded in `X-Forwarded-For`, not the proxy ([serve.md](../serve.md#behind-a-reverse-proxy-whose-address-is-it)) |
 | `--calendar-object-max-bytes` | 1 MiB | Size cap for an object (ops and client PUT; advertised as `max-resource-size`) |
 | `--calendar-feed-max-age` | `300` | `Cache-Control` max-age on feeds |
 | `--calendar-resp-timeout` | `30s` | Answer-lane deadline |

@@ -44,6 +44,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 )
 
@@ -89,6 +90,10 @@ type limits struct {
 // server's Start()/Stop() controller contract and the Registry interface the
 // txco://websocket/* ops depend on.
 type Controller struct {
+	// clients resolves a request's client address behind the operator's
+	// HTTP proxies (--web-trusted-proxies); see clientIP.
+	clients *edgeproxy.Clients
+
 	ctx     context.Context
 	pu      *processor.Unit
 	enabled bool
@@ -149,6 +154,9 @@ func NewController(ctx context.Context, pu *processor.Unit) *Controller {
 		perTenant: make(map[string]int),
 		pending:   make(map[string]pendingAccept),
 		now:       time.Now,
+	}
+	if pu != nil {
+		c.clients, _ = edgeproxy.NewClients(pu.Conf.WebTrustedProxies)
 	}
 	if pu == nil {
 		return c

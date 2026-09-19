@@ -294,6 +294,7 @@ address by DNS (RFC 6764), the `dns` personality can publish
 | `--contacts-store` / `--contacts-db-path` | `sqlite` / `./chassis/data/contacts.db` | The index; a non-sqlite backend is shared and opened on every node |
 | `--contacts-insecure-auth` | `false` | Accept Basic auth without TLS (`txco dev --contacts` sets it) |
 | `--login-rate` | `30` | Password checks per minute, per IP and per principal, shared with the IMAP, CalDAV and WebDAV heads (cache misses only) |
+| `--web-trusted-proxies` | (empty) | CIDRs of the HTTP proxies in front of the web head: behind one, "per IP" means the client the proxy recorded in `X-Forwarded-For`, not the proxy ([serve.md](../serve.md#behind-a-reverse-proxy-whose-address-is-it)) |
 | `--contacts-object-max-bytes` | 1 MiB | Size cap for a card (ops and client PUT; advertised as `max-resource-size`) |
 | `--contacts-resp-timeout` | `30s` | Answer-lane deadline |
 | `--contacts-observe-sample` / `--contacts-observe-max-inflight` | `1` / `8` | Observe-lane sampling and concurrency |

@@ -181,6 +181,7 @@ of an object (S3) sends only that part through the server.
 | `--drive-max-file-bytes` (4 GiB) | a PUT that declares more is 413 before a byte moves; a PUT without a `Content-Length` (Finder streams a dragged file that way) is accepted and stops at the cap |
 | `--drive-max-collection-bytes`, `--drive-max-resources` (unlimited) | a write past them is 507 |
 | `--login-rate` (30/min) | password checks per client IP and per principal, shared with the IMAP, CalDAV and CardDAV heads, counted only on verified-login-cache misses; over it is 429 |
+| `--web-trusted-proxies` (none) | the HTTP proxies in front of the web head: behind one, "per client IP" means the client the proxy recorded in `X-Forwarded-For`, not the proxy — without it every mount shares one budget ([serve.md](../serve.md#behind-a-reverse-proxy-whose-address-is-it)) |
 | `--drive-sweep-period` (15 min) | on `webdav` nodes: superseded versions and the objects of failed writes are reclaimed after `--drive-sweep-grace` (1 h); tombstones are hard-deleted after `--drive-tombstone-retention` (7 d) |
 
 Every refused login logs one `webdav login` line with its outcome; a

@@ -326,7 +326,7 @@ func (c *Controller) newJob(r *http.Request, req *goipp.Message, site printerSit
 	return chipp.NewJob{
 		Tenant: site.tenant, Printer: t.printer,
 		RequestingUser: clip(user, 255), JobName: clip(name, 255), DocumentName: clip(doc, 255),
-		DocumentFormat: format, Host: hostWithPort(r, t), URIPath: t.uriPath(), ClientIP: clientIP(r),
+		DocumentFormat: format, Host: hostWithPort(r, t), URIPath: t.uriPath(), ClientIP: c.clientIP(r),
 	}
 }
 

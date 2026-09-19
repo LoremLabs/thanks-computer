@@ -15,7 +15,12 @@
 // is proof the connection came through the front door, and its contents
 // are chassis facts, not client input.
 //
-// Leaf package: no chassis imports, so any head (imap, tcp, …) can use it.
+// An HTTP head behind HTTP proxies gets the same fact from the same
+// boundary, in a header instead (clientip.go): X-Forwarded-For counts only
+// when the socket peer is one of those CIDRs.
+//
+// Leaf package: no chassis imports, so any head (imap, tcp, web, …) can use
+// it.
 package edgeproxy
 
 import (
@@ -42,9 +47,21 @@ var ErrNoHeader = errors.New("edgeproxy: trusted peer sent no valid PROXY header
 // ParseTrusted turns operator entries (CIDRs, or bare IPs meaning /32 or
 // /128) into networks. Blank entries are dropped; entries that parse as
 // neither come back in bad so the caller decides whether that is a
-// warning (imap) or a refusal to start (tcp).
+// warning (imap, web) or a refusal to start (tcp).
+//
+// An entry may itself hold several, separated by commas or spaces. A list
+// flag read from one environment variable arrives split one way or the
+// other depending on who wrote it, and the wrong guess used to leave
+// "a,b" as one unparseable entry — a trust list that silently trusted
+// nobody.
 func ParseTrusted(entries []string) (nets []*net.IPNet, bad []string) {
+	var flat []string
 	for _, e := range entries {
+		flat = append(flat, strings.FieldsFunc(e, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+		})...)
+	}
+	for _, e := range flat {
 		e = strings.TrimSpace(e)
 		if e == "" {
 			continue

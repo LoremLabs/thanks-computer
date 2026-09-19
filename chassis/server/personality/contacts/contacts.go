@@ -28,6 +28,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
@@ -42,6 +43,10 @@ type HostResolver interface {
 // (shared with every head that signs in with a credential), the lanes. It binds no listener of its own — the
 // web head mounts Handler().
 type Controller struct {
+	// clients resolves a request's client address behind the operator's
+	// HTTP proxies (--web-trusted-proxies); see clientIP.
+	clients *edgeproxy.Clients
+
 	ctx      context.Context
 	pu       *processor.Unit
 	store    *chcon.Store
@@ -73,6 +78,9 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chcon.Store, 
 		prefix:   "/carddav",
 		maxBytes: 1 << 20,
 		now:      func() time.Time { return time.Now().UTC() },
+	}
+	if pu != nil {
+		c.clients, _ = edgeproxy.NewClients(pu.Conf.WebTrustedProxies)
 	}
 	if pu != nil {
 		c.prefix = cleanPrefix(pu.Conf.ContactsPathPrefix)

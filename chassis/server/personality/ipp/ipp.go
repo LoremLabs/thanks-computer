@@ -46,6 +46,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
@@ -97,6 +98,10 @@ type SecretSource func(ctx context.Context, tenantSlug, name string) (cleartext 
 // Controller owns the head's shared state. It binds no listener — the web
 // head mounts Handler() — but it does own one goroutine: the dispatcher.
 type Controller struct {
+	// clients resolves a request's client address behind the operator's
+	// HTTP proxies (--web-trusted-proxies); see clientIP.
+	clients *edgeproxy.Clients
+
 	ctx      context.Context
 	pu       *processor.Unit
 	store    *chipp.Store
@@ -158,6 +163,9 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chipp.Store, 
 		nudge:    make(chan struct{}, 1),
 		upSince:  time.Now().UTC(),
 		now:      func() time.Time { return time.Now().UTC() },
+	}
+	if pu != nil {
+		c.clients, _ = edgeproxy.NewClients(pu.Conf.WebTrustedProxies)
 	}
 	c.tenantFor = c.lookupTenant
 	c.subscribed = c.snapshotSubscribed

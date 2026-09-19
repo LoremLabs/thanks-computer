@@ -130,22 +130,11 @@ func (web *WebController) LoggingMiddleware(next http.Handler) http.Handler {
 }
 
 func (web *WebController) LogFromRequest(crw *contextResponseWriter, r *http.Request, rt int) {
-	userIp := r.RemoteAddr
-	fwdAddress := r.Header.Get("X-Forwarded-For") // capitalisation doesn't matter
-	if fwdAddress != "" {
-		// Got X-Forwarded-For
-		userIp = fwdAddress // If it's a single IP, then awesome!
-
-		// If we got an array... grab the first IP
-		ips := strings.Split(fwdAddress, ", ")
-		if len(ips) > 1 {
-			userIp = ips[0]
-		}
-	}
-
-	if strings.ContainsRune(userIp, ':') {
-		userIp, _, _ = net.SplitHostPort(userIp)
-	}
+	// The client, not whatever the request claims: X-Forwarded-For is read
+	// only behind --web-trusted-proxies, and then from its trustworthy end
+	// (edgeproxy.Clients). This line used to print the header's first entry
+	// from anyone, which is the one entry a client chooses.
+	userIp := web.clients.IP(r)
 
 	rid := crw.Header().Get("X-Request-Id")
 	if rid == "" {

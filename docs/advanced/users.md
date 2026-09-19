@@ -189,6 +189,9 @@ until re-enabled.
 **One budget for guesses.** Password checks are limited per client IP and
 per principal across all four heads together (`--login-rate`, 30 a
 minute): guessing over CalDAV spends the same budget as guessing over IMAP.
+Behind a reverse proxy, name it in `--web-trusted-proxies` (and
+`--imap-proxy-protocol`), or "per client IP" means the proxy and every
+client shares one budget ([serve.md](./serve.md#behind-a-reverse-proxy-whose-address-is-it)).
 
 **Who is acting.** A run a head starts on behalf of a signed-in client —
 an IMAP answer lane, a CalDAV observe — carries `@principal.id`,

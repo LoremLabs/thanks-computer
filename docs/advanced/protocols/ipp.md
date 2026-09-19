@@ -119,14 +119,27 @@ macOS — Printers & Scanners → Add → **IP**:
 or from a terminal:
 
 ```
-lpadmin -p research -E -v ipps://ipp.acme.example:443/p/research -m everywhere
+lpadmin -U print -p research -E -v ipps://ipp.acme.example:443/p/research -m everywhere \
+  -o printer-is-shared=false -o auth-info-required=username,password
 ```
 
 Give the **port**. IPP's default is 631, which this head does not listen
-on; CUPS treats port 443 as always-TLS, so `:443` is IPPS. Nothing is
-answered without the password, so **adding** the printer already asks for
-the username and password (`lpadmin` prompts in the terminal) and offers to
-keep them in the Keychain; printing then asks no more.
+on; CUPS treats port 443 as always-TLS, so `:443` is IPPS.
+
+**The Add Printer dialog needs `--ipp-anonymous-attributes`.** Printers &
+Scanners › Add, and an `ipps://…` link, which opens the same dialog, both
+query the printer's capabilities before they have a password to offer.
+Challenged, the dialog says "Unable to communicate with the printer" and
+never asks for one (macOS 15.8). With the flag on, the dialog asks for the
+username and password once, offers the Keychain, and builds an AirPrint
+queue that asks for credentials from its first print.
+
+**`lpadmin` needs `-U <username>`.** `-U` names the printer's user.
+Without it `lpadmin` offers your login name, retries 16 times and fails
+with "Unable to query printer". It then asks once, in the terminal, for the
+printer's password. Without `-o auth-info-required=username,password`,
+the first job waits "on hold for authentication" until you authenticate
+from the print queue window; after that, printing asks no more.
 
 `<printer>` is any label you like (`a-z 0-9 . _ -`, lowercase). The chassis
 keeps **no list of printers**: the label reaches the stack as
@@ -251,12 +264,16 @@ answered without the password. A request over plaintext is refused (`403`)
 before a credential is read, unless `--ipp-insecure-auth` (dev). A bare
 request is challenged (`401`) and the client authenticates and asks again —
 CUPS does this on its own. `--ipp-anonymous-attributes` (default off) is the
-one escape hatch: it lets Get-Printer-Attributes alone through without
-credentials, for a print client that insists on querying a printer's
-capabilities while *adding* it, before it has a password to offer. That
-answer holds nothing about the tenant (the fixed capability set and the
-label from the URL) but it does confirm a printer exists at that hostname,
-which is why it is off. Verifications are throttled per
+one escape hatch. It lets Get-Printer-Attributes alone through without
+credentials, for a print client that queries a printer's capabilities while
+*adding* it, before it has a password to offer. macOS's Add Printer dialog
+is such a client (see [Add the printer](#add-the-printer)), so a
+deployment that wants that dialog to work turns the flag on. The answer
+holds nothing about the tenant: the fixed capability set, the label from
+the URL, and an idle queue. It does confirm that a printer exists at that
+hostname, which a `401` rather than a `404` already tells. Printing is never
+anonymous. Every other operation is challenged, and a request carrying a
+document is challenged before its body is read. Verifications are throttled per
 client IP and per tenant (`--ipp-auth-rate`), counting only logins that are
 not already verified, so a client that re-authenticates on every request
 costs nothing while a guesser is capped — correct guess included.
@@ -345,8 +362,26 @@ Recorded with `--ipp-wire-debug`. CUPS 2.3.4 `ipptool`:
   group (RFC 8011 §4.1.3 order: operation, unsupported, then the object);
 - sends `copies=1` in its job ticket.
 
-Still to record from the macOS print dialog itself: whether Add Printer
-can add a printer that challenges its attribute query (if not:
-`--ipp-anonymous-attributes`), whether it uses Print-Job or Create-Job +
-Send-Document, whether the dialog needs `image/urf` advertised before it
-offers a driverless queue, and what Safari sends.
+macOS 15.8 Add Printer and print queues (recorded 2026-09-19, onepony
+docs/0028):
+
+- **Adding a printer.** Add Printer sends Get-Printer-Attributes bare, with
+  no credential, and never answers a `401` with a password prompt. After
+  three `401`s it gives up with "Unable to communicate with the printer". With
+  `--ipp-anonymous-attributes` it adds the printer.
+- **The queue it builds.** The printer gets an AirPrint PPD built from the
+  attributes, with PDF only; `image/urf` is not needed. The queue is
+  `auth-info-required=username,password` from the start, taken from
+  `uri-authentication-supported=basic`.
+- **The printer's name.** Add Printer also asks for `printer-dns-sd-name`,
+  which this head does not send. So the queue is named after the host
+  (`ipp.acme.example`), not the printer.
+- **Printing.** A queue sends Validate-Job, then Create-Job + Send-Document
+  (chunked), after one bare request that is challenged.
+- **The Keychain.** It keeps one credential per host (`print` @ host, no
+  port, no path), so every printer on a host shares it.
+- **Configuration profiles** (`com.apple.mcxprinting`) install a queue
+  without ever querying the printer. They use Apple's Generic Printer PPD,
+  which passes PDF through.
+
+Still to record: what Safari sends, and macOS 26.

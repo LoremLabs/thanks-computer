@@ -179,12 +179,11 @@ func hostOnly(host string) string {
 	return host
 }
 
-func clientIP(r *http.Request) string {
-	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return h
-	}
-	return r.RemoteAddr
-}
+// clientIP is the address of the client that sent r: the socket peer, or —
+// when that peer is one of --web-trusted-proxies — the client the proxies
+// recorded in X-Forwarded-For (edgeproxy.Clients). It keys the per-IP login
+// limit and is what the login line reports.
+func (c *Controller) clientIP(r *http.Request) string { return c.clients.IP(r) }
 
 func (c *Controller) secure(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
@@ -198,7 +197,7 @@ func (c *Controller) secure(r *http.Request) bool {
 // Then the account's status, admission, the tenant match, and finally the
 // collection itself.
 func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant string) (principal, bool) {
-	ip := clientIP(r)
+	ip := c.clientIP(r)
 	if !c.secure(r) && !c.insecureAuth {
 		http.Error(w, "TLS required", http.StatusForbidden)
 		return principal{}, false

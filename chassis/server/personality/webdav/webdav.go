@@ -31,6 +31,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
+	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
@@ -58,6 +59,10 @@ type HostResolver interface {
 // cache and the throttles. It binds no listener of its own — the web head
 // mounts Handler().
 type Controller struct {
+	// clients resolves a request's client address behind the operator's
+	// HTTP proxies (--web-trusted-proxies); see clientIP.
+	clients *edgeproxy.Clients
+
 	ctx      context.Context
 	pu       *processor.Unit
 	store    *chdrive.Store
@@ -87,6 +92,9 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chdrive.Store
 		resolver: resolver,
 		prefix:   "/drive",
 		now:      func() time.Time { return time.Now().UTC() },
+	}
+	if pu != nil {
+		c.clients, _ = edgeproxy.NewClients(pu.Conf.WebTrustedProxies)
 	}
 	if pu != nil {
 		c.prefix = cleanPrefix(pu.Conf.DrivePathPrefix)

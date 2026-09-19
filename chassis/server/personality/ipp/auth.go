@@ -3,7 +3,6 @@ package ipp
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,12 +12,11 @@ import (
 
 const challenge = `Basic realm="ipp", charset="UTF-8"`
 
-func clientIP(r *http.Request) string {
-	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return h
-	}
-	return r.RemoteAddr
-}
+// clientIP is the address of the client that sent r: the socket peer, or —
+// when that peer is one of --web-trusted-proxies — the client the proxies
+// recorded in X-Forwarded-For (edgeproxy.Clients). It keys the per-IP auth
+// limit, and is what the auth line and the job event report.
+func (c *Controller) clientIP(r *http.Request) string { return c.clients.IP(r) }
 
 // secure reports whether the request reached us over TLS — the chassis's
 // own listener, or a front proxy that terminated it.
@@ -47,7 +45,7 @@ func (c *Controller) demand(w http.ResponseWriter, r *http.Request) {
 // It reads HEADERS ONLY, and ServeHTTP calls it before the first byte of the
 // body is read. That ordering is load-bearing, not tidiness — see ServeHTTP.
 func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, site printerSite) bool {
-	ip := clientIP(r)
+	ip := c.clientIP(r)
 	if !secure(r) && !c.insecureAuth {
 		http.Error(w, "TLS required", http.StatusForbidden)
 		return false
