@@ -9,8 +9,9 @@ Nothing lands there on its own.
 
 ```
 OPS/calendar-demo/
-  100/provision_parse.txcl   POST /calendar/provision → parse {"username", "password"?}
-  110/account.txcl           txco://calendar/account (argon2id; password generated when omitted)
+  100/provision_parse.txcl   POST /calendar/provision → parse {"username"}
+  110/account.txcl           txco://calendar/account — its username bound to a principal
+  120/credential.txcl        txco://credential/create — its password, issued once (new accounts only)
   110/missing.txcl           …400 without a username
   120/calendar.txcl          txco://calendar/calendar — "hello", policy put/delete = stack, feed = ensure
   130/hello.txcl             txco://calendar/put — a daily event from event{} (the chassis renders the VEVENT)
@@ -30,14 +31,16 @@ txco auth tenant hostnames add pony.local.thanks.computer --stack calendar-demo
 curl -X POST http://localhost:8080/calendar/provision \
   -d '{"username":"paris@pony.local.thanks.computer"}'
 # {"username":"paris@pony.local.thanks.computer","created":true,
-#  "password":"xxxx-xxxx-xxxx-xxxx-xxxx-xxxx",
+#  "password":"k7m2-river-galaxy-bamboo-orbit-velvet",
 #  "calendar":{"name":"hello","path":"/dav/paris@pony.local.thanks.computer/calendars/hello/",
 #              "feed_path":"/dav/feed/<token>.ics"},
 #  "hello":{"uid":"hello.paris@pony.local.thanks.computer","etag":"…","noop":false},
 #  "caldav":{"server":"pony.local.thanks.computer","port":8080,"tls":false,"path":"/dav/"}}
 ```
 
-The password is returned exactly once — only its hash is stored. The
+The password is returned exactly once — only its hash is stored, and the
+chassis keeps it out of the trace. It is a credential (see
+[users](../../docs/advanced/users.md)) whose scope opens this head only. The
 route is **open on loopback** (it is a demo); the guarantee that holds
 everywhere is in the op: `txco://calendar/account` runs only inside this
 tenant's rules and only for a domain the tenant owns. `*.local.thanks.computer`

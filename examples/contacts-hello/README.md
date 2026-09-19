@@ -8,8 +8,9 @@ Nothing lands there on its own.
 
 ```
 OPS/contacts-demo/
-  100/provision_parse.txcl   POST /contacts/provision → parse {"username", "password"?}
-  110/account.txcl           txco://contacts/account (argon2id; password generated when omitted)
+  100/provision_parse.txcl   POST /contacts/provision → parse {"username"}
+  110/account.txcl           txco://contacts/account — its username bound to a principal
+  120/credential.txcl        txco://credential/create — its password, issued once (new accounts only)
   110/missing.txcl           …400 without a username
   120/addressbook.txcl       txco://contacts/addressbook — "hello", policy put/delete = stack
   130/hello.txcl             txco://contacts/put — a card from card{} (the chassis renders the vCard)
@@ -30,13 +31,15 @@ txco auth tenant hostnames add pony.local.thanks.computer --stack contacts-demo
 curl -X POST http://localhost:8080/contacts/provision \
   -d '{"username":"paris@pony.local.thanks.computer"}'
 # {"username":"paris@pony.local.thanks.computer","created":true,
-#  "password":"xxxx-xxxx-xxxx-xxxx-xxxx-xxxx",
+#  "password":"k7m2-river-galaxy-bamboo-orbit-velvet",
 #  "addressbook":{"name":"hello","path":"/carddav/paris@pony.local.thanks.computer/addressbooks/hello/"},
 #  "hello":{"uid":"hello.paris@pony.local.thanks.computer","etag":"…","noop":false},
 #  "carddav":{"server":"pony.local.thanks.computer","port":8080,"tls":false,"path":"/carddav/"}}
 ```
 
-The password is returned exactly once — only its hash is stored. The
+The password is returned exactly once — only its hash is stored, and the
+chassis keeps it out of the trace. It is a credential (see
+[users](../../docs/advanced/users.md)) whose scope opens this head only. The
 route is **open on loopback** (it is a demo); the guarantee that holds
 everywhere is in the op: `txco://contacts/account` runs only inside this
 tenant's rules and only for a domain the tenant owns. `*.local.thanks.computer`

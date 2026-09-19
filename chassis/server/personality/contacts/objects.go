@@ -111,7 +111,7 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
 		return
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opPut, addressbook: refOf(ab),
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opPut, addressbook: refOf(ab),
 		object: &objRef{Name: resource, UID: facts.UID, Size: int64(len(bytes)), Exists: exists},
 		vcard:  bytes, card: &facts, clientIP: pr.clientIP}
 	if exists {

@@ -64,20 +64,18 @@ not on every request a polling client makes. The
 
 ```txcl
 EXEC "txco://contacts/account"
-  WITH username = "paris@pony.example.com",   # <local>@<domain the tenant owns>
-       password = ._imapacct.password,        # the same password the IMAP account got
-       into = "_conacct"
+  WITH username  = "paris@pony.example.com",   # <local>@<domain the tenant owns>
+       principal = "pony:paris",               # who the username signs in as
+       into      = "_conacct"
 ```
 
 The WITH clause is `txco://calendar/account`'s: `username` (req; the
 domain must be a verified hostname or delegated zone of the tenant),
-`password` (omitted: unchanged on update / generated on create; `""`:
-generated; else stored, ≥ 8 chars), `rotate`, `password_style` /
-`password_words`, `status`, `policy` (the account-default mutation policy).
-Result at `into` (default `_contacts`): `{username, created, principal,
-password?, rotated?}` — `password` appears **only** when generated, once.
-Pass the password another head minted and one credential opens Mail,
-Calendar and Contacts.
+`principal` (required when the username is new), `status`, `policy` (the
+account-default mutation policy). The account holds no password: a
+[credential](../users.md#credentials) with a `contacts` scope opens it,
+and one credential can open Mail, Calendar and Contacts. Result at `into`
+(default `_contacts`): `{username, created, principal, principal_url}`.
 
 ## Address books: `txco://contacts/addressbook`
 
@@ -191,13 +189,15 @@ the parse reports them as `kind: group`. Not yet: `sync-collection` /
 case-sensitively (the library's matcher), and its results are re-encoded
 by the library, which emits a `;` inside a text value unescaped.
 
-Basic auth on every request: the head verifies argon2id once and caches
-the verified triple for five minutes. A request must arrive over TLS — the
-web head's own listener, or `X-Forwarded-Proto: https` from the front
-proxy — unless `--contacts-insecure-auth` (dev). Throttles count cache
-misses only (`--contacts-login-rate`). A `disabled` account and a
-suspended tenant are refused; an account on another tenant's hostname is
-refused exactly like a wrong password.
+Basic auth on every request, checked by the login resolver the credential
+heads share ([users](../users.md#signing-in)): the credential must name
+`contacts`, and argon2id runs once per five minutes per node — a revoked
+credential is refused at once all the same. A request must arrive over
+TLS — the web head's own listener, or `X-Forwarded-Proto: https` from the
+front proxy — unless `--contacts-insecure-auth` (dev). Throttles count
+cache misses only (`--login-rate`, shared with every head). A `disabled`
+account and a suspended tenant are refused; an account on another tenant's
+hostname is refused exactly like a wrong password.
 
 ## Seeding address books with a stack
 
@@ -293,7 +293,7 @@ address by DNS (RFC 6764), the `dns` personality can publish
 | `--contacts-path-prefix` | `/carddav` | The reserved prefix on every hostname (plus `/.well-known/carddav`); must differ from the calendar's |
 | `--contacts-store` / `--contacts-db-path` | `sqlite` / `./chassis/data/contacts.db` | The index; a non-sqlite backend is shared and opened on every node |
 | `--contacts-insecure-auth` | `false` | Accept Basic auth without TLS (`txco dev --contacts` sets it) |
-| `--contacts-login-rate` | `30` | Verifications per minute, per IP and per username, on cache misses only |
+| `--login-rate` | `30` | Password checks per minute, per IP and per principal, shared with the IMAP, CalDAV and WebDAV heads (cache misses only) |
 | `--contacts-object-max-bytes` | 1 MiB | Size cap for a card (ops and client PUT; advertised as `max-resource-size`) |
 | `--contacts-resp-timeout` | `30s` | Answer-lane deadline |
 | `--contacts-observe-sample` / `--contacts-observe-max-inflight` | `1` / `8` | Observe-lane sampling and concurrency |

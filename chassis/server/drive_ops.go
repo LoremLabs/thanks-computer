@@ -88,10 +88,12 @@ func driveCollection(ctx context.Context, d driveDeps, in []byte) (event.Payload
 // a Basic-auth login (<local>@<owned domain>, the calendar / contacts
 // rule, so usernames are globally unique by construction) bound to ONE
 // collection (`collection`, by name; the DAV root that login sees).
-// Result at `into`: {username, created, collection_id, collection, mount,
-// password?, rotated?} — password only when generated (create, explicit
-// "", or `rotate`). Pass the password the IMAP account got (`password =
-// ._imapacct.password`) and the heads share one credential.
+// The account holds no password: its username is bound to `principal`
+// (bindAccount), and a login is a credential issued to that principal with
+// txco://credential/create whose `drive:<collection_id>:…` scope (or
+// `drive:*:…`) opens this head. The collection is the principal's grant; a
+// scope can only narrow it. Result at `into`: {username, created,
+// principal, collection_id, collection, mount}.
 func driveAccount(ctx context.Context, d driveDeps, in []byte) (event.Payload, error) {
 	tenant, meta, into, ep, ok := drivePrelude(ctx, d)
 	if !ok {
@@ -123,12 +125,12 @@ func driveAccount(ctx context.Context, d driveDeps, in []byte) (event.Payload, e
 		}
 		collectionID = coll.ID
 	}
-	pwr, pcode, pmsg := resolveAccountPassword(meta, func() (bool, error) { return exists, nil })
+	status := gjson.GetBytes(meta, "status").String()
+	principal, pcode, pmsg := bindAccount(ctx, d.ids, d.snap, tenant, username, meta)
 	if pcode != "" {
 		return driveErr(into, "txco_drive_"+pcode, pmsg), nil
 	}
-	status := gjson.GetBytes(meta, "status").String()
-	created, err := d.store.UpsertAccount(ctx, tenant, username, pwr.hash, status, collectionID)
+	created, err := d.store.UpsertAccount(ctx, tenant, username, status, collectionID)
 	if err != nil {
 		return driveStoreErr(into, err), nil
 	}
@@ -151,12 +153,7 @@ func driveAccount(ctx context.Context, d driveDeps, in []byte) (event.Payload, e
 	// show up as "paris" rather than as another "drive". The bare prefix
 	// still serves the same tree for anything already mounted.
 	out.Set(into+".mount", strings.TrimSuffix(d.prefix, "/")+"/"+coll.Name+"/")
-	if pwr.generated != "" {
-		out.Set(into+".password", pwr.generated)
-	}
-	if pwr.rotated {
-		out.Set(into+".rotated", true)
-	}
+	out.Set(into+".principal", principal.ID)
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
 }
 

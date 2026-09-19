@@ -162,7 +162,7 @@ func (b *backend) DeleteAddressBook(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opRemove, addressbook: refOf(ab), clientIP: pr.clientIP}
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opRemove, addressbook: refOf(ab), clientIP: pr.clientIP}
 	if status, msg := b.c.gate(&ab, &pr.acct, chcon.VerbRemove, &m); status != 0 {
 		return httpErr(status, "%s", msg)
 	}
@@ -261,7 +261,7 @@ func (b *backend) DeleteAddressObject(ctx context.Context, path string) error {
 	if !found {
 		return httpErr(http.StatusNotFound, "no such object")
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opDelete, addressbook: refOf(ab),
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opDelete, addressbook: refOf(ab),
 		object:   &objRef{Name: resource, UID: existing.UID, ETag: existing.ETag, PriorETag: existing.ETag, Size: existing.Size, Exists: true},
 		clientIP: pr.clientIP}
 	if pc, err := chcon.Parse(existing.VCard); err == nil {

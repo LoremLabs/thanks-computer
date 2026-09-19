@@ -48,17 +48,19 @@ login for the `webdav` head — `<local>@<domain>` where the domain is a
 verified hostname or delegated zone of the tenant, the same rule the
 calendar and contacts heads apply, so usernames are globally unique by
 construction — bound to exactly ONE collection, which is the root the
-login sees. Pass the password the IMAP account got and the heads share one
-credential.
+login sees. The account holds no password: its username signs in as its
+`principal`, with a [credential](./users.md#credentials) whose scopes name
+the drive (`drive:<collection_id>:*`). The same credential can open the
+pony's mailbox, calendar and contacts too, if its scopes name them.
 
 ```txcl
 EXEC "txco://drive/collection" WITH name = ._pc.slug, into = "_dc"
 EXEC "txco://drive/account"
-  WITH username = ._imapacct.username,
-       password = ._imapacct.password,
+  WITH username   = ._imapacct.username,
+       principal  = &concat("pony:", ._pc.slug),
        collection = ._pc.slug,
-       into = "_drvacct"
-# → _drvacct = {username, created, collection_id, collection, mount: "/drive/"}
+       into       = "_drvacct"
+# → _drvacct = {username, created, principal, collection_id, collection, mount: "/drive/paris/"}
 ```
 
 ## Operations
@@ -72,7 +74,7 @@ collection is always addressed by `collection` (its name); a resource by
 | op | WITH | result |
 |---|---|---|
 | `drive/collection` | `name`; `remove` (+ `force` to remove a non-empty one); `policy` (what a CLIENT may do, by subtree — see below) | `{id, name, sync_token, bytes_used, resource_count, created, policy?}` or `{name, removed}` |
-| `drive/account` | `username`, `collection`; `password` / `rotate` / `password_style` (`token` \| `words`) / `password_words` as `imap/account`; `status` `active` \| `disabled` | `{username, created, collection_id, collection, mount, password?, rotated?}` |
+| `drive/account` | `username`, `collection` (on create), `principal` (on create); `status` `active` \| `disabled` | `{username, created, principal, collection_id, collection, mount}` |
 | `drive/put` | `collection`, `path`; `from` XOR `value` XOR `from_sha` (a sha256 the tenant already holds in the blob store — streamed, not buffered, so the op cap does not apply); `encoding` `base64` (default) \| `utf8`; `content_type`; `if_match`, `if_none_match` (an etag, an RFC 7232 list of them, or `*`); `parents` (create missing ancestors) | `{resource_id, path, etag, size, created, noop, modseq}` — `noop` when the bytes were already there |
 | `drive/get` | `collection`; `path` XOR `resource_id`; `encoding` `base64` (default) \| `utf8` \| `auto`; `max_bytes` | `{resource_id, path, name, etag, size, content_type, modseq, content, encoding}` |
 | `drive/stat` | `collection`; `path` XOR `resource_id` (`path = ""` is the root) | `{exists, resource?}` — a miss is a result |

@@ -11,8 +11,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/tidwall/gjson"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
@@ -55,15 +55,24 @@ func newContactsDeps(t *testing.T, owned map[string]string) contactsDeps {
 		}
 	}
 	fixed := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	return contactsDeps{store: store, snap: func() *sql.DB { return mirror }, dialect: registry.SQLite,
+	return contactsDeps{store: store, ids: authntest.NewSQLiteStore(t), snap: func() *sql.DB { return mirror }, dialect: registry.SQLite,
 		maxBytes: 1 << 20, prefix: "/carddav", now: func() time.Time { return fixed }}
 }
 
 func callCon(t *testing.T, fn func(context.Context, contactsDeps, []byte) (event.Payload, error), d contactsDeps, tenant, metaJSON string) string {
 	t.Helper()
+	return callConFrom(t, fn, d, tenant, "web", metaJSON)
+}
+
+// callConFrom runs the op as a rule of `stack`.
+func callConFrom(t *testing.T, fn func(context.Context, contactsDeps, []byte) (event.Payload, error), d contactsDeps, tenant, stack, metaJSON string) string {
+	t.Helper()
 	ctx := context.Background()
 	if tenant != "" {
 		ctx = processor.WithTenant(ctx, tenant)
+	}
+	if stack != "" {
+		ctx = processor.WithStack(ctx, stack)
 	}
 	ctx = operation.WithMeta(ctx, metaJSON)
 	pl, err := fn(ctx, d, []byte(`{"_txc":{"op":"demo/100/contacts"}}`))
@@ -76,40 +85,31 @@ func callCon(t *testing.T, fn func(context.Context, contactsDeps, []byte) (event
 func TestContactsAccountOp(t *testing.T) {
 	d := newContactsDeps(t, map[string]string{"pony.example.com": "acme"})
 
-	out := callCon(t, contactsAccount, d, "acme", `{"username":"Paris@Pony.Example.com","password_style":"words"}`)
+	out := callCon(t, contactsAccount, d, "acme", `{"username":"Paris@Pony.Example.com","principal":"pony:paris"}`)
 	if gjson.Get(out, "_contacts.error").Exists() {
 		t.Fatalf("create: %s", out)
 	}
-	pw := gjson.Get(out, "_contacts.password").String()
 	if gjson.Get(out, "_contacts.username").String() != "paris@pony.example.com" || !gjson.Get(out, "_contacts.created").Bool() ||
-		strings.Count(pw, "-") != 4 || gjson.Get(out, "_contacts.principal").String() != "/carddav/paris@pony.example.com/" {
+		gjson.Get(out, "_contacts.principal").String() != "pony:paris" || gjson.Get(out, "_contacts.principal_url").String() == "" ||
+		gjson.Get(out, "_contacts.password").Exists() {
 		t.Errorf("create = %s", out)
 	}
 	a, ok, _ := d.store.GetAccount(context.Background(), "paris@pony.example.com")
 	if !ok || a.Tenant != "acme" {
 		t.Fatalf("account = %+v ok=%v", a, ok)
 	}
-	if match, _ := apppass.VerifyPassword(a.PwHash, pw); !match {
-		t.Error("generated password does not verify")
+	wantBound(t, d.ids, "t_acme", "paris@pony.example.com", "pony:paris")
+	out = callCon(t, contactsAccount, d, "acme", `{"username":"paris@pony.example.com","status":"disabled","into":"_ca"}`)
+	if gjson.Get(out, "_ca.error").Exists() || gjson.Get(out, "_ca.created").Bool() || gjson.Get(out, "_ca.principal").String() != "pony:paris" {
+		t.Errorf("update = %s", out)
 	}
-	// The shared-credential path: an explicit password (the one IMAP minted).
-	out = callCon(t, contactsAccount, d, "acme", `{"username":"paris@pony.example.com","password":"river-galaxy-bamboo-orbit-velvet","into":"_ca"}`)
-	if gjson.Get(out, "_ca.error").Exists() || gjson.Get(out, "_ca.password").Exists() || gjson.Get(out, "_ca.created").Bool() {
-		t.Errorf("explicit password = %s", out)
-	}
-	a2, _, _ := d.store.GetAccount(context.Background(), "paris@pony.example.com")
-	if match, _ := apppass.VerifyPassword(a2.PwHash, "river-galaxy-bamboo-orbit-velvet"); !match {
-		t.Error("explicit password not stored")
-	}
-	out = callCon(t, contactsAccount, d, "acme", `{"username":"paris@pony.example.com","rotate":true}`)
-	if !gjson.Get(out, "_contacts.rotated").Bool() || gjson.Get(out, "_contacts.password").String() == "" {
-		t.Errorf("rotate = %s", out)
-	}
+	accountOpRefusals(t, "contacts", "paris@pony.example.com", "", func(stack, meta string) string {
+		return callConFrom(t, contactsAccount, d, "acme", stack, meta)
+	})
 	for meta, code := range map[string]string{
-		`{"username":"x@else.example.com"}`:                          "txco_contacts_domain_not_owned",
-		`{"username":"nope"}`:                                        "txco_contacts_invalid_arg",
-		`{"username":"x@pony.example.com","password":"short"}`:       "txco_contacts_invalid_arg",
-		`{"username":"x@pony.example.com","policy":{"put":"maybe"}}`: "txco_contacts_invalid_arg",
+		`{"username":"x@else.example.com"}`: "txco_contacts_domain_not_owned",
+		`{"username":"nope"}`:               "txco_contacts_invalid_arg",
+		`{"username":"x@pony.example.com","principal":"pony:x","policy":{"put":"maybe"}}`: "txco_contacts_invalid_arg",
 	} {
 		if got := gjson.Get(callCon(t, contactsAccount, d, "acme", meta), "_contacts.error.code").String(); got != code {
 			t.Errorf("%s → %s, want %s", meta, got, code)
@@ -132,7 +132,7 @@ const appleVCard = "BEGIN:VCARD\r\nVERSION:3.0\r\nPRODID:-//Apple Inc.//macOS 15
 
 func TestContactsAddressbookAndObjectsOps(t *testing.T) {
 	d := newContactsDeps(t, map[string]string{"pony.example.com": "acme"})
-	callCon(t, contactsAccount, d, "acme", `{"username":"paris@pony.example.com"}`)
+	callCon(t, contactsAccount, d, "acme", `{"username":"paris@pony.example.com","principal":"pony:paris"}`)
 
 	out := callCon(t, contactsAddressbook, d, "acme", `{"username":"paris@pony.example.com","name":"senders","display_name":"Paris senders","description":"who may write","policy":{"put":"stack","delete":"stack"}}`)
 	if gjson.Get(out, "_contacts.error").Exists() || !gjson.Get(out, "_contacts.created").Bool() ||
@@ -278,7 +278,7 @@ func TestContactsAddressbookAndObjectsOps(t *testing.T) {
 
 func TestContactsSyncOp(t *testing.T) {
 	d := newContactsDeps(t, map[string]string{"pony.example.com": "acme"})
-	callCon(t, contactsAccount, d, "acme", `{"username":"paris@pony.example.com"}`)
+	callCon(t, contactsAccount, d, "acme", `{"username":"paris@pony.example.com","principal":"pony:paris"}`)
 	callCon(t, contactsAddressbook, d, "acme", `{"username":"paris@pony.example.com","name":"senders"}`)
 	callCon(t, contactsPut, d, "acme", `{"username":"paris@pony.example.com","addressbook":"senders","name":"ann-x.io.vcf","card":{"emails":[{"value":"ann@x.io"}]}}`)
 

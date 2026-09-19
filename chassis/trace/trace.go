@@ -75,9 +75,12 @@ func ParseMode(s string) Mode {
 // the true size before capping `Payload` to BodyCapBytes so meta.json
 // records what was sent, not just what we kept on disk.
 type RequestInfo struct {
-	RID          string
-	Src          string
-	Tenant       string
+	RID    string
+	Src    string
+	Tenant string
+	// Principal is who the request acts as — the id a head's verified login
+	// pinned (processor.PrincipalScope). Empty when no one signed in.
+	Principal    string
 	Stack        string
 	StartedAt    time.Time
 	Payload      []byte
@@ -95,6 +98,12 @@ type RequestInfo struct {
 // Output is the handler's raw response. Both are recorded only in
 // ModeFull.
 type StepInfo struct {
+	// Tenant is the tenant the run was pinned to when this step ran
+	// (processor.TenantScope). A request enters the boot pipeline as `_sys`
+	// and is re-tenanted by routing, so this — not RequestInfo.Tenant — is
+	// what a per-(tenant, stack) redaction hint must be looked up by.
+	// Empty: the request's tenant from Begin.
+	Tenant     string
 	Stack      string
 	Scope      int
 	Name       string

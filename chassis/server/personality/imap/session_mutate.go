@@ -64,7 +64,7 @@ func (s *session) after(m mode, mut mutation) {
 }
 
 func (s *session) base(op string, mb mboxRef) mutation {
-	return mutation{tenant: s.acct.Tenant, account: s.acct.Username, op: op, mailbox: mb, clientIP: s.ip}
+	return mutation{tenant: s.acct.Tenant, account: s.acct.Username, who: s.who, op: op, mailbox: mb, clientIP: s.ip}
 }
 
 // AppendLimit caps a client APPEND literal at --imap-append-max-bytes.

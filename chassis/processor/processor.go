@@ -30,6 +30,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/attach"
 	authregistry "github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
@@ -335,6 +336,49 @@ func StackScope(ctx context.Context) string {
 	return ""
 }
 
+// PrincipalScope returns the id of the principal the request acts as
+// (`pony:paris`, `user:usr_…`), or "" when no one signed in. It is the
+// trusted answer: the head that verified the password pinned it on the
+// dispatch context (authn.WithAuthenticated). `_txc.principal` is a
+// read-only copy for stacks; access decisions read this.
+func PrincipalScope(ctx context.Context) string {
+	a, _ := authn.AuthenticatedFrom(ctx)
+	return a.Principal.ID
+}
+
+// stampPrincipal makes the envelope's `_txc.principal` equal the pin: the
+// principal, its kind and the credential when a head pinned one; nothing at
+// all when none did. So no client, stored payload or earlier hop can bring a
+// principal in — the only way one enters is a head's verified login.
+func stampPrincipal(ctx context.Context, raw string) string {
+	a, ok := authn.AuthenticatedFrom(ctx)
+	if !ok {
+		if gjson.Get(raw, "_txc.principal").Exists() {
+			raw, _ = sjson.Delete(raw, "_txc.principal")
+		}
+		return raw
+	}
+	raw, _ = sjson.Set(raw, "_txc.principal", map[string]string{
+		"id": a.Principal.ID, "kind": string(a.Principal.Kind), "credential": a.Credential,
+	})
+	return raw
+}
+
+// withPrincipalFrom re-pins the principal from a chassis-stamped envelope —
+// the scope-entry envelope a continuation captured at suspend, which
+// stampPrincipal wrote and no rule can (`_txc.principal` is reserved).
+func withPrincipalFrom(ctx context.Context, scopeEnvelope string) context.Context {
+	p := gjson.Get(scopeEnvelope, "_txc.principal")
+	if !p.Exists() {
+		return ctx
+	}
+	principal, err := authn.ParsePrincipal(p.Get("id").String())
+	if err != nil {
+		return ctx
+	}
+	return authn.WithAuthenticated(ctx, authn.Authenticated{Principal: principal, Credential: p.Get("credential").String()})
+}
+
 // tenantExists reports whether a non-revoked tenant with this slug
 // exists in the opstack snapshot. Used to validate a boot re-tenant
 // target before rebinding the pin.
@@ -525,6 +569,16 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		if ctx.Value(ctxKeySource) == nil {
 			ctx = WithSource(ctx, gjson.Get(raw, "_txc.src").String())
 		}
+
+		// The principal is the one pin NOT taken from the envelope: only a
+		// head's verified login sets it (on ctx), and the envelope's copy is
+		// made to match — see stampPrincipal.
+		raw = stampPrincipal(ctx, raw)
+
+		// Where an op that issues a secret notes it, so trace records of
+		// this request never hold it (issued.go). A caller that records
+		// the request's final payload installs it first (runWithTrace).
+		ctx = WithIssuedSecrets(ctx)
 
 		// Per-request stream sink (see stream.go): lets an op push
 		// response-body chunks to the client mid-dispatch — today a
@@ -2489,6 +2543,8 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 	// this, SourceScope(ctx) is "" after a suspend and every op that gates
 	// on the pinned source (txco://websocket/reply, txco://relay) refuses.
 	rctx = WithSource(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.src").String())
+	// And the principal, from the same envelope, which stampPrincipal wrote.
+	rctx = withPrincipalFrom(rctx, ss.ScopeEnvelope)
 
 	// Resume against the opstack frozen at suspend, not the live one. The
 	// snapshot DB is attached to rctx so EVERY opstack lookup in the
@@ -2569,6 +2625,7 @@ func (pu *Unit) emitResumeUsage(ss continuation.StageSuspended, finalRaw []byte,
 	pu.Usage.WriteEvent(usage.UsageEvent{
 		RID:        continuation.ResumeTraceRID(runID, stage),
 		Tenant:     TenantFromEnvelope(ss.ScopeEnvelope), // slug, matches the suspend's line
+		Principal:  gjson.Get(ss.ScopeEnvelope, "_txc.principal.id").String(),
 		Src:        "continuation",
 		Stack:      stack,
 		DurationMS: dur.Milliseconds(),
@@ -2612,6 +2669,7 @@ func (pu *Unit) emitResumeSegmentUsage(ctx context.Context, suspendEnvelope, run
 	pu.Usage.WriteEvent(usage.UsageEvent{
 		RID:        continuation.ResumeTraceRID(runID, ri.segStage),
 		Tenant:     TenantFromEnvelope(suspendEnvelope),
+		Principal:  PrincipalScope(ctx),
 		Src:        "continuation",
 		Stack:      stack,
 		DurationMS: time.Since(ri.segStart).Milliseconds(),
@@ -2988,6 +3046,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 // single-shot path always has.
 func (pu *Unit) recordStep(ctx context.Context, op operation.Operation, r execResult, info trace.StepInfo) {
 	opName := op.Resonator.Exec
+	info.Tenant = tenantScope(ctx)
 	info.Stack = op.Stack
 	info.Scope = op.Scope
 	info.Name = op.Name

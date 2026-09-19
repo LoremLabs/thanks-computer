@@ -13,8 +13,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/tidwall/gjson"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/drive/filestore"
@@ -70,16 +70,25 @@ func newDriveDeps(t *testing.T, owned map[string]string) driveDeps {
 		t.Fatal(err)
 	}
 	fixed := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
-	return driveDeps{store: store, snap: func() *sql.DB { return mirror }, dialect: registry.SQLite,
+	return driveDeps{store: store, ids: authntest.NewSQLiteStore(t), snap: func() *sql.DB { return mirror }, dialect: registry.SQLite,
 		maxBytes: 1 << 20, prefix: "/drive", now: func() time.Time { return fixed },
 		ix: blob.NewKVIndex(newKVHandle(t)), fcas: fcas}
 }
 
 func callDrive(t *testing.T, fn func(context.Context, driveDeps, []byte) (event.Payload, error), d driveDeps, tenant, metaJSON string) string {
 	t.Helper()
+	return callDriveFrom(t, fn, d, tenant, "web", metaJSON)
+}
+
+// callDriveFrom runs the op as a rule of `stack`.
+func callDriveFrom(t *testing.T, fn func(context.Context, driveDeps, []byte) (event.Payload, error), d driveDeps, tenant, stack, metaJSON string) string {
+	t.Helper()
 	ctx := context.Background()
 	if tenant != "" {
 		ctx = processor.WithTenant(ctx, tenant)
+	}
+	if stack != "" {
+		ctx = processor.WithStack(ctx, stack)
 	}
 	ctx = operation.WithMeta(ctx, metaJSON)
 	pl, err := fn(ctx, d, []byte(`{"_txc":{"op":"demo/100/drive"},"body":{"content_b64":"aGVsbG8="}}`))
@@ -106,13 +115,13 @@ func TestDriveCollectionAndAccountOps(t *testing.T) {
 		t.Errorf("bad name → %s", got)
 	}
 
-	out = callDrive(t, driveAccount, d, "acme", `{"username":"Paris@Pony.Example.com","collection":"paris","password_style":"words"}`)
+	out = callDrive(t, driveAccount, d, "acme", `{"username":"Paris@Pony.Example.com","collection":"paris","principal":"pony:paris"}`)
 	if gjson.Get(out, "_drive.error").Exists() {
 		t.Fatalf("account create: %s", out)
 	}
-	pw := gjson.Get(out, "_drive.password").String()
 	if gjson.Get(out, "_drive.username").String() != "paris@pony.example.com" || !gjson.Get(out, "_drive.created").Bool() ||
-		strings.Count(pw, "-") != 4 || gjson.Get(out, "_drive.collection_id").String() != collID ||
+		gjson.Get(out, "_drive.principal").String() != "pony:paris" || gjson.Get(out, "_drive.password").Exists() ||
+		gjson.Get(out, "_drive.collection_id").String() != collID ||
 		gjson.Get(out, "_drive.collection").String() != "paris" || gjson.Get(out, "_drive.mount").String() != "/drive/paris/" {
 		t.Errorf("create = %s", out)
 	}
@@ -120,29 +129,21 @@ func TestDriveCollectionAndAccountOps(t *testing.T) {
 	if !ok || a.Tenant != "acme" || a.CollectionID != collID {
 		t.Fatalf("account = %+v ok=%v", a, ok)
 	}
-	if match, _ := apppass.VerifyPassword(a.PwHash, pw); !match {
-		t.Error("generated password does not verify")
+	wantBound(t, d.ids, "t_acme", "paris@pony.example.com", "pony:paris")
+	// An update needs neither the principal nor the collection.
+	out = callDrive(t, driveAccount, d, "acme", `{"username":"paris@pony.example.com","status":"disabled","into":"_da"}`)
+	if gjson.Get(out, "_da.error").Exists() || gjson.Get(out, "_da.created").Bool() ||
+		gjson.Get(out, "_da.collection").String() != "paris" || gjson.Get(out, "_da.principal").String() != "pony:paris" {
+		t.Errorf("update = %s", out)
 	}
-	// The shared-credential path: an explicit password, no collection needed on update.
-	out = callDrive(t, driveAccount, d, "acme", `{"username":"paris@pony.example.com","password":"river-galaxy-bamboo-orbit-velvet","into":"_da"}`)
-	if gjson.Get(out, "_da.error").Exists() || gjson.Get(out, "_da.password").Exists() || gjson.Get(out, "_da.created").Bool() ||
-		gjson.Get(out, "_da.collection").String() != "paris" {
-		t.Errorf("explicit password = %s", out)
-	}
-	a2, _, _ := d.store.GetAccount(context.Background(), "paris@pony.example.com")
-	if match, _ := apppass.VerifyPassword(a2.PwHash, "river-galaxy-bamboo-orbit-velvet"); !match {
-		t.Error("explicit password not stored")
-	}
-	out = callDrive(t, driveAccount, d, "acme", `{"username":"paris@pony.example.com","rotate":true}`)
-	if !gjson.Get(out, "_drive.rotated").Bool() || gjson.Get(out, "_drive.password").String() == "" {
-		t.Errorf("rotate = %s", out)
-	}
+	accountOpRefusals(t, "drive", "paris@pony.example.com", `,"collection":"paris"`, func(stack, meta string) string {
+		return callDriveFrom(t, driveAccount, d, "acme", stack, meta)
+	})
 	for meta, code := range map[string]string{
-		`{"username":"x@else.example.com","collection":"paris"}`:                "txco_drive_domain_not_owned",
-		`{"username":"nope","collection":"paris"}`:                              "txco_drive_invalid_arg",
-		`{"username":"x@pony.example.com","collection":"paris","password":"s"}`: "txco_drive_invalid_arg",
-		`{"username":"x@pony.example.com"}`:                                     "txco_drive_invalid_arg",
-		`{"username":"x@pony.example.com","collection":"nope"}`:                 "txco_drive_not_found",
+		`{"username":"x@else.example.com","collection":"paris"}`:                     "txco_drive_domain_not_owned",
+		`{"username":"nope","collection":"paris"}`:                                   "txco_drive_invalid_arg",
+		`{"username":"x@pony.example.com"}`:                                          "txco_drive_invalid_arg",
+		`{"username":"x@pony.example.com","collection":"nope","principal":"pony:x"}`: "txco_drive_not_found",
 	} {
 		if got := gjson.Get(callDrive(t, driveAccount, d, "acme", meta), "_drive.error.code").String(); got != code {
 			t.Errorf("%s → %s, want %s", meta, got, code)

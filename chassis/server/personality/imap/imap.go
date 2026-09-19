@@ -10,8 +10,9 @@
 // that reach the store from an op are fanned out to selected sessions
 // through a head-local hub (EXISTS / EXPUNGE / FETCH on Poll and IDLE).
 //
-// Phase 0a scope (authentication first): LOGIN against argon2id account
-// rows with per-IP and per-account throttles, a verified-login cache and
+// Phase 0a scope (authentication first): LOGIN against the identity store
+// (chassis/authn, shared with the DAV heads) behind per-IP and per-account
+// LOGIN throttles, with a verified-login cache and
 // the tenant admission check; NAMESPACE, LIST, STATUS, SELECT, FETCH,
 // SEARCH, STORE (flags, local policy), POLL/IDLE, SUBSCRIBE. Mutating
 // verbs (CREATE/DELETE/RENAME/APPEND/COPY/MOVE/EXPUNGE) answer NO [CANNOT]
@@ -37,21 +38,14 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	txtls "github.com/loremlabs/thanks-computer/chassis/tls"
-)
-
-const (
-	// loginCacheTTL is how long a verified (username, hash, password)
-	// triple skips argon2id.
-	loginCacheTTL = 5 * time.Minute
-	loginCacheMax = 10000
 )
 
 // Controller owns the IMAP listeners and their go-imap servers. It
@@ -73,9 +67,12 @@ type Controller struct {
 
 	loginIP   *throttle.Throttle
 	loginAcct *throttle.Throttle
-	cache     *apppass.LoginCache
-	conns     *connCounter
-	hub       *hub
+	// auth verifies passwords: the resolver the four heads share, with
+	// its login cache and the --login-rate throttles. loginIP/loginAcct
+	// above are IMAP's own LOGIN-command flood guard (--imap-login-rate).
+	auth  *authn.Resolver
+	conns *connCounter
+	hub   *hub
 
 	logins metric.Int64Counter
 }
@@ -92,7 +89,6 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chimap.Store)
 		ctx:   ctx,
 		pu:    pu,
 		store: store,
-		cache: apppass.NewLoginCache(loginCacheTTL, loginCacheMax),
 		hub:   newHub(ctx, store, logger),
 	}
 	if pu != nil {
@@ -115,6 +111,9 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chimap.Store)
 	}
 	return c
 }
+
+// SetAuth hands the head the login resolver (chassis/authn).
+func (c *Controller) SetAuth(r *authn.Resolver) { c.auth = r }
 
 // SetFileCAS wires the content store BODY[] renders from. Nil-safe: without
 // it, metadata still serves and BODY[] answers NO [UNAVAILABLE].
@@ -309,14 +308,17 @@ func (c *Controller) boundAddrs() []string {
 // this hop. tls=false with proxied=false is the one that means what it
 // looks like — LOGIN in the clear, which only --imap-insecure-auth
 // permits. A bare `tls` bool could not tell those two apart.
-func (c *Controller) noteLogin(outcome, user, ip, listener string, tlsOn, proxied bool) {
+func (c *Controller) noteLogin(outcome, user, ip, listener string, tlsOn, proxied bool, who authn.Authenticated) {
 	if c.logins != nil {
 		c.logins.Add(c.ctx, 1, metric.WithAttributes(attrOutcome(outcome)))
 	}
 	if c.pu != nil && c.pu.Logger != nil {
-		c.pu.Logger.Info("imap login",
-			zap.String("user", user), zap.String("ip", ip), zap.String("outcome", outcome),
-			zap.Bool("tls", tlsOn), zap.String("listener", listener), zap.Bool("proxied", proxied))
+		fields := []zap.Field{zap.String("user", user), zap.String("ip", ip), zap.String("outcome", outcome),
+			zap.Bool("tls", tlsOn), zap.String("listener", listener), zap.Bool("proxied", proxied)}
+		if !who.IsZero() {
+			fields = append(fields, zap.String("principal", who.Principal.ID), zap.String("credential", who.Credential))
+		}
+		c.pu.Logger.Info("imap login", fields...)
 	}
 }
 

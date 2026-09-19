@@ -287,3 +287,34 @@ func getString(b []byte, path string) string {
 func hasPath(b []byte, path string) bool {
 	return gjson.GetBytes(b, path).Exists()
 }
+
+// TestRebuild_RedactsAnIssuedPassword — txco://credential/create answers
+// with a password, once, for the rule that shows it to a person. The trace
+// must never hold it, whether or not the author remembered `redact`: the
+// registry adds `<into>.password` for every such rule, and the default
+// `_credential.password` too, since a computed `into` cannot be read here.
+func TestRebuild_RedactsAnIssuedPassword(t *testing.T) {
+	db := testDB(t)
+	insertTenant(t, db, "T-ACME", "acme")
+	insertOp(t, db, "T-ACME", "web", "plain", `WHEN .x == 1 EXEC "txco://credential/create" WITH principal = "pony:paris", scopes = ["imap:*:*"]`)
+	insertOp(t, db, "T-ACME", "web", "into", `WHEN .x == 2 EXEC "txco://credential/create" WITH principal = "pony:paris", scopes = ["imap:*:*"], into = "_new"`)
+	insertOp(t, db, "T-ACME", "web", "noise", `WHEN .x == 3 EXEC "txco://user/create" WITH email = "a@example.com", into = "_other"`)
+	insertOp(t, db, "T-ACME", "admin", "computed", `WHEN .x == 4 EXEC "txco://credential/create" WITH principal = "pony:paris", scopes = ["imap:*:*"], into = .dest`)
+
+	r := newRedactRegistry(zap.NewNop())
+	if err := r.Rebuild(db); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := r.Hints("acme", "web").Redact, []string{"_credential.password", "_new.password"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("web redact = %v, want %v", got, want)
+	}
+	if got, want := r.Hints("acme", "admin").Redact, []string{"_credential.password"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("computed into: redact = %v, want %v", got, want)
+	}
+
+	// And it is applied: the op's own output, as the trace records it.
+	out := trace.ApplyHints([]byte(`{"_new":{"id":"crd_1","password":"txc_k7m2_secret"}}`), r.Hints("acme", "web"))
+	if gjson.GetBytes(out, "_new.password").String() != "[REDACTED]" || gjson.GetBytes(out, "_new.id").String() != "crd_1" {
+		t.Errorf("applied = %s", out)
+	}
+}

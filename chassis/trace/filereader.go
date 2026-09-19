@@ -110,6 +110,9 @@ func readHeader(reqDir string, d *RequestDetail, full bool) {
 	if v, ok := in["tenant"].(string); ok {
 		d.Tenant = v
 	}
+	if v, ok := in["principal"].(string); ok {
+		d.Principal = v
+	}
 	if v, ok := in["stack"].(string); ok {
 		d.Stack = v
 	}

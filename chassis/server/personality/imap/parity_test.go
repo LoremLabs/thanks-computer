@@ -39,7 +39,7 @@ type observed struct {
 func startMemServer(t *testing.T) string {
 	t.Helper()
 	mem := imapmemserver.New()
-	u := imapmemserver.NewUser("paris@example.com", "pw")
+	u := imapmemserver.NewUser("paris@example.com", "bcdf-pw")
 	if err := u.Create("INBOX", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func scenario(t *testing.T, addr string) observed {
 			t.Fatal(err)
 		}
 	}
-	must(c.Login("paris@example.com", "pw").Wait())
+	must(c.Login("paris@example.com", "bcdf-pw").Wait())
 	must(c.Create("Archive", nil).Wait())
 	must(c.Create("Projects/Alpha", nil).Wait())
 	var o observed
@@ -173,7 +173,7 @@ func TestParityWithIMAPMemServer(t *testing.T) {
 	ref := scenario(t, startMemServer(t))
 
 	h := newHarness(t, config.Config{})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	got := scenario(t, h.addr)
 
 	if !reflect.DeepEqual(ref, got) {

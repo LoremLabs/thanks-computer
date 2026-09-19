@@ -51,7 +51,7 @@ const (
 func TestReconcileOwnsTheCalendar(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", user, "hash", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", user, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	m := calseed.New(s, false)
@@ -114,7 +114,7 @@ func TestReconcileOwnsTheCalendar(t *testing.T) {
 func TestReconcileRefusals(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", user, "hash", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", user, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	m := calseed.New(s, true)

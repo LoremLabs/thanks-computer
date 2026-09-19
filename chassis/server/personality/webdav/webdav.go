@@ -29,20 +29,13 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
-	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
 
 const (
-	// loginCacheTTL is how long a verified (username, hash, password)
-	// triple skips argon2id — a WebDAV client re-authenticates every
-	// request, so this is what makes Basic auth affordable.
-	loginCacheTTL = 5 * time.Minute
-	loginCacheMax = 10000
-
 	// Streaming budget for one PUT or GET body: a floor plus a per-MiB
 	// allowance, capped — the same shape the admin blob upload uses to
 	// escape the web listener's 15 s global timeouts for one request.
@@ -70,9 +63,10 @@ type Controller struct {
 	store    *chdrive.Store
 	resolver HostResolver
 
-	cache     *apppass.LoginCache
-	loginIP   *throttle.Throttle
-	loginAcct *throttle.Throttle
+	// auth verifies passwords: the resolver the four heads share, with
+	// its login cache and throttles (--login-rate). nil ⇒ every login
+	// answers "temporary failure".
+	auth *authn.Resolver
 
 	prefix       string
 	insecureAuth bool
@@ -91,7 +85,6 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chdrive.Store
 		pu:       pu,
 		store:    store,
 		resolver: resolver,
-		cache:    apppass.NewLoginCache(loginCacheTTL, loginCacheMax),
 		prefix:   "/drive",
 		now:      func() time.Time { return time.Now().UTC() },
 	}
@@ -99,8 +92,6 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chdrive.Store
 		c.prefix = cleanPrefix(pu.Conf.DrivePathPrefix)
 		c.insecureAuth = pu.Conf.DriveInsecureAuth
 		c.maxBytes = int64(pu.Conf.DriveMaxFileBytes)
-		c.loginIP = throttle.New(pu.Conf.DriveLoginRate, time.Minute)
-		c.loginAcct = throttle.New(pu.Conf.DriveLoginRate, time.Minute)
 		if pu.Mc != nil && pu.Mc.Meter != nil {
 			c.logins, _ = pu.Mc.Meter.Int64Counter("chassis.webdav.logins",
 				metric.WithDescription("WebDAV Basic-auth attempts by outcome"),
@@ -109,6 +100,9 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chdrive.Store
 	}
 	return c
 }
+
+// SetAuth hands the head the login resolver (chassis/authn).
+func (c *Controller) SetAuth(r *authn.Resolver) { c.auth = r }
 
 // Prefix is the reserved path prefix (no trailing slash).
 func (c *Controller) Prefix() string { return c.prefix }
@@ -138,11 +132,16 @@ func (c *Controller) Stop() {}
 // Handler is the http.Handler the web head mounts on Prefix()/.
 func (c *Controller) Handler() http.Handler { return c }
 
-// noteLogin counts a login outcome and logs one line for it.
-func (c *Controller) noteLogin(outcome, username, ip string) {
+// noteLogin counts a login outcome and logs one line for it. who is set
+// on a successful login: the principal and the credential that signed in.
+func (c *Controller) noteLogin(outcome, username, ip string, who ...authn.Authenticated) {
 	c.countLogin(outcome)
 	if c.pu != nil && c.pu.Logger != nil {
-		c.pu.Logger.Info("webdav login", zap.String("outcome", outcome), zap.String("user", username), zap.String("ip", ip))
+		fields := []zap.Field{zap.String("outcome", outcome), zap.String("user", username), zap.String("ip", ip)}
+		if len(who) > 0 && !who[0].IsZero() {
+			fields = append(fields, zap.String("principal", who[0].Principal.ID), zap.String("credential", who[0].Credential))
+		}
+		c.pu.Logger.Info("webdav login", fields...)
 	}
 }
 

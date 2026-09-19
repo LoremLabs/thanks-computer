@@ -1,5 +1,5 @@
 {
-  "note": "Contacts head + provisioning: POST /contacts/provision creates an account (argon2id), an address book whose policy asks the `_contacts` stack before a client edit commits, and a hello card from card{}. The book is then readable by any CardDAV client on the web port under /carddav/ (Basic auth over plaintext in dev), and the `_contacts` stack refuses cards without an email address. Binds localhost → contacts-demo for the route and pony.local.thanks.computer (dev-local, auto-verified) as the domain the username must belong to. Needs `txco dev --contacts`.",
+  "note": "Contacts head + provisioning: POST /contacts/provision creates an account bound to a principal, its password (issued once by txco://credential/create), an address book whose policy asks the `_contacts` stack before a client edit commits, and a hello card from card{}. The book is then readable by any CardDAV client on the web port under /carddav/ (Basic auth over plaintext in dev), and the `_contacts` stack refuses cards without an email address. Binds localhost → contacts-demo for the route and pony.local.thanks.computer (dev-local, auto-verified) as the domain the username must belong to. Needs `txco dev --contacts`.",
   "dev_flags": [
     "--contacts"
   ],
@@ -28,7 +28,7 @@
       "path": "/contacts/provision",
       "status": 200,
       "contains": "\"noop\":true",
-      "body": "{\"username\":\"paris@pony.local.thanks.computer\",\"password\":\"correct-horse-battery\"}"
+      "body": "{\"username\":\"paris@pony.local.thanks.computer\"}"
     },
     {
       "name": "a domain the tenant does not own is refused",

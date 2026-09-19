@@ -20,8 +20,9 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
@@ -50,6 +51,7 @@ func (fakeAdmission) AcquireConcurrency(string, *admission.Lease) bool { return 
 type fakeStack struct {
 	mu      sync.Mutex
 	seen    []string
+	who     []string // the principal pinned on each dispatch's context
 	respond func(raw string) string
 }
 
@@ -62,6 +64,8 @@ func (f *fakeStack) serve(bus <-chan *event.Envelope) {
 			raw := env.Payload.Raw
 			f.mu.Lock()
 			f.seen = append(f.seen, raw)
+			a, _ := authn.AuthenticatedFrom(env.Ctx)
+			f.who = append(f.who, a.Principal.ID)
 			f.mu.Unlock()
 			out := "{}"
 			if f.respond != nil {
@@ -91,6 +95,7 @@ func (f *fakeStack) wait(t *testing.T, n int) []string {
 
 type harness struct {
 	ctrl  *Controller
+	ids   *authn.Store
 	store *chcal.Store
 	srv   *httptest.Server
 }
@@ -110,8 +115,8 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	if conf.CalendarPathPrefix == "" {
 		conf.CalendarPathPrefix = "/dav"
 	}
-	if conf.CalendarLoginRate == 0 {
-		conf.CalendarLoginRate = 100
+	if conf.LoginRate == 0 {
+		conf.LoginRate = 100
 	}
 	if conf.CalendarObserveSample == 0 {
 		conf.CalendarObserveSample = 1
@@ -126,19 +131,27 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), Admission: fakeAdmission{suspended: "suspended"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu, store, fakeResolver{"pony.example.com": "acme", "other.example.com": "other", "sad.example.com": "suspended"})
+	ids := authntest.NewSQLiteStore(t)
+	ctrl.SetAuth(authn.NewResolver(ids, authn.ResolverConfig{Rate: conf.LoginRate, TenantID: authntest.SameTenantID}))
 	ctrl.now = func() time.Time { return time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC) }
 	ctrl.Start()
 	srv := httptest.NewServer(ctrl.Handler())
 	t.Cleanup(func() { srv.Close(); ctrl.Stop(); cancel() })
-	return &harness{ctrl: ctrl, store: store, srv: srv}
+	return &harness{ctrl: ctrl, ids: ids, store: store, srv: srv}
 }
 
+// account provisions username in tenant, signing in as its own principal
+// with password (which must carry a credential id — see authntest.Grant).
 func (h *harness) account(t *testing.T, tenant, username, password string) {
 	t.Helper()
-	hash, _ := apppass.HashPassword(password)
-	if _, err := h.store.UpsertAccount(context.Background(), tenant, username, hash, "", nil); err != nil {
+	if _, err := h.store.UpsertAccount(context.Background(), tenant, username, "", nil); err != nil {
 		t.Fatal(err)
 	}
+	p, err := authn.ParsePrincipal("acct:" + username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authntest.Grant(t, h.ids, tenant, p, username, password, "calendar:*:*")
 }
 
 func (h *harness) calendar(t *testing.T, tenant, username, name, policy string) chcal.Calendar {
@@ -200,7 +213,7 @@ func (h *harness) do(t *testing.T, r req) (*http.Response, string) {
 
 const (
 	user = "paris@pony.example.com"
-	pw   = "river-galaxy-bamboo-orbit-velvet"
+	pw   = "bcdf-river-galaxy-bamboo-orbit-velvet"
 )
 
 func icsDaily(uid, summary, start, dur string) string {
@@ -302,9 +315,6 @@ func TestAuthAndDiscovery(t *testing.T) {
 	if resp.StatusCode != 207 || !strings.Contains(out, "/dav/paris@pony.example.com/calendars/schedule/") || !strings.Contains(out, "Schedule") || !strings.Contains(out, "VEVENT") {
 		t.Errorf("home propfind = %d\n%s", resp.StatusCode, out)
 	}
-	// A verified login is cached: the throttle counts misses only.
-	h.ctrl.loginIP = nil
-	h.ctrl.loginAcct = nil
 }
 
 func TestObjectsQueriesAndFeed(t *testing.T) {
@@ -431,7 +441,7 @@ func TestMkcalendarProppatchAndRemove(t *testing.T) {
 		t.Errorf("mkcalendar under default policy = %d", resp.StatusCode)
 	}
 	// An account policy opens it.
-	if _, err := h.store.UpsertAccount(context.Background(), "acme", user, "", "", json.RawMessage(`{"mkcalendar":"local","remove":"local"}`)); err != nil {
+	if _, err := h.store.UpsertAccount(context.Background(), "acme", user, "", json.RawMessage(`{"mkcalendar":"local","remove":"local"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if resp, body := h.do(t, req{method: "MKCALENDAR", path: home + "7A3B-UUID/", user: user, pass: pw, body: mk}); resp.StatusCode != 201 {
@@ -550,6 +560,16 @@ func TestPolicyLanesAndRewrite(t *testing.T) {
 	if o := seen[4]; gjson.Get(o, "_txc.calendar.phase").String() != "observe" || gjson.Get(o, "_txc.calendar.object.etag").String() == "" || gjson.Get(o, "_txc.calendar.calendar.name").String() != "watched" {
 		t.Errorf("observe envelope = %s", o)
 	}
+	// Every dispatch — answer and observe — acts as the principal that
+	// signed in, pinned on its context (the processor stamps
+	// `_txc.principal` from that pin).
+	fs.mu.Lock()
+	for i, who := range fs.who {
+		if who != "acct:"+user {
+			t.Errorf("dispatch %d acted as %q", i, who)
+		}
+	}
+	fs.mu.Unlock()
 	// Unsubscribed tenant with a stack policy ⇒ 503.
 	h.ctrl.lanes.subscribed = func(string) bool { return false }
 	if resp, _ := h.do(t, req{method: "PUT", path: base + "asked/n.ics", user: user, pass: pw, body: icsDaily("N-1", "x", "20260101T090000Z", "PT30M"), headers: ct}); resp.StatusCode != 503 {
@@ -590,7 +610,7 @@ func loginLines(logs *observer.ObservedLogs) map[string]int {
 }
 
 func TestThrottleCountsMissesOnly(t *testing.T) {
-	h := newHarness(t, config.Config{CalendarLoginRate: 3})
+	h := newHarness(t, config.Config{LoginRate: 3})
 	h.account(t, "acme", user, pw)
 	h.calendar(t, "acme", user, "schedule", "")
 	// Many correct logins: one miss, the rest cache hits — never throttled.
@@ -669,5 +689,50 @@ func TestPolicyDefaults(t *testing.T) {
 	}
 	if err := chcal.ValidatePolicy(json.RawMessage(`{"fly":"deny"}`)); err == nil {
 		t.Error("bad verb accepted")
+	}
+}
+
+// TestLoginGoesThroughTheIdentityStore — the head signs in with a
+// credential: its username's binding finds the principal, the id in the
+// password finds the credential, and the credential's scopes must name
+// this head. A password the chassis never issued, the right password for
+// another door, and a revoked credential all fail — revocation at once,
+// though the password was verified (and cached) a moment before.
+func TestLoginGoesThroughTheIdentityStore(t *testing.T) {
+	h := newHarness(t, config.Config{})
+	core, logs := observer.New(zapcore.InfoLevel)
+	h.ctrl.pu.Logger = zap.New(core)
+	h.account(t, "acme", user, pw)
+	status := func(pass string) int {
+		t.Helper()
+		resp, _ := h.do(t, req{method: "OPTIONS", path: "/dav/", user: user, pass: pass})
+		return resp.StatusCode
+	}
+	if c := status(pw); c >= 400 {
+		t.Fatalf("login = %d", c)
+	}
+	if c := status("river-galaxy-bamboo-orbit-velvet"); c != 401 {
+		t.Errorf("a password with no credential id = %d", c)
+	}
+	p, _ := authn.ParsePrincipal("acct:" + user)
+	authntest.Grant(t, h.ids, "acme", p, user, "bcdg-another-door", "imap:*:*")
+	if c := status("bcdg-another-door"); c != 401 {
+		t.Errorf("another head's credential = %d", c)
+	}
+	creds, _ := h.ids.ListCredentials(context.Background(), "acme", "web", p, false)
+	for _, c := range creds {
+		if _, _, err := h.ids.RevokeCredential(context.Background(), "acme", "web", c.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := status(pw); c != 401 {
+		t.Errorf("revoked = %d", c)
+	}
+	if got := loginLines(logs); got["ok"] != 1 || got["scope"] != 1 || got["failed"] != 2 {
+		t.Errorf("login lines = %v, want ok:1 scope:1 failed:2", got)
+	}
+	ok := logs.FilterMessage("calendar login").FilterField(zap.String("outcome", "ok")).All()
+	if len(ok) != 1 || ok[0].ContextMap()["principal"] != p.ID || ok[0].ContextMap()["credential"] == "" {
+		t.Errorf("the ok line does not say who signed in: %v", ok)
 	}
 }

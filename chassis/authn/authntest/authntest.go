@@ -7,6 +7,7 @@ package authntest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"path"
@@ -17,6 +18,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -460,6 +462,196 @@ func Conformance(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 		}
 		if _, _, err := s.IssueCredential(ctx, tn, "web", full, authn.NewCredential{Scopes: []string{"imap:*:*"}}); !errors.Is(err, authn.ErrTooMany) {
 			t.Errorf("issue past the cap: %v", err)
+		}
+	})
+
+	t.Run("resolver", func(t *testing.T) { resolverCases(t, newStore) })
+}
+
+// SameTenantID is a ResolverConfig.TenantID for tests whose tenants use the
+// same string for slug and id.
+func SameTenantID(_ context.Context, slug string) (string, error) { return slug, nil }
+
+func sameTenantID(ctx context.Context, slug string) (string, error) { return SameTenantID(ctx, slug) }
+
+// Grant makes username sign in as p with password, for a head's tests —
+// which need to know the password, where the store only ever generates
+// one. It binds the username (as stack `web`), then gives p a credential
+// holding exactly password with the given scopes. password must carry a
+// short id, as an issued one does (authn.ShortIDOf): "bcdf-secret" does.
+// Granting the same short id to p again replaces its password.
+func Grant(t testing.TB, s *authn.Store, tenantID string, p authn.Principal, username, password string, scopes ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, _, err := s.BindPrincipal(ctx, tenantID, "web", p, authn.NewBinding{Kind: authn.BindEmail, Subject: username}); err != nil {
+		t.Fatalf("bind %s: %v", username, err)
+	}
+	short, ok := authn.ShortIDOf(password)
+	if !ok {
+		t.Fatalf("test password %q has no credential id: write it like bcdf-%s", password, password)
+	}
+	hash, err := apppass.HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authn.ParseScopes(scopes); err != nil {
+		t.Fatalf("scopes: %v", err)
+	}
+	enc, _ := json.Marshal(scopes)
+	if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(
+		`DELETE FROM credentials WHERE tenant_id = ? AND principal_id = ? AND short_id = ?`), tenantID, p.ID, short); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(`INSERT INTO credentials
+		(id, tenant_id, principal_id, short_id, kind, secret_hash, scopes, label, created_by, created_at)
+		VALUES (?, ?, ?, ?, 'app_password', ?, ?, 'test', 'web', '2026-09-19T00:00:00Z')`),
+		"crd_"+hxid.NewTimeSort().String(), tenantID, p.ID, short, hash, string(enc)); err != nil {
+		t.Fatalf("grant %s: %v", username, err)
+	}
+}
+
+func resolverCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
+	ctx := context.Background()
+	imapLogin := func(username string) authn.Scope {
+		return authn.Scope{Domain: "imap", Instance: username, Action: "login"}
+	}
+	attempt := func(tn, username, pw string) authn.Attempt {
+		return authn.Attempt{Tenant: tn, Username: username, Password: pw, IP: "192.0.2.1", Want: imapLogin(username)}
+	}
+
+	t.Run("a bound username and its credential sign in", func(t *testing.T) {
+		s, tn := newStore(t), tenant()
+		r := authn.NewResolver(s, authn.ResolverConfig{TenantID: sameTenantID})
+		pony, _ := authn.ParsePrincipal("pony:paris")
+		if _, _, err := s.BindPrincipal(ctx, tn, "web", pony, authn.NewBinding{Kind: authn.BindEmail, Subject: "paris@onepony.com"}); err != nil {
+			t.Fatal(err)
+		}
+		c, pw, err := s.IssueCredential(ctx, tn, "web", pony, authn.NewCredential{Scopes: []string{"imap:*:login", "drive:dc_1:*"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := r.Login(ctx, attempt(tn, "Paris@OnePony.com", pw))
+		if res.Outcome != authn.OutcomeOK || res.Who.Principal != pony || res.Who.Credential != c.ID || res.Cached {
+			t.Fatalf("login = %+v", res)
+		}
+		// The next one is a cache hit, and records nothing new.
+		if res := r.Login(ctx, attempt(tn, "paris@onepony.com", pw)); res.Outcome != authn.OutcomeOK || !res.Cached {
+			t.Errorf("second login = %+v", res)
+		}
+		list, _ := s.ListCredentials(ctx, tn, "web", pony, false)
+		if len(list) != 1 || list[0].LastUsedAt == nil {
+			t.Errorf("last_used_at not recorded: %+v", list)
+		}
+
+		// Doors: the drive scope names one collection; calendar is not named.
+		for _, c := range []struct {
+			want authn.Scope
+			out  authn.Outcome
+		}{
+			{authn.Scope{Domain: "drive", Instance: "dc_1", Action: "login"}, authn.OutcomeOK},
+			{authn.Scope{Domain: "drive", Instance: "dc_2", Action: "login"}, authn.OutcomeScope},
+			{authn.Scope{Domain: "calendar", Instance: "paris@onepony.com", Action: "login"}, authn.OutcomeScope},
+		} {
+			a := attempt(tn, "paris@onepony.com", pw)
+			a.Want = c.want
+			if res := r.Login(ctx, a); res.Outcome != c.out {
+				t.Errorf("door %v: %s, want %s", c.want, res.Outcome, c.out)
+			}
+		}
+
+		for name, bad := range map[string]string{
+			"wrong secret":    pw[:len(pw)-1] + "x",
+			"legacy password": "river-galaxy-bamboo-orbit-velvet",
+			"unknown id":      "txc_zzzz_" + strings.Repeat("a", 32),
+		} {
+			if res := r.Login(ctx, attempt(tn, "paris@onepony.com", bad)); res.Outcome != authn.OutcomeFailed {
+				t.Errorf("%s: %+v", name, res)
+			}
+		}
+		// Another tenant's same address knows nothing of this pony.
+		if res := r.Login(ctx, attempt(tenant(), "paris@onepony.com", pw)); res.Outcome != authn.OutcomeFailed {
+			t.Errorf("another tenant: %+v", res)
+		}
+		// An unbound username in the tenant fails the same way.
+		if res := r.Login(ctx, attempt(tn, "milan@onepony.com", pw)); res.Outcome != authn.OutcomeFailed {
+			t.Errorf("unbound username: %+v", res)
+		}
+	})
+
+	t.Run("revocation is immediate, cache or not", func(t *testing.T) {
+		s, tn := newStore(t), tenant()
+		r := authn.NewResolver(s, authn.ResolverConfig{TenantID: sameTenantID})
+		pony, _ := authn.ParsePrincipal("pony:oslo")
+		_, _, _ = s.BindPrincipal(ctx, tn, "web", pony, authn.NewBinding{Kind: authn.BindEmail, Subject: "oslo@onepony.com"})
+		c, pw, _ := s.IssueCredential(ctx, tn, "web", pony, authn.NewCredential{Scopes: []string{"imap:*:*"}})
+		if res := r.Login(ctx, attempt(tn, "oslo@onepony.com", pw)); res.Outcome != authn.OutcomeOK {
+			t.Fatalf("login = %+v", res)
+		}
+		if _, _, err := s.RevokeCredential(ctx, tn, "web", c.ID); err != nil {
+			t.Fatal(err)
+		}
+		if res := r.Login(ctx, attempt(tn, "oslo@onepony.com", pw)); res.Outcome != authn.OutcomeFailed {
+			t.Errorf("revoked, still cached on this node: %+v", res)
+		}
+	})
+
+	t.Run("a disabled user cannot sign in, and can again once enabled", func(t *testing.T) {
+		s, tn := newStore(t), tenant()
+		r := authn.NewResolver(s, authn.ResolverConfig{TenantID: sameTenantID})
+		u, _, _, err := s.CreateUser(ctx, tn, "web", authn.NewUser{Email: "alice@example.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, pw, _ := s.IssueCredential(ctx, tn, "web", u.Principal(), authn.NewCredential{Scopes: []string{"imap:*:*"}})
+		if res := r.Login(ctx, attempt(tn, "alice@example.com", pw)); res.Outcome != authn.OutcomeOK || res.Who.Principal != u.Principal() {
+			t.Fatalf("login = %+v", res)
+		}
+		_, _ = s.SetUserDisabled(ctx, tn, "web", u.ID, true)
+		if res := r.Login(ctx, attempt(tn, "alice@example.com", pw)); res.Outcome != authn.OutcomeDisabled {
+			t.Errorf("disabled = %+v", res)
+		}
+		_, _ = s.SetUserDisabled(ctx, tn, "web", u.ID, false)
+		if res := r.Login(ctx, attempt(tn, "alice@example.com", pw)); res.Outcome != authn.OutcomeOK {
+			t.Errorf("enabled again = %+v", res)
+		}
+	})
+
+	t.Run("checks are throttled per principal across heads, hits are free", func(t *testing.T) {
+		s, tn := newStore(t), tenant()
+		r := authn.NewResolver(s, authn.ResolverConfig{Rate: 3, TenantID: sameTenantID})
+		pony, _ := authn.ParsePrincipal("pony:lima")
+		_, _, _ = s.BindPrincipal(ctx, tn, "web", pony, authn.NewBinding{Kind: authn.BindEmail, Subject: "lima@onepony.com"})
+		_, pw, _ := s.IssueCredential(ctx, tn, "web", pony, authn.NewCredential{Scopes: []string{"imap:*:*", "calendar:*:*"}})
+		// The right password, many times: one check, the rest cache hits.
+		for i := 0; i < 10; i++ {
+			if res := r.Login(ctx, attempt(tn, "lima@onepony.com", pw)); res.Outcome != authn.OutcomeOK {
+				t.Fatalf("login %d = %+v", i, res)
+			}
+		}
+		// Two wrong guesses from different addresses, over two heads, spend
+		// the principal's budget; the third check is refused.
+		a := attempt(tn, "lima@onepony.com", pw+"x")
+		a.IP = "198.51.100.1"
+		r.Login(ctx, a)
+		a.IP, a.Want = "198.51.100.2", authn.Scope{Domain: "calendar", Instance: "lima@onepony.com", Action: "login"}
+		r.Login(ctx, a)
+		a.IP = "198.51.100.3"
+		if res := r.Login(ctx, a); res.Outcome != authn.OutcomeThrottled {
+			t.Errorf("third check = %+v", res)
+		}
+		// …while the owner's cached password still works.
+		if res := r.Login(ctx, attempt(tn, "lima@onepony.com", pw)); res.Outcome != authn.OutcomeOK {
+			t.Errorf("cached owner = %+v", res)
+		}
+	})
+
+	t.Run("no tenant id is an error, not a wrong password", func(t *testing.T) {
+		s := newStore(t)
+		r := authn.NewResolver(s, authn.ResolverConfig{TenantID: func(context.Context, string) (string, error) {
+			return "", errors.New("mirror not loaded")
+		}})
+		if res := r.Login(ctx, attempt("acme", "a@example.com", "x")); res.Outcome != authn.OutcomeError || res.Err == nil {
+			t.Errorf("login = %+v", res)
 		}
 	})
 }

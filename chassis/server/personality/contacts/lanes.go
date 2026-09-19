@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
 	"github.com/loremlabs/thanks-computer/chassis/event"
@@ -97,6 +98,9 @@ type mutation struct {
 	props       map[string]string // proppatch / mkaddressbook: the properties set
 	clientIP    string
 	rewrite     *rewrite // set from an answer, read by the committer
+	// who signed in: pinned on the dispatch context, so the run acts as
+	// that principal (processor.PrincipalScope, `_txc.principal`).
+	who authn.Authenticated
 }
 
 // answer is the translated `@contacts.res` of an answer-lane run.
@@ -248,6 +252,7 @@ func (l *lanes) dispatchObserve(ctx context.Context, m mutation) {
 	dctx, cancel := context.WithTimeout(ctx, observeDispatchTimeout)
 	defer cancel()
 	dctx = context.WithValue(dctx, config.CtxKeyRid, rid)
+	dctx = authn.WithAuthenticated(dctx, m.who)
 
 	resCh := make(chan event.Payload, 1)
 	envelope := event.PackageJSON(dctx, payload, resCh, "contacts")
@@ -284,6 +289,7 @@ func (l *lanes) ask(m mutation) answer {
 
 	rctx, cancel := context.WithTimeout(l.ctx, answerRunTimeout)
 	rctx = context.WithValue(rctx, config.CtxKeyRid, rid)
+	rctx = authn.WithAuthenticated(rctx, m.who)
 	resCh := make(chan event.Payload, 1)
 	envelope := event.PackageJSON(rctx, payload, resCh, "contacts")
 

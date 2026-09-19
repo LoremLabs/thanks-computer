@@ -12,6 +12,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/event"
@@ -38,6 +39,7 @@ import (
 // driveDeps is what the handlers need from the boot wiring.
 type driveDeps struct {
 	store *chdrive.Store // nil ⇒ txco_drive_disabled
+	ids   *authn.Store   // the identity store drive/account binds in
 	// snap returns the mirror DB the domain-ownership rule reads (dbcache
 	// snapshot); nil ⇒ every domain is refused.
 	snap     func() *sql.DB

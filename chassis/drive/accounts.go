@@ -10,11 +10,12 @@ import (
 )
 
 // Account is a drive_accounts row: a Basic-auth login for the `webdav`
-// head, bound to exactly ONE collection (the DAV root the login sees).
+// head, bound to exactly ONE collection (the DAV root the login sees). The
+// collection is the principal's grant; a credential's `drive:<id>:…` scope
+// can only narrow it.
 type Account struct {
 	Tenant       string
 	Username     string
-	PwHash       string
 	Status       string
 	CollectionID string
 	CreatedAt    time.Time
@@ -26,11 +27,12 @@ func NormalizeUsername(u string) string {
 	return strings.ToLower(strings.TrimSpace(u))
 }
 
-// UpsertAccount creates the account or updates it. An empty pwHash /
-// status / collectionID leaves the stored value unchanged on update; pwHash
-// and collectionID are required on create. created reports whether the row
-// was new.
-func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, status, collectionID string) (created bool, err error) {
+// UpsertAccount creates the account or updates it. An empty status /
+// collectionID leaves the stored value unchanged on update; collectionID is
+// required on create. created reports whether the row was new.
+// The account holds no password: who may sign in as it is the identity
+// store's business (chassis/authn — a binding and a credential).
+func (s *Store) UpsertAccount(ctx context.Context, tenant, username, status, collectionID string) (created bool, err error) {
 	username = NormalizeUsername(username)
 	if tenant == "" || username == "" {
 		return false, errors.New("drive: empty tenant or username")
@@ -54,9 +56,6 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 	exists := err == nil
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if pwHash == "" {
-			return false, errors.New("drive: a new account needs a password")
-		}
 		if collectionID == "" {
 			return false, errors.New("drive: a new account needs a collection")
 		}
@@ -64,9 +63,9 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 			status = StatusActive
 		}
 		_, ierr := s.db.ExecContext(ctx, s.rb(`
-			INSERT INTO drive_accounts (tenant, username, pw_hash, status, collection_id, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`),
-			tenant, username, pwHash, status, collectionID, now, now)
+			INSERT INTO drive_accounts (tenant, username, status, collection_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)`),
+			tenant, username, status, collectionID, now, now)
 		switch {
 		case ierr == nil:
 			return true, nil
@@ -91,10 +90,6 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 		}
 		sets := []string{"updated_at = ?"}
 		args := []any{now}
-		if pwHash != "" {
-			sets = append(sets, "pw_hash = ?")
-			args = append(args, pwHash)
-		}
 		if status != "" {
 			sets = append(sets, "status = ?")
 			args = append(args, status)
@@ -118,9 +113,9 @@ func (s *Store) GetAccount(ctx context.Context, username string) (Account, bool,
 	var a Account
 	var created, updated string
 	err := s.db.QueryRowContext(ctx, s.rb(`
-		SELECT tenant, username, pw_hash, status, collection_id, created_at, updated_at
+		SELECT tenant, username, status, collection_id, created_at, updated_at
 		  FROM drive_accounts WHERE username = ?`), username).
-		Scan(&a.Tenant, &a.Username, &a.PwHash, &a.Status, &a.CollectionID, &created, &updated)
+		Scan(&a.Tenant, &a.Username, &a.Status, &a.CollectionID, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, false, nil
 	}

@@ -104,7 +104,7 @@ func (c *Controller) createAddressbook(ctx context.Context, pr principal, name s
 	} else if found {
 		return chcon.Addressbook{}, http.StatusMethodNotAllowed, "address book exists"
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opMkaddressbook,
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opMkaddressbook,
 		addressbook: abRef{Name: name, DisplayName: props["displayname"]}, props: props, clientIP: pr.clientIP}
 	if status, msg := c.gate(nil, &pr.acct, chcon.VerbMkaddressbook, &m); status != 0 {
 		return chcon.Addressbook{}, status, msg
@@ -139,7 +139,7 @@ func (c *Controller) serveProppatch(w http.ResponseWriter, r *http.Request, pr p
 		http.Error(w, "malformed request body", http.StatusBadRequest)
 		return
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opProppatch, addressbook: refOf(ab), props: props, clientIP: pr.clientIP}
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opProppatch, addressbook: refOf(ab), props: props, clientIP: pr.clientIP}
 	if status, msg := c.gate(&ab, &pr.acct, chcon.VerbProppatch, &m); status != 0 {
 		http.Error(w, msg, status)
 		return

@@ -126,33 +126,33 @@ func TestCollectionsAndAccounts(t *testing.T) {
 	}
 
 	// Accounts: create, update, tenant fence, collection ownership.
-	created, err = s.UpsertAccount(ctx, "tnt_a", "Alice", "h1", "", c.ID)
+	created, err = s.UpsertAccount(ctx, "tnt_a", "Alice", "", c.ID)
 	if err != nil || !created {
 		t.Fatalf("UpsertAccount: created=%v err=%v", created, err)
 	}
 	a, ok, err := s.GetAccount(ctx, "alice")
-	if err != nil || !ok || a.PwHash != "h1" || a.Status != drive.StatusActive || a.CollectionID != c.ID {
+	if err != nil || !ok || a.Status != drive.StatusActive || a.CollectionID != c.ID {
 		t.Fatalf("GetAccount: %+v ok=%v err=%v", a, ok, err)
 	}
-	if _, err := s.UpsertAccount(ctx, "tnt_a", "alice", "", drive.StatusDisabled, ""); err != nil {
+	if _, err := s.UpsertAccount(ctx, "tnt_a", "alice", drive.StatusDisabled, ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	a, _, _ = s.GetAccount(ctx, "alice")
-	if a.PwHash != "h1" || a.Status != drive.StatusDisabled {
+	if a.Status != drive.StatusDisabled || a.CollectionID != c.ID {
 		t.Fatalf("update kept nothing: %+v", a)
 	}
 	cb, _, err := s.EnsureCollection(ctx, "tnt_b", "docs")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpsertAccount(ctx, "tnt_b", "alice", "h2", "", cb.ID); !errors.Is(err, drive.ErrUsernameTaken) {
+	if _, err := s.UpsertAccount(ctx, "tnt_b", "alice", "", cb.ID); !errors.Is(err, drive.ErrUsernameTaken) {
 		t.Fatalf("cross-tenant upsert: %v", err)
 	}
-	if _, err := s.UpsertAccount(ctx, "tnt_b", "bob", "h2", "", c.ID); !errors.Is(err, drive.ErrNotFound) {
+	if _, err := s.UpsertAccount(ctx, "tnt_b", "bob", "", c.ID); !errors.Is(err, drive.ErrNotFound) {
 		t.Fatalf("other tenant's collection accepted: %v", err)
 	}
-	if _, err := s.UpsertAccount(ctx, "tnt_a", "carol", "", "", c.ID); err == nil {
-		t.Fatal("create without password accepted")
+	if _, err := s.UpsertAccount(ctx, "tnt_a", "carol", "", ""); err == nil {
+		t.Fatal("create without a collection accepted")
 	}
 
 	// Delete: refuses non-empty, force tombstones.
@@ -815,5 +815,39 @@ func TestLargeStreamingPut(t *testing.T) {
 	got, res := read(t, s, c.ID, "big.bin")
 	if got != string(body) || res.ContentType != "application/octet-stream" {
 		t.Fatalf("big read: %d bytes, %s", len(got), res.ContentType)
+	}
+}
+
+// TestEnsureSchemaDropsTheOldPasswordColumn — a table from before the
+// identity store has a pw_hash column. EnsureSchema drops it and keeps the
+// rows; the account's login lives in chassis/authn now.
+func TestEnsureSchemaDropsTheOldPasswordColumn(t *testing.T) {
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(t.TempDir(), "old.db")+"?mode=rwc&_journal_mode=WAL&_busy_timeout=15000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE drive_accounts (
+		tenant TEXT NOT NULL, username TEXT NOT NULL, pw_hash TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'active', collection_id TEXT NOT NULL,
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+		PRIMARY KEY (tenant, username), UNIQUE (username))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO drive_accounts (tenant, username, pw_hash, collection_id, created_at, updated_at)
+		VALUES ('acme', 'paris@example.com', '$argon2id$old', 'dc_1', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s := drive.NewStore(db, registry.SQLite, nil)
+	for i := 0; i < 2; i++ {
+		if err := s.EnsureSchema(context.Background()); err != nil {
+			t.Fatalf("ensure schema #%d: %v", i, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT pw_hash FROM drive_accounts`); err == nil {
+		t.Error("pw_hash is still there")
+	}
+	if a, ok, err := s.GetAccount(context.Background(), "paris@example.com"); err != nil || !ok || a.Tenant != "acme" {
+		t.Errorf("the row did not survive: %+v ok=%v err=%v", a, ok, err)
 	}
 }

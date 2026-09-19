@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/tidwall/gjson"
 
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
@@ -26,6 +27,7 @@ import (
 type fakeStack struct {
 	mu      sync.Mutex
 	seen    []string
+	who     []string // the principal pinned on each dispatch's context
 	respond func(raw string) string
 	delay   time.Duration
 }
@@ -39,6 +41,8 @@ func (f *fakeStack) serve(bus <-chan *event.Envelope) {
 			raw := env.Payload.Raw
 			f.mu.Lock()
 			f.seen = append(f.seen, raw)
+			a, _ := authn.AuthenticatedFrom(env.Ctx)
+			f.who = append(f.who, a.Principal.ID)
 			delay := f.delay
 			f.mu.Unlock()
 			out := "{}"
@@ -98,8 +102,8 @@ const rawMsg = "From: Owner <owner@example.com>\r\nTo: paris@example.com\r\nSubj
 
 func TestTreeVerbsAndList(t *testing.T) {
 	h := newHarness(t, config.Config{})
-	h.account(t, "acme", "paris@example.com", "pw", "")
-	c := login(t, h, "paris@example.com", "pw")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
+	c := login(t, h, "paris@example.com", "bcdf-pw")
 
 	if err := c.Create("Brain/Knowledge", &imap.CreateOptions{SpecialUse: []imap.MailboxAttr{imap.MailboxAttrArchive}}).Wait(); err != nil {
 		t.Fatalf("create: %v", err)
@@ -161,8 +165,8 @@ func TestClientAppendCopyMoveExpunge(t *testing.T) {
 	h := newHarness(t, config.Config{})
 	ix := blob.NewKVIndex(nil)
 	_ = ix
-	h.account(t, "acme", "paris@example.com", "pw", "")
-	c := login(t, h, "paris@example.com", "pw")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
+	c := login(t, h, "paris@example.com", "bcdf-pw")
 	_ = c.Create("Archive", nil).Wait()
 
 	ac := c.Append("INBOX", int64(len(rawMsg)), &imap.AppendOptions{Flags: []imap.Flag{imap.FlagFlagged}, Time: time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)})
@@ -272,7 +276,7 @@ func TestPolicyDenyAndLanes(t *testing.T) {
 		return `{"_txc":{"imap":{"res":{"ok":false,"code":"cannot","msg":"not here"}}}}`
 	}}
 	withStack(t, h, fs)
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	ctx := context.Background()
 	if _, err := h.store.CreateMailbox(ctx, "acme", "paris@example.com", "Locked", "locked", nil, json.RawMessage(`{"append":"deny","create":"deny"}`)); err != nil {
 		t.Fatal(err)
@@ -280,7 +284,7 @@ func TestPolicyDenyAndLanes(t *testing.T) {
 	if _, err := h.store.CreateMailbox(ctx, "acme", "paris@example.com", "Knowledge", "knowledge", nil, json.RawMessage(`{"append":"stack"}`)); err != nil {
 		t.Fatal(err)
 	}
-	c := login(t, h, "paris@example.com", "pw")
+	c := login(t, h, "paris@example.com", "bcdf-pw")
 
 	// deny: refused at the protocol layer, nothing dispatched.
 	ac := c.Append("Locked", int64(len(rawMsg)), nil)
@@ -357,17 +361,26 @@ func TestPolicyDenyAndLanes(t *testing.T) {
 	if n := len(fs.wait(t, 5)); n != 5 {
 		t.Errorf("STORE dispatched under local policy: %d envelopes", n)
 	}
+	// Every dispatch acts as the principal that signed in, pinned on its
+	// context (the processor stamps `_txc.principal` from that pin).
+	fs.mu.Lock()
+	for i, who := range fs.who {
+		if who != "acct:paris@example.com" {
+			t.Errorf("dispatch %d acted as %q", i, who)
+		}
+	}
+	fs.mu.Unlock()
 }
 
 func TestAnswerLaneDeadlineAndAbsent(t *testing.T) {
 	h := newHarness(t, config.Config{})
 	fs := &fakeStack{delay: 2 * time.Second}
 	withStack(t, h, fs)
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	if _, err := h.store.CreateMailbox(context.Background(), "acme", "paris@example.com", "Slow", "", nil, json.RawMessage(`{"append":"stack"}`)); err != nil {
 		t.Fatal(err)
 	}
-	c := login(t, h, "paris@example.com", "pw")
+	c := login(t, h, "paris@example.com", "bcdf-pw")
 	ac := c.Append("Slow", int64(len(rawMsg)), nil)
 	_, _ = ac.Write([]byte(rawMsg))
 	_ = ac.Close()

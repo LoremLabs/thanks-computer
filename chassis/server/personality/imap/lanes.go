@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -109,6 +110,9 @@ type mutation struct {
 	objects  []objectRef
 	msg      *msgFacts
 	clientIP string
+	// who signed in: pinned on the dispatch context, so the run acts as
+	// that principal (processor.PrincipalScope, `_txc.principal`).
+	who authn.Authenticated
 }
 
 // answer is the translated `@imap.res` of an answer-lane run.
@@ -262,6 +266,7 @@ func (l *lanes) dispatchObserve(ctx context.Context, m mutation) {
 	dctx, cancel := context.WithTimeout(ctx, observeDispatchTimeout)
 	defer cancel()
 	dctx = context.WithValue(dctx, config.CtxKeyRid, rid)
+	dctx = authn.WithAuthenticated(dctx, m.who)
 
 	resCh := make(chan event.Payload, 1)
 	envelope := event.PackageJSON(dctx, payload, resCh, "imap")
@@ -302,6 +307,7 @@ func (l *lanes) ask(m mutation) answer {
 
 	rctx, cancel := context.WithTimeout(l.ctx, answerRunTimeout)
 	rctx = context.WithValue(rctx, config.CtxKeyRid, rid)
+	rctx = authn.WithAuthenticated(rctx, m.who)
 	resCh := make(chan event.Payload, 1)
 	envelope := event.PackageJSON(rctx, payload, resCh, "imap")
 

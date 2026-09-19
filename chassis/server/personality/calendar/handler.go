@@ -12,7 +12,7 @@ import (
 	"github.com/emersion/go-webdav/caldav"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
@@ -23,6 +23,9 @@ type principal struct {
 	username string
 	acct     chcal.Account
 	clientIP string
+	// who is the principal the credential signed in as, pinned on every
+	// envelope this request dispatches.
+	who authn.Authenticated
 }
 
 type ctxKeyPrincipal struct{}
@@ -153,9 +156,13 @@ func (c *Controller) secure(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// authenticate is Basic auth over the account table: TLS first (before a
-// credential is read), then the verified-login cache, the throttles on a
-// miss only, argon2id, status, admission, and the tenant match.
+// authenticate is Basic auth: TLS first (before a credential is read), the
+// account the username names, then the password through the login resolver
+// the heads share (chassis/authn: the username's binding finds the
+// principal, the credential id in the password finds the credential, one
+// argon2id verify, and the credential's scopes must cover
+// `calendar:<username>:login` — with one login cache and one set of
+// throttles), then the account's status, admission, and the tenant match.
 func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant string) (principal, bool) {
 	ip := clientIP(r)
 	if !c.secure(r) && !c.insecureAuth {
@@ -183,19 +190,6 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return principal{}, false
 	}
-	throttled := func() bool {
-		if c.loginIP != nil && ip != "" {
-			if ok, _ := c.loginIP.Allow(ip); !ok {
-				return true
-			}
-		}
-		if c.loginAcct != nil {
-			if ok, _ := c.loginAcct.Allow(username); !ok {
-				return true
-			}
-		}
-		return false
-	}
 	tooMany := func() (principal, bool) {
 		c.noteLogin("throttled", username, ip)
 		w.Header().Set("Retry-After", "60")
@@ -209,28 +203,27 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		return principal{}, false
 	}
 	if !found {
-		if throttled() {
+		if c.auth.Miss(ip, username, pass) == authn.OutcomeThrottled {
 			return tooMany()
 		}
-		apppass.VerifyDummy(pass)
 		return deny("failed")
 	}
-	key := apppass.LoginKey(acct.Username, acct.PwHash, pass)
-	cached := c.cache.Hit(key)
-	if !cached {
-		if throttled() {
-			return tooMany()
-		}
-		match, verr := apppass.VerifyPassword(acct.PwHash, pass)
-		if verr != nil {
-			c.pu.Logger.Warn("calendar account has an unreadable password hash", zap.String("user", username), zap.String("err", verr.Error()))
-			return deny("error")
-		}
-		if !match {
-			return deny("failed")
-		}
-		c.cache.Put(key)
+	res := c.auth.Login(r.Context(), authn.Attempt{
+		Tenant: acct.Tenant, Username: acct.Username, Password: pass, IP: ip,
+		Want: authn.Scope{Domain: "calendar", Instance: acct.Username, Action: "login"},
+	})
+	switch res.Outcome {
+	case authn.OutcomeOK:
+	case authn.OutcomeThrottled:
+		return tooMany()
+	case authn.OutcomeError:
+		c.pu.Logger.Warn("calendar login failed", zap.String("user", username), zap.Error(res.Err))
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+		return principal{}, false
+	default:
+		return deny(string(res.Outcome))
 	}
+	cached := res.Cached
 	if acct.Status != chcal.StatusActive {
 		return deny("disabled")
 	}
@@ -260,9 +253,9 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		// per cache TTL per node. Refusals above log every time.
 		c.countLogin("ok")
 	} else {
-		c.noteLogin("ok", username, ip)
+		c.noteLogin("ok", username, ip, res.Who)
 	}
-	return principal{tenant: tenant, username: acct.Username, acct: acct, clientIP: ip}, true
+	return principal{tenant: tenant, username: acct.Username, acct: acct, clientIP: ip, who: res.Who}, true
 }
 
 // serveFeed answers GET/HEAD <prefix>/feed/<token>.ics from the store.
@@ -324,7 +317,7 @@ func (c *Controller) serveRemoveCalendar(w http.ResponseWriter, r *http.Request,
 		http.NotFound(w, r)
 		return
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opRemove, calendar: refOf(cal), clientIP: pr.clientIP}
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opRemove, calendar: refOf(cal), clientIP: pr.clientIP}
 	if status, msg := c.gate(&cal, &pr.acct, chcal.VerbRemove, &m); status != 0 {
 		http.Error(w, msg, status)
 		return

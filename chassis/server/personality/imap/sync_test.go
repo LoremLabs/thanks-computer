@@ -29,7 +29,7 @@ func seqs(u []uint32) string {
 func selectINBOX(t *testing.T, h *harness) (*imapclient.Client, *unilateral) {
 	t.Helper()
 	c, u := dialWith(t, h.addr)
-	if err := c.Login("paris@example.com", "pw").Wait(); err != nil {
+	if err := c.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
@@ -40,7 +40,7 @@ func selectINBOX(t *testing.T, h *harness) (*imapclient.Client, *unilateral) {
 
 func TestRemoteAppendSeenOnNextCommand(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSyncInterval: "0"})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	c, u := selectINBOX(t, h)
 	remote := h.remote(t)
 	h.appendHelloVia(t, remote, "acme", "paris@example.com", "r1", "remote one", "one")
@@ -63,7 +63,7 @@ func TestRemoteAppendSeenOnNextCommand(t *testing.T) {
 
 func TestRemoteFlagsDelivered(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSyncInterval: "0"})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	h.appendHello(t, "acme", "paris@example.com", "k", "s", "t")
 	c, u := selectINBOX(t, h)
 	remote := h.remote(t)
@@ -82,7 +82,7 @@ func TestRemoteFlagsDelivered(t *testing.T) {
 
 func TestRemoteExpungeSequence(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSyncInterval: "0"})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	for _, k := range []string{"a", "b", "c"} {
 		h.appendHello(t, "acme", "paris@example.com", k, k, k)
 	}
@@ -126,7 +126,7 @@ func TestRemoteExpungeSequence(t *testing.T) {
 
 func TestOwnStoreNotEchoed(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSyncInterval: "0"})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	h.appendHello(t, "acme", "paris@example.com", "k", "s", "t")
 	c1, u1 := selectINBOX(t, h)
 	c2, u2 := selectINBOX(t, h)
@@ -151,7 +151,7 @@ func TestOwnStoreNotEchoed(t *testing.T) {
 
 func TestIdleTickDeliversRemoteAppend(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSyncInterval: "1s"})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	c, u := selectINBOX(t, h)
 	idle, err := c.Idle()
 	if err != nil {
@@ -180,10 +180,10 @@ func TestIdleTickDeliversRemoteAppend(t *testing.T) {
 
 func TestRemoteResetSendsBye(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSyncInterval: "0"})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	h.appendHello(t, "acme", "paris@example.com", "k", "s", "t")
 	c, _ := dialWith(t, h.addr)
-	if err := c.Login("paris@example.com", "pw").Wait(); err != nil {
+	if err := c.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
 		t.Fatal(err)
 	}
 	first, err := c.Select("INBOX", nil).Wait()
@@ -201,7 +201,7 @@ func TestRemoteResetSendsBye(t *testing.T) {
 		t.Error("NOOP after a reset should fail (BYE)")
 	}
 	c2 := dial(t, h.addr)
-	if err := c2.Login("paris@example.com", "pw").Wait(); err != nil {
+	if err := c2.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
 		t.Fatal(err)
 	}
 	sel, err := c2.Select("INBOX", nil).Wait()
@@ -212,7 +212,7 @@ func TestRemoteResetSendsBye(t *testing.T) {
 
 func TestMoveExpungeStillWriteExpunges(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSyncInterval: "0"})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	for _, k := range []string{"a", "b", "c", "d"} {
 		h.appendHello(t, "acme", "paris@example.com", k, k, k)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	"github.com/loremlabs/thanks-computer/chassis/event"
@@ -170,6 +171,9 @@ func (pu *Unit) detachedOpContext(ctx context.Context, raw string, timeout time.
 	if s := sourceScope(ctx); s != "" {
 		dctx = WithSource(dctx, s)
 	}
+	if a, ok := authn.AuthenticatedFrom(ctx); ok {
+		dctx = authn.WithAuthenticated(dctx, a)
+	}
 	if rid, ok := ctx.Value(config.CtxKeyRid).(string); ok && rid != "" {
 		dctx = context.WithValue(dctx, config.CtxKeyRid, rid)
 	}
@@ -218,7 +222,8 @@ func (pu *Unit) completeContinuableSync(
 	finish := time.Now()
 	if r.err != nil {
 		trace.FromContext(ctx).Step(trace.StepInfo{
-			Stack: op.Stack, Scope: op.Scope, Name: name,
+			Tenant: tenantScope(ctx),
+			Stack:  op.Stack, Scope: op.Scope, Name: name,
 			Operation: op.Resonator.Exec, Transport: "continuable",
 			Input:     []byte(op.Input),
 			StartedAt: aStart, FinishedAt: finish,
@@ -238,7 +243,8 @@ func (pu *Unit) completeContinuableSync(
 		out, oerr := pu.OverlayResponseFor(ctx, op.EnvelopeView(), payload, op.Resonator.Emit.Overrides)
 		if oerr != nil {
 			trace.FromContext(ctx).Step(trace.StepInfo{
-				Stack: op.Stack, Scope: op.Scope, Name: name,
+				Tenant: tenantScope(ctx),
+				Stack:  op.Stack, Scope: op.Scope, Name: name,
 				Operation: op.Resonator.Exec, Transport: "continuable",
 				Input:     []byte(op.Input),
 				StartedAt: aStart, FinishedAt: finish,
@@ -253,7 +259,8 @@ func (pu *Unit) completeContinuableSync(
 		payload = out
 	}
 	trace.FromContext(ctx).Step(trace.StepInfo{
-		Stack: op.Stack, Scope: op.Scope, Name: name,
+		Tenant: tenantScope(ctx),
+		Stack:  op.Stack, Scope: op.Scope, Name: name,
 		Operation: op.Resonator.Exec, Transport: "continuable",
 		Input:     []byte(op.Input),
 		Output:    []byte(payload),
@@ -381,7 +388,8 @@ func (pu *Unit) promoteContinuable(
 	})
 	ack, _ := json.Marshal(map[string]string{"status": "promoted", "transport": "continuable"})
 	trace.FromContext(ctx).Step(trace.StepInfo{
-		Stack: op.Stack, Scope: op.Scope, Name: name,
+		Tenant: tenantScope(ctx),
+		Stack:  op.Stack, Scope: op.Scope, Name: name,
 		Operation: op.Resonator.Exec, Transport: "continuable",
 		Input:     []byte(op.Input),
 		Output:    ack,

@@ -12,7 +12,7 @@ import (
 	"github.com/emersion/go-webdav"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
@@ -25,6 +25,8 @@ type principal struct {
 	acct     chdrive.Account
 	coll     chdrive.Collection
 	clientIP string
+	// who is the principal the credential signed in as.
+	who authn.Authenticated
 	// prefix is the mount prefix this REQUEST used — the bare one, or the
 	// one that names the collection (mountPrefix). Every rel/href on the
 	// request reads it, so a session's URLs stay in the form the client
@@ -188,10 +190,13 @@ func (c *Controller) secure(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// authenticate is Basic auth over the account table: TLS first (before a
-// credential is read), then the verified-login cache, the throttles on a
-// miss only, argon2id, status, admission, the tenant match, and finally
-// the account's collection. The flow is the calendar head's.
+// authenticate is Basic auth: TLS first (before a credential is read), the
+// account the username names, then the password through the login resolver
+// the heads share (chassis/authn — the calendar head's flow), whose scope
+// check here is `drive:<collection-id>:login`: the account's collection is
+// the principal's grant, and a credential's drive scope can only narrow it.
+// Then the account's status, admission, the tenant match, and finally the
+// collection itself.
 func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant string) (principal, bool) {
 	ip := clientIP(r)
 	if !c.secure(r) && !c.insecureAuth {
@@ -218,19 +223,6 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return principal{}, false
 	}
-	throttled := func() bool {
-		if c.loginIP != nil && ip != "" {
-			if ok, _ := c.loginIP.Allow(ip); !ok {
-				return true
-			}
-		}
-		if c.loginAcct != nil {
-			if ok, _ := c.loginAcct.Allow(username); !ok {
-				return true
-			}
-		}
-		return false
-	}
 	tooMany := func() (principal, bool) {
 		c.noteLogin("throttled", username, ip)
 		w.Header().Set("Retry-After", "60")
@@ -244,28 +236,27 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		return principal{}, false
 	}
 	if !found {
-		if throttled() {
+		if c.auth.Miss(ip, username, pass) == authn.OutcomeThrottled {
 			return tooMany()
 		}
-		apppass.VerifyDummy(pass)
 		return deny("failed")
 	}
-	key := apppass.LoginKey(acct.Username, acct.PwHash, pass)
-	cached := c.cache.Hit(key)
-	if !cached {
-		if throttled() {
-			return tooMany()
-		}
-		match, verr := apppass.VerifyPassword(acct.PwHash, pass)
-		if verr != nil {
-			c.pu.Logger.Warn("webdav account has an unreadable password hash", zap.String("user", username), zap.String("err", verr.Error()))
-			return deny("error")
-		}
-		if !match {
-			return deny("failed")
-		}
-		c.cache.Put(key)
+	res := c.auth.Login(r.Context(), authn.Attempt{
+		Tenant: acct.Tenant, Username: acct.Username, Password: pass, IP: ip,
+		Want: authn.Scope{Domain: "drive", Instance: acct.CollectionID, Action: "login"},
+	})
+	switch res.Outcome {
+	case authn.OutcomeOK:
+	case authn.OutcomeThrottled:
+		return tooMany()
+	case authn.OutcomeError:
+		c.pu.Logger.Warn("webdav login failed", zap.String("user", username), zap.Error(res.Err))
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+		return principal{}, false
+	default:
+		return deny(string(res.Outcome))
 	}
+	cached := res.Cached
 	if acct.Status != chdrive.StatusActive {
 		return deny("disabled")
 	}
@@ -308,10 +299,10 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, tenant
 		// TTL per node. Refusals above log every time.
 		c.countLogin("ok")
 	} else {
-		c.noteLogin("ok", username, ip)
+		c.noteLogin("ok", username, ip, res.Who)
 	}
 	return principal{
-		tenant: tenant, username: acct.Username, acct: acct, coll: coll, clientIP: ip,
+		tenant: tenant, username: acct.Username, acct: acct, coll: coll, clientIP: ip, who: res.Who,
 		prefix: c.mountPrefix(coll, r.URL.Path),
 	}, true
 }

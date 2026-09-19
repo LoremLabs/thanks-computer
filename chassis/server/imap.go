@@ -14,6 +14,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
@@ -51,8 +52,11 @@ import (
 
 type imapDeps struct {
 	store *chimap.Store // nil ⇒ txco_imap_disabled
-	fcas  filecas.Store // nil ⇒ append answers txco_imap_disabled
-	ix    blob.Index    // may be nil (no tenant sha rows recorded)
+	// ids is the identity store the account op binds the username in
+	// (bindAccount); nil ⇒ imap/account answers txco_imap_disabled.
+	ids  *authn.Store
+	fcas filecas.Store // nil ⇒ append answers txco_imap_disabled
+	ix   blob.Index    // may be nil (no tenant sha rows recorded)
 	// snap returns the mirror DB the domain-ownership rule reads (dbcache
 	// snapshot); nil ⇒ every domain is refused.
 	snap     func() *sql.DB
@@ -115,10 +119,11 @@ func (d imapDeps) domainOwned(ctx context.Context, tenant, domain string) (bool,
 	return mail.DomainOwnedByTenant(ctx, d.snap(), d.dialect, tenant, domain)
 }
 
-// imapAccount creates or updates an IMAP account for the pinned tenant.
-// Result at `into`: {username, created, password?, rotated?} — password
-// only when generated (create, explicit "", or `rotate`); rotated only
-// when an existing account's password was regenerated.
+// imapAccount creates or updates an IMAP account for the pinned tenant and
+// binds its username to `principal` (bindAccount): the account holds no
+// password — a login is a credential issued to that principal with
+// txco://credential/create. Result at `into`: {username, created,
+// principal}.
 func imapAccount(ctx context.Context, d imapDeps, in []byte) (event.Payload, error) {
 	tenant, meta, into, ep, ok := imapPrelude(ctx, d)
 	if !ok {
@@ -137,24 +142,16 @@ func imapAccount(ctx context.Context, d imapDeps, in []byte) (event.Payload, err
 			fmt.Sprintf("domain %q is not a verified hostname or delegated zone of this tenant", domain)), nil
 	}
 
-	// The password block is shared with txco://calendar/account
-	// (account_password.go): absent ⇒ unchanged on update / generated on
-	// create; "" ⇒ generated and returned once; `rotate` ⇒ regenerated;
-	// `password_style` token|words.
-	pwr, pcode, pmsg := resolveAccountPassword(meta, func() (bool, error) {
-		_, exists, gerr := d.store.GetAccount(ctx, username)
-		return exists, gerr
-	})
-	if pcode != "" {
-		return imapErr(into, "txco_imap_"+pcode, pmsg), nil
-	}
-	generated, pwHash, rotated := pwr.generated, pwr.hash, pwr.rotated
 	status := gjson.GetBytes(meta, "status").String()
 	var policy json.RawMessage
 	if p := gjson.GetBytes(meta, "policy"); p.Exists() && p.IsObject() {
 		policy = json.RawMessage(p.Raw)
 	}
-	created, err := d.store.UpsertAccount(ctx, tenant, username, pwHash, status, policy)
+	principal, pcode, pmsg := bindAccount(ctx, d.ids, d.snap, tenant, username, meta)
+	if pcode != "" {
+		return imapErr(into, "txco_imap_"+pcode, pmsg), nil
+	}
+	created, err := d.store.UpsertAccount(ctx, tenant, username, status, policy)
 	if err != nil {
 		code := "txco_imap_store"
 		if err == chimap.ErrUsernameTaken {
@@ -164,12 +161,7 @@ func imapAccount(ctx context.Context, d imapDeps, in []byte) (event.Payload, err
 	}
 	raw, _ := sjson.Set(`{}`, into+".username", username)
 	raw, _ = sjson.Set(raw, into+".created", created)
-	if generated != "" {
-		raw, _ = sjson.Set(raw, into+".password", generated)
-	}
-	if rotated {
-		raw, _ = sjson.Set(raw, into+".rotated", true)
-	}
+	raw, _ = sjson.Set(raw, into+".principal", principal.ID)
 	return event.Payload{Raw: raw, Type: event.JSON}, nil
 }
 

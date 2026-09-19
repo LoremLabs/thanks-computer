@@ -92,16 +92,16 @@ func NewRedactingSink(inner Sink, lookup HintLookup) Sink {
 	return &RedactingSink{inner: inner, lookup: lookup}
 }
 
-// Begin captures the request's tenant and (initial) stack, applies
-// hints to the inbound payload, then forwards to the inner sink.
+// Begin captures the request's tenant and (initial) stack, applies hints to
+// the inbound payload, then forwards to the inner sink.
 func (s *RedactingSink) Begin(info RequestInfo) RequestTracer {
 	rt := &redactingTracer{
 		lookup: s.lookup,
 		tenant: info.Tenant,
-		stacks: map[string]struct{}{},
+		slots:  map[slot]struct{}{},
 	}
 	if info.Stack != "" {
-		rt.stacks[info.Stack] = struct{}{}
+		rt.slots[slot{info.Tenant, info.Stack}] = struct{}{}
 	}
 	info.Payload = ApplyHints(info.Payload, rt.union())
 	rt.inner = s.inner.Begin(info)
@@ -111,38 +111,46 @@ func (s *RedactingSink) Begin(info RequestInfo) RequestTracer {
 // Close forwards to the inner sink.
 func (s *RedactingSink) Close(ctx context.Context) error { return s.inner.Close(ctx) }
 
-// redactingTracer wraps the inner RequestTracer and applies the
-// running union of hints (Begin's stack + every Step's stack) on
-// every forwarded call.
+// redactingTracer wraps the inner RequestTracer and applies the running
+// union of hints — every (tenant, stack) the request has visited — on every
+// forwarded call.
+//
+// The tenant is the STEP's. Every request enters the boot pipeline pinned
+// to `_sys` and is re-tenanted by routing, so the tenant Begin sees is
+// `_sys` for nearly every request; keying a tenant stack's hints by it
+// found nothing, and no tenant's `WITH redact` / `WITH omit` ever applied.
 type redactingTracer struct {
 	inner  RequestTracer
 	lookup HintLookup
-	tenant string
+	tenant string // Begin's: the fallback for a step that carries none
 
-	mu     sync.Mutex // guards stacks (parallel ops at the same scope share one tracer)
-	stacks map[string]struct{}
+	mu    sync.Mutex // guards slots (parallel ops at the same scope share one tracer)
+	slots map[slot]struct{}
 }
 
-// union builds the deduplicated hint lists for every (tenant, stack)
-// the request has visited so far. Omit wins on collision.
+// slot is one (tenant, stack) a request has run in.
+type slot struct{ tenant, stack string }
+
+// union builds the deduplicated hint lists for every (tenant, stack) the
+// request has visited so far. Omit wins on collision.
 func (t *redactingTracer) union() Hints {
 	if t.lookup == nil {
 		return Hints{}
 	}
 	t.mu.Lock()
-	stackSnap := make([]string, 0, len(t.stacks))
-	for st := range t.stacks {
-		stackSnap = append(stackSnap, st)
+	snap := make([]slot, 0, len(t.slots))
+	for sl := range t.slots {
+		snap = append(snap, sl)
 	}
 	t.mu.Unlock()
-	if len(stackSnap) == 0 {
+	if len(snap) == 0 {
 		return Hints{}
 	}
 	var out Hints
 	seenR := map[string]struct{}{}
 	seenO := map[string]struct{}{}
-	for _, st := range stackSnap {
-		h := t.lookup(t.tenant, st)
+	for _, sl := range snap {
+		h := t.lookup(sl.tenant, sl.stack)
 		for _, p := range h.Redact {
 			if _, dup := seenR[p]; dup {
 				continue
@@ -173,8 +181,12 @@ func (t *redactingTracer) union() Hints {
 
 func (t *redactingTracer) Step(info StepInfo) {
 	if info.Stack != "" {
+		tenant := info.Tenant
+		if tenant == "" {
+			tenant = t.tenant
+		}
 		t.mu.Lock()
-		t.stacks[info.Stack] = struct{}{}
+		t.slots[slot{tenant, info.Stack}] = struct{}{}
 		t.mu.Unlock()
 	}
 	h := t.union()

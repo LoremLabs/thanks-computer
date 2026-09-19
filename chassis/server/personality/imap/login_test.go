@@ -7,6 +7,8 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/loremlabs/thanks-computer/chassis/authn"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 )
 
@@ -20,10 +22,10 @@ import (
 func TestLoginLineNamesTheListener(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
 	h := newHarnessWithLogger(t, config.Config{}, zap.New(core))
-	h.account(t, "acme", "paris@example.com", "secret-1", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-secret-1", "")
 
 	c := dial(t, h.addr)
-	if err := c.Login("paris@example.com", "secret-1").Wait(); err != nil {
+	if err := c.Login("paris@example.com", "bcdf-secret-1").Wait(); err != nil {
 		t.Fatalf("login: %v", err)
 	}
 
@@ -45,5 +47,43 @@ func TestLoginLineNamesTheListener(t *testing.T) {
 		if got[field] != want {
 			t.Errorf("%s = %v, want %v", field, got[field], want)
 		}
+	}
+}
+
+// TestLoginGoesThroughTheIdentityStore — LOGIN verifies a credential: the
+// username's binding finds the principal, the id in the password finds the
+// credential, and its scopes must name IMAP. The ok line says who signed
+// in; the right password for another head is refused like a wrong one.
+func TestLoginGoesThroughTheIdentityStore(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	h := newHarnessWithLogger(t, config.Config{}, zap.New(core))
+	h.account(t, "acme", "paris@example.com", "bcdf-secret-1", "")
+	p, _ := authn.ParsePrincipal("acct:paris@example.com")
+	authntest.Grant(t, h.ids, "acme", p, "paris@example.com", "bcdg-calendar-only", "calendar:*:*")
+
+	c := dial(t, h.addr)
+	if err := c.Login("paris@example.com", "bcdg-calendar-only").Wait(); err == nil {
+		t.Fatal("a calendar-only credential opened IMAP")
+	}
+	if err := c.Login("paris@example.com", "secret-1").Wait(); err == nil {
+		t.Fatal("a password with no credential id signed in")
+	}
+	if err := c.Login("paris@example.com", "bcdf-secret-1").Wait(); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	outcomes := map[string]int{}
+	var ok map[string]any
+	for _, e := range logs.FilterMessage("imap login").All() {
+		m := e.ContextMap()
+		outcomes[m["outcome"].(string)]++
+		if m["outcome"] == "ok" {
+			ok = m
+		}
+	}
+	if outcomes["scope"] != 1 || outcomes["failed"] != 1 || outcomes["ok"] != 1 {
+		t.Errorf("outcomes = %v, want scope:1 failed:1 ok:1", outcomes)
+	}
+	if ok["principal"] != p.ID || ok["credential"] == "" {
+		t.Errorf("the ok line does not say who signed in: %v", ok)
 	}
 }

@@ -50,7 +50,7 @@ const (
 func TestReconcileOwnsTheAddressbook(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", user, "hash", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", user, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	m := conseed.New(s, false)
@@ -113,7 +113,7 @@ func TestReconcileOwnsTheAddressbook(t *testing.T) {
 func TestReconcileRefusals(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", user, "hash", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", user, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	m := conseed.New(s, true)

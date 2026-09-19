@@ -428,3 +428,33 @@ func TestApplyHints_PreservesValidJSON(t *testing.T) {
 		t.Fatalf("structure mismatch: got %v want %v", v, want)
 	}
 }
+
+// TestRedactingSink_RetenantedRequestUsesTheStepsTenant — a request enters
+// the boot pipeline pinned to `_sys` and is re-tenanted by routing: Begin
+// sees `_sys`, the tenant's steps carry the real tenant. A hint keyed by
+// the real (tenant, stack) must apply to those steps and to the final
+// payload. Keyed by Begin's tenant alone, it never did.
+func TestRedactingSink_RetenantedRequestUsesTheStepsTenant(t *testing.T) {
+	inner := newCaptureSink()
+	wrapped := NewRedactingSink(inner, fixedLookup(map[string]Hints{
+		"acme:web": {Redact: []string{"_cred.password"}},
+	}))
+	rt := wrapped.Begin(RequestInfo{RID: "r9", Tenant: "_sys", Stack: "boot/0", Payload: []byte(`{}`)})
+	rt.Step(StepInfo{Tenant: "_sys", Stack: "_sys/boot", Output: []byte(`{"_txc":{"goto":"web/0"}}`)})
+	rt.Step(StepInfo{Tenant: "acme", Stack: "web", Output: []byte(`{"_cred":{"id":"crd_1","password":"txc_k7m2_secret"}}`)})
+	rt.End("ok", "", []byte(`{"_cred":{"id":"crd_1","password":"txc_k7m2_secret"}}`))
+
+	r := inner.get("r9")
+	if got := gjson.GetBytes(r.steps[1].Output, "_cred.password").String(); got != "[REDACTED]" {
+		t.Errorf("step output = %s", r.steps[1].Output)
+	}
+	if got := gjson.GetBytes(r.final, "_cred.password").String(); got != "[REDACTED]" {
+		t.Errorf("final = %s", r.final)
+	}
+	// Another tenant's stack of the same name is not this one.
+	rt2 := wrapped.Begin(RequestInfo{RID: "r10", Tenant: "_sys", Stack: "boot/0"})
+	rt2.Step(StepInfo{Tenant: "other", Stack: "web", Output: []byte(`{"_cred":{"password":"p"}}`)})
+	if got := gjson.GetBytes(inner.get("r10").steps[0].Output, "_cred.password").String(); got != "p" {
+		t.Errorf("another tenant's hint applied: %q", got)
+	}
+}

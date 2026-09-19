@@ -17,8 +17,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/filecas/filestore"
@@ -39,6 +40,7 @@ func (fakeAdmission) AllowRate(string) (bool, time.Duration)           { return 
 func (fakeAdmission) AcquireConcurrency(string, *admission.Lease) bool { return true }
 
 type harness struct {
+	ids    *authn.Store
 	ctrl   *Controller
 	store  *chimap.Store
 	fcas   filecas.Store
@@ -83,6 +85,9 @@ func newHarnessWithLogger(t *testing.T, conf config.Config, logger *zap.Logger) 
 	if conf.IMAPLoginRate == 0 {
 		conf.IMAPLoginRate = 100
 	}
+	if conf.LoginRate == 0 {
+		conf.LoginRate = 100
+	}
 	if conf.IMAPObserveSample == 0 {
 		conf.IMAPObserveSample = 1
 	}
@@ -92,6 +97,8 @@ func newHarnessWithLogger(t *testing.T, conf config.Config, logger *zap.Logger) 
 	pu := &processor.Unit{Conf: conf, Logger: logger, Admission: fakeAdmission{suspended: "suspended"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu, store)
+	ids := authntest.NewSQLiteStore(t)
+	ctrl.SetAuth(authn.NewResolver(ids, authn.ResolverConfig{Rate: conf.LoginRate, TenantID: authntest.SameTenantID}))
 	ctrl.SetFileCAS(fs)
 	ctrl.Start()
 	t.Cleanup(func() { ctrl.Stop(); cancel() })
@@ -99,7 +106,7 @@ func newHarnessWithLogger(t *testing.T, conf config.Config, logger *zap.Logger) 
 	if len(addrs) < 1 {
 		t.Fatalf("bound %v", addrs)
 	}
-	return &harness{ctrl: ctrl, store: store, fcas: fs, addr: addrs[0], dbPath: dbPath}
+	return &harness{ids: ids, ctrl: ctrl, store: store, fcas: fs, addr: addrs[0], dbPath: dbPath}
 }
 
 // remote is a second Store over the same index with NO change listener: a
@@ -115,15 +122,18 @@ func (h *harness) remote(t *testing.T) *chimap.Store {
 	return chimap.NewStore(db, registry.SQLite)
 }
 
+// account provisions username in tenant, signing in as its own principal
+// with password (which must carry a credential id — see authntest.Grant).
 func (h *harness) account(t *testing.T, tenant, username, password, status string) {
 	t.Helper()
-	hash, err := chimap.HashPassword(password)
+	if _, err := h.store.UpsertAccount(context.Background(), tenant, username, status, nil); err != nil {
+		t.Fatal(err)
+	}
+	p, err := authn.ParsePrincipal("acct:" + username)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.UpsertAccount(context.Background(), tenant, username, hash, status, nil); err != nil {
-		t.Fatal(err)
-	}
+	authntest.Grant(t, h.ids, tenant, p, username, password, "imap:*:*")
 }
 
 // appendHello projects a record into the account's INBOX the way the
@@ -240,11 +250,11 @@ func dial(t *testing.T, addr string) *imapclient.Client {
 
 func TestLoginAndReadINBOX(t *testing.T) {
 	h := newHarness(t, config.Config{})
-	h.account(t, "acme", "paris@example.com", "secret-1", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-secret-1", "")
 	h.appendHello(t, "acme", "paris@example.com", "hello", "Hello from your pony", "Hi there — your mailbox works.\n")
 
 	c := dial(t, h.addr)
-	if err := c.Login("Paris@Example.com", "secret-1").Wait(); err != nil {
+	if err := c.Login("Paris@Example.com", "bcdf-secret-1").Wait(); err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	ns, err := c.Namespace().Wait()
@@ -300,7 +310,7 @@ func TestLoginAndReadINBOX(t *testing.T) {
 		t.Fatal(err)
 	}
 	c2 := dial(t, h.addr)
-	if err := c2.Login("paris@example.com", "secret-1").Wait(); err != nil {
+	if err := c2.Login("paris@example.com", "bcdf-secret-1").Wait(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c2.Select("INBOX", nil).Wait(); err != nil {
@@ -344,12 +354,12 @@ func TestLoginAndReadINBOX(t *testing.T) {
 // names exactly one account, and fails plainly when it is ambiguous.
 func TestLoginWithBareLocalPart(t *testing.T) {
 	h := newHarness(t, config.Config{})
-	h.account(t, "acme", "paris@example.com", "pw", "")
-	h.account(t, "acme", "rome@example.com", "pw", "")
-	h.account(t, "other", "rome@other.example", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
+	h.account(t, "acme", "rome@example.com", "bcdf-pw", "")
+	h.account(t, "other", "rome@other.example", "bcdf-pw", "")
 
 	c := dial(t, h.addr)
-	if err := c.Login("paris", "pw").Wait(); err != nil {
+	if err := c.Login("paris", "bcdf-pw").Wait(); err != nil {
 		t.Fatalf("bare local part: %v", err)
 	}
 	lst, err := c.List("", "*", nil).Collect()
@@ -357,19 +367,19 @@ func TestLoginWithBareLocalPart(t *testing.T) {
 		t.Fatalf("list after bare login = %+v err=%v", lst, err)
 	}
 	c2 := dial(t, h.addr)
-	if err := c2.Login("rome", "pw").Wait(); err == nil || !strings.Contains(err.Error(), "Authentication failed") {
+	if err := c2.Login("rome", "bcdf-pw").Wait(); err == nil || !strings.Contains(err.Error(), "Authentication failed") {
 		t.Errorf("ambiguous local part err = %v", err)
 	}
-	if err := c2.Login("rome@other.example", "pw").Wait(); err != nil {
+	if err := c2.Login("rome@other.example", "bcdf-pw").Wait(); err != nil {
 		t.Errorf("full address still works: %v", err)
 	}
 }
 
 func TestAppendNotifiesSelectedSession(t *testing.T) {
 	h := newHarness(t, config.Config{})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	c := dial(t, h.addr)
-	if err := c.Login("paris@example.com", "pw").Wait(); err != nil {
+	if err := c.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
 		t.Fatal(err)
 	}
 	sel, _ := c.Select("INBOX", nil).Wait()
@@ -403,9 +413,9 @@ func TestAppendNotifiesSelectedSession(t *testing.T) {
 
 func TestLoginFailuresAndThrottle(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPLoginRate: 3})
-	h.account(t, "acme", "paris@example.com", "right", "")
-	h.account(t, "acme", "off@example.com", "pw", chimap.StatusDisabled)
-	h.account(t, "suspended", "gone@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-right", "")
+	h.account(t, "acme", "off@example.com", "bcdf-pw", chimap.StatusDisabled)
+	h.account(t, "suspended", "gone@example.com", "bcdf-pw", "")
 
 	c := dial(t, h.addr)
 	err := c.Login("paris@example.com", "wrong").Wait()
@@ -416,36 +426,33 @@ func TestLoginFailuresAndThrottle(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Authentication failed") {
 		t.Fatalf("unknown user err = %v", err)
 	}
-	err = c.Login("off@example.com", "pw").Wait()
+	err = c.Login("off@example.com", "bcdf-pw").Wait()
 	if err == nil || !strings.Contains(err.Error(), "Account disabled") {
 		t.Fatalf("disabled err = %v", err)
 	}
 	// 4th attempt from this IP within the minute: throttled before any
 	// password work.
-	err = c.Login("paris@example.com", "right").Wait()
+	err = c.Login("paris@example.com", "bcdf-right").Wait()
 	if err == nil || !strings.Contains(err.Error(), "Too many login attempts") {
 		t.Fatalf("throttle err = %v", err)
-	}
-	if h.ctrl.cache.Hit(apppass.LoginKey("paris@example.com", "", "right")) {
-		t.Error("nothing should be cached")
 	}
 }
 
 func TestAdmissionAndConnCap(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPMaxConnsPerAccount: 1})
-	h.account(t, "suspended", "gone@example.com", "pw", "")
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "suspended", "gone@example.com", "bcdf-pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 
 	c := dial(t, h.addr)
-	err := c.Login("gone@example.com", "pw").Wait()
+	err := c.Login("gone@example.com", "bcdf-pw").Wait()
 	if err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("suspended tenant err = %v", err)
 	}
-	if err := c.Login("paris@example.com", "pw").Wait(); err != nil {
+	if err := c.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
 		t.Fatal(err)
 	}
 	c2 := dial(t, h.addr)
-	err = c2.Login("paris@example.com", "pw").Wait()
+	err = c2.Login("paris@example.com", "bcdf-pw").Wait()
 	if err == nil || !strings.Contains(err.Error(), "Too many connections") {
 		t.Fatalf("conn cap err = %v", err)
 	}
@@ -456,7 +463,7 @@ func TestAdmissionAndConnCap(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		c3 := dial(t, h.addr)
-		if err := c3.Login("paris@example.com", "pw").Wait(); err == nil {
+		if err := c3.Login("paris@example.com", "bcdf-pw").Wait(); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {

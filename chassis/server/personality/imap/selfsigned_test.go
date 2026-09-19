@@ -16,7 +16,7 @@ import (
 // certificate itself is pinned in chassis/tls.)
 func TestSelfSignedDevTLS(t *testing.T) {
 	h := newHarness(t, config.Config{IMAPSelfSigned: true, IMAPTLSAddrs: []string{"127.0.0.1:0"}})
-	h.account(t, "acme", "paris@example.com", "pw", "")
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
 	// The head minted its own certificate at Start; trust THAT one.
 	pool := x509.NewCertPool()
 	pool.AddCert(h.ctrl.tlsConfig.Certificates[0].Leaf)
@@ -30,7 +30,7 @@ func TestSelfSignedDevTLS(t *testing.T) {
 		t.Fatalf("starttls: %v", err)
 	}
 	defer c.Close()
-	if err := c.Login("paris@example.com", "pw").Wait(); err != nil {
+	if err := c.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
 		t.Fatalf("login over starttls: %v", err)
 	}
 	// Implicit TLS on the IMAPS port, verifying against the minted cert.
@@ -40,7 +40,7 @@ func TestSelfSignedDevTLS(t *testing.T) {
 		t.Fatalf("imaps: %v", err)
 	}
 	defer c2.Close()
-	if err := c2.Login("paris@example.com", "pw").Wait(); err != nil {
+	if err := c2.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
 		t.Fatalf("login over imaps: %v", err)
 	}
 }

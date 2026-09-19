@@ -53,30 +53,27 @@ func mustCal(t *testing.T, s *Store, name string) Calendar {
 func TestAccounts(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	created, err := s.UpsertAccount(ctx, "acme", "Paris@Example.COM", "hash1", "", nil)
+	created, err := s.UpsertAccount(ctx, "acme", "Paris@Example.COM", "", nil)
 	if err != nil || !created {
 		t.Fatalf("create: created=%v err=%v", created, err)
 	}
 	a, ok, err := s.GetAccount(ctx, "paris@example.com")
-	if err != nil || !ok || a.Tenant != "acme" || a.PwHash != "hash1" || a.Status != StatusActive || string(a.Policy) != "{}" {
+	if err != nil || !ok || a.Tenant != "acme" || a.Status != StatusActive || string(a.Policy) != "{}" {
 		t.Fatalf("account = %+v ok=%v err=%v", a, ok, err)
 	}
-	// Update keeps the hash when none is given.
-	if c, err := s.UpsertAccount(ctx, "acme", "paris@example.com", "", StatusDisabled, nil); err != nil || c {
+	// Update changes the status.
+	if c, err := s.UpsertAccount(ctx, "acme", "paris@example.com", StatusDisabled, nil); err != nil || c {
 		t.Fatalf("update: created=%v err=%v", c, err)
 	}
 	a, _, _ = s.GetAccount(ctx, "paris@example.com")
-	if a.PwHash != "hash1" || a.Status != StatusDisabled {
+	if a.Status != StatusDisabled {
 		t.Errorf("after update: %+v", a)
 	}
 	// Another tenant cannot take the username.
-	if _, err := s.UpsertAccount(ctx, "other", "paris@example.com", "h", "", nil); !errors.Is(err, ErrUsernameTaken) {
+	if _, err := s.UpsertAccount(ctx, "other", "paris@example.com", "", nil); !errors.Is(err, ErrUsernameTaken) {
 		t.Errorf("cross-tenant upsert err = %v, want ErrUsernameTaken", err)
 	}
-	if _, err := s.UpsertAccount(ctx, "acme", "new@example.com", "", "", nil); err == nil {
-		t.Error("create without a password must fail")
-	}
-	if _, err := s.UpsertAccount(ctx, "acme", "x@example.com", "h", "weird", nil); err == nil {
+	if _, err := s.UpsertAccount(ctx, "acme", "x@example.com", "weird", nil); err == nil {
 		t.Error("bad status must fail")
 	}
 }
@@ -254,5 +251,39 @@ func TestSameContentIgnoresVolatileLines(t *testing.T) {
 	}
 	if SameContent(a, []byte("BEGIN:VEVENT\r\nSUMMARY:other\r\nEND:VEVENT\r\n")) {
 		t.Error("different content reported same")
+	}
+}
+
+// TestEnsureSchemaDropsTheOldPasswordColumn — a table from before the
+// identity store has a pw_hash column. EnsureSchema drops it and keeps the
+// rows; the account's login lives in chassis/authn now.
+func TestEnsureSchemaDropsTheOldPasswordColumn(t *testing.T) {
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(t.TempDir(), "old.db")+"?mode=rwc&_journal_mode=WAL&_busy_timeout=15000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE calendar_accounts (
+		tenant TEXT NOT NULL, username TEXT NOT NULL, pw_hash TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'active', policy TEXT NOT NULL DEFAULT '{}',
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+		PRIMARY KEY (tenant, username), UNIQUE (username))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO calendar_accounts (tenant, username, pw_hash,  created_at, updated_at)
+		VALUES ('acme', 'paris@example.com', '$argon2id$old',  '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(db, registry.SQLite)
+	for i := 0; i < 2; i++ {
+		if err := s.EnsureSchema(context.Background()); err != nil {
+			t.Fatalf("ensure schema #%d: %v", i, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT pw_hash FROM calendar_accounts`); err == nil {
+		t.Error("pw_hash is still there")
+	}
+	if a, ok, err := s.GetAccount(context.Background(), "paris@example.com"); err != nil || !ok || a.Tenant != "acme" {
+		t.Errorf("the row did not survive: %+v ok=%v err=%v", a, ok, err)
 	}
 }

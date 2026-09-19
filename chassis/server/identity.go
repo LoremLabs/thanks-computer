@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -117,18 +116,11 @@ func identityPrelude(ctx context.Context, d identityDeps, family string) (identi
 	if d.store == nil {
 		return c, c.err("disabled", "no identity store on this node (auth.db failed to open at boot; see the chassis log)"), false
 	}
-	var snap *sql.DB
-	if d.snap != nil {
-		snap = d.snap()
+	tenantID, err := lookupTenantID(ctx, d.snap, slug)
+	if err != nil {
+		return c, c.err("no_tenant", err.Error()), false
 	}
-	if snap == nil {
-		return c, c.err("no_tenant", "no tenant directory on this node"), false
-	}
-	err := snap.QueryRowContext(ctx,
-		`SELECT tenant_id FROM tenants WHERE slug = ? AND revoked_at IS NULL`, slug).Scan(&c.tenantID)
-	if err != nil || c.tenantID == "" {
-		return c, c.err("no_tenant", fmt.Sprintf("tenant %q not found", slug)), false
-	}
+	c.tenantID = tenantID
 	return c, event.Payload{}, true
 }
 
@@ -308,6 +300,9 @@ func credentialCreate(ctx context.Context, d identityDeps, _ []byte) (event.Payl
 	if err != nil {
 		return c.storeErr(err), nil
 	}
+	// Shown once, to the rule that asked — and scrubbed from every trace
+	// record of this request (processor.ScrubbingTracer).
+	processor.NoteIssuedSecret(ctx, password)
 	out := newCredentialOut(cr)
 	out.Password = password
 	return identityOK(c.into, out), nil

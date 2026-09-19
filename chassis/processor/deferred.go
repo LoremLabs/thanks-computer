@@ -208,7 +208,8 @@ func (pu *Unit) dispatchDeferred(ctx context.Context, raw, stage string, ops []o
 				pu.Logger.Warn("deferred async dispatch failed",
 					zap.String("stage", cstage), zap.String("op", name), zap.Error(aerr))
 				trace.FromContext(ctx).Step(trace.StepInfo{
-					Stack: op.Stack, Scope: op.Scope, Name: name,
+					Tenant: tenantScope(ctx),
+					Stack:  op.Stack, Scope: op.Scope, Name: name,
 					Operation: op.Resonator.Exec, Transport: "async",
 					Input:     []byte(op.Input),
 					StartedAt: aStart, FinishedAt: time.Now(),
@@ -220,7 +221,8 @@ func (pu *Unit) dispatchDeferred(ctx context.Context, raw, stage string, ops []o
 			}
 			ack, _ := json.Marshal(map[string]string{"status": "accepted", "job_id": jobID})
 			trace.FromContext(ctx).Step(trace.StepInfo{
-				Stack: op.Stack, Scope: op.Scope, Name: name,
+				Tenant: tenantScope(ctx),
+				Stack:  op.Stack, Scope: op.Scope, Name: name,
 				Operation: op.Resonator.Exec, Transport: "async",
 				Input: []byte(op.Input), Output: ack,
 				StartedAt: aStart, FinishedAt: time.Now(), Status: "pending",
@@ -504,7 +506,8 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 	aStart := time.Now()
 	ack, _ := json.Marshal(map[string]string{"status": "accepted", "transport": "async-local"})
 	trace.FromContext(reqCtx).Step(trace.StepInfo{
-		Stack: op.Stack, Scope: op.Scope, Name: name,
+		Tenant: tenantScope(reqCtx),
+		Stack:  op.Stack, Scope: op.Scope, Name: name,
 		Operation: op.Resonator.Exec, Transport: "async",
 		Input: []byte(op.Input), Output: ack,
 		StartedAt: aStart, FinishedAt: time.Now(), Status: "pending",
@@ -597,7 +600,8 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 				eb, _ = pu.Runs.Get(ctx, term.ErrorKey)
 			}
 			trace.FromContext(ctx).Step(trace.StepInfo{
-				Stack: rStack, Scope: rScope, Name: e.Op, Transport: "async",
+				Tenant: tenantScope(ctx),
+				Stack:  rStack, Scope: rScope, Name: e.Op, Transport: "async",
 				Output: eb, StartedAt: ss.SuspendedAt, FinishedAt: term.RecordedAt,
 				Status: "error", Error: "deferred op failed",
 			})
@@ -615,7 +619,8 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 			}
 		}
 		trace.FromContext(ctx).Step(trace.StepInfo{
-			Stack: rStack, Scope: rScope, Name: e.Op, Transport: "async",
+			Tenant: tenantScope(ctx),
+			Stack:  rStack, Scope: rScope, Name: e.Op, Transport: "async",
 			Output: ob, StartedAt: ss.SuspendedAt, FinishedAt: term.RecordedAt,
 			Status: "completed",
 		})
@@ -654,6 +659,7 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 	})
 	rctx = withDeferredRun(rctx, runID, rcid)
 	rctx = WithTenant(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.tenant").String())
+	rctx = withPrincipalFrom(rctx, ss.ScopeEnvelope)
 
 	if snapData, serr := pu.Runs.ReadOpstackSnapshot(ctx, runID); serr == nil && len(snapData) > 0 {
 		if snapDB, berr := buildSnapshotDB(snapData); berr != nil {

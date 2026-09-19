@@ -9,7 +9,7 @@ import (
 func seedAccount(t *testing.T, s *Store) Mailbox {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", "p@example.com", "h", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", "p@example.com", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	inbox, _, _ := s.GetMailbox(ctx, "acme", "p@example.com", "INBOX")

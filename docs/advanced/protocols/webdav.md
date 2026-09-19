@@ -43,19 +43,31 @@ node serves one drive. For `txco dev` on plain HTTP add
 ```txcl
 EXEC "txco://drive/collection" WITH name = "paris", into = "_dc"
 EXEC "txco://drive/account"
-  WITH username = "paris@pony.example.com",
+  WITH username   = "paris@pony.example.com",
        collection = "paris",
-       password_style = "words",
-       into = "_drvacct"
-# → _drvacct.password (once), _drvacct.mount = "/drive/"
+       principal  = "pony:paris",
+       into       = "_drvacct"
+# → _drvacct.collection_id = "dc_…", _drvacct.mount = "/drive/paris/"
+
+WHEN ._drvacct.created == true
+  EXEC "txco://credential/create"
+    WITH principal = ._drvacct.principal,
+         scopes    = &concat("drive:", ._drvacct.collection_id, ":*"),
+         password_style = "words"
+# → _credential.password (once)
 ```
 
 The username is `<local>@<domain>` where the domain is a verified hostname
 or delegated zone of the tenant — the rule every DAV head applies, so
-usernames are globally unique by construction. Give the IMAP account's
-password and one credential opens mail, calendar, contacts and files. In
-a mount dialog a person may type just the local part; the head completes
-it with the request's host.
+usernames are globally unique by construction. The account holds no
+password: it signs in as its `principal` with a
+[credential](../users.md#credentials) whose scopes name the drive. A login
+opens `drive:<collection-id>:login` — the account's own collection is what
+the principal may reach, and the credential's scope can only narrow it:
+`drive:dc_…:*` opens that one drive, `drive:*:*` whichever the account is
+bound to, and a credential without a `drive` scope opens none. In a mount
+dialog a person may type just the local part; the head completes it with
+the request's host.
 
 ## Mount
 
@@ -168,7 +180,7 @@ of an object (S3) sends only that part through the server.
 |---|---|
 | `--drive-max-file-bytes` (4 GiB) | a PUT that declares more is 413 before a byte moves; a PUT without a `Content-Length` (Finder streams a dragged file that way) is accepted and stops at the cap |
 | `--drive-max-collection-bytes`, `--drive-max-resources` (unlimited) | a write past them is 507 |
-| `--drive-login-rate` (30/min) | per client IP and per username, counted only on verified-login-cache misses; over it is 429 |
+| `--login-rate` (30/min) | password checks per client IP and per principal, shared with the IMAP, CalDAV and CardDAV heads, counted only on verified-login-cache misses; over it is 429 |
 | `--drive-sweep-period` (15 min) | on `webdav` nodes: superseded versions and the objects of failed writes are reclaimed after `--drive-sweep-grace` (1 h); tombstones are hard-deleted after `--drive-tombstone-retention` (7 d) |
 
 Every refused login logs one `webdav login` line with its outcome; a

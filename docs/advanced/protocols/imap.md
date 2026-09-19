@@ -64,27 +64,44 @@ attempt logs one `imap login` line with its outcome.
 
 ## Accounts: `txco://imap/account`
 
+An account is a mailbox. It holds no password: who may open it is a
+[credential](../users.md#credentials) issued to the account's principal.
+The account op binds the username to that principal; `credential/create`
+gives the principal a password whose scopes include `imap`.
+
 ```txcl
+# 110: the mailbox, signing in as the pony
 EXEC "txco://imap/account"
-  WITH username = "paris@pony.example.com",   # <local>@<domain the tenant owns>
-       password = "",                         # "" (or omitted on create) generates one
-       into = "_acct"
+  WITH username  = "paris@pony.example.com",   # <local>@<domain the tenant owns>
+       principal = "pony:paris",
+       into      = "_acct"
+
+# 120: its password — generated, returned once, and never in a trace
+WHEN ._acct.created == true
+  EXEC "txco://credential/create"
+    WITH principal = ._acct.principal,
+         scopes    = ["imap:*:*"],
+         password_style = "words"
 ```
 
 | WITH | Meaning |
 |---|---|
 | `username` (req) | `<local>@<domain>`. The domain must be a verified hostname binding or a delegated DNS zone of the tenant — the same ownership rule `txco://sendmail` applies to `From:`. Usernames are global: one tenant per address. |
-| `password` | Omitted: unchanged on update, generated on create. `""`: generated. Otherwise stored (≥ 8 chars). Only an argon2id hash is kept. |
-| `rotate` | `true`: generate a new password for an existing account and return it once (a "rotate mailbox password" button). With an explicit `password` it is simply that password. |
-| `password_style` | How a generated password looks: `token` (default) is a 24-character group token (`xxxx-xxxx-…`, ~116 bits); `words` is hyphen-joined words from the BIP-39 list (`river-galaxy-bamboo-orbit-velvet`), 11 bits per word — the phrase a person types into a phone. |
-| `password_words` | Word count for `words`, 4–12, default 5 (55 bits: online guessing is throttled by the head, and an offline attack on the argon2id hash is measured in millennia). |
+| `principal` | Who this username signs in as: `user:usr_…` (from `txco://user/create`) or a name your product chooses, like `pony:paris`. Required when the username is new; an update may leave it out. |
 | `status` | `active` (default) or `disabled`. |
 | `policy` | Account-default policy object (reserved for the next phase). |
 
-Result at `into` (default `_imap`): `{username, created, password?, rotated?}` —
-`password` appears **only** when it was generated (create, `""`, or
-`rotate`), and only this once; `rotated` is `true` when an existing
-account's password was regenerated. Creating an account creates its `INBOX`.
+`password`, `rotate`, `password_style` and `password_words` are refused:
+passwords are [credentials](../users.md#credentials) now, issued with
+`txco://credential/create` and rotated there too.
+
+Only the stack that manages a principal can point a username at it, or
+change an account whose username it holds (`txco_imap_not_owner`), and a
+username bound to one principal cannot be moved to another
+(`txco_imap_username_bound`).
+
+Result at `into` (default `_imap`): `{username, created, principal}`.
+Creating an account creates its `INBOX`.
 
 ## Messages: `txco://imap/append`
 
@@ -226,7 +243,7 @@ than delay a client. Both lanes meter fuel like any run.
 
 Mail client settings: IMAP server = the chassis host, port `1993` (dev,
 self-signed) or `993` (prod) with SSL on, username = the full address,
-password = the generated one. Apple Mail verifies an outgoing server too
+password = the one `txco://credential/create` issued. Apple Mail verifies an outgoing server too
 when adding an account; there is no submission head yet, so for a local
 test run Mailpit (`mailpit --smtp-auth-accept-any --smtp-auth-allow-insecure`)
 and point outgoing at `localhost:1025`, or use a real SMTP account.
@@ -295,7 +312,8 @@ proxied=false` is a genuine cleartext `LOGIN`, which only
 | `--imap-insecure-auth` | `false` | LOGIN without TLS |
 | `--imap-self-signed` | `false` | Mint a self-signed certificate at boot (dev; `txco dev --imap` sets it) |
 | `--imap-wire-debug` | `false` | Log every IMAP line at DEBUG, credentials included (dev) |
-| `--imap-login-rate` | `10` | LOGIN attempts per minute, per IP and per username |
+| `--imap-login-rate` | `10` | LOGIN commands per minute, per IP and per username — a flood guard, before any lookup |
+| `--login-rate` | `30` | Password checks per minute, per IP and per principal, shared with the CalDAV, CardDAV and WebDAV heads (cache misses only) |
 | `--imap-max-conns-per-account` | `16` | Simultaneous authenticated connections |
 | `--imap-append-max-bytes` | 32 MiB | Size cap for `txco://imap/append` and a client APPEND (`APPENDLIMIT`) |
 | `--imap-resp-timeout` | `30s` | Answer-lane deadline |

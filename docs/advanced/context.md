@@ -31,6 +31,7 @@ is a shorthand for `_txc.` Note that this shorthand is for chassis `txcl`, opera
 | `@tenant` / `@stack` | Resolved by [ingress](../routing.md); pinned per request |
 | `@ingress` / `@hostname_verified` | Matched ingress key / ownership-verification bit |
 | `@op` / `@step` | The firing op's identity and scope (stamped on dispatched envelopes) |
+| `@principal.{id,kind,credential}` | Who the request acts as, when someone signed in: the principal a head verified a [credential](./users.md#signing-in) for (`pony:paris`, `user:usr_…`), and the credential's id. Present only on runs the IMAP, CalDAV and CardDAV heads start; read-only — a copy of what the chassis pinned, never taken from the request |
 
 ### Per-head request data:
 

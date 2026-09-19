@@ -17,7 +17,7 @@ const rawTestMsg = "From: Owner <owner@example.com>\r\nTo: paris@pony.example.co
 
 func provision(t *testing.T, d imapDeps) {
 	t.Helper()
-	out := callIMAP(t, imapAccount, d, "acme", `{"username":"paris@pony.example.com"}`)
+	out := callIMAP(t, imapAccount, d, "acme", `{"username":"paris@pony.example.com","principal":"pony:paris"}`)
 	if gjson.Get(out, "_imap.error").Exists() {
 		t.Fatalf("provision: %s", out)
 	}

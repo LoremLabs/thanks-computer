@@ -24,19 +24,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
-	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
-)
-
-const (
-	// loginCacheTTL is how long a verified (username, hash, password)
-	// triple skips argon2id — a CalDAV client re-authenticates every
-	// request, so this is what makes Basic auth affordable.
-	loginCacheTTL = 5 * time.Minute
-	loginCacheMax = 10000
 )
 
 // HostResolver maps a request's Host to its tenant — the same routing
@@ -45,8 +36,8 @@ type HostResolver interface {
 	ResolveErr(key ingress.RouteKey) (ingress.RouteTarget, bool, error)
 }
 
-// Controller owns the head's shared state: the store, the verified-login
-// cache, the throttles, the lanes. It binds no listener of its own — the
+// Controller owns the head's shared state: the store, the login resolver
+// (shared with every head that signs in with a credential), the lanes. It binds no listener of its own — the
 // web head mounts Handler().
 type Controller struct {
 	ctx      context.Context
@@ -54,10 +45,11 @@ type Controller struct {
 	store    *chcal.Store
 	resolver HostResolver
 
-	cache     *apppass.LoginCache
-	loginIP   *throttle.Throttle
-	loginAcct *throttle.Throttle
-	lanes     *lanes
+	// auth verifies passwords: the resolver the four heads share, with
+	// its login cache and throttles (--login-rate). nil ⇒ every login
+	// answers "temporary failure".
+	auth  *authn.Resolver
+	lanes *lanes
 
 	prefix       string
 	insecureAuth bool
@@ -77,7 +69,6 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chcal.Store, 
 		pu:       pu,
 		store:    store,
 		resolver: resolver,
-		cache:    apppass.NewLoginCache(loginCacheTTL, loginCacheMax),
 		prefix:   "/dav",
 		maxBytes: 1 << 20,
 		now:      func() time.Time { return time.Now().UTC() },
@@ -87,8 +78,6 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chcal.Store, 
 		c.insecureAuth = pu.Conf.CalendarInsecureAuth
 		c.maxBytes = int64(pu.Conf.CalendarObjectMaxBytes)
 		c.feedMaxAge = pu.Conf.CalendarFeedMaxAge
-		c.loginIP = throttle.New(pu.Conf.CalendarLoginRate, time.Minute)
-		c.loginAcct = throttle.New(pu.Conf.CalendarLoginRate, time.Minute)
 		c.lanes = newLanes(ctx, pu)
 		if pu.Mc != nil && pu.Mc.Meter != nil {
 			c.logins, _ = pu.Mc.Meter.Int64Counter("chassis.calendar.logins",
@@ -98,6 +87,9 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chcal.Store, 
 	}
 	return c
 }
+
+// SetAuth hands the head the login resolver (chassis/authn).
+func (c *Controller) SetAuth(r *authn.Resolver) { c.auth = r }
 
 // Prefix is the reserved path prefix (no trailing slash).
 func (c *Controller) Prefix() string { return c.prefix }
@@ -133,11 +125,16 @@ func (c *Controller) Stop() {
 // /.well-known/caldav.
 func (c *Controller) Handler() http.Handler { return c }
 
-// noteLogin counts a login outcome and logs one line for it.
-func (c *Controller) noteLogin(outcome, username, ip string) {
+// noteLogin counts a login outcome and logs one line for it. who is set
+// on a successful login: the principal and the credential that signed in.
+func (c *Controller) noteLogin(outcome, username, ip string, who ...authn.Authenticated) {
 	c.countLogin(outcome)
 	if c.pu != nil && c.pu.Logger != nil {
-		c.pu.Logger.Info("calendar login", zap.String("outcome", outcome), zap.String("user", username), zap.String("ip", ip))
+		fields := []zap.Field{zap.String("outcome", outcome), zap.String("user", username), zap.String("ip", ip)}
+		if len(who) > 0 && !who[0].IsZero() {
+			fields = append(fields, zap.String("principal", who[0].Principal.ID), zap.String("credential", who[0].Credential))
+		}
+		c.pu.Logger.Info("calendar login", fields...)
 	}
 }
 

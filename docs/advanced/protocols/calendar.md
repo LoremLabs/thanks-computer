@@ -58,25 +58,30 @@ not on every request a polling client makes. The
 
 ## Accounts: `txco://calendar/account`
 
+An account is a calendar home. It holds no password: who may open it is a
+[credential](../users.md#credentials) issued to the account's principal,
+with a `calendar` scope. One credential can open every head its scopes
+name — Mail, Calendar, Contacts and Files with one password.
+
 ```txcl
 EXEC "txco://calendar/account"
-  WITH username = "paris@pony.example.com",   # <local>@<domain the tenant owns>
-       password = ._imapacct.password,        # the same password the IMAP account got
-       into = "_calacct"
+  WITH username  = "paris@pony.example.com",   # <local>@<domain the tenant owns>
+       principal = "pony:paris",               # who the username signs in as
+       into      = "_calacct"
 ```
 
 | WITH | Meaning |
 |---|---|
 | `username` (req) | `<local>@<domain>`. The domain must be a verified hostname binding or a delegated DNS zone of the tenant — the ownership rule `txco://sendmail` and `txco://imap/account` apply. Usernames are global: one tenant per address. |
-| `password` | Omitted: unchanged on update, generated on create. `""`: generated. Otherwise stored (≥ 8 chars). Only an argon2id hash is kept. Pass the password another head minted and one credential opens both. |
-| `rotate` | `true`: generate a new password for an existing account and return it once. |
-| `password_style` / `password_words` | As [IMAP](./imap.md): `token` (default) or `words` (4–12 BIP-39 words, default 5). |
+| `principal` | Who this username signs in as (`user:usr_…`, or `<kind>:<name>`). Required when the username is new; an update may leave it out. |
 | `status` | `active` (default) or `disabled`. |
 | `policy` | Account-default mutation policy (below), the fallback for every calendar. |
 
-Result at `into` (default `_calendar`): `{username, created, principal,
-password?, rotated?}` — `password` appears **only** when it was generated,
-and only this once. `principal` is the account's CalDAV path.
+`password`, `rotate`, `password_style` and `password_words` are refused —
+see [credentials](../users.md#credentials). Result at `into` (default
+`_calendar`): `{username, created, principal, principal_url}` —
+`principal_url` is the account's CalDAV principal path, what a client
+discovers.
 
 ## Calendars: `txco://calendar/calendar`
 
@@ -171,14 +176,17 @@ re-materialization. Not yet: `sync-collection` / `getctag` (clients fall
 back to an etag diff per refresh, which works), `RECURRENCE-ID` overrides
 in time-range matching, VTODO in feeds, invitations, free/busy.
 
-Basic auth on every request: the head verifies argon2id once and caches
-the verified triple for five minutes, so a client's dozens of requests per
-refresh cost one hash. A request must arrive over TLS — the web head's own
-listener, or `X-Forwarded-Proto: https` from the front proxy — unless
+Basic auth on every request, checked by the login resolver the credential
+heads share ([users](../users.md#signing-in)): the username finds the
+principal, the credential must name `calendar`, and argon2id runs once per
+five minutes per node, so a client's dozens of requests per refresh cost
+one hash — a revoked credential is refused at once all the same. A request
+must arrive over TLS — the web head's own listener, or
+`X-Forwarded-Proto: https` from the front proxy — unless
 `--calendar-insecure-auth` (dev). Throttles count cache misses only
-(`--calendar-login-rate`, per client IP and per username). A `disabled`
-account and a suspended tenant are refused; an account on another tenant's
-hostname is refused exactly like a wrong password.
+(`--login-rate`, per client IP and per principal, across every head). A
+`disabled` account and a suspended tenant are refused; an account on
+another tenant's hostname is refused exactly like a wrong password.
 
 The **ICS feed** `GET <prefix>/feed/<token>.ics` needs no auth — the token
 is the secret (24 random bytes, hashed at rest, shown once by the op). It
@@ -300,7 +308,7 @@ TXT records (`--dns-caldavs-port`, see [dns](./dns.md)).
 | `--calendar-path-prefix` | `/dav` | The reserved prefix on every hostname (plus `/.well-known/caldav`) |
 | `--calendar-store` / `--calendar-db-path` | `sqlite` / `./chassis/data/calendar.db` | The index; a non-sqlite backend is shared and opened on every node |
 | `--calendar-insecure-auth` | `false` | Accept Basic auth without TLS (`txco dev --calendar` sets it) |
-| `--calendar-login-rate` | `30` | Verifications per minute, per IP and per username, on cache misses only |
+| `--login-rate` | `30` | Password checks per minute, per IP and per principal, shared with the IMAP, CardDAV and WebDAV heads (cache misses only) |
 | `--calendar-object-max-bytes` | 1 MiB | Size cap for an object (ops and client PUT; advertised as `max-resource-size`) |
 | `--calendar-feed-max-age` | `300` | `Cache-Control` max-age on feeds |
 | `--calendar-resp-timeout` | `30s` | Answer-lane deadline |

@@ -54,7 +54,6 @@ var ErrUsernameTaken = errors.New("imap: username belongs to another tenant")
 type Account struct {
 	Tenant    string
 	Username  string
-	PwHash    string
 	Status    string
 	Policy    json.RawMessage
 	CreatedAt time.Time
@@ -226,7 +225,6 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS imap_accounts (
 			tenant     TEXT NOT NULL,
 			username   TEXT NOT NULL,
-			pw_hash    TEXT NOT NULL,
 			status     TEXT NOT NULL DEFAULT 'active',
 			policy     TEXT NOT NULL DEFAULT '{}',
 			created_at TEXT NOT NULL,
@@ -280,6 +278,21 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			return fmt.Errorf("imap: ensure schema: %w", err)
 		}
 	}
+	// The account's password moved to the identity store (chassis/authn): a
+	// login is a credential that authenticates as a principal, and the
+	// username only finds that principal. Drop the old column rather than
+	// leave it — a column nothing reads is one someone eventually writes by
+	// accident. Probe, then drop: both engines support DROP COLUMN, and
+	// pw_hash is in no index or constraint. Two nodes booting together can
+	// both try; the loser's error is fine once the column is gone.
+	const probePwHash = `SELECT pw_hash FROM imap_accounts WHERE 1 = 0`
+	if _, err := s.db.ExecContext(ctx, probePwHash); err == nil {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE imap_accounts DROP COLUMN pw_hash`); err != nil {
+			if _, still := s.db.ExecContext(ctx, probePwHash); still == nil {
+				return fmt.Errorf("imap: drop imap_accounts.pw_hash: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -293,9 +306,11 @@ func NormalizeUsername(u string) string {
 }
 
 // UpsertAccount creates the account (and its INBOX) or updates it. An empty
-// pwHash / status / policy leaves the stored value unchanged on update;
-// pwHash is required on create. created reports whether the row was new.
-func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, status string, policy json.RawMessage) (created bool, err error) {
+// status / policy leaves the stored value unchanged on update. created
+// reports whether the row was new.
+// The account holds no password: who may sign in as it is the identity
+// store's business (chassis/authn — a binding and a credential).
+func (s *Store) UpsertAccount(ctx context.Context, tenant, username, status string, policy json.RawMessage) (created bool, err error) {
 	username = NormalizeUsername(username)
 	if tenant == "" || username == "" {
 		return false, errors.New("imap: empty tenant or username")
@@ -313,9 +328,6 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 	exists := err == nil
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if pwHash == "" {
-			return false, errors.New("imap: a new account needs a password")
-		}
 		if status == "" {
 			status = StatusActive
 		}
@@ -323,9 +335,9 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 			policy = json.RawMessage(`{}`)
 		}
 		_, ierr := s.db.ExecContext(ctx, s.rb(`
-			INSERT INTO imap_accounts (tenant, username, pw_hash, status, policy, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`),
-			tenant, username, pwHash, status, string(policy), now, now)
+			INSERT INTO imap_accounts (tenant, username, status, policy, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)`),
+			tenant, username, status, string(policy), now, now)
 		switch {
 		case ierr == nil:
 			created = true
@@ -351,10 +363,6 @@ func (s *Store) UpsertAccount(ctx context.Context, tenant, username, pwHash, sta
 		}
 		sets := []string{"updated_at = ?"}
 		args := []any{now}
-		if pwHash != "" {
-			sets = append(sets, "pw_hash = ?")
-			args = append(args, pwHash)
-		}
 		if status != "" {
 			sets = append(sets, "status = ?")
 			args = append(args, status)
@@ -382,9 +390,9 @@ func (s *Store) GetAccount(ctx context.Context, username string) (Account, bool,
 	var a Account
 	var policy, created, updated string
 	err := s.db.QueryRowContext(ctx, s.rb(`
-		SELECT tenant, username, pw_hash, status, policy, created_at, updated_at
+		SELECT tenant, username, status, policy, created_at, updated_at
 		  FROM imap_accounts WHERE username = ?`), username).
-		Scan(&a.Tenant, &a.Username, &a.PwHash, &a.Status, &policy, &created, &updated)
+		Scan(&a.Tenant, &a.Username, &a.Status, &policy, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, false, nil
 	}

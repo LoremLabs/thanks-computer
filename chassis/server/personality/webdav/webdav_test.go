@@ -18,8 +18,9 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/drive/filestore"
@@ -47,6 +48,7 @@ func (fakeAdmission) AcquireConcurrency(string, *admission.Lease) bool { return 
 
 type harness struct {
 	ctrl  *Controller
+	ids   *authn.Store
 	store *chdrive.Store
 	srv   *httptest.Server
 	coll  chdrive.Collection
@@ -83,8 +85,8 @@ func newHarnessWith(t *testing.T, conf config.Config, wrap func(chdrive.ObjectSt
 	if conf.DrivePathPrefix == "" {
 		conf.DrivePathPrefix = "/drive"
 	}
-	if conf.DriveLoginRate == 0 {
-		conf.DriveLoginRate = 100
+	if conf.LoginRate == 0 {
+		conf.LoginRate = 100
 	}
 	if conf.DriveMaxFileBytes == 0 {
 		conf.DriveMaxFileBytes = 1 << 20
@@ -93,27 +95,33 @@ func newHarnessWith(t *testing.T, conf config.Config, wrap func(chdrive.ObjectSt
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), Admission: fakeAdmission{suspended: "suspended"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu, store, fakeResolver{"pony.example.com": "acme", "other.example.com": "other", "sad.example.com": "suspended"})
+	ids := authntest.NewSQLiteStore(t)
+	ctrl.SetAuth(authn.NewResolver(ids, authn.ResolverConfig{Rate: conf.LoginRate, TenantID: authntest.SameTenantID}))
 	ctrl.Start()
 	srv := httptest.NewServer(ctrl.Handler())
 	t.Cleanup(func() { srv.Close(); ctrl.Stop(); cancel() })
-	h := &harness{ctrl: ctrl, store: store, srv: srv}
+	h := &harness{ctrl: ctrl, ids: ids, store: store, srv: srv}
 	h.coll, _, err = store.EnsureCollection(context.Background(), "acme", "paris")
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.account(t, "acme", "paris@pony.example.com", "correct-horse", h.coll.ID)
+	h.account(t, "acme", "paris@pony.example.com", "bcdf-correct-horse", h.coll.ID)
 	return h
 }
 
+// account provisions username in tenant, bound to collID, signing in as its
+// own principal with password (which must carry a credential id — see
+// authntest.Grant).
 func (h *harness) account(t *testing.T, tenant, username, password, collID string) {
 	t.Helper()
-	hash, err := apppass.HashPassword(password)
+	if _, err := h.store.UpsertAccount(context.Background(), tenant, username, "", collID); err != nil {
+		t.Fatal(err)
+	}
+	p, err := authn.ParsePrincipal("acct:" + username)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.UpsertAccount(context.Background(), tenant, username, hash, "", collID); err != nil {
-		t.Fatal(err)
-	}
+	authntest.Grant(t, h.ids, tenant, p, username, password, "drive:*:*")
 }
 
 type reqOpt func(*http.Request)
@@ -136,7 +144,7 @@ func (h *harness) do(t *testing.T, method, path string, b io.Reader, opts ...req
 		t.Fatal(err)
 	}
 	req.Host = "pony.example.com"
-	req.SetBasicAuth("paris@pony.example.com", "correct-horse")
+	req.SetBasicAuth("paris@pony.example.com", "bcdf-correct-horse")
 	if b != nil {
 		if s, ok := b.(*strings.Reader); ok {
 			req.ContentLength = int64(s.Len())
@@ -185,18 +193,18 @@ func TestAuthGates(t *testing.T) {
 	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, host("unknown.example.com"))
 	want(t, resp, http.StatusNotFound, "unrouted host")
 	// Bare local part completes to the host.
-	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, auth("paris", "correct-horse"), hdr("Depth", "0"))
+	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, auth("paris", "bcdf-correct-horse"), hdr("Depth", "0"))
 	want(t, resp, http.StatusMultiStatus, "bare local part")
 	// Disabled account.
-	if _, err := h.store.UpsertAccount(context.Background(), "acme", "paris@pony.example.com", "", chdrive.StatusDisabled, ""); err != nil {
+	if _, err := h.store.UpsertAccount(context.Background(), "acme", "paris@pony.example.com", chdrive.StatusDisabled, ""); err != nil {
 		t.Fatal(err)
 	}
 	resp, _ = h.do(t, "PROPFIND", "/drive/", nil)
 	want(t, resp, http.StatusUnauthorized, "disabled account")
 	// Suspended tenant.
 	sad, _, _ := h.store.EnsureCollection(context.Background(), "suspended", "c")
-	h.account(t, "suspended", "sad@sad.example.com", "correct-horse", sad.ID)
-	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, host("sad.example.com"), auth("sad@sad.example.com", "correct-horse"))
+	h.account(t, "suspended", "sad@sad.example.com", "bcdf-correct-horse", sad.ID)
+	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, host("sad.example.com"), auth("sad@sad.example.com", "bcdf-correct-horse"))
 	want(t, resp, http.StatusPaymentRequired, "suspended tenant")
 	// OPTIONS needs no credentials and advertises class 2.
 	resp, _ = h.do(t, "OPTIONS", "/drive/", nil, noAuth())
@@ -209,7 +217,7 @@ func TestAuthGates(t *testing.T) {
 func TestThrottle(t *testing.T) {
 	var conf config.Config
 	insecure(&conf)
-	conf.DriveLoginRate = 3
+	conf.LoginRate = 3
 	h := newHarness(t, conf)
 	for i := 0; i < 3; i++ {
 		resp, _ := h.do(t, "PROPFIND", "/drive/", nil, auth("paris@pony.example.com", "wrong"))
@@ -551,14 +559,14 @@ func TestPrefixAndAccountBinding(t *testing.T) {
 	// A second account on another collection of the same tenant sees only
 	// its own tree.
 	c2, _, _ := h.store.EnsureCollection(context.Background(), "acme", "second")
-	h.account(t, "acme", "two@pony.example.com", "correct-horse", c2.ID)
-	resp, _ = h.do(t, http.MethodGet, "/files/a.txt", nil, auth("two@pony.example.com", "correct-horse"))
+	h.account(t, "acme", "two@pony.example.com", "bcdf-correct-horse", c2.ID)
+	resp, _ = h.do(t, http.MethodGet, "/files/a.txt", nil, auth("two@pony.example.com", "bcdf-correct-horse"))
 	want(t, resp, http.StatusNotFound, "other collection")
 	// An account bound to a removed collection has nothing to serve.
 	if _, err := h.store.DeleteCollection(context.Background(), "acme", "second", true); err != nil {
 		t.Fatal(err)
 	}
-	resp, _ = h.do(t, "PROPFIND", "/files/", nil, auth("two@pony.example.com", "correct-horse"), hdr("Depth", "0"))
+	resp, _ = h.do(t, "PROPFIND", "/files/", nil, auth("two@pony.example.com", "bcdf-correct-horse"), hdr("Depth", "0"))
 	want(t, resp, http.StatusNotFound, "removed collection")
 	// The store's events reflect the head's writes (one per mutation).
 	if c, _, _ := h.store.GetCollectionByID(context.Background(), h.coll.ID); c.SyncToken != 1 || c.ResourceCount != 1 {
@@ -995,4 +1003,32 @@ func TestGetRanges(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoginOpensOnlyTheCredentialsCollection — the door a drive login opens
+// is `drive:<collection-id>:login`. The account's collection is the
+// principal's grant; a credential's drive scope can only narrow it: one for
+// another collection, or for another head, is refused like a wrong password.
+func TestLoginOpensOnlyTheCredentialsCollection(t *testing.T) {
+	var conf config.Config
+	insecure(&conf)
+	h := newHarness(t, conf)
+	p, _ := authn.ParsePrincipal("acct:paris@pony.example.com")
+	other, _, err := h.store.EnsureCollection(context.Background(), "acme", "milan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pass, scope := range map[string]string{
+		"bcdg-this-drive":    "drive:" + h.coll.ID + ":*",
+		"bcdh-another-drive": "drive:" + other.ID + ":*",
+		"bcdj-mail-only":     "imap:*:*",
+	} {
+		authntest.Grant(t, h.ids, "acme", p, "paris@pony.example.com", pass, scope)
+	}
+	resp, _ := h.do(t, "PROPFIND", "/drive/", nil, auth("paris@pony.example.com", "bcdg-this-drive"), hdr("Depth", "0"))
+	want(t, resp, http.StatusMultiStatus, "a credential for this collection")
+	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, auth("paris@pony.example.com", "bcdh-another-drive"))
+	want(t, resp, http.StatusUnauthorized, "a credential for another collection")
+	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, auth("paris@pony.example.com", "bcdj-mail-only"))
+	want(t, resp, http.StatusUnauthorized, "a credential for another head")
 }

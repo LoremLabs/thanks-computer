@@ -7,12 +7,12 @@
 # is Fastmail/Gmail/Dovecot and there is no /seed — you only declare the
 # source and store its password.
 #
-# Body is JSON {"password": "..."}. That password becomes the account's
-# login, so it MUST equal the value you stored in the secret the source
-# references (PONY_MAILBOX) — that is the whole point: the source logs in
-# with the secret, so the account it logs into must share the password.
-# The web inlet base64-encodes the body at @web.req.body; decode + parse
-# it, and mark that a seed request is in flight.
+# No body is needed. The FIRST seed creates the account and answers with
+# its password, once — the chassis generates every password (it carries
+# the credential's id). Store that value as the secret the source
+# references (PONY_MAILBOX): the source logs in with the secret, so it
+# must be the account's password. Later seeds only add messages. Mark
+# that a seed request is in flight.
 WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/seed"
   EMIT ._seed = &try_json(&b64decode(@web.req.body)),
        ._seed_req = true

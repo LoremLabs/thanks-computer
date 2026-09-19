@@ -18,11 +18,11 @@ import (
 )
 
 // calendarAccount creates or updates a calendar account for the pinned
-// tenant. Result at `into`: {username, created, password?, rotated?} —
-// password only when generated (create, explicit "", or `rotate`); rotated
-// only when an existing account's password was regenerated. Pass the
-// password the IMAP account got (`password = ._imapacct.password`) and the
-// two heads share one credential.
+// tenant and binds its username to `principal` (bindAccount): the account
+// holds no password — a login is a credential issued to that principal
+// with txco://credential/create, whose `calendar:…` scope opens this head.
+// Result at `into`: {username, created, principal, principal_url} —
+// principal_url is the DAV principal resource a client discovers.
 func calendarAccount(ctx context.Context, d calendarDeps, in []byte) (event.Payload, error) {
 	tenant, meta, into, ep, ok := calendarPrelude(ctx, d)
 	if !ok {
@@ -40,13 +40,6 @@ func calendarAccount(ctx context.Context, d calendarDeps, in []byte) (event.Payl
 		return calendarErr(into, "txco_calendar_domain_not_owned",
 			fmt.Sprintf("domain %q is not a verified hostname or delegated zone of this tenant", domain)), nil
 	}
-	pwr, pcode, pmsg := resolveAccountPassword(meta, func() (bool, error) {
-		_, exists, gerr := d.store.GetAccount(ctx, username)
-		return exists, gerr
-	})
-	if pcode != "" {
-		return calendarErr(into, "txco_calendar_"+pcode, pmsg), nil
-	}
 	status := gjson.GetBytes(meta, "status").String()
 	var policy json.RawMessage
 	if p := gjson.GetBytes(meta, "policy"); p.Exists() {
@@ -58,7 +51,11 @@ func calendarAccount(ctx context.Context, d calendarDeps, in []byte) (event.Payl
 		}
 		policy = json.RawMessage(p.Raw)
 	}
-	created, err := d.store.UpsertAccount(ctx, tenant, username, pwr.hash, status, policy)
+	principal, pcode, pmsg := bindAccount(ctx, d.ids, d.snap, tenant, username, meta)
+	if pcode != "" {
+		return calendarErr(into, "txco_calendar_"+pcode, pmsg), nil
+	}
+	created, err := d.store.UpsertAccount(ctx, tenant, username, status, policy)
 	if err != nil {
 		code := "txco_calendar_store"
 		if errors.Is(err, chcal.ErrUsernameTaken) {
@@ -69,13 +66,9 @@ func calendarAccount(ctx context.Context, d calendarDeps, in []byte) (event.Payl
 	out := jsonx.NewObject()
 	out.Set(into+".username", username)
 	out.Set(into+".created", created)
-	out.Set(into+".principal", principalPath(d.prefix, username))
-	if pwr.generated != "" {
-		out.Set(into+".password", pwr.generated)
-	}
-	if pwr.rotated {
-		out.Set(into+".rotated", true)
-	}
+	out.Set(into+".principal", principal.ID)
+	// The DAV principal resource a client discovers — not the identity above.
+	out.Set(into+".principal_url", principalPath(d.prefix, username))
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
 }
 

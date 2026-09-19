@@ -86,6 +86,9 @@ func (s *FileSink) Begin(info RequestInfo) RequestTracer {
 	if payloadBytes > len(info.Payload) {
 		inDoc["payload_truncated"] = true
 	}
+	if info.Principal != "" {
+		inDoc["principal"] = info.Principal
+	}
 	if data, err := json.MarshalIndent(inDoc, "", "  "); err == nil {
 		_ = writeFile(filepath.Join(reqDir, "in.json"), data)
 	}
@@ -107,16 +110,21 @@ func (s *FileSink) Begin(info RequestInfo) RequestTracer {
 		startedAt: info.StartedAt,
 	}
 	t.Event(TimelineEvent{
-		Ts:    info.StartedAt,
-		Event: "request.start",
-		Fields: map[string]any{
-			"rid":    info.RID,
-			"src":    info.Src,
-			"tenant": info.Tenant,
-			"stack":  info.Stack,
-		},
+		Ts:     info.StartedAt,
+		Event:  "request.start",
+		Fields: requestStartFields(info),
 	})
 	return t
+}
+
+// requestStartFields are the request.start timeline event's fields. The
+// principal appears only for a request someone signed in to.
+func requestStartFields(info RequestInfo) map[string]any {
+	f := map[string]any{"rid": info.RID, "src": info.Src, "tenant": info.Tenant, "stack": info.Stack}
+	if info.Principal != "" {
+		f["principal"] = info.Principal
+	}
+	return f
 }
 
 // fileTracer is the per-request handle backed by Dir.

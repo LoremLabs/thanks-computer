@@ -146,7 +146,7 @@ func (c *Controller) createCalendar(ctx context.Context, pr principal, name stri
 	} else if found {
 		return chcal.Calendar{}, http.StatusMethodNotAllowed, "calendar exists"
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opMkcalendar,
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opMkcalendar,
 		calendar: calRef{Name: name, DisplayName: props["displayname"], Timezone: props["timezone"]}, props: props, clientIP: pr.clientIP}
 	if status, msg := c.gate(nil, &pr.acct, chcal.VerbMkcalendar, &m); status != 0 {
 		return chcal.Calendar{}, status, msg
@@ -198,7 +198,7 @@ func (c *Controller) serveProppatch(w http.ResponseWriter, r *http.Request, pr p
 		http.Error(w, "malformed request body", http.StatusBadRequest)
 		return
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opProppatch, calendar: refOf(cal), props: props, clientIP: pr.clientIP}
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opProppatch, calendar: refOf(cal), props: props, clientIP: pr.clientIP}
 	if status, msg := c.gate(&cal, &pr.acct, chcal.VerbProppatch, &m); status != 0 {
 		http.Error(w, msg, status)
 		return

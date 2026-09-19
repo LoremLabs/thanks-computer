@@ -10,6 +10,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
 )
@@ -105,10 +106,10 @@ func (r *redactRegistry) Rebuild(db *sql.DB) error {
 		// populated Resonator; we still read whatever WITH clauses
 		// were captured. A nil result is the only thing we skip.
 		res, _ := txcl.Resonator(def)
-		if res == nil || len(res.With) == 0 {
+		if res == nil {
 			continue
 		}
-		r1 := withList(res.With, "redact")
+		r1 := append(withList(res.With, "redact"), issuedSecretPaths(res.Exec, res.With)...)
 		o1 := withList(res.With, "omit")
 		if len(r1) == 0 && len(o1) == 0 {
 			continue
@@ -155,6 +156,27 @@ func (r *redactRegistry) Rebuild(db *sql.DB) error {
 		zap.Int("rules_with_hints", withRules),
 		zap.Int("slots", len(out)))
 	return nil
+}
+
+// issuedSecretPaths is what the chassis redacts without being asked: an op
+// that returns a secret exactly once. txco://credential/create answers with
+// the credential's password at `<into>.password`; it must reach the rule
+// that shows it to a person, and never the trace. `into` is read the way
+// the op reads it (intoPath): a literal, or the default when absent — a
+// computed `into` cannot be known here, so the default is redacted as well.
+func issuedSecretPaths(exec string, with map[string]ast.Value) []string {
+	if strings.TrimSpace(exec) != "txco://credential/create" {
+		return nil
+	}
+	paths := []string{"_credential.password"}
+	if v, ok := with["into"]; ok {
+		if s, ok := ast.LiteralOrNil(v).(string); ok {
+			if into, _ := txcguard.AuthorTarget(s); into != "" && into != "_credential" {
+				paths = append(paths, into+".password")
+			}
+		}
+	}
+	return paths
 }
 
 // withList pulls a comma-separated literal-string value out of the

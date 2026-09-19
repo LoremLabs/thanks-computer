@@ -11,9 +11,10 @@ OPS/imap-demo/
   085/autoconfig_respond.txcl  …the config-v1.1.xml: this host, 993, SSL, %EMAILADDRESS%
   090/provision_auth.txcl    POST /imap/provision → txco://basic-auth-verify (open until IMAP_PROVISION_PASSWORD is set)
   095/provision_reject.txcl  …401 unless the verdict is an explicit true
-  100/provision_parse.txcl   POST /imap/provision → parse {"username", "password"?}
+  100/provision_parse.txcl   POST /imap/provision → parse {"username"}
   100/folders_*.txcl         POST /imap/folders (create a role-tagged folder), GET /imap/folders
-  110/account.txcl           txco://imap/account (argon2id; password generated when omitted)
+  110/account.txcl           txco://imap/account — the mailbox, its username bound to a principal
+  120/credential.txcl        txco://credential/create — its password, issued once (new accounts only)
   120/hello.txcl             txco://imap/append — a RECORD, rendered to RFC 5322 on FETCH
   130/folder.txcl            txco://imap/mailbox — role + per-verb policy
   140/*, 200/*               JSON responses
@@ -32,11 +33,14 @@ txco auth tenant hostnames add pony.local.thanks.computer --stack imap-demo
 curl -X POST http://localhost:8080/imap/provision \
   -d '{"username":"paris@pony.local.thanks.computer"}'
 # {"username":"paris@pony.local.thanks.computer","created":true,
-#  "password":"xxxx-xxxx-xxxx-xxxx-xxxx-xxxx","hello_uid":1,"hello_noop":false,
+#  "password":"k7m2-river-galaxy-bamboo-orbit-velvet","hello_uid":1,"hello_noop":false,
 #  "imap":{"host":"127.0.0.1","port":1993,"tls":true}}
 ```
 
-The password is returned exactly once — only its hash is stored. The
+The password is returned exactly once — only its hash is stored, and the
+chassis keeps it out of the trace. It is a credential (see
+[users](../../docs/advanced/users.md)): its leading `k7m2` names it, and
+its scope opens IMAP only. The
 routes in this example are **open on loopback** (it is a demo); the
 guarantee that holds everywhere is in the op: `txco://imap/account` runs
 only inside this tenant's rules and only for a domain the tenant owns. A
@@ -104,9 +108,9 @@ Then add the account in a mail client:
 | Outgoing server | Apple Mail verifies one while adding the account and there is no submission head yet: run Mailpit (`brew install mailpit; mailpit --smtp-auth-accept-any --smtp-auth-allow-insecure`) and use `localhost:1025`, or a real SMTP account |
 
 INBOX shows "Hello from your stack". Re-running the provision call with
-the same username rotates nothing unless a password is given, and the
-hello is a no-op (same `object_key`, same content). A wrong password is
-`NO [AUTHENTICATIONFAILED]`; more than ten attempts a minute from one
+the same username issues no new password, and the hello is a no-op (same
+`object_key`, same content). A wrong password is
+`NO [AUTHENTICATIONFAILED]`; more than ten LOGINs a minute from one
 address is `NO [LIMIT]`.
 
 Or with a plain client:

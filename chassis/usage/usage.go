@@ -25,8 +25,12 @@ import (
 // "_sys" (or empty) for unrouted/404 traffic, which is logged as-is so
 // rejected requests are still measured.
 type UsageEvent struct {
-	RID        string
-	Tenant     string
+	RID    string
+	Tenant string
+	// Principal is who the request acted as (`pony:paris`, `user:usr_…`):
+	// the id a head's verified login pinned. Empty — and left off the log
+	// line — when no one signed in, which is every web request.
+	Principal  string
 	Src        string // "http" | "tcp" | "cron"
 	Stack      string // entry stage the request dispatched to
 	DurationMS int64
@@ -127,6 +131,9 @@ func (s *ZapSink) WriteEvent(ev UsageEvent) {
 	// both; the node that served it is the base "host" field.
 	if ev.WebHost != "" {
 		fields = append(fields, zap.String("web.host", ev.WebHost))
+	}
+	if ev.Principal != "" {
+		fields = append(fields, zap.String("principal", ev.Principal))
 	}
 	// Admission denials: tag the line so log-based billing/analytics can
 	// exclude rejected traffic. billable is emitted only when false — the

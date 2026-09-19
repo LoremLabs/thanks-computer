@@ -15,7 +15,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 )
@@ -40,6 +40,7 @@ type session struct {
 	proxied  bool
 
 	acct   *chimap.Account
+	who    authn.Authenticated // the principal the credential signed in as
 	domain string
 	slot   bool // holds a per-account connection slot
 
@@ -100,14 +101,18 @@ func (s *session) Close() error {
 
 // ---- authentication ------------------------------------------------------
 
-// Login verifies the credentials against imap_accounts. Order matters:
-// throttles first (no password work for a flood), then the account lookup
-// with a dummy verify on a miss (no existence oracle), the verified-login
-// cache, argon2id, the tenant admission check, and the per-account
-// connection cap.
+// Login verifies the credentials. Order matters: the LOGIN throttles first
+// (no work at all for a flood), then the account the username names, with
+// a dummy verify on a miss (no existence oracle), then the password
+// through the login resolver the heads share (chassis/authn: binding →
+// credential → one argon2id verify, its scopes covering
+// `imap:<username>:login`), the account's status, the tenant admission
+// check, and the per-account connection cap.
 func (s *session) Login(username, password string) error {
 	username = chimap.NormalizeUsername(username)
-	note := func(outcome string) { s.c.noteLogin(outcome, username, s.ip, s.listener, s.isTLS(), s.proxied) }
+	note := func(outcome string) {
+		s.c.noteLogin(outcome, username, s.ip, s.listener, s.isTLS(), s.proxied, authn.Authenticated{})
+	}
 	if s.c.loginIP != nil && s.ip != "" {
 		if ok, _ := s.c.loginIP.Allow(s.ip); !ok {
 			note("throttled")
@@ -143,23 +148,32 @@ func (s *session) Login(username, password string) error {
 		return no(imap.ResponseCodeUnavailable, "Temporary failure")
 	}
 	if !ok {
-		chimap.VerifyDummy(password)
+		if s.c.auth.Miss(s.ip, username, password) == authn.OutcomeThrottled {
+			note("throttled")
+			return no(imap.ResponseCodeLimit, "Too many login attempts")
+		}
 		note("failed")
 		return imapserver.ErrAuthFailed
 	}
-	key := apppass.LoginKey(acct.Username, acct.PwHash, password)
-	if !s.c.cache.Hit(key) {
-		match, verr := chimap.VerifyPassword(acct.PwHash, password)
-		if verr != nil {
-			s.c.pu.Logger.Warn("imap account has an unreadable password hash", zap.String("user", username), zap.String("err", verr.Error()))
-			note("error")
-			return imapserver.ErrAuthFailed
-		}
-		if !match {
-			note("failed")
-			return imapserver.ErrAuthFailed
-		}
-		s.c.cache.Put(key)
+	res := s.c.auth.Login(s.ctx(), authn.Attempt{
+		Tenant: acct.Tenant, Username: acct.Username, Password: password, IP: s.ip,
+		Want: authn.Scope{Domain: "imap", Instance: acct.Username, Action: "login"},
+	})
+	switch res.Outcome {
+	case authn.OutcomeOK:
+	case authn.OutcomeThrottled:
+		note("throttled")
+		return no(imap.ResponseCodeLimit, "Too many login attempts")
+	case authn.OutcomeError:
+		s.c.pu.Logger.Warn("imap login failed", zap.String("user", username), zap.Error(res.Err))
+		note("error")
+		return no(imap.ResponseCodeUnavailable, "Temporary failure")
+	case authn.OutcomeDisabled:
+		note("disabled")
+		return no(imap.ResponseCodeAuthorizationFailed, "Account disabled")
+	default:
+		note(string(res.Outcome))
+		return imapserver.ErrAuthFailed
 	}
 	if acct.Status != chimap.StatusActive {
 		note("disabled")
@@ -177,8 +191,9 @@ func (s *session) Login(username, password string) error {
 	}
 	s.slot = true
 	s.acct = &acct
+	s.who = res.Who
 	s.domain = domainOf(acct.Username)
-	note("ok")
+	s.c.noteLogin("ok", username, s.ip, s.listener, s.isTLS(), s.proxied, res.Who)
 	return nil
 }
 

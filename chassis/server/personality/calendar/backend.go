@@ -284,7 +284,7 @@ func (b *backend) PutCalendarObject(ctx context.Context, path string, data *ical
 	if err != nil {
 		return nil, httpErr(http.StatusServiceUnavailable, "store: %v", err)
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opPut, calendar: refOf(cal),
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opPut, calendar: refOf(cal),
 		object: &objRef{Name: resource, UID: facts.UID, Component: facts.Component, Size: int64(len(bytes)), Exists: exists},
 		ical:   bytes, event: &facts, clientIP: pr.clientIP}
 	if exists {
@@ -367,7 +367,7 @@ func (b *backend) DeleteCalendarObject(ctx context.Context, path string) error {
 	if !found {
 		return httpErr(http.StatusNotFound, "no such object")
 	}
-	m := mutation{tenant: pr.tenant, account: pr.username, op: opDelete, calendar: refOf(cal),
+	m := mutation{tenant: pr.tenant, account: pr.username, who: pr.who, op: opDelete, calendar: refOf(cal),
 		object:   &objRef{Name: resource, UID: existing.UID, ETag: existing.ETag, PriorETag: existing.ETag, Component: existing.Component, Size: existing.Size, Exists: true},
 		clientIP: pr.clientIP}
 	if pe, err := chcal.Parse(existing.ICal); err == nil {

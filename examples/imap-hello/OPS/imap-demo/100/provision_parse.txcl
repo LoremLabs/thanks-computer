@@ -1,5 +1,4 @@
-# POST /imap/provision — step 1: the body is JSON {"username": …,
-# "password"?: …}.
+# POST /imap/provision — step 1: the body is JSON {"username": …}.
 #
 # UNAUTHENTICATED BY DESIGN — a loopback demo. Anyone who can reach the
 # web port can create or reset an account under a domain this tenant

@@ -77,6 +77,7 @@ type RequestDetail struct {
 	RID        string
 	Src        string
 	Tenant     string
+	Principal  string // who the request acted as; "" when no one signed in
 	Stack      string
 	Route      string
 	StartedAt  string

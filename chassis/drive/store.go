@@ -196,7 +196,6 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS drive_accounts (
 			tenant        TEXT NOT NULL,
 			username      TEXT NOT NULL,
-			pw_hash       TEXT NOT NULL,
 			status        TEXT NOT NULL DEFAULT 'active',
 			collection_id TEXT NOT NULL,
 			created_at    TEXT NOT NULL,
@@ -248,6 +247,21 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		}
 		if _, err := s.db.ExecContext(ctx, c.ddl); err != nil {
 			return fmt.Errorf("drive: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	// The account's password moved to the identity store (chassis/authn): a
+	// login is a credential that authenticates as a principal, and the
+	// username only finds that principal. Drop the old column rather than
+	// leave it — a column nothing reads is one someone eventually writes by
+	// accident. Probe, then drop: both engines support DROP COLUMN, and
+	// pw_hash is in no index or constraint. Two nodes booting together can
+	// both try; the loser's error is fine once the column is gone.
+	const probePwHash = `SELECT pw_hash FROM drive_accounts WHERE 1 = 0`
+	if _, err := s.db.ExecContext(ctx, probePwHash); err == nil {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE drive_accounts DROP COLUMN pw_hash`); err != nil {
+			if _, still := s.db.ExecContext(ctx, probePwHash); still == nil {
+				return fmt.Errorf("drive: drop drive_accounts.pw_hash: %w", err)
+			}
 		}
 	}
 	return nil

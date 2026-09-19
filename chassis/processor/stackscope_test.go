@@ -7,6 +7,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 )
 
@@ -78,5 +79,64 @@ func TestStackScopeComesFromTheDeployedRule(t *testing.T) {
 
 	if got := StackScope(context.Background()); got != "" {
 		t.Errorf("unpinned StackScope = %q", got)
+	}
+}
+
+// TestPrincipalComesOnlyFromAVerifiedLogin — `_txc.principal` is the
+// stack's read-only copy of the principal a head pinned on its dispatch
+// context. With no pin, whatever the request brought is removed; with one,
+// the copy is the pin, whatever the request said; and no rule can write it.
+func TestPrincipalComesOnlyFromAVerifiedLogin(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	seed := func(stack, rule string) {
+		t.Helper()
+		if _, err := pu.Dbc.Db.Exec(
+			`INSERT INTO ops (stack, scope, name, txcl, mock_req, mock_res) VALUES (?, 0, 'r', ?, '', '')`,
+			stack, rule); err != nil {
+			t.Fatalf("seed op: %v", err)
+		}
+	}
+	run := func(ctx context.Context, stage, envelope string) string {
+		t.Helper()
+		resCh := make(chan event.Payload, 1)
+		if err := pu.Run(ctx, envelope, stage, resCh); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return (<-resCh).Raw
+	}
+	seed("who", `WHEN .x == 1 EMIT .saw = @principal.id, .kind = @principal.kind, .cred = @principal.credential`)
+	seed("forge", `WHEN .x == 1 EMIT @principal.id = "user:usr_forged1", @principal = "pony:forged"`)
+	const smuggled = `{"x":1,"_txc":{"principal":{"id":"user:usr_smuggled","kind":"user"}}}`
+
+	// No head signed anyone in: the smuggled principal is gone.
+	out := run(context.Background(), "who/0", smuggled)
+	if gjson.Get(out, "_txc.principal").Exists() || gjson.Get(out, "saw").String() != "" {
+		t.Errorf("unpinned request kept a principal: %s", out)
+	}
+
+	pony, _ := authn.ParsePrincipal("pony:paris")
+	signedIn := authn.WithAuthenticated(context.Background(), authn.Authenticated{Principal: pony, Credential: "crd_1"})
+	out = run(signedIn, "who/0", smuggled)
+	if gjson.Get(out, "saw").String() != "pony:paris" || gjson.Get(out, "kind").String() != "pony" || gjson.Get(out, "cred").String() != "crd_1" {
+		t.Errorf("pinned request: %s", out)
+	}
+
+	out = run(signedIn, "forge/0", `{"x":1}`)
+	if got := gjson.Get(out, "_txc.principal.id").String(); got != "pony:paris" {
+		t.Errorf("a rule rewrote the principal to %q: %s", got, out)
+	}
+
+	if got := PrincipalScope(signedIn); got != "pony:paris" {
+		t.Errorf("PrincipalScope = %q", got)
+	}
+	if got := PrincipalScope(context.Background()); got != "" {
+		t.Errorf("unpinned PrincipalScope = %q", got)
+	}
+	// A resume re-pins from the chassis-stamped scope envelope.
+	if a, ok := authn.AuthenticatedFrom(withPrincipalFrom(context.Background(), out)); !ok || a.Principal != pony || a.Credential != "crd_1" {
+		t.Errorf("re-pin from the envelope = %+v, %v", a, ok)
+	}
+	if _, ok := authn.AuthenticatedFrom(withPrincipalFrom(context.Background(), `{"_txc":{"principal":{"id":"not a principal"}}}`)); ok {
+		t.Error("re-pinned a malformed principal")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
@@ -52,6 +53,7 @@ import (
 
 type contactsDeps struct {
 	store *chcon.Store // nil ⇒ txco_contacts_disabled
+	ids   *authn.Store // the identity store contacts/account binds in
 	// snap returns the mirror DB the domain-ownership rule reads (dbcache
 	// snapshot); nil ⇒ every domain is refused.
 	snap     func() *sql.DB

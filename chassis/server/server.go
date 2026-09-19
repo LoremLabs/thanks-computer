@@ -958,14 +958,20 @@ func runWithTrace(
 		return runPipeline(ctx, pu, envelope, raw, stage, capture)
 	}
 
+	// The secrets an op issues this request (credential/create's password)
+	// are noted on ctx and scrubbed from every trace record of it — steps
+	// and the final payload alike — by the wrapper below.
+	ctx = processor.WithIssuedSecrets(ctx)
 	tracer := sink.Begin(trace.RequestInfo{
 		RID:       envelope.Rid,
 		Src:       envelope.Src,
 		Tenant:    gjson.Get(raw, "_txc.tenant").String(),
+		Principal: processor.PrincipalScope(ctx),
 		Stack:     stage,
 		StartedAt: time.Now(),
 		Payload:   []byte(raw),
 	})
+	tracer = processor.ScrubbingTracer(ctx, tracer)
 	ctx = trace.WithContext(ctx, tracer)
 
 	finalPayload, fuelUsed, err = runPipeline(ctx, pu, envelope, raw, stage, capture)
@@ -1709,7 +1715,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// projects into the index another node's head serves. Tenant pinned from ctx; the username's domain must
 	// pass the sendmail ownership rule against the mirror snapshot. See
 	// chassis/server/imap.go + chassis/imap.
-	imapD := imapDeps{store: imapStore, fcas: fcas, ix: blobIndex, snap: dbc.Snapshot,
+	imapD := imapDeps{store: imapStore, ids: identityStore, fcas: fcas, ix: blobIndex, snap: dbc.Snapshot,
 		maxBytes: int64(conf.IMAPAppendMaxBytes)} // nil dialect ⇒ SQLite (the mirror)
 	pu.Handle([]byte("txco://imap/account"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
@@ -1743,7 +1749,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// With a shared backend every node opens the store, head or not. Tenant
 	// pinned from ctx; the username's domain must pass the sendmail
 	// ownership rule. See chassis/server/calendar.go + chassis/calendar.
-	calD := calendarDeps{store: calendarStore, snap: dbc.Snapshot,
+	calD := calendarDeps{store: calendarStore, ids: identityStore, snap: dbc.Snapshot,
 		maxBytes: int64(conf.CalendarObjectMaxBytes), prefix: conf.CalendarPathPrefix}
 	for name, fn := range map[string]func(context.Context, calendarDeps, []byte) (event.Payload, error){
 		"txco://calendar/account":  calendarAccount,
@@ -1766,7 +1772,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// materialized by UID, and a bounded batch. Registered unconditionally
 	// so a node without the store answers `_contacts.error
 	// txco_contacts_disabled`. See chassis/server/contacts.go + chassis/contacts.
-	conD := contactsDeps{store: contactsStore, snap: dbc.Snapshot,
+	conD := contactsDeps{store: contactsStore, ids: identityStore, snap: dbc.Snapshot,
 		maxBytes: int64(conf.ContactsObjectMaxBytes), prefix: conf.ContactsPathPrefix}
 	for name, fn := range map[string]func(context.Context, contactsDeps, []byte) (event.Payload, error){
 		"txco://contacts/account":     contactsAccount,
@@ -1805,7 +1811,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// unconditionally so a node without the store answers `_drive.error
 	// txco_drive_disabled`. See chassis/server/drive.go + chassis/drive +
 	// docs/advanced/drive.md.
-	drvD := driveDeps{store: driveStore, snap: dbc.Snapshot, ix: blobIndex, fcas: fcas,
+	drvD := driveDeps{store: driveStore, ids: identityStore, snap: dbc.Snapshot, ix: blobIndex, fcas: fcas,
 		maxBytes: int64(conf.DriveOpMaxBytes), prefix: conf.DrivePathPrefix, // nil dialect ⇒ SQLite (the mirror)
 		signer: driveSigner, signBase: signedURLBase(conf)}
 	for name, fn := range map[string]func(context.Context, driveDeps, []byte) (event.Payload, error){
@@ -2118,12 +2124,28 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		webCtrl.SetSignedHandler(signedHandler(driveStore, driveSigner, pu.Admission, pu.Logger))
 	}
 
+	// The login resolver (chassis/authn) the four credential heads share —
+	// IMAP, CalDAV, CardDAV, WebDAV: one login cache and one set of
+	// throttles (--login-rate), so a guess over one head spends the same
+	// budget as a guess over another. nil when the identity store did not
+	// open on this node; every login then answers "temporary failure".
+	var logins *authn.Resolver
+	if identityStore != nil {
+		logins = authn.NewResolver(identityStore, authn.ResolverConfig{
+			Rate: conf.LoginRate,
+			TenantID: func(ctx context.Context, slug string) (string, error) {
+				return lookupTenantID(ctx, dbc.Snapshot, slug)
+			},
+		})
+	}
+
 	// Calendar personality (CalDAV + ICS feeds on the web head under
 	// --calendar-path-prefix). The controller owns the store, the login
 	// cache/throttles and the `_calendar` lanes; the web head mounts its
 	// handler. Off (a 404 on the prefix) unless `calendar` is in
 	// --personalities and the store opened.
 	calCtrl := calendarp.NewController(ctx, pu, calendarStore, resolver)
+	calCtrl.SetAuth(logins)
 	if calCtrl.Enabled() {
 		webCtrl.SetCalendar(calCtrl.Handler(), calCtrl.Prefix())
 	}
@@ -2131,6 +2153,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// --contacts-path-prefix), the calendar's sibling: same shape, its own
 	// store, lanes and prefix.
 	conCtrl := contactsp.NewController(ctx, pu, contactsStore, resolver)
+	conCtrl.SetAuth(logins)
 	if conCtrl.Enabled() {
 		webCtrl.MountDAV("/.well-known/carddav", conCtrl.Prefix(), conCtrl.Handler())
 	}
@@ -2138,6 +2161,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	// --drive-path-prefix): a plain file tree per account, no well-known
 	// path (WebDAV has no discovery — the mount URL is the prefix itself).
 	wdCtrl := webdavp.NewController(ctx, pu, driveStore, resolver)
+	wdCtrl.SetAuth(logins)
 	if wdCtrl.Enabled() {
 		webCtrl.MountDAV("", wdCtrl.Prefix(), wdCtrl.Handler())
 	}
@@ -2173,6 +2197,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	tcpCtrl.SetResolver(resolver)
 	tcpWantsManagedCert := tcpCtrl.WantsManagedTLS()
 	imapCtrl := imapp.NewController(ctx, pu, imapStore)
+	imapCtrl.SetAuth(logins)
 	imapCtrl.SetFileCAS(fcas)
 	imapCtrl.SetBlobIndex(blobIndex)
 	// --imap-self-signed (txco dev) mints its own certificate in the head
@@ -2514,8 +2539,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 								fuel = 0
 							}
 							usageSink.WriteEvent(usage.UsageEvent{
-								RID:        envelope.Rid,
-								Tenant:     tenant,
+								RID:    envelope.Rid,
+								Tenant: tenant,
+								// The head's verified login, pinned on the
+								// context it dispatched with — never the
+								// envelope's copy.
+								Principal:  processor.PrincipalScope(reqCtx),
 								Src:        envelope.Src,
 								Stack:      stack,
 								DurationMS: resTime,

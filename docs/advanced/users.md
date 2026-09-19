@@ -8,11 +8,13 @@ service), and the revocable passwords each of them signs in with. One
 person is one user across the tenant, with as many credentials as they have
 devices — each scoped to the doors it may open, each revocable on its own._
 
-> **Status.** This is the identity **store**. The protocol heads (IMAP,
-> CalDAV, CardDAV, WebDAV, IPP) do not sign people in against it yet — they
-> still use the password on each `…/account` op. When they switch over, a
-> credential issued here is what a mail client or a printer presents. Until
-> then these ops create and manage the records; nothing reads the passwords.
+> **Upgrading.** Accounts no longer hold passwords. `txco://imap/account`,
+> `calendar/account`, `contacts/account` and `drive/account` take a
+> `principal` instead and refuse `password` and `rotate`; every mail,
+> calendar, contacts and drive client signs in with a credential issued
+> here. A password set before this release has no credential id and stops
+> working: re-run each account op with its `principal`, issue a credential,
+> and give the new password to the client ([Signing in](#signing-in)).
 
 These are **your product's** users. They are not the accounts that
 administer a tenant (`txco login`, the admin UI): those live on a different
@@ -56,7 +58,7 @@ WHEN ._claim.ok == true
 | `user/create` | `email`, `display_name?`, `verified?` | the user, its `principal`, and `created` |
 | `user/get` | `id` \| `email` | the user (`email`, `email_verified` when looked up by email) |
 | `user/disable` | `id`, `disabled?` (default `true`; `false` re-enables) | the user |
-| `credential/create` | `principal`, `scopes[]`, `label?`, `password_style?` (`token` \| `words`), `password_words?` (4–12) | the credential **and its `password`, once** |
+| `credential/create` | `principal`, `scopes` (a list, or one scope as a string — build a computed one with `&concat`), `label?`, `password_style?` (`token` \| `words`), `password_words?` (4–12) | the credential **and its `password`, once** |
 | `credential/list` | `principal`, `include_revoked?` | `{principal, count, items[]}`, newest first — never a secret |
 | `credential/revoke` | `id` — or `principal` with `except` = an id, or `all = true` | `{id, principal, revoked}` — or `{principal, revoked_count}` |
 
@@ -89,8 +91,8 @@ WHEN ._user.created == true
 
 The `password` is in the result **once**. Only its argon2id hash is stored;
 it cannot be read back, by you or by the chassis. Show it to the person and
-drop it — and `redact` it, as above, so it stays out of
-[traces](./trace.md).
+drop it. The chassis keeps it out of [traces](./trace.md) on its own; a
+`redact` as above is harmless.
 
 **Every password is generated.** There is no `password = "…"` param. An
 issued password carries the id of its credential:
@@ -151,6 +153,53 @@ password that still works. To revoke everything, say so: `all = true`.
 
 Revocation is permanent. The row stays (`include_revoked = true` lists it),
 and its `short_id` is never reused.
+
+## Signing in
+
+The IMAP, CalDAV, CardDAV and WebDAV heads sign people in with these
+credentials. An account op (`txco://imap/account` and its siblings) binds
+the account's username to a principal; the client then presents the
+username and a password `credential/create` issued to that principal:
+
+```text
+username ──binding──▶ principal ──id in the password──▶ credential ──▶ verified
+                                                             │
+                                          its scopes must open this head
+```
+
+| head | the scope a login needs |
+|---|---|
+| IMAP | `imap:<username>:login` |
+| CalDAV | `calendar:<username>:login` |
+| CardDAV | `contacts:<username>:login` |
+| WebDAV | `drive:<collection-id>:login` — the account's own collection |
+
+So `imap:*:*` opens every mailbox the principal has, and nothing else; one
+credential with `["imap:*:*", "calendar:*:*", "contacts:*:*"]` is one
+password for Mail, Calendar and Contacts. A drive account's collection is
+what its principal may reach; the credential's `drive` scope can only
+narrow it.
+
+**Revocation is immediate.** Each head remembers a verified password for a
+few minutes so a client's stream of requests costs one hash, but every
+request reads the credential, so a revoked one is refused on its next use.
+(An IMAP session already open stays open.) A disabled user cannot sign in
+until re-enabled.
+
+**One budget for guesses.** Password checks are limited per client IP and
+per principal across all four heads together (`--login-rate`, 30 a
+minute): guessing over CalDAV spends the same budget as guessing over IMAP.
+
+**Who is acting.** A run a head starts on behalf of a signed-in client —
+an IMAP answer lane, a CalDAV observe — carries `@principal.id`,
+`@principal.kind` and `@principal.credential`. It is a read-only copy of
+what the chassis pinned; no request, rule or op can set it, and a run
+nobody signed in to has none. Usage lines and traces record the principal
+too.
+
+**The password stays out of traces.** The chassis removes a password
+`credential/create` issued from every trace record of that request — as
+itself, and inside a response body that renders it — without a `redact`.
 
 ## Which stack may manage a principal
 

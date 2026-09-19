@@ -15,6 +15,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
@@ -50,6 +51,7 @@ import (
 
 type calendarDeps struct {
 	store *chcal.Store // nil ⇒ txco_calendar_disabled
+	ids   *authn.Store // the identity store calendar/account binds in
 	// snap returns the mirror DB the domain-ownership rule reads (dbcache
 	// snapshot); nil ⇒ every domain is refused.
 	snap     func() *sql.DB

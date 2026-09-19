@@ -47,7 +47,7 @@ func TestUpsertAccountCreatesINBOXAndIsIdempotent(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
-	created, err := s.UpsertAccount(ctx, "acme", "Paris@Example.COM", "hash1", "", nil)
+	created, err := s.UpsertAccount(ctx, "acme", "Paris@Example.COM", "", nil)
 	if err != nil || !created {
 		t.Fatalf("create: created=%v err=%v", created, err)
 	}
@@ -55,7 +55,7 @@ func TestUpsertAccountCreatesINBOXAndIsIdempotent(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("get: ok=%v err=%v", ok, err)
 	}
-	if a.Tenant != "acme" || a.Username != "paris@example.com" || a.PwHash != "hash1" || a.Status != StatusActive {
+	if a.Tenant != "acme" || a.Username != "paris@example.com" || a.Status != StatusActive {
 		t.Errorf("account = %+v", a)
 	}
 	if string(a.Policy) != "{}" {
@@ -69,22 +69,22 @@ func TestUpsertAccountCreatesINBOXAndIsIdempotent(t *testing.T) {
 		t.Errorf("INBOX = %+v", mb)
 	}
 
-	// Update: empty pwHash keeps the hash; status + policy change.
-	created, err = s.UpsertAccount(ctx, "acme", "paris@example.com", "", StatusDisabled, json.RawMessage(`{"append":"observe"}`))
+	// Update: status + policy change.
+	created, err = s.UpsertAccount(ctx, "acme", "paris@example.com", StatusDisabled, json.RawMessage(`{"append":"observe"}`))
 	if err != nil || created {
 		t.Fatalf("update: created=%v err=%v", created, err)
 	}
 	a, _, _ = s.GetAccount(ctx, "paris@example.com")
-	if a.PwHash != "hash1" || a.Status != StatusDisabled || string(a.Policy) != `{"append":"observe"}` {
+	if a.Status != StatusDisabled || string(a.Policy) != `{"append":"observe"}` {
 		t.Errorf("after update = %+v", a)
 	}
-	// A new password replaces the hash.
-	if _, err := s.UpsertAccount(ctx, "acme", "paris@example.com", "hash2", "", nil); err != nil {
+	// An empty status and policy leave both as they were.
+	if _, err := s.UpsertAccount(ctx, "acme", "paris@example.com", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	a, _, _ = s.GetAccount(ctx, "paris@example.com")
-	if a.PwHash != "hash2" {
-		t.Errorf("pw_hash = %q, want hash2", a.PwHash)
+	if a.Status != StatusDisabled || string(a.Policy) != `{"append":"observe"}` {
+		t.Errorf("an empty update changed the account: %+v", a)
 	}
 	// Still exactly one INBOX.
 	mbs, _ := s.ListMailboxes(ctx, "acme", "paris@example.com")
@@ -96,16 +96,13 @@ func TestUpsertAccountCreatesINBOXAndIsIdempotent(t *testing.T) {
 func TestUpsertAccountRefusesCrossTenantUsername(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", "paris@example.com", "h", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", "paris@example.com", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpsertAccount(ctx, "other", "paris@example.com", "h", "", nil); err != ErrUsernameTaken {
+	if _, err := s.UpsertAccount(ctx, "other", "paris@example.com", "", nil); err != ErrUsernameTaken {
 		t.Errorf("cross-tenant upsert err = %v, want ErrUsernameTaken", err)
 	}
-	if _, err := s.UpsertAccount(ctx, "acme", "new@example.com", "", "", nil); err == nil {
-		t.Error("create without password should fail")
-	}
-	if _, err := s.UpsertAccount(ctx, "acme", "x@example.com", "h", "weird", nil); err == nil {
+	if _, err := s.UpsertAccount(ctx, "acme", "x@example.com", "weird", nil); err == nil {
 		t.Error("bad status should fail")
 	}
 }
@@ -113,7 +110,7 @@ func TestUpsertAccountRefusesCrossTenantUsername(t *testing.T) {
 func TestAppendSemantics(t *testing.T) {
 	s, clk := newTestStore(t)
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", "paris@example.com", "h", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", "paris@example.com", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	mb, _, _ := s.GetMailbox(ctx, "acme", "paris@example.com", "INBOX")
@@ -206,7 +203,7 @@ func TestAppendSemantics(t *testing.T) {
 func TestMailboxHelpers(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	if _, err := s.UpsertAccount(ctx, "acme", "p@example.com", "h", "", nil); err != nil {
+	if _, err := s.UpsertAccount(ctx, "acme", "p@example.com", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	mb, created, err := s.EnsureMailbox(ctx, "acme", "p@example.com", "/Brain//Knowledge/")
@@ -242,7 +239,7 @@ func TestGetAccountByLocalPart(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	for _, u := range []string{"paris@a.example.com", "rome@a.example.com", "rome@b.example.com", "paris_x@a.example.com"} {
-		if _, err := s.UpsertAccount(ctx, "acme", u, "h", "", nil); err != nil {
+		if _, err := s.UpsertAccount(ctx, "acme", u, "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -446,7 +443,7 @@ func TestUpsertAccountConcurrentCreate(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c, err := s.UpsertAccount(ctx, "acme", "race@example.com", "h", "", nil)
+			c, err := s.UpsertAccount(ctx, "acme", "race@example.com", "", nil)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -463,5 +460,39 @@ func TestUpsertAccountConcurrentCreate(t *testing.T) {
 	mbs, _ := s.ListMailboxes(ctx, "acme", "race@example.com")
 	if len(mbs) != 1 {
 		t.Errorf("mailboxes = %d, want the one INBOX", len(mbs))
+	}
+}
+
+// TestEnsureSchemaDropsTheOldPasswordColumn — a table from before the
+// identity store has a pw_hash column. EnsureSchema drops it and keeps the
+// rows; the account's login lives in chassis/authn now.
+func TestEnsureSchemaDropsTheOldPasswordColumn(t *testing.T) {
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(t.TempDir(), "old.db")+"?mode=rwc&_journal_mode=WAL&_busy_timeout=15000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE imap_accounts (
+		tenant TEXT NOT NULL, username TEXT NOT NULL, pw_hash TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'active', policy TEXT NOT NULL DEFAULT '{}',
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+		PRIMARY KEY (tenant, username), UNIQUE (username))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO imap_accounts (tenant, username, pw_hash,  created_at, updated_at)
+		VALUES ('acme', 'paris@example.com', '$argon2id$old',  '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(db, registry.SQLite)
+	for i := 0; i < 2; i++ {
+		if err := s.EnsureSchema(context.Background()); err != nil {
+			t.Fatalf("ensure schema #%d: %v", i, err)
+		}
+	}
+	if _, err := db.Exec(`SELECT pw_hash FROM imap_accounts`); err == nil {
+		t.Error("pw_hash is still there")
+	}
+	if a, ok, err := s.GetAccount(context.Background(), "paris@example.com"); err != nil || !ok || a.Tenant != "acme" {
+		t.Errorf("the row did not survive: %+v ok=%v err=%v", a, ok, err)
 	}
 }

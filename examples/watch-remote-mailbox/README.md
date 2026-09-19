@@ -20,11 +20,11 @@ provider and skip straight to "watch".
 OPS/watch-mailbox/
   SOURCES/mailboxes.jsonl    the declaration: WHAT to watch, and the NAME of the password secret
   _source/0/record.txcl      one run per pulled message → kv/cas into the `received` namespace (dedup on @source.key)
-  080/seed_parse.txcl        POST /seed → parse {"password"}
-  085/seed_missing.txcl      …400 if no password
+  080/seed_parse.txcl        POST /seed → mark the request
   100/seed_account.txcl      txco://imap/account — provision the LOCAL account the source will log into
+  110/seed_credential.txcl   txco://credential/create — its password, issued once on the first seed
   110/seed_append.txcl       txco://imap/append — drop a fresh message (object_key = @rid) into its INBOX
-  200/seed_respond.txcl      JSON: mailbox + appended uid
+  200/seed_respond.txcl      JSON: mailbox + appended uid (+ the password, first seed only)
   080/received_list.txcl     GET /received → txco://kv/list the `received` namespace
   200/received_respond.txcl  JSON: {received: <count>, keys: [...]}
 OPS/_sys/boot/…              the standard dev system opstack (detect/route/static/404); 75/auto-route → watch-mailbox
@@ -54,11 +54,11 @@ Both, in different places, and the split is the whole security point:
 
 So: set the username in the file, set the password with `secrets set`.
 For THIS example there is a twist — because the mailbox is one you also
-provision locally, the password has to match on both sides: the value
-you store as `PONY_MAILBOX` is the same one you hand to `/seed`, which is
-what the local account's login is set to. For a real remote mailbox you
-only do the `secrets set` half; the provider already owns the password
-(use a per-mailbox **app password**, not your main one).
+provision locally, the chassis is the provider: the first `/seed` creates
+the local account and answers with the password it issued, once, and
+that is the value you store as `PONY_MAILBOX`. For a real remote mailbox
+you only do the `secrets set` half; the provider already owns the
+password (use a per-mailbox **app password**, not your main one).
 
 ## Run the full loop
 
@@ -73,18 +73,17 @@ TXCO_SOURCE_PERIOD=5 txco dev --imap --source
 default so the demo is snappy. In a second terminal:
 
 ```
-# 1. store the mailbox password (use this exact value below too)
-txco auth tenant secrets set PONY_MAILBOX --tenant default          # enter: correct-horse-battery
-
-# 2. own the domain so the local account can be provisioned under it
+# 1. own the domain so the local account can be provisioned under it
 #    (*.local.thanks.computer resolves to loopback and auto-verifies in dev)
 txco auth tenant hostnames add pony.local.thanks.computer --stack watch-mailbox --tenant default
 
-# 3. provision the LOCAL watched mailbox + drop a message in it
-curl -sS -X POST http://localhost:8080/seed \
-  -H 'Host: pony.local.thanks.computer' \
-  -d '{"password":"correct-horse-battery"}'
-# {"seeded":true,"mailbox":"desk@pony.local.thanks.computer","appended_uid":1,"next":"…"}
+# 2. provision the LOCAL watched mailbox + drop a message in it
+curl -sS -X POST http://localhost:8080/seed -H 'Host: pony.local.thanks.computer'
+# {"seeded":true,"mailbox":"desk@pony.local.thanks.computer","created":true,
+#  "password":"txc_k7m2_…","appended_uid":1,"next":"…"}
+
+# 3. store that password as the mailbox secret — it is shown only once
+txco auth tenant secrets set PONY_MAILBOX --tenant default          # paste the password
 
 # 4. within ~5s the source polls, fires a _source run, and moves the message.
 #    See what it pulled:
@@ -141,14 +140,14 @@ ticket, answer, hand off to an LLM — instead of just counting.
   runs it `open`, which is why pointing at loopback (`127.0.0.1`) works
   here; production defaults to `private` and blocks RFC1918/loopback, so
   a self-hosted mailbox needs its range in `--egress-allow-cidrs`.
-- **`/seed`'s password is in-flight cleartext — the source's is not.**
-  Provisioning a local account inherently needs the password in the
-  envelope, so `POST /seed` puts it there and (under `--trace-mode=full`)
-  it appears in that request's trace. That is the demo route, not the
-  feature: the source's own mailbox password lives ONLY in the secret
-  store, is materialized inside the poller and zeroed after LOGIN, and
-  never reaches an envelope, trace, or log — `grep`-ing a full trace for
-  it after a poll returns nothing. A real deployment has no `/seed`.
+- **`/seed` answers with the password once — the source never shows it.**
+  The first `POST /seed` returns the password the chassis issued in its
+  response (the chassis redacts it from that request's trace). That is
+  the demo route, not the feature: the source's own mailbox password
+  lives ONLY in the secret store, is materialized inside the poller and
+  zeroed after LOGIN, and never reaches an envelope, trace, or log —
+  `grep`-ing a full trace for it after a poll returns nothing. A real
+  deployment has no `/seed`.
 - **`tls":"none"` is a dev convenience** for the loopback plaintext
   listener (the dev IMAP cert is self-signed, so the source can't verify
   `implicit`/`starttls` against it). A real source uses `implicit`

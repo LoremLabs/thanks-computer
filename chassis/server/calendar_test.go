@@ -12,8 +12,8 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
@@ -56,15 +56,24 @@ func newCalendarDeps(t *testing.T, owned map[string]string) calendarDeps {
 		}
 	}
 	fixed := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
-	return calendarDeps{store: store, snap: func() *sql.DB { return mirror }, dialect: registry.SQLite,
+	return calendarDeps{store: store, ids: authntest.NewSQLiteStore(t), snap: func() *sql.DB { return mirror }, dialect: registry.SQLite,
 		maxBytes: 1 << 20, prefix: "/dav", now: func() time.Time { return fixed }}
 }
 
 func callCal(t *testing.T, fn func(context.Context, calendarDeps, []byte) (event.Payload, error), d calendarDeps, tenant, metaJSON string) string {
 	t.Helper()
+	return callCalFrom(t, fn, d, tenant, "web", metaJSON)
+}
+
+// callCalFrom runs the op as a rule of `stack`.
+func callCalFrom(t *testing.T, fn func(context.Context, calendarDeps, []byte) (event.Payload, error), d calendarDeps, tenant, stack, metaJSON string) string {
+	t.Helper()
 	ctx := context.Background()
 	if tenant != "" {
 		ctx = processor.WithTenant(ctx, tenant)
+	}
+	if stack != "" {
+		ctx = processor.WithStack(ctx, stack)
 	}
 	ctx = operation.WithMeta(ctx, metaJSON)
 	pl, err := fn(ctx, d, []byte(`{"_txc":{"op":"demo/100/calendar"}}`))
@@ -77,40 +86,32 @@ func callCal(t *testing.T, fn func(context.Context, calendarDeps, []byte) (event
 func TestCalendarAccountOp(t *testing.T) {
 	d := newCalendarDeps(t, map[string]string{"pony.example.com": "acme"})
 
-	out := callCal(t, calendarAccount, d, "acme", `{"username":"Paris@Pony.Example.com","password_style":"words"}`)
+	out := callCal(t, calendarAccount, d, "acme", `{"username":"Paris@Pony.Example.com","principal":"pony:paris"}`)
 	if gjson.Get(out, "_calendar.error").Exists() {
 		t.Fatalf("create: %s", out)
 	}
-	pw := gjson.Get(out, "_calendar.password").String()
 	if gjson.Get(out, "_calendar.username").String() != "paris@pony.example.com" || !gjson.Get(out, "_calendar.created").Bool() ||
-		strings.Count(pw, "-") != 4 || gjson.Get(out, "_calendar.principal").String() != "/dav/paris@pony.example.com/" {
+		gjson.Get(out, "_calendar.principal").String() != "pony:paris" ||
+		gjson.Get(out, "_calendar.principal_url").String() != "/dav/paris@pony.example.com/" || gjson.Get(out, "_calendar.password").Exists() {
 		t.Errorf("create = %s", out)
 	}
 	a, ok, _ := d.store.GetAccount(context.Background(), "paris@pony.example.com")
 	if !ok || a.Tenant != "acme" {
 		t.Fatalf("account = %+v ok=%v", a, ok)
 	}
-	if match, _ := apppass.VerifyPassword(a.PwHash, pw); !match {
-		t.Error("generated password does not verify")
+	wantBound(t, d.ids, "t_acme", "paris@pony.example.com", "pony:paris")
+	// An update needs no principal: the username's binding supplies it.
+	out = callCal(t, calendarAccount, d, "acme", `{"username":"paris@pony.example.com","status":"disabled","into":"_ca"}`)
+	if gjson.Get(out, "_ca.error").Exists() || gjson.Get(out, "_ca.created").Bool() || gjson.Get(out, "_ca.principal").String() != "pony:paris" {
+		t.Errorf("update = %s", out)
 	}
-	// The shared-credential path: an explicit password (the one IMAP minted).
-	out = callCal(t, calendarAccount, d, "acme", `{"username":"paris@pony.example.com","password":"river-galaxy-bamboo-orbit-velvet","into":"_ca"}`)
-	if gjson.Get(out, "_ca.error").Exists() || gjson.Get(out, "_ca.password").Exists() || gjson.Get(out, "_ca.created").Bool() {
-		t.Errorf("explicit password = %s", out)
-	}
-	a2, _, _ := d.store.GetAccount(context.Background(), "paris@pony.example.com")
-	if match, _ := apppass.VerifyPassword(a2.PwHash, "river-galaxy-bamboo-orbit-velvet"); !match {
-		t.Error("explicit password not stored")
-	}
-	out = callCal(t, calendarAccount, d, "acme", `{"username":"paris@pony.example.com","rotate":true}`)
-	if !gjson.Get(out, "_calendar.rotated").Bool() || gjson.Get(out, "_calendar.password").String() == "" {
-		t.Errorf("rotate = %s", out)
-	}
+	accountOpRefusals(t, "calendar", "paris@pony.example.com", "", func(stack, meta string) string {
+		return callCalFrom(t, calendarAccount, d, "acme", stack, meta)
+	})
 	for meta, code := range map[string]string{
-		`{"username":"x@else.example.com"}`:                          "txco_calendar_domain_not_owned",
-		`{"username":"nope"}`:                                        "txco_calendar_invalid_arg",
-		`{"username":"x@pony.example.com","password":"short"}`:       "txco_calendar_invalid_arg",
-		`{"username":"x@pony.example.com","policy":{"put":"maybe"}}`: "txco_calendar_invalid_arg",
+		`{"username":"x@else.example.com"}`: "txco_calendar_domain_not_owned",
+		`{"username":"nope"}`:               "txco_calendar_invalid_arg",
+		`{"username":"x@pony.example.com","principal":"pony:x","policy":{"put":"maybe"}}`: "txco_calendar_invalid_arg",
 	} {
 		if got := gjson.Get(callCal(t, calendarAccount, d, "acme", meta), "_calendar.error.code").String(); got != code {
 			t.Errorf("%s → %s, want %s", meta, got, code)
@@ -129,7 +130,7 @@ func TestCalendarAccountOp(t *testing.T) {
 
 func TestCalendarCalendarAndObjectsOps(t *testing.T) {
 	d := newCalendarDeps(t, map[string]string{"pony.example.com": "acme"})
-	callCal(t, calendarAccount, d, "acme", `{"username":"paris@pony.example.com"}`)
+	callCal(t, calendarAccount, d, "acme", `{"username":"paris@pony.example.com","principal":"pony:paris"}`)
 
 	out := callCal(t, calendarCalendar, d, "acme", `{"username":"paris@pony.example.com","name":"schedule","display_name":"Paris schedule","timezone":"UTC","color":"#6b4de6","policy":{"put":"stack","delete":"stack"},"feed":"ensure"}`)
 	if gjson.Get(out, "_calendar.error").Exists() || !gjson.Get(out, "_calendar.created").Bool() ||
