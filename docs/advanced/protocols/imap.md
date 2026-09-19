@@ -312,7 +312,7 @@ proxied=false` is a genuine cleartext `LOGIN`, which only
 | `--imap-insecure-auth` | `false` | LOGIN without TLS |
 | `--imap-self-signed` | `false` | Mint a self-signed certificate at boot (dev; `txco dev --imap` sets it) |
 | `--imap-wire-debug` | `false` | Log every IMAP line at DEBUG, credentials included (dev) |
-| `--imap-login-rate` | `10` | LOGIN commands per minute, per IP and per username — a flood guard, before any lookup |
+| `--imap-login-rate` | `10` | LOGIN commands per minute, per IP and per username — a flood guard, before any lookup. A rate-limited LOGIN (this guard, or `--login-rate`) is refused after a 2-second pause, so a client retrying a dead password cannot do it several times a second |
 | `--login-rate` | `30` | Password checks per minute, per IP and per principal, shared with the CalDAV, CardDAV and WebDAV heads (cache misses only) |
 | `--imap-max-conns-per-account` | `16` | Simultaneous authenticated connections |
 | `--imap-append-max-bytes` | 32 MiB | Size cap for `txco://imap/append` and a client APPEND (`APPENDLIMIT`) |

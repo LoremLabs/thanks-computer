@@ -84,6 +84,35 @@ func (s *session) ctx() context.Context {
 	return context.Background()
 }
 
+// throttledReplyDelay is how long a rate-limited LOGIN waits before it is
+// refused.
+//
+// A mail client whose password has stopped working retries as fast as the
+// server answers, and a refusal that costs nothing to send costs nothing to
+// repeat: one client was seen at four LOGINs a second, around the clock,
+// each one a log line. The pause makes the refusal the slow path, so a
+// connection gets one attempt per delay. Two seconds is far inside any
+// client's login timeout.
+const throttledReplyDelay = 2 * time.Second
+
+// throttled refuses a LOGIN that a rate limit turned away — IMAP's own flood
+// guard or the shared resolver's — after throttledReplyDelay. The attempt is
+// logged first, so the line carries the time it arrived. The wait holds
+// nothing (no lookup has run, no connection slot is taken) and ends early
+// when the head shuts down.
+func (s *session) throttled(note func(outcome string)) error {
+	note("throttled")
+	if d := time.Duration(s.c.throttleDelay.Load()); d > 0 {
+		t := time.NewTimer(d)
+		select {
+		case <-t.C:
+		case <-s.ctx().Done():
+			t.Stop()
+		}
+	}
+	return no(imap.ResponseCodeLimit, "Too many login attempts")
+}
+
 func no(code imap.ResponseCode, text string) error {
 	return &imap.Error{Type: imap.StatusResponseTypeNo, Code: code, Text: text}
 }
@@ -115,14 +144,12 @@ func (s *session) Login(username, password string) error {
 	}
 	if s.c.loginIP != nil && s.ip != "" {
 		if ok, _ := s.c.loginIP.Allow(s.ip); !ok {
-			note("throttled")
-			return no(imap.ResponseCodeLimit, "Too many login attempts")
+			return s.throttled(note)
 		}
 	}
 	if s.c.loginAcct != nil && username != "" {
 		if ok, _ := s.c.loginAcct.Allow(username); !ok {
-			note("throttled")
-			return no(imap.ResponseCodeLimit, "Too many login attempts")
+			return s.throttled(note)
 		}
 	}
 	var acct chimap.Account
@@ -149,8 +176,7 @@ func (s *session) Login(username, password string) error {
 	}
 	if !ok {
 		if s.c.auth.Miss(s.ip, username, password) == authn.OutcomeThrottled {
-			note("throttled")
-			return no(imap.ResponseCodeLimit, "Too many login attempts")
+			return s.throttled(note)
 		}
 		note("failed")
 		return imapserver.ErrAuthFailed
@@ -162,8 +188,7 @@ func (s *session) Login(username, password string) error {
 	switch res.Outcome {
 	case authn.OutcomeOK:
 	case authn.OutcomeThrottled:
-		note("throttled")
-		return no(imap.ResponseCodeLimit, "Too many login attempts")
+		return s.throttled(note)
 	case authn.OutcomeError:
 		s.c.pu.Logger.Warn("imap login failed", zap.String("user", username), zap.Error(res.Err))
 		note("error")

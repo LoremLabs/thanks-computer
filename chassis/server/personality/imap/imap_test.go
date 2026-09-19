@@ -46,6 +46,7 @@ type harness struct {
 	fcas   filecas.Store
 	addr   string
 	dbPath string
+	cancel context.CancelFunc // ends the head's context, as a shutdown does
 }
 
 // testDSN is the production SQLite DSN shape (chassis/imap/sqlite.go): WAL
@@ -97,6 +98,9 @@ func newHarnessWithLogger(t *testing.T, conf config.Config, logger *zap.Logger) 
 	pu := &processor.Unit{Conf: conf, Logger: logger, Admission: fakeAdmission{suspended: "suspended"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu, store)
+	// No pause before a throttled refusal: the tests that exhaust a rate
+	// limit would each wait it out. TestThrottledLoginWaits puts one back.
+	ctrl.throttleDelay.Store(0)
 	ids := authntest.NewSQLiteStore(t)
 	ctrl.SetAuth(authn.NewResolver(ids, authn.ResolverConfig{Rate: conf.LoginRate, TenantID: authntest.SameTenantID}))
 	ctrl.SetFileCAS(fs)
@@ -106,7 +110,7 @@ func newHarnessWithLogger(t *testing.T, conf config.Config, logger *zap.Logger) 
 	if len(addrs) < 1 {
 		t.Fatalf("bound %v", addrs)
 	}
-	return &harness{ids: ids, ctrl: ctrl, store: store, fcas: fs, addr: addrs[0], dbPath: dbPath}
+	return &harness{ids: ids, ctrl: ctrl, store: store, fcas: fs, addr: addrs[0], dbPath: dbPath, cancel: cancel}
 }
 
 // remote is a second Store over the same index with NO change listener: a
@@ -435,6 +439,44 @@ func TestLoginFailuresAndThrottle(t *testing.T) {
 	err = c.Login("paris@example.com", "bcdf-right").Wait()
 	if err == nil || !strings.Contains(err.Error(), "Too many login attempts") {
 		t.Fatalf("throttle err = %v", err)
+	}
+}
+
+// A rate-limited LOGIN is refused slowly. A client with a dead password
+// retries as fast as it is answered, so the refusal must be the slow path;
+// a wrong password that is NOT rate-limited is answered at once.
+func TestThrottledLoginWaits(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	h := newHarness(t, config.Config{IMAPLoginRate: 1})
+	h.ctrl.throttleDelay.Store(int64(delay))
+	h.account(t, "acme", "paris@example.com", "bcdf-right", "")
+
+	c := dial(t, h.addr)
+	if err := c.Login("paris@example.com", "bcdf-wrong").Wait(); err == nil || !strings.Contains(err.Error(), "Authentication failed") {
+		t.Fatalf("first attempt err = %v, want a plain failure", err)
+	}
+	for i := 0; i < 2; i++ {
+		start := time.Now()
+		err := c.Login("paris@example.com", "bcdf-right").Wait()
+		took := time.Since(start)
+		if err == nil || !strings.Contains(err.Error(), "Too many login attempts") {
+			t.Fatalf("attempt %d err = %v, want throttled", i+2, err)
+		}
+		if took < delay {
+			t.Errorf("throttled refusal %d came back in %v, want at least %v", i+1, took, delay)
+		}
+	}
+
+	// Shutting the head down does not wait the pause out.
+	h.ctrl.throttleDelay.Store(int64(time.Hour))
+	done := make(chan struct{})
+	go func() { _ = c.Login("paris@example.com", "bcdf-right").Wait(); close(done) }()
+	time.Sleep(100 * time.Millisecond)
+	h.cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a throttled LOGIN outlived the head's shutdown")
 	}
 }
 

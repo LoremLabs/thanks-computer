@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -67,6 +68,10 @@ type Controller struct {
 
 	loginIP   *throttle.Throttle
 	loginAcct *throttle.Throttle
+	// throttleDelay is how long a rate-limited LOGIN waits for its refusal
+	// (nanoseconds; see session.throttled). Atomic because a test shortens
+	// it while the accept loop is already running.
+	throttleDelay atomic.Int64
 	// auth verifies passwords: the resolver the four heads share, with
 	// its login cache and the --login-rate throttles. loginIP/loginAcct
 	// above are IMAP's own LOGIN-command flood guard (--imap-login-rate).
@@ -94,6 +99,7 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chimap.Store)
 	if pu != nil {
 		c.loginIP = throttle.New(pu.Conf.IMAPLoginRate, time.Minute)
 		c.loginAcct = throttle.New(pu.Conf.IMAPLoginRate, time.Minute)
+		c.throttleDelay.Store(int64(throttledReplyDelay))
 		c.conns = newConnCounter(pu.Conf.IMAPMaxConnsPerAccount)
 		c.lanes = newLanes(ctx, pu)
 		var bad []string
