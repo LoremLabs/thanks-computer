@@ -20,6 +20,7 @@ my-workspace/
         okrs.txcl                # a rule (several .txcl at one scope step run in parallel)
       0200_NOTIFY/
         notify.txcl
+        notice.md                # optional text a rule pulls in with &include("notice.md")
       schema.json                # optional — json schema description of the stack others can use
   APPS/                          # optional — local services txco dev boots
     api/server.js                # these do not get deployed in a remote txco chassis

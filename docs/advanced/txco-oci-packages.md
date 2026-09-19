@@ -93,6 +93,12 @@ Rules reference operations as `op://NAME`. Each ref resolves one of two ways:
 `txco package validate` enforces the split: every `op://NAME` with a colocated file must be
 declared `bundled`; every one without must be declared `required`.
 
+Files an op pulls in with [`&include`](./txcl/txcl.md#including-files--include) ship the
+same way: they must sit inside the stack directory (`OPS/<stack>/`), which is exactly what
+install copies, so an installed package always has them. `validate` expands them like
+`apply` does, and an installed stack's recorded hash covers them, so a new version that
+only changes an included file still counts as a change.
+
 ## 5. Installing
 
 ```sh

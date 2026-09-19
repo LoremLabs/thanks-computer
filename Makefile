@@ -59,6 +59,20 @@ ui:
 		echo "==> pnpm run build (continuation-ui)..."; \
 		(cd continuation-ui && pnpm run build) || exit $$?; \
 	fi
+	@if [ -n "$$SKIP_UI" ]; then \
+		echo "==> skipping printer UI build (SKIP_UI set)"; \
+	elif [ ! -d printer-ui ]; then \
+		echo "==> printer-ui/ missing; skipping UI build"; \
+	elif ! command -v pnpm >/dev/null 2>&1; then \
+		echo "==> pnpm not on PATH; skipping printer UI build (install pnpm to embed an up-to-date bundle)"; \
+	else \
+		if [ ! -d printer-ui/node_modules ]; then \
+			echo "==> pnpm install (printer-ui, first run)..."; \
+			(cd printer-ui && pnpm install) || exit $$?; \
+		fi; \
+		echo "==> pnpm run build (printer-ui)..."; \
+		(cd printer-ui && pnpm run build) || exit $$?; \
+	fi
 
 # Build the txco binary locally (chassis/bin/txco) after refreshing the
 # embedded UI bundle. `make build SKIP_UI=1` bypasses the UI step.

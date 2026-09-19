@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -405,10 +406,25 @@ Flags:
 			// watcher doesn't lstat tens of thousands of built assets 10×/sec.
 			// FILES/ asset trees are excluded by default (see Options.IncludeFiles);
 			// txco.yaml `dev.watch.ignore` + --watch-ignore add more.
+			// Files the ops pull in with &include: editing one re-applies like
+			// editing the .txcl. Re-read from every walk, so a newly added
+			// include is watched from the next save on.
+			var included atomic.Pointer[map[string]bool]
+			noteIncludes := func(ops []bundle.Op) {
+				m := map[string]bool{}
+				for _, op := range ops {
+					for _, p := range op.Includes {
+						m[filepath.Join(dir, filepath.FromSlash(p))] = true
+					}
+				}
+				included.Store(&m)
+			}
+			noteIncludes(ops)
 			watchOpts := devpkg.Options{
 				Debounce:     500 * time.Millisecond,
 				Ignore:       append(append([]string{}, cfg.Dev.Watch.Ignore...), (*watchIgnore)...),
 				IncludeFiles: cfg.Dev.Watch.IncludeFiles,
+				Included:     func(p string) bool { return (*included.Load())[p] },
 			}
 			filesNote := "FILES/ excluded"
 			if watchOpts.IncludeFiles {
@@ -417,7 +433,7 @@ Flags:
 			if len(watchOpts.Ignore) > 0 {
 				filesNote += "; ignoring " + strings.Join(watchOpts.Ignore, ", ")
 			}
-			fmt.Fprintf(stdout, "[watch] watching %s (.txcl/.json → draft; colocated .js → rebuild + activate; %s)\n", opsDir, filesNote)
+			fmt.Fprintf(stdout, "[watch] watching %s (.txcl/.json/&include files → draft; colocated .js → rebuild + activate; %s)\n", opsDir, filesNote)
 			state := newDevWatchState()
 			// .txcl/.json → sticky draft (no auto-activation; activate to publish).
 			go func() {
@@ -429,6 +445,7 @@ Flags:
 						fmt.Fprintf(stderr, "[watch] walk: %v\n", err)
 						return
 					}
+					noteIncludes(freshOps)
 					if err := devApplyToDraft(ctx, dir, resolved, freshOps, state, stdout, stderr); err != nil {
 						fmt.Fprintf(stderr, "[watch] push to draft: %v\n", err)
 					}
@@ -452,6 +469,7 @@ Flags:
 						fmt.Fprintf(stderr, "[watch] walk: %v\n", err)
 						return
 					}
+					noteIncludes(freshOps)
 					if err := devApply(ctx, dir, resolved, freshOps, stdout, stderr); err != nil {
 						fmt.Fprintf(stderr, "[watch] compute reload: %v\n", err)
 					}

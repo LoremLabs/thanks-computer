@@ -8,6 +8,7 @@
     { "include": "#regex-after-binding" },
     { "include": "#string" },
     { "include": "#number" },
+    { "include": "#include-directive" },
     { "include": "#amp-ident" },
     { "include": "#at-branch" },
     { "include": "#dot-branch" },
@@ -60,6 +61,11 @@
     "number": {
       "name": "constant.numeric.txcl",
       "match": "(?<![A-Za-z0-9_.])-?(?:\\d+\\.\\d+|\\d+)\\b"
+    },
+    "include-directive": {
+      "comment": "&include(\"file\") is replaced by the file's text when txco reads OPS/ (not a runtime function), so it reads as a directive.",
+      "name": "keyword.control.directive.include.txcl",
+      "match": "&include\\b"
     },
     "amp-ident": {
       "name": "entity.name.function.txcl",

@@ -345,26 +345,122 @@ func TestNotFoundIsOneAnswer(t *testing.T) {
 	}
 }
 
-func TestTransportGates(t *testing.T) {
-	h := newHarness(t, config.Config{})
+// A browser at a printer's address gets the printer page: the label, and
+// the three fields macOS's Add Printer › IP tab asks for, with the port
+// spelled out (the Host behind the edge carries none, and IPP's default is
+// 631). It is served only where an IPP request would get its 401 — a
+// printer that does not exist is the same 404 as ever — and it carries no
+// credential and nothing the URL does not already say.
+func TestPrinterPage(t *testing.T) {
+	h := newHarness(t, config.Config{StructuredHostSuffix: ".stacks.example"})
+	h.zones["core-abc123.stacks.example"] = tenant
 
-	// GET is not IPP.
-	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/p/research", nil)
-	req.Host = zoneHost
-	resp, err := h.srv.Client().Do(req)
+	get := func(method, host, path string) (*http.Response, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, h.srv.URL+path, nil)
+		req.Host = host
+		resp, err := h.srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, string(b)
+	}
+
+	for _, c := range []struct{ host, path, uri, address, queue string }{
+		{zoneHost, "/p/research", "ipps://ipp.dripl.example:443/p/research", "ipp.dripl.example:443", "p/research"},
+		{zoneHost + ":8443", "/p/research", "ipps://ipp.dripl.example:8443/p/research", "ipp.dripl.example:8443", "p/research"},
+		{"ipp.stacks.example", "/p/core-abc123/paris", "ipps://ipp.stacks.example:443/p/core-abc123/paris", "ipp.stacks.example:443", "p/core-abc123/paris"},
+	} {
+		resp, body := get(http.MethodGet, c.host, c.path)
+		if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+			t.Fatalf("GET %s%s: %d %q", c.host, c.path, resp.StatusCode, resp.Header.Get("Content-Type"))
+		}
+		for _, want := range []string{"thanks, c", c.uri, c.address, c.queue} {
+			if !strings.Contains(body, want) {
+				t.Errorf("GET %s%s: page lacks %q", c.host, c.path, want)
+			}
+		}
+		if strings.Contains(body, password) || strings.Contains(body, DefaultUsername+":") {
+			t.Fatalf("GET %s%s: the page carries a credential", c.host, c.path)
+		}
+	}
+
+	// Prod's shape: TLS ends at the edge, which forwards plain HTTP with
+	// X-Forwarded-Proto and a Host that names no port. Still ipps, :443.
+	req, _ := http.NewRequest(http.MethodGet, h.plain.URL+"/p/core-abc123/paris", nil)
+	req.Host = "ipp.stacks.example"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	edge, err := h.plain.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != http.MethodPost {
-		t.Fatalf("GET: %d Allow=%q", resp.StatusCode, resp.Header.Get("Allow"))
+	b, _ := io.ReadAll(edge.Body)
+	edge.Body.Close()
+	if edge.StatusCode != http.StatusOK || !strings.Contains(string(b), "ipps://ipp.stacks.example:443/p/core-abc123/paris") {
+		t.Fatalf("behind the edge: %d, page lacks the ipps :443 address", edge.StatusCode)
+	}
+	// …and a truly plaintext request (dev's :8080) is honest about it.
+	req, _ = http.NewRequest(http.MethodGet, h.plain.URL+"/p/research", nil)
+	req.Host = zoneHost + ":8080"
+	plain, err := h.plain.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = io.ReadAll(plain.Body)
+	plain.Body.Close()
+	if !strings.Contains(string(b), "ipp://ipp.dripl.example:8080/p/research") || strings.Contains(string(b), "ipps://") {
+		t.Fatal("plaintext request: want the ipp:// :8080 address and no ipps")
+	}
+
+	resp, body := get(http.MethodHead, zoneHost, "/p/research")
+	if resp.StatusCode != http.StatusOK || body != "" || resp.Header.Get("Content-Length") == "" {
+		t.Fatalf("HEAD: %d, %d body bytes, Content-Length %q", resp.StatusCode, len(body), resp.Header.Get("Content-Length"))
+	}
+
+	// No printer, no page: the one 404, whatever the reason.
+	for _, c := range []struct{ host, path string }{
+		{"ipp.quiet.example", "/p/research"}, // a tenant without an _ipp stack
+		{"ipp.nokey.example", "/p/research"}, // …without the credential
+		{"ipp.nowhere.example", "/p/research"},
+		{zoneHost, "/p/Not_A_Label"},
+	} {
+		if resp, _ := get(http.MethodGet, c.host, c.path); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s%s: %d, want 404", c.host, c.path, resp.StatusCode)
+		}
+	}
+	if len(h.envelopes()) != 0 {
+		t.Fatal("a page view reached the bus")
+	}
+}
+
+func TestTransportGates(t *testing.T) {
+	h := newHarness(t, config.Config{})
+
+	// Neither IPP nor a browser: a printer answers GET (its page), HEAD and
+	// POST; a job only POST.
+	for _, c := range []struct{ method, path, allow string }{
+		{http.MethodPut, "/p/research", "GET, HEAD, POST"},
+		{http.MethodGet, "/p/research/jobs/1", http.MethodPost},
+	} {
+		req, _ := http.NewRequest(c.method, h.srv.URL+c.path, nil)
+		req.Host = zoneHost
+		resp, err := h.srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != c.allow {
+			t.Fatalf("%s %s: %d Allow=%q, want 405 Allow=%q", c.method, c.path, resp.StatusCode, resp.Header.Get("Allow"), c.allow)
+		}
 	}
 
 	// Wrong content type.
-	req, _ = http.NewRequest(http.MethodPost, h.srv.URL+"/p/research", strings.NewReader("{}"))
+	req, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/p/research", strings.NewReader("{}"))
 	req.Host = zoneHost
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ = h.srv.Client().Do(req)
+	resp, _ := h.srv.Client().Do(req)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnsupportedMediaType {
 		t.Fatalf("json body: %d", resp.StatusCode)

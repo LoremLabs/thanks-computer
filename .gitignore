@@ -40,5 +40,9 @@ chassis/server/admin/ui/dist/*
 # into dist/ on every build so go:embed works before the first build.
 chassis/server/continuation/ui/dist/*
 !chassis/server/continuation/ui/dist/.gitkeep
+# Printer page (the ipp head's GET on a printer) — same pattern; its public/
+# .gitkeep is copied back into dist/ on every build.
+chassis/server/personality/ipp/ui/dist/*
+!chassis/server/personality/ipp/ui/dist/.gitkeep
 .txco/
 *.wasm

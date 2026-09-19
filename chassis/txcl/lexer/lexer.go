@@ -16,6 +16,7 @@ type Lexer struct {
 	readPosition int         // current reading position in input (after current char)
 	ch           byte        // current char under examination
 	LastToken    token.Token // last token for lookback
+	start        int         // byte offset where the last token began (see Span)
 
 	// errs collects lexical errors (e.g. unterminated string/regex
 	// literals). Recorded unconditionally as the input is scanned, but
@@ -38,6 +39,19 @@ func (l *Lexer) Errors() []string {
 	return l.errs
 }
 
+// Span returns the byte offsets [start, end) of the token NextToken last
+// returned, within the input: the token's own text, with the whitespace
+// and comments before it excluded. A STRING's span covers its quotes (and
+// a `b64` prefix); an AMP_IDENT's covers the `&`. Tools that rewrite txcl
+// source by token (the CLI's &include expansion) splice on these.
+func (l *Lexer) Span() (start, end int) {
+	end = l.position
+	if end > len(l.input) {
+		end = len(l.input)
+	}
+	return l.start, end
+}
+
 func (l *Lexer) NextToken() token.Token {
 	var tok token.Token
 
@@ -49,6 +63,11 @@ func (l *Lexer) NextToken() token.Token {
 	if l.ch == '#' {
 		l.skipComment()
 		return (l.NextToken())
+	}
+
+	l.start = l.position
+	if l.start > len(l.input) {
+		l.start = len(l.input)
 	}
 
 	switch l.ch {

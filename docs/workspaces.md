@@ -89,6 +89,18 @@ The command sees a scrubbed environment — `PATH`, `HOME` (= the
 workspace), `TMPDIR` (inside it), plus your `env` and any `secrets.env.*`
 — never the chassis's.
 
+A script longer than a line belongs in its own file beside the op,
+pulled in with [`&include`](./advanced/txcl/txcl.md#including-files--include):
+fixed argv, the script as data, no escaping.
+
+```txcl
+WITH args  = ["python3", "-c", &include("server.py")]   # small: in argv
+WITH command = "bash -s", stdin = &include("setup.sh")  # large: on stdin
+```
+
+One argument is capped by the operating system (128 KiB on Linux), so
+feed anything big on `stdin`.
+
 **Secrets never come back out.** Every materialized secret's value is
 replaced with `[REDACTED]` in stdout, stderr and error messages before
 the result is built, so neither the envelope nor the trace step carries

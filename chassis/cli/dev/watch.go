@@ -31,16 +31,26 @@ type Options struct {
 	// 10×/sec is the main idle-CPU cost in a large workspace. Set true to watch
 	// FILES/ too (e.g. when hand-editing static assets you want hot-reloaded).
 	IncludeFiles bool
+
+	// Included, when set, reports whether an absolute path is a file some
+	// op pulls in with `&include("…")`. WatchOps treats a change to one like
+	// a .txcl edit, since the op's text is that file's contents.
+	Included func(path string) bool
 }
 
 // WatchOps watches dir recursively for changes to *.txcl and *.json
-// files. Calls onChange with a debounced cadence — bursty editor
-// saves coalesce into a single re-apply rather than firing N times.
+// files, and to the files opts.Included names. Calls onChange with a
+// debounced cadence — bursty editor saves coalesce into a single re-apply
+// rather than firing N times.
 //
 // Blocks until ctx is canceled. Returns the watcher's exit error (or
 // nil on clean shutdown).
 func WatchOps(ctx context.Context, dir string, opts Options, onChange func()) error {
-	return watchDir(ctx, dir, opts, relevantExt, onChange)
+	match := relevantExt
+	if opts.Included != nil {
+		match = func(p string) bool { return relevantExt(p) || opts.Included(p) }
+	}
+	return watchDir(ctx, dir, opts, match, onChange)
 }
 
 // WatchColocatedComputes watches the OPS/ tree for colocated compute source

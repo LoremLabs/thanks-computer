@@ -37,7 +37,7 @@ GET /logs     → tails the workspace's harness/x11vnc/Xvfb/openbox/chrome logs
 | Piece | What it does |
 |---|---|
 | `browser/090/auth.txcl` / `095/auth_reject.txcl` | the HTTP Basic gate over every route but `/healthz` (fails closed, see below) |
-| `browser/100/setup.txcl` | readiness check + detached provision/launch; the runtime version is its `env` (`REQ`, data), the script is fixed mechanism, fed on `stdin` to `bash -s` |
+| `browser/100/setup.txcl` + `setup.sh` | readiness check + detached provision/launch; the runtime version is its `env` (`REQ`, data), the script (`setup.sh`, pulled in with `&include`) is fixed mechanism, fed on `stdin` to `bash -s` |
 | `browser/200/setup_ok.txcl` / `setup_err.txcl` / `setup_fail.txcl` | the script's JSON verdict, or a 503 on a transport failure |
 | `browser/100/home.txcl` | serves the page, base64-embedded; the editable source is `PAGE/index.html` (regenerate the base64 after editing) |
 | `browser/100/upgrade.txcl` | accepts the WebSocket on `/screen` |
@@ -46,7 +46,7 @@ GET /logs     → tails the workspace's harness/x11vnc/Xvfb/openbox/chrome logs
 
 The pony harness (`ws-harness.py`: a stdlib-only WebSocket client that finds
 Chrome's CDP page target on `:9222` and navigates it every few seconds, so a
-watcher sees the pony working) is written into the workspace by `setup.txcl`
+watcher sees the pony working) is written into the workspace by `setup.sh`
 from a base64 literal. There is no separate source file for it yet; to change
 it, decode that literal, edit, re-encode.
 

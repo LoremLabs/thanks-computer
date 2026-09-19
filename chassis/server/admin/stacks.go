@@ -37,6 +37,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
+	"github.com/loremlabs/thanks-computer/chassis/txcl/include"
 )
 
 // Stack-level types serialised on the wire. version_number is the
@@ -2195,6 +2196,18 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 					"hint":  "define it under operations: in txco.yaml and run `txco apply`, or use an explicit http(s):// URL",
 				}}
 			}
+			// Guardrail: `&include("…")` is expanded by the txco CLI when it
+			// reads the OPS/ tree; one arriving bare (an older txco, or the
+			// API driven directly) would fail at runtime as an unknown
+			// function. Refuse it here; the deferred rollback aborts.
+			if include.Has(rf.content) {
+				return currentActiveID, targetVersionID, &materialiseError{http.StatusUnprocessableEntity, "unexpanded_include", map[string]any{
+					"stack": stackName,
+					"scope": pf.scope,
+					"name":  pf.name,
+					"hint":  unexpandedIncludeHint,
+				}}
+			}
 			// Guardrail: every compute://<alg>/<digest> a rule references
 			// must already be in the artifact store, else the rule would
 			// materialise and fail at runtime with "artifact not found".
@@ -2773,6 +2786,11 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 			})
 			continue
 		}
+		if include.Has(f.Content) {
+			resp.OK = false
+			resp.Errors = append(resp.Errors, validateError{Path: f.Path, Err: "unexpanded &include — " + unexpandedIncludeHint})
+			continue
+		}
 		// Strict validation: catches unterminated strings, unknown
 		// verbs, and trailing garbage that the lenient runtime parser
 		// (txcl.Resonator) silently tolerates. Authoring-time only —
@@ -2794,6 +2812,10 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// unexpandedIncludeHint explains an op that still carries `&include`.
+const unexpandedIncludeHint = "&include is expanded by the txco CLI when it reads your OPS/ tree; " +
+	"this op was uploaded without it (an older txco, or the admin API directly) — run `txco apply` with a current txco"
 
 // handleDiffVersions: GET /v1/tenants/{t}/stacks/{name}/diff?v1=&v2=
 //

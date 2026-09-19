@@ -127,3 +127,44 @@ func TestValidateFlagsUnresolvedOpRef(t *testing.T) {
 		t.Fatalf("expected op://RESEARCH error for 300/bad.txcl, got %+v", resp.Errors)
 	}
 }
+
+// A bare `&include` (uploaded without the CLI's expansion) is refused at
+// activate and flagged by validate; an expanded op whose text merely
+// mentions `&include(` inside a string is fine.
+func TestUnexpandedIncludeGuard(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin"})
+	v := callCreateDraft(t, c, "incstack", "")
+	callPutFiles(t, c, "incstack", v, []stackFile{
+		{Path: "100/good.txcl", Content: `EXEC "http://x/y" WITH s = "echo '&include(\"x\")'"`},
+		{Path: "300/bad.txcl", Content: `EXEC "http://x/y" WITH s = &include("run.sh")`},
+	})
+
+	code, resp := callValidate(t, c, "incstack", v)
+	if code != http.StatusOK || resp.OK {
+		t.Fatalf("validate = %d %+v, want 200 and not OK", code, resp)
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0].Path != "300/bad.txcl" || !strings.Contains(resp.Errors[0].Err, "unexpanded &include") {
+		t.Fatalf("errors = %+v, want one unexpanded &include on 300/bad.txcl", resp.Errors)
+	}
+
+	w := httptest.NewRecorder()
+	r := withTenantAdminCtx(muxRequest(http.MethodPost,
+		"/v1/tenants/default/stacks/incstack/activate",
+		mustJSON(t, activateRequest{VersionNumber: v}),
+		map[string]string{"name": "incstack"}), testTenant)
+	c.handleActivateStack(w, r)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "unexpanded_include") {
+		t.Fatalf("activate = %d %s, want 422 unexpanded_include", w.Code, w.Body.String())
+	}
+	if got := opsCount(t, c, "incstack"); got != 0 {
+		t.Fatalf("ops rows after rejected activate = %d, want 0 (rollback)", got)
+	}
+
+	v2 := callCreateDraft(t, c, "incok", "")
+	callPutFiles(t, c, "incok", v2, []stackFile{
+		{Path: "100/good.txcl", Content: `EXEC "http://x/y" WITH s = "echo '&include(\"x\")'"`},
+	})
+	if resp := callActivate(t, c, "incok", v2); resp.VersionNumber != v2 {
+		t.Fatalf("expanded text mentioning &include should activate, got %+v", resp)
+	}
+}

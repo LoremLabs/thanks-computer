@@ -72,7 +72,7 @@ txco ui dev                                 # open the dev admin UI
 | Command | What it does |
 |---|---|
 | `txco serve` | Boot the chassis ([runtime reference](./serve.md)) |
-| `txco dev` | The dev loop: boots your `txco.yaml` apps + an ephemeral chassis, watches `OPS/*.txcl` and compute `.js/.ts` files, re-applies on save. Registers a keyless [`dev` profile](#local-dev-no-key-required) for the chassis. `--ui` adds the admin-UI Vite server; `--tcp` / `--dns` add those heads |
+| `txco dev` | The dev loop: boots your `txco.yaml` apps + an ephemeral chassis, watches `OPS/*.txcl`, the files they [`&include`](./txcl/txcl.md#including-files--include) and compute `.js/.ts` files, re-applies on save. Registers a keyless [`dev` profile](#local-dev-no-key-required) for the chassis. `--ui` adds the admin-UI Vite server; `--tcp` / `--dns` add those heads |
 | `txco demo` | Ephemeral chassis + browser playground with a guided curriculum (build/web/mail/async/mcp tracks) |
 | `txco init <stack>` | Scaffold `OPS/<stack>/…`; `--from github:…\|oci:…\|dir:…` scaffolds from a template |
 | `txco doctor` | Diagnose local setup: home dir, profile, keys, chassis reachability, version sync (`--offline` skips remote checks) |
@@ -84,9 +84,9 @@ The CLI verbs map onto that flow:
 
 | Command | What it does |
 |---|---|
-| `txco apply [dir]` | Deploy the whole `OPS/` tree: draft + activate per changed stack; resolves `op://` refs; uploads computes. Refuses a stack the chassis moved since this workspace last synced (see below); `--force` overwrites |
+| `txco apply [dir]` | Deploy the whole `OPS/` tree: draft + activate per changed stack; expands [`&include`](./txcl/txcl.md#including-files--include) files, resolves `op://` refs; uploads computes. Refuses a stack the chassis moved since this workspace last synced (see below); `--force` overwrites |
 | `txco push <stack>` | Like `apply`, one stack |
-| `txco pull <stack>` | Materialize a stack's active version (or `--version N`) into local `OPS/<stack>/` — the inverse of `push` |
+| `txco pull <stack>` | Materialize a stack's active version (or `--version N`) into local `OPS/<stack>/` — the inverse of `push`, as deployed: `op://` refs come back resolved and `&include`s come back as the included text |
 | `txco draft <stack>` | Upload a draft *without* activating (stage for review); `--activate` flips it too |
 | `txco activate <stack>` | Flip the active-version pointer (defaults to newest draft). Activating an older version = rollback |
 | `txco versions <stack>` | List a stack's versions, active one marked |

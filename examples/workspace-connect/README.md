@@ -36,7 +36,7 @@ Click **connect** before **start** and see `unavailable`.
 | Piece | What it does |
 |---|---|
 | `conn/100/upgrade.txcl` | accepts the WebSocket on `/connect` (a binding is a capability the stack grants here, once) |
-| `conn/100/start.txcl` | `workspace://tools/exec` starts a tiny Python echo server on loopback 17777, detached from the exec, idle-exits after 10 min, no-op if already up |
+| `conn/100/start.txcl` + `echo_server.py` | `workspace://tools/exec` starts a tiny Python echo server (`echo_server.py`, pulled in with `&include`) on loopback 17777, detached from the exec, idle-exits after 10 min, no-op if already up |
 | `conn/_websocket/100/parse.txcl` | decodes the first message `{"type":"connect","service":"echo"}` |
 | `conn/_websocket/200/connect.txcl` | `workspace://tools/connect WITH service = .msg.service` binds the service and returns the lease |
 | `conn/FILES/index.html` | a bytes console: typed lines → binary frames, echoed bytes → the log |

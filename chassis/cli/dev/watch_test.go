@@ -81,6 +81,41 @@ func TestWatchOpsIgnoresUnrelated(t *testing.T) {
 	}
 }
 
+// TestWatchOpsFiresOnIncludedFiles: a file an op &includes counts as op
+// source; one that nothing includes still doesn't.
+func TestWatchOpsFiresOnIncludedFiles(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "run.sh")
+	other := filepath.Join(dir, "notes.sh")
+	for _, p := range []string{script, other} {
+		if err := os.WriteFile(p, []byte("v0"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var fired int32
+	opts := Options{Debounce: 200 * time.Millisecond, Included: func(p string) bool { return p == script }}
+	go func() {
+		_ = WatchOps(ctx, dir, opts, func() { atomic.AddInt32(&fired, 1) })
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	_ = os.WriteFile(other, []byte("v1"), 0o644)
+	time.Sleep(500 * time.Millisecond)
+	if got := atomic.LoadInt32(&fired); got != 0 {
+		t.Fatalf("got %d fires for a file nothing includes; want 0", got)
+	}
+
+	_ = os.WriteFile(script, []byte("v1"), 0o644)
+	time.Sleep(500 * time.Millisecond)
+	if got := atomic.LoadInt32(&fired); got != 1 {
+		t.Errorf("got %d fires for an included file; want 1", got)
+	}
+}
+
 // TestPruneDirs checks the subtree-pruning rules: FILES/ is excluded by
 // default, kept with IncludeFiles, and custom globs match by base name or
 // relative path. A matched directory is reported once and not descended into.

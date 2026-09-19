@@ -44,6 +44,13 @@ For full control, skip `prompt`/`system` and author the conversation
 directly: `WITH messages = [...]` (OpenAI-style `role`/`content`
 turns).
 
+A long system prompt can live in its own file beside the op:
+`WITH system = &include("system.md")`
+([Including files](./advanced/txcl/txcl.md#including-files--include)).
+It is still a template: its `{{@path}}` markers are filled like any
+other, and any other `{{…}}` in it (a Handlebars example, say) is an
+error, so keep such text out of included prompts.
+
 ## Structured output
 
 `WITH schema = {...}` (a JSON Schema) switches to structured-output

@@ -58,6 +58,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/loremlabs/thanks-computer/chassis/txcl/include"
 )
 
 // Op is one row in a bundle. Mirrors the admin/ops.go OpRecord shape.
@@ -72,6 +74,11 @@ type Op struct {
 	// SourcePath is the absolute path to the .txcl file. Set by Walk for
 	// diagnostic purposes; not serialized into the wire format.
 	SourcePath string `json:"-"`
+
+	// Includes lists the files this op's `&include("…")` directives read
+	// (paths within the walked filesystem, like SourcePath). Txcl already
+	// holds their contents; `txco dev` watches these for changes.
+	Includes []string `json:"-"`
 }
 
 // Diag is a non-fatal-at-walk-time finding about a `.txcl` leaf that could
@@ -277,12 +284,23 @@ func walkFS(fsys fs.FS, root string, wantSystem bool) ([]Op, []Diag, error) {
 		}
 		seen[key] = p
 
+		// `&include("file")` becomes the file's text, here, so every
+		// command that reads ops (deploy, diff, lint, status, packages)
+		// sees the expanded op and the admin API never sees the directive.
+		// A bad include is an error, like an unreadable .txcl: skipping
+		// the op would deploy its stack without it.
+		text, deps, ierr := include.Expand(fsys, path.Join(opsRoot, stack), p, string(txcl))
+		if ierr != nil {
+			return ierr
+		}
+
 		op := Op{
 			Stack:      stack,
 			Scope:      scope,
 			Name:       name,
-			Txcl:       string(txcl),
+			Txcl:       text,
 			SourcePath: p,
+			Includes:   deps,
 		}
 
 		// Read sibling mock files if present. They attach to every rule in the

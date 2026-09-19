@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
+	"github.com/loremlabs/thanks-computer/chassis/txcl/include"
 )
 
 // runPull: `txco pull <stack> [--version N] [--force] [<dir>]`
@@ -394,6 +396,9 @@ Flags:
 
 	stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(stack))
 	files, err := collectStackFiles(stackDir)
+	if err == nil {
+		err = expandStackIncludes(dir, stack, files)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "draft: walk %s: %v\n", stackDir, err)
 		return 1
@@ -492,6 +497,26 @@ func collectStackFiles(stackDir string) ([]client.StackFile, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// expandStackIncludes expands `&include("…")` in the .txcl files of a
+// collected stack, as the OPS walker does for apply and push (draft reads
+// files directly, so it would otherwise upload the bare directive, which
+// the chassis refuses).
+func expandStackIncludes(dir, stack string, files []client.StackFile) error {
+	fsys := os.DirFS(dir)
+	stackDir := path.Join("OPS", stack)
+	for i, f := range files {
+		if !strings.HasSuffix(f.Path, ".txcl") || f.Encoding != "" {
+			continue
+		}
+		out, _, err := include.Expand(fsys, stackDir, path.Join(stackDir, f.Path), f.Content)
+		if err != nil {
+			return err
+		}
+		files[i].Content = out
+	}
+	return nil
 }
 
 // runActivate: `txco activate <stack> [--version N]`

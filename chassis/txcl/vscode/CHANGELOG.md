@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- `&include("file")` highlighted as a directive (`keyword.control.directive.include`)
+  rather than a function: txco replaces it with the file's text when it
+  reads `OPS/`, so it never runs as a call.
+- Snippet: `include`.
+
 ## 0.2.0
 
 - `LOOP` clause: `LOOP` and `UNTIL` keywords, plus `EVERY` and `MAX`

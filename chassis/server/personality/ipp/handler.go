@@ -15,6 +15,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
+	printerui "github.com/loremlabs/thanks-computer/chassis/server/personality/ipp/ui"
 )
 
 // ServeHTTP answers one request on an `ipp.<x>` host.
@@ -51,8 +52,21 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer zero(site.password)
 
+	// A browser at the printer's own address (the https twin of its ipps://
+	// URI) gets the printer page. It sits AFTER the existence check, so it
+	// answers exactly where an IPP request would get its 401 — the page
+	// tells nothing a 401 does not — and shows only what the URL already
+	// says.
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && t.job == 0 {
+		c.servePage(w, r, t)
+		return
+	}
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+		if t.job == 0 {
+			w.Header().Set("Allow", "GET, HEAD, POST")
+		} else {
+			w.Header().Set("Allow", http.MethodPost)
+		}
 		http.Error(w, "this is an IPP printer: POST application/ipp", http.StatusMethodNotAllowed)
 		return
 	}
@@ -498,5 +512,37 @@ func clip(s string, max int) string {
 func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
+	}
+}
+
+// servePage answers a browser at a printer's address with the printer page
+// (package ui): the printer's label and the three fields macOS's Add Printer
+// › IP tab asks for, plus an ipps:// link that opens Add Printer itself. The
+// address always spells out its port — IPP's default is 631, which this head
+// does not listen on, and behind the edge the Host carries none.
+func (c *Controller) servePage(w http.ResponseWriter, r *http.Request, t target) {
+	scheme, port := "ipp", ":80"
+	if secure(r) {
+		scheme, port = "ipps", ":443"
+	}
+	addr := hostWithPort(r, t)
+	if addr == t.host {
+		addr += port
+	}
+	page, _ := printerui.Page(printerui.Printer{
+		Name:    t.printer,
+		URI:     scheme + "://" + addr + t.uriPath(),
+		Address: addr,
+		Queue:   strings.TrimPrefix(t.uriPath(), "/"),
+	})
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Length", strconv.Itoa(len(page)))
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(page)
 	}
 }

@@ -141,6 +141,23 @@ printer's password. Without `-o auth-info-required=username,password`,
 the first job waits "on hold for authentication" until you authenticate
 from the print queue window; after that, printing asks no more.
 
+**The printer's page.** The printer's address over https, for example
+`https://ipp.acme.example/p/research`, is a web page for that printer. It
+shows the printer's name, an **Add printer** button (the `ipps://` link,
+which opens macOS's Add Printer),
+and the three fields for setting it up by hand: Address with the port
+spelled out, Protocol, and Queue. Hand people this link rather than the
+fields.
+
+- **Where it appears:** only for a printer that exists. Everything else
+  gets the same 404 as ever.
+- **What it shows:** only what its URL already says. It carries no
+  credential.
+- **Where it comes from:** the chassis builds it from `printer-ui/`
+  (Svelte, one self-contained file embedded like the continuation page).
+  A product that wants more, such as a setup profile or its own name for
+  the printer, builds that itself and links here.
+
 `<printer>` is any label you like (`a-z 0-9 . _ -`, lowercase). The chassis
 keeps **no list of printers**: the label reaches the stack as
 `@ipp.printer`, and one tenant can hand out `…/p/research`,

@@ -7,10 +7,10 @@ event-routing DSL used by [thanks, computer.](https://www.thanks.computer).
 
 - Highlighting for keywords (`WHEN`, `SELECT`, `SET`, `EXEC`, `LOOP`, `EMIT`, …),
   strings, regex literals, branch paths (`.x.y.z`, `@x`), the `&fn`
-  function-call sigil, numbers, operators, and `#` comments — colors
-  come from your active theme.
+  function-call sigil, the `&include("file")` directive, numbers,
+  operators, and `#` comments — colors come from your active theme.
 - `#` line-comment toggling (Cmd+/), bracket matching, auto-pairs.
-- Snippets: `when`, `set`, `exec`, `emit`, `loop`, `poll`, full `rule` skeleton.
+- Snippets: `when`, `set`, `exec`, `emit`, `loop`, `poll`, `include`, full `rule` skeleton.
 - File icon for `.txcl` in the Explorer.
 
 ## Links

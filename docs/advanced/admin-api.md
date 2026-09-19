@@ -13,7 +13,11 @@ Direct API use is supported for CI and custom tooling. Endpoints are
 
 **Note**: the API only sees concrete state. `op://NAME` symbolic
 references are resolved client-side by `txco apply` (which also uploads
-the compiled wasm to the computes endpoint) before anything is POSTed.
+the compiled wasm to the computes endpoint) before anything is POSTed,
+and `&include("file")` is replaced by the file's text
+([Including files](./txcl/txcl.md#including-files--include)). Validate
+and activate refuse an op that still carries either: `unresolved_op_ref`,
+`unexpanded_include` (422).
 
 ## Authentication
 

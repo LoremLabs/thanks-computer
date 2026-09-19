@@ -104,6 +104,8 @@ EXEC "http://example.com/path"
 SET .name = "alice \"the great\""
 ```
 
+A string may span lines. For anything long (a script, a prompt, a page), keep it in its own file and pull it in with [`&include`](#including-files--include) instead of escaping it by hand.
+
 ### Numbers
 
 Integers and floats:
@@ -208,9 +210,39 @@ SET @web.res.body = b64"not found\n"
 
 `b64` only acts as a typed-literal prefix when _immediately_ followed by `"` (no whitespace). Anywhere else it remains an ordinary identifier.
 
+## Including files — `&include`
+
+`&include("path")` puts a file's contents into an op as a string literal, so a script, prompt or page can live as a plain file beside the op instead of an escaped string inside it:
+
+```txcl
+# OPS/tools/0100_SETUP/setup.txcl, with setup.sh beside it
+WHEN @src == "http" && @web.req.url.path == "/setup"
+  EXEC "workspace://tools/exec"
+    WITH command = "bash -s",
+         stdin   = &include("setup.sh")
+```
+
+It is not a runtime function. `txco` replaces each `&include("…")` with a quoted copy of the file when it reads your `OPS/` tree, so `apply`, `push`, `draft`, `dev`, `diff`, `lint`, `status` and package builds all see the expanded op, and the chassis only ever stores and runs the expanded text (as with [`op://` references](#exec--dispatch-target)). Because the replacement happens before parsing, `&include` works anywhere a string literal does, including inside `[...]` arrays and on the right-hand side of `WHEN`:
+
+```txcl
+WITH args = ["python3", "-c", &include("server.py")]
+```
+
+The rules:
+
+- **One quoted path**, relative to the `.txcl` file's directory. `../` is fine as long as the file stays inside the op's stack directory (`OPS/<stack>/`): that is what a [package](../txco-oci-packages.md) carries, so an op never depends on a file outside its stack. Absolute paths are refused.
+- **A regular file.** Symlinks are refused, since packages and uploads drop them.
+- **UTF-8 text, at most 1 MiB.** A NUL byte is refused (a txcl string cannot hold one), a leading byte-order mark is dropped, and everything else, trailing newline included, is kept byte for byte.
+- **Not recursive.** An included file is data; an `&include` inside it is just text.
+- **Errors name the spot:** `OPS/tools/0100_SETUP/setup.txcl:5: &include("setup.sh"): no such file OPS/tools/0100_SETUP/setup.sh`. A bad include stops the command rather than deploying the stack without that op.
+
+Where the file ends up still matters. `ai://chat` treats `{{…}}` in `prompt` and `system` as template markers, and an included prompt gets the same treatment. A script passed in `args` is subject to the operating system's argument limit (128 KiB for one argument on Linux), so feed a large one on `stdin`. Since the chassis never sees the directive, `txco pull` and the admin UI show the expanded text. Keep the file as the source and `txco apply` from it.
+
+`txco dev` watches the files your ops include and re-pushes the stack's draft when one changes. Keep included files outside `FILES/`, which the watcher skips by default and which is also uploaded and served as static assets.
+
 ## Functions
 
-Anywhere a literal or `@path` value is accepted as the right hand side of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`. In `WHEN`, a function call is allowed on the right-hand side only when **every argument is a literal** — see [WHEN — filter](#when--filter) for why.
+Anywhere a literal or `@path` value is accepted as the right hand side of `SET`, `EMIT`, `WITH`, or `SELECT … DEFAULT`, you can also call a registered runtime function with `&name(args...)`. In `WHEN`, a function call is allowed on the right-hand side only when **every argument is a literal** — see [WHEN — filter](#when--filter) for why. (`&include("file")` looks like a call but isn't one: `txco` replaces it before the op is parsed — see [Including files](#including-files--include).)
 
 ```txcl
 SET .id  = &uuid()
