@@ -1,0 +1,9 @@
+# POST /ipp/provision — step 0b: refuse a caller 090 did not vouch for.
+WHEN @web.req.method == "POST" && @web.req.url.path == "/ipp/provision" && @computed.basic_auth_ok != true
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error", "unauthorized",
+         "message", "POST /ipp/provision needs Basic auth: user provision, password = the IPP_PROVISION_PASSWORD secret"))),
+       @web.res.status = 401,
+       @web.res.headers.www-authenticate.0 = "Basic realm=ipp-provision",
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

@@ -32,7 +32,7 @@ const marker = "<!--txco:printer-->"
 // Printer is what the page shows: the fields macOS's Add Printer › IP tab
 // asks for, plus the address a client adds the printer by.
 type Printer struct {
-	Name    string `json:"name"`    // the printer label
+	Name    string `json:"name"`    // the registered display name, else the label
 	URI     string `json:"uri"`     // ipps://ipp.<zone>:443/p/<printer>
 	Address string `json:"address"` // ipp.<zone>:443 — the port always spelled out
 	Queue   string `json:"queue"`   // p/<printer>, or p/<handle>/<printer>

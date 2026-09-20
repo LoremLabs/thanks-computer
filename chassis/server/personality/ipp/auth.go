@@ -1,13 +1,13 @@
 package ipp
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
+	"go.uber.org/zap"
+
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 )
 
 const challenge = `Basic realm="ipp", charset="UTF-8"`
@@ -36,55 +36,70 @@ func (c *Controller) demand(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "authentication required", http.StatusUnauthorized)
 }
 
-// authenticate checks the request's Basic credential against the tenant's
-// static one. Order matters (it is the drive head's): TLS FIRST, before a
-// credential is even read; then the verified cache; the throttles on a miss
-// only; the constant-time compare; admission last. It writes the HTTP
-// answer itself on failure and returns false.
+// authenticate signs the request's Basic credential in through the chassis's
+// login resolver (chassis/authn) — the one the IMAP and DAV heads use, so a
+// guess here spends the same budget as a guess there. Order matters (it is
+// the drive head's): TLS FIRST, before a credential is even read; then the
+// resolver, which resolves the username to its principal, finds the
+// credential by the id in the password, verifies it and checks that its
+// scopes cover `ipp:<printer>:print`; then the GRANT — the printer belongs to
+// one principal, and only that principal prints to it; admission last. It
+// writes the HTTP answer itself on failure and returns ok=false.
 //
 // It reads HEADERS ONLY, and ServeHTTP calls it before the first byte of the
 // body is read. That ordering is load-bearing, not tidiness — see ServeHTTP.
-func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, site printerSite) bool {
+func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, site printerSite) (authn.Authenticated, bool) {
 	ip := c.clientIP(r)
 	if !secure(r) && !c.insecureAuth {
 		http.Error(w, "TLS required", http.StatusForbidden)
-		return false
+		return authn.Authenticated{}, false
 	}
-	header := r.Header.Get("Authorization")
 	user, pass, ok := r.BasicAuth()
-	if !ok || header == "" {
+	if !ok || user == "" {
 		c.demand(w, r)
-		return false
+		return authn.Authenticated{}, false
+	}
+	deny := func(outcome string, who ...authn.Authenticated) (authn.Authenticated, bool) {
+		c.noteAuth(outcome, site, user, ip, who...)
+		w.Header().Set("WWW-Authenticate", challenge)
+		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		return authn.Authenticated{}, false
 	}
 
-	// The cache key binds the PRESENTED credential to the CURRENT secret (by
-	// digest), so rotating IPP_PASSWORD invalidates every cached login by
-	// construction — no explicit flush.
-	digest := sha256.Sum256(append([]byte(site.username+"\x00"), site.password...))
-	key := apppass.LoginKey(site.tenant+"\x00"+user, hex.EncodeToString(digest[:]), pass)
-	if !c.cache.Hit(key) {
-		// A miss is either a first login or a guess; both pay the throttle.
-		// Counting only misses is what lets a print client re-authenticate
-		// on every operation for free while a guesser — who always misses —
-		// is capped, correct guess included.
-		if c.throttled(ip, site.tenant) {
-			c.noteAuth("throttled", site.tenant, ip)
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "too many authentication attempts", http.StatusTooManyRequests)
-			return false
-		}
-		if !apppass.BasicHeaderMatches(header, site.username, site.password) {
-			c.noteAuth("failed", site.tenant, ip)
-			w.Header().Set("WWW-Authenticate", challenge)
-			http.Error(w, "authentication failed", http.StatusUnauthorized)
-			return false
-		}
-		c.cache.Put(key)
+	// The username is the full address its principal was bound under. A name
+	// the resolver cannot read as one (a bare "print", the pre-principal
+	// username) is answered like any unknown name, at the same cost.
+	res := c.auth.Login(r.Context(), authn.Attempt{
+		Tenant: site.tenant, Username: user, Password: pass, IP: ip,
+		Want: authn.Scope{Domain: "ipp", Instance: site.printer.Label, Action: "print"},
+	})
+	switch res.Outcome {
+	case authn.OutcomeOK:
+	case authn.OutcomeThrottled:
+		c.noteAuth("throttled", site, user, ip)
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "too many authentication attempts", http.StatusTooManyRequests)
+		return authn.Authenticated{}, false
+	case authn.OutcomeError:
+		c.pu.Logger.Warn("ipp login failed", zap.String("tenant", site.tenant), zap.Error(res.Err))
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+		return authn.Authenticated{}, false
+	default:
+		return deny(string(res.Outcome))
+	}
+
+	// The grant. One principal per printer: a valid password for ANOTHER
+	// principal is refused exactly like a wrong one, so it learns nothing
+	// about whose printer this is. Letting others print here widens this
+	// comparison (and the one in sendDocument), nothing else.
+	if res.Who.Principal.ID != site.printer.PrincipalID {
+		return deny("grant", res.Who)
 	}
 
 	if c.pu != nil && c.pu.Admission != nil {
 		if d := c.pu.Admission.Decide(site.tenant); !d.Admit {
-			c.noteAuth("denied", site.tenant, ip)
+			c.noteAuth("denied", site, user, ip, res.Who)
 			status := d.Status
 			if status == 0 {
 				status = http.StatusForbidden
@@ -93,23 +108,16 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, site p
 				w.Header().Set("Retry-After", strconv.Itoa(int(d.Retry.Seconds())))
 			}
 			http.Error(w, "service unavailable for this tenant", status)
-			return false
+			return authn.Authenticated{}, false
 		}
 	}
-	c.noteAuth("ok", site.tenant, ip)
-	return true
-}
-
-func (c *Controller) throttled(ip, tenant string) bool {
-	if c.authIP != nil && ip != "" {
-		if ok, _ := c.authIP.Allow(ip); !ok {
-			return true
-		}
+	if res.Cached {
+		// A print client sends its password with every operation, so a hit is
+		// the same client's next request, not a new login. It is counted; the
+		// line is logged once per password check. Refusals log every time.
+		c.countAuth("ok")
+	} else {
+		c.noteAuth("ok", site, user, ip, res.Who)
 	}
-	if c.authTenant != nil {
-		if ok, _ := c.authTenant.Allow(tenant); !ok {
-			return true
-		}
-	}
-	return false
+	return res.Who, true
 }

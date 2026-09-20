@@ -1,5 +1,5 @@
 {
-  "note": "IPP head: with `txco dev --ipp` the tenant's `_ipp` stack makes it a printer at ipps://ipp.localhost:8443/p/<printer> once the IPP_PASSWORD secret is set. The probe cannot speak IPP or set a secret (HTTP checks only), so it covers what rides the web head: the listing route answers, and /p/<printer> on the ORDINARY hostname is the stack's own path — printers exist only on `ipp.<host>`. Printing itself is exercised by the Go tests (chassis/server/personality/ipp) and by hand with ipptool — see the README. Binds localhost → ipp-demo; `ipp.localhost` then resolves to this tenant through that binding.",
+  "note": "IPP head: with `txco dev --ipp` the tenant's `_ipp` stack makes it a printer at ipps://ipp.localhost:8443/p/<printer> once a printer is registered (txco://ipp/printer). The probe cannot speak IPP (HTTP checks only), so it covers what rides the web head: the provision route registers a printer and answers a one-time password, a second provision issues none, the listing route answers, and /p/<printer> on the ORDINARY hostname is the stack's own path — printers exist only on `ipp.<host>`. Printing itself is exercised by the Go tests (chassis/server/personality/ipp) and by hand with ipptool — see the README. Binds localhost → ipp-demo; `ipp.localhost` then resolves to this tenant through that binding.",
   "dev_flags": [
     "--ipp"
   ],
@@ -10,6 +10,30 @@
     }
   ],
   "checks": [
+    {
+      "name": "provision: a user, a printer and a one-time password",
+      "method": "POST",
+      "path": "/ipp/provision",
+      "body": "{\"printer\":\"research\",\"email\":\"probe@example.com\",\"name\":\"Research Pony\"}",
+      "status": 200,
+      "contains": "\"username\":\"probe@example.com\""
+    },
+    {
+      "name": "provision without a printer label is a 400",
+      "method": "POST",
+      "path": "/ipp/provision",
+      "body": "{\"email\":\"probe@example.com\"}",
+      "status": 400,
+      "contains": "missing_field"
+    },
+    {
+      "name": "a label no URL reaches is refused by the op",
+      "method": "POST",
+      "path": "/ipp/provision",
+      "body": "{\"printer\":\"Front Desk\",\"email\":\"probe@example.com\"}",
+      "status": 400,
+      "contains": "txco_ipp_invalid_arg"
+    },
     {
       "name": "nothing printed yet",
       "method": "GET",

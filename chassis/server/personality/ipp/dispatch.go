@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -97,6 +98,11 @@ func (c *Controller) deliver(ctx context.Context, j chipp.Job) {
 	// timeout below.
 	runCtx, cancelRun := context.WithTimeout(c.ctx, c.runTimeout)
 	runCtx = context.WithValue(runCtx, config.CtxKeyRid, rid)
+	// WHO printed rides the job row, so the run is pinned to them whichever
+	// node delivers it (`@principal`). It is never read from the envelope.
+	if who, ok := jobPrincipal(j); ok {
+		runCtx = authn.WithAuthenticated(runCtx, who)
+	}
 	// Buffered and unread on purpose: the bus sends the run's single reply
 	// under a select, so a reader is not required. The goroutine below only
 	// releases the run context's timer when the run ends.
@@ -134,6 +140,21 @@ func (c *Controller) deliver(ctx context.Context, j chipp.Job) {
 		cancel()
 		c.noteJob("bus_timeout")
 	}
+}
+
+// jobPrincipal is who a job's run acts as. ok=false for a job with no
+// principal — one an older build created during a fleet roll — or with one
+// that does not parse: the run is delivered with no principal at all, never
+// with a guessed one, and the stack decides what an unsigned job is worth.
+func jobPrincipal(j chipp.Job) (authn.Authenticated, bool) {
+	if j.PrincipalID == "" {
+		return authn.Authenticated{}, false
+	}
+	p, err := authn.ParsePrincipal(j.PrincipalID)
+	if err != nil {
+		return authn.Authenticated{}, false
+	}
+	return authn.Authenticated{Principal: p, Credential: j.CredentialID}, true
 }
 
 // buildEnvelope renders a committed job as the `_ipp/0` envelope. Pure, so

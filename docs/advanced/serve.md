@@ -50,8 +50,9 @@ txco serve --web-trusted-proxies "10.0.0.0/8 fd00::/8"   # or TXCO_WEB_TRUSTED_P
   passes an incoming header along.
 - **What uses it.** The per-IP login limit (`--login-rate`) of the calendar,
   contacts, webdav and ipp heads and their login lines; the client address
-  those heads and the websocket head put on their events; the `ip` of the
-  web access log.
+  those heads and the websocket head put on their events; `@client.ip` on
+  every web request, which is what a rule should key a rate limit on; the
+  `ip` of the web access log.
 - **Left empty** (the default) nobody is trusted and the client is the
   socket peer. Behind a proxy that means every client shares ONE per-IP
   login budget, and one app retrying a dead password can use it up for

@@ -264,6 +264,30 @@ user then types only the address and password. Thunderbird does not
 consult RFC 6186 `_imaps._tcp` SRV records; the `dns` personality can still
 publish them for clients that do (`--dns-imaps-port`, see [dns](./dns.md)).
 
+**The username is the full address.** A client that sends only the local
+part (`paris`) still signs in today, when that name belongs to exactly one
+account on the whole chassis — mail clients do it when the address domain
+and the server name line up. It is a convenience with a cost: the head
+knows no hostname at `LOGIN` (it reads no SNI, and behind an edge TLS ended
+upstream), so it cannot scope the lookup to a tenant, and "exactly one"
+changes the day another tenant creates an account with the same local part.
+The password check that follows is the real gate — a bare name finds an
+account, it does not open one — but configure clients with the full
+address. Every bare login is marked `bare: true` on its `imap login` line
+(and `txco.imap.bare` on the login counter), so you can count the clients
+that rely on it; `--imap-refuse-bare-usernames` then refuses them like any
+unknown name. A later release turns that on by default.
+
+**A revoked password closes the sessions it opened.** `LOGIN` is the only
+time a mail client presents its password, and it holds its connections for
+hours. So an open session re-checks its credential about once a minute — on
+any command, on `NOOP`, and on a timer inside a quiet `IDLE` — and a session
+whose credential was revoked (a rotation, a removed device) or whose user
+was disabled gets `BYE Credential revoked; sign in again`. If the identity
+database cannot be read the session is kept: a database blip does not drop
+every client. It does not see a revoked username binding or a deleted
+account; those end a session at its next login.
+
 On the hosted fleet that is exactly the topology: the edge terminates
 `:993` with the stack's existing certificate and forwards the session to
 the head over the private network with the PROXY protocol, the same path
@@ -312,6 +336,7 @@ proxied=false` is a genuine cleartext `LOGIN`, which only
 | `--imap-insecure-auth` | `false` | LOGIN without TLS |
 | `--imap-self-signed` | `false` | Mint a self-signed certificate at boot (dev; `txco dev --imap` sets it) |
 | `--imap-wire-debug` | `false` | Log every IMAP line at DEBUG, credentials included (dev) |
+| `--imap-refuse-bare-usernames` | `false` | refuse a `LOGIN` whose username has no `@`; see [Mail client settings](#mail-client-settings). Count `bare: true` login lines before turning it on |
 | `--imap-login-rate` | `10` | LOGIN commands per minute, per IP and per username — a flood guard, before any lookup. A rate-limited LOGIN (this guard, or `--login-rate`) is refused after a 2-second pause, so a client retrying a dead password cannot do it several times a second |
 | `--login-rate` | `30` | Password checks per minute, per IP and per principal, shared with the CalDAV, CardDAV and WebDAV heads (cache misses only) |
 | `--imap-max-conns-per-account` | `16` | Simultaneous authenticated connections |

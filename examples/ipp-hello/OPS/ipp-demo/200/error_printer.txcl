@@ -1,0 +1,9 @@
+# A failed printer step answers 400 with the op's structured code: a label no URL could reach, or a chassis started without --ipp (txco_ipp_disabled).
+WHEN ._printer.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "step", "printer",
+         "error", ._printer.error.code,
+         "message", ._printer.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

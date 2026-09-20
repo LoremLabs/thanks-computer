@@ -100,3 +100,29 @@ func (s *Store) authorize(ctx context.Context, q querier, tenantID, stack string
 	}
 	return base, nil
 }
+
+// RequireOwner reports whether stack manages p, for an op that grants p
+// something the identity tables do not hold (a printer, say). Unlike the
+// writes above it does not make stack the owner of a principal nobody has
+// written yet: p must already exist — ErrNotFound otherwise — so a grant
+// cannot name a principal another stack could later claim. Another stack's
+// principal is an *OwnerError. It returns the base stack.
+func (s *Store) RequireOwner(ctx context.Context, tenantID, stack string, p Principal) (base string, err error) {
+	if err := requireTenant(tenantID); err != nil {
+		return "", err
+	}
+	base = BaseStack(stack)
+	if base == "" {
+		return "", ErrNoStack
+	}
+	owner, found, err := s.ownerOf(ctx, s.DB, tenantID, p)
+	switch {
+	case err != nil:
+		return "", err
+	case !found:
+		return "", ErrNotFound
+	case owner != base:
+		return "", &OwnerError{Principal: p, Owner: owner}
+	}
+	return base, nil
+}

@@ -178,6 +178,13 @@ func (s *Store) Limits() Limits { return s.limits }
 // counters — one DDL serves SQLite and Postgres. Additive-only: a later
 // column is added with its own IF-NOT-EXISTS-shaped statement.
 func (s *Store) EnsureSchema(ctx context.Context) error {
+	return registry.RetrySchema(ctx, s.ensureSchema)
+}
+
+// ensureSchema is one pass of EnsureSchema. Every statement is idempotent and
+// every additive column is probed first, so RetrySchema may run it again
+// after losing a first-boot race to another node.
+func (s *Store) ensureSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS drive_collections (
 			id             TEXT PRIMARY KEY,

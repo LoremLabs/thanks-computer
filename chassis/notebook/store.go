@@ -69,6 +69,13 @@ func (s *Store) DB() *sql.DB { return s.db }
 // serves SQLite and Postgres. There is no migration runner for these
 // stores; changes must be additive.
 func (s *Store) EnsureSchema(ctx context.Context) error {
+	return registry.RetrySchema(ctx, s.ensureSchema)
+}
+
+// ensureSchema is one pass of EnsureSchema. Every statement is idempotent and
+// every additive column is probed first, so RetrySchema may run it again
+// after losing a first-boot race to another node.
+func (s *Store) ensureSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS notebooks (
 			notebook_id TEXT PRIMARY KEY,

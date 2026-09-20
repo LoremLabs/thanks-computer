@@ -6,14 +6,9 @@ import (
 	"strconv"
 	"strings"
 
+	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
-
-// printerLabel is what names a printer in the path: a DNS-label-ish name,
-// lowercase. It is free-form on purpose — the chassis keeps no registry of
-// printers; the label is an operation selector the tenant's `_ipp` stack
-// interprets ("research", "summarize", "expenses").
-var printerLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$`)
 
 // handleLabel is ONE DNS label: the leftmost label of a structured hostname
 // (`core-hmhzx2isby` of `core-hmhzx2isby.stacks.example`). Stricter than a
@@ -127,7 +122,9 @@ func ippTarget(host, path, sharedZone string) (target, bool) {
 	default:
 		return target{}, false
 	}
-	if !printerLabel.MatchString(parts[0]) {
+	// The label grammar is the registry's (chipp.ValidLabel): what the URL
+	// can name is exactly what `txco://ipp/printer` can register.
+	if !chipp.ValidLabel(parts[0]) {
 		return target{}, false
 	}
 	t.printer = parts[0]

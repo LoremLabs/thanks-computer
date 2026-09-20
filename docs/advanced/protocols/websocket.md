@@ -76,7 +76,7 @@ pre-stamped, so the boot pipeline promotes it straight to the sub-stack.
 | `@websocket.msg.bytes` | payload size |
 | `@websocket.close.{code, reason, initiated_by}` | close runs only; `initiated_by` is `client`, `stack`, or `chassis` |
 | `@websocket.tenant` | tenant slug |
-| `@client.ip` | first `X-Forwarded-For` hop, else the peer |
+| `@client.ip` | the client's address: the socket peer, or behind [`--web-trusted-proxies`](../serve.md#behind-a-reverse-proxy-whose-address-is-it) the client the proxies recorded — never a header the client chose |
 
 ```json
 {

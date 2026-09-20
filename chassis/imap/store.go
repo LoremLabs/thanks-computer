@@ -221,6 +221,13 @@ func (s *Store) emit(changes []Change) {
 // uidnext, size and modseq are int64) — SQLite reads BIGINT as INTEGER
 // affinity, Postgres as int8, so one DDL serves both engines.
 func (s *Store) EnsureSchema(ctx context.Context) error {
+	return registry.RetrySchema(ctx, s.ensureSchema)
+}
+
+// ensureSchema is one pass of EnsureSchema. Every statement is idempotent and
+// every additive column is probed first, so RetrySchema may run it again
+// after losing a first-boot race to another node.
+func (s *Store) ensureSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS imap_accounts (
 			tenant     TEXT NOT NULL,

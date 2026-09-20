@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 
+	"github.com/loremlabs/thanks-computer/chassis/authn"
+	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
@@ -74,19 +76,29 @@ func (c *Controller) snapshotSubscribed(ctx context.Context, slug string) (bool,
 	return err == nil, err
 }
 
-// printerSite is a resolved, ENABLED tenant: it has a zone/host, an active
-// `_ipp` stack and a credential. Anything short of that is "not found".
+// printerSite is a resolved printer: a tenant with a zone/host and an active
+// `_ipp` stack, and an active printer row for the label. Anything short of
+// that is "not found".
 type printerSite struct {
 	tenant     string
 	ingressKey string
-	username   string
-	password   []byte
+	printer    chipp.Printer
+	// who is set once the request has signed in (ServeHTTP); zero on the
+	// anonymous Get-Printer-Attributes path and on the printer page.
+	who authn.Authenticated
 }
 
-// site resolves a target to an enabled tenant. ok=false with a nil error is
-// the fail-closed 404 — and it is ONE answer for every reason (no such
-// zone, unverified, a reserved tenant, no `_ipp` stack, no IPP_PASSWORD), so
-// a prober learns nothing about which tenants exist or what they run.
+// site resolves a target to a registered printer. ok=false with a nil error
+// is the fail-closed 404 — and it is ONE answer for every reason (no such
+// zone, unverified, a reserved tenant, no `_ipp` stack, no such printer, a
+// disabled one), so a prober learns nothing about which tenants exist or
+// what they run.
+//
+// What it DOES learn is whether a label is registered: a registered printer
+// answers 401 (or its page) where an unregistered one answers 404. That is
+// the cost of a printer being a row, accepted because a label is not a
+// secret — it is in the URL the owner hands out, and a product's labels are
+// usually public already (a pony's is in its mail address).
 func (c *Controller) site(ctx context.Context, t target) (printerSite, bool, error) {
 	slug, key, ok, err := c.tenantFor(ctx, t.x)
 	if err != nil || !ok {
@@ -99,18 +111,17 @@ func (c *Controller) site(ctx context.Context, t target) (printerSite, bool, err
 	if err != nil || !sub {
 		return printerSite{}, false, err
 	}
-	if c.secret == nil {
+	qctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	p, err := c.store.GetPrinter(qctx, slug, t.printer)
+	if errors.Is(err, chipp.ErrPrinterNotFound) {
 		return printerSite{}, false, nil
 	}
-	pw, found, err := c.secret(ctx, slug, SecretPassword)
-	if err != nil || !found || len(pw) == 0 {
+	if err != nil {
 		return printerSite{}, false, err
 	}
-	user := DefaultUsername
-	if u, found, uerr := c.secret(ctx, slug, SecretUsername); uerr != nil {
-		return printerSite{}, false, uerr
-	} else if found && len(u) > 0 {
-		user = string(u)
+	if !p.Active() {
+		return printerSite{}, false, nil
 	}
-	return printerSite{tenant: slug, ingressKey: key, username: user, password: pw}, true, nil
+	return printerSite{tenant: slug, ingressKey: key, printer: p}, true, nil
 }

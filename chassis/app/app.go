@@ -519,10 +519,13 @@ func Run(bi BuildInfo) int {
 		logger.Info("skipping drive store open — webdav personality not active and --drive-store=sqlite",
 			zap.String("personalities", conf.Personalities))
 	}
-	// IPP job store: one row per print job (receiving → committed →
-	// delivered). Only a node running the `ipp` head opens it — no op reads
-	// it — and there it is fatal: a printer that cannot record a job must not
-	// accept one. Own file, never the runtime DB (a job row is written
+	// IPP store: one row per printer (txco://ipp/printer) and one per print
+	// job (receiving → committed → delivered). Only a node running the `ipp`
+	// head opens it, and there it is fatal: a printer that cannot record a
+	// job must not accept one. On any other node txco://ipp/printer answers
+	// txco_ipp_disabled — register printers from a rule that runs where the
+	// head does (the web tier, which serves it). Own file, never the runtime
+	// DB (a job row is written
 	// several times per print; the dbcache watcher reloads the whole mirror
 	// on any runtime-file write). Documents are not stored here: they stream
 	// into the file CAS.

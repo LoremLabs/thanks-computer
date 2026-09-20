@@ -20,6 +20,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
+	"github.com/loremlabs/thanks-computer/chassis/authn/authntest"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
@@ -89,23 +91,34 @@ func (failingCAS) PutStream(context.Context, io.Reader, int64) (string, int64, e
 const (
 	zoneHost = "ipp.dripl.example"
 	tenant   = "driplit"
-	password = "five-correct-horse-battery-staples"
+	// The default client: the address pony:research is bound under, and a
+	// password that carries a credential id (authntest.Grant).
+	username  = "research@dripl.example"
+	principal = "pony:research"
+	password  = "bcdf-five-correct-horse-battery-staples"
+	// Another principal of the same tenant, with a printer of its own.
+	lyonUsername = "lyon@dripl.example"
+	lyonPassword = "ghjk-lyon-has-its-own-password"
+	// The `other` tenant's client signs in under the same address — a binding
+	// is per tenant — with its own password.
+	otherPassword = "mnpq-others-password"
 )
 
 type harness struct {
-	t      *testing.T
-	ctrl   *Controller
-	store  *chipp.Store
-	fcas   *filestore.FileStore
-	ix     *memIndex
-	srv    *httptest.Server // TLS
-	plain  *httptest.Server
-	bus    chan *event.Envelope
-	mu     sync.Mutex
-	seen   []string // envelopes the "bus" accepted
-	zones  map[string]string
-	subs   map[string]bool
-	secret map[string]string // tenant + "/" + name
+	t     *testing.T
+	ctrl  *Controller
+	store *chipp.Store
+	fcas  *filestore.FileStore
+	ix    *memIndex
+	srv   *httptest.Server // TLS
+	plain *httptest.Server
+	bus   chan *event.Envelope
+	mu    sync.Mutex
+	seen  []string              // envelopes the "bus" accepted
+	who   []authn.Authenticated // …and whom each was pinned to
+	zones map[string]string
+	subs  map[string]bool
+	ids   *authn.Store
 }
 
 func newHarness(t *testing.T, conf config.Config) *harness {
@@ -120,8 +133,8 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	}
 	conf.Personalities = "web,ipp"
 	conf.IPPAnonymousAttributes = true
-	if conf.IPPAuthRate == 0 {
-		conf.IPPAuthRate = 1000
+	if conf.LoginRate == 0 {
+		conf.LoginRate = 1000
 	}
 	if conf.IPPMaxJobBytes == 0 {
 		conf.IPPMaxJobBytes = 1 << 20
@@ -132,20 +145,31 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	conf.OpTimeoutMax = "5s"
 	h := &harness{
 		t: t, store: store, fcas: fs, ix: &memIndex{shas: map[string]blob.ShaRow{}},
-		bus:    make(chan *event.Envelope, 16),
-		zones:  map[string]string{"dripl.example": tenant, "other.example": "other", "quiet.example": "quiet", "nokey.example": "nokey", "broke.example": "suspended"},
-		subs:   map[string]bool{tenant: true, "other": true, "nokey": true, "suspended": true},
-		secret: map[string]string{tenant + "/" + SecretPassword: password, "other/" + SecretPassword: "others-password", "suspended/" + SecretPassword: password},
+		bus:   make(chan *event.Envelope, 16),
+		zones: map[string]string{"dripl.example": tenant, "other.example": "other", "quiet.example": "quiet", "noprinter.example": "noprinter", "broke.example": "suspended"},
+		subs:  map[string]bool{tenant: true, "other": true, "noprinter": true, "suspended": true},
+		ids:   authntest.NewSQLiteStore(t),
 	}
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop(), Bus: h.bus, Admission: fakeAdmission{suspended: "suspended"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := NewController(ctx, pu, store, nil)
 	c.SetFileCAS(fs)
 	c.SetBlobIndex(h.ix)
-	c.SetSecretSource(func(_ context.Context, slug, name string) ([]byte, bool, error) {
-		v, ok := h.secret[slug+"/"+name]
-		return []byte(v), ok, nil
-	})
+	c.SetAuth(authn.NewResolver(h.ids, authn.ResolverConfig{Rate: conf.LoginRate, TenantID: authntest.SameTenantID}))
+	// Who may sign in, and to what. `quiet` has a printer but no `_ipp`
+	// stack; `noprinter` has the stack and no printer.
+	h.grant(tenant, principal, username, password, "ipp:*:*")
+	h.grant(tenant, "pony:lyon", lyonUsername, lyonPassword, "ipp:*:*")
+	h.grant("other", principal, username, otherPassword, "ipp:*:*")
+	h.grant("suspended", principal, username, password, "ipp:*:*")
+	for _, label := range []string{"research", "expenses", "paris"} {
+		h.printer(tenant, label, principal, "")
+	}
+	h.printer(tenant, "lyon", "pony:lyon", "Lyon")
+	h.printer("other", "research", principal, "")
+	h.printer("other", "paris", principal, "")
+	h.printer("quiet", "research", principal, "")
+	h.printer("suspended", "research", principal, "")
 	c.tenantFor = func(_ context.Context, x string) (string, string, bool, error) {
 		slug, ok := h.zones[x]
 		return slug, "zone:" + x, ok, nil
@@ -159,8 +183,10 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 	// head waited for a run's reply, these tests would hang or fail.
 	go func() {
 		for env := range h.bus {
+			who, _ := authn.AuthenticatedFrom(env.Ctx)
 			h.mu.Lock()
 			h.seen = append(h.seen, env.Payload.Raw)
+			h.who = append(h.who, who)
 			h.mu.Unlock()
 		}
 	}()
@@ -180,6 +206,44 @@ func (h *harness) envelopes() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.seen...)
+}
+
+// pinned is whom each delivered run was pinned to, in delivery order; the
+// zero Authenticated for a run with no principal.
+func (h *harness) pinned() []authn.Authenticated {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]authn.Authenticated(nil), h.who...)
+}
+
+// grant makes user sign in to tenant as principal with pass.
+func (h *harness) grant(tenant, principal, user, pass string, scopes ...string) {
+	h.t.Helper()
+	p, err := authn.ParsePrincipal(principal)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	authntest.Grant(h.t, h.ids, tenant, p, user, pass, scopes...)
+}
+
+// printer registers (or changes) a printer row.
+func (h *harness) printer(tenant, label, principal, display string) {
+	h.t.Helper()
+	if _, _, err := h.store.UpsertPrinter(context.Background(), chipp.Printer{
+		Tenant: tenant, Label: label, PrincipalID: principal, DisplayName: display, CreatedBy: "web",
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// credentialID is the id of the one credential principal holds in tenant.
+func (h *harness) credentialID(tenant, principal string) string {
+	h.t.Helper()
+	var id string
+	if err := h.ids.DB.QueryRow(`SELECT id FROM credentials WHERE tenant_id = ? AND principal_id = ?`, tenant, principal).Scan(&id); err != nil {
+		h.t.Fatal(err)
+	}
+	return id
 }
 
 // request is one IPP operation as a client sends it.
@@ -241,7 +305,7 @@ func (h *harness) do(rq request) (*http.Response, *goipp.Message) {
 	if !rq.noAuth {
 		user, pass := rq.user, rq.pass
 		if user == "" {
-			user = DefaultUsername
+			user = username
 		}
 		if pass == "" {
 			pass = password
@@ -315,15 +379,23 @@ func shaOf(b []byte) string {
 
 // Every reason a printer "is not there" gives ONE identical answer, before
 // the body is read: nothing about which tenants exist, which run an `_ipp`
-// stack, or which have set a password leaks to a prober.
+// stack, or what they run leaks to a prober. (Whether a LABEL is registered
+// does: see site.)
 func TestNotFoundIsOneAnswer(t *testing.T) {
 	h := newHarness(t, config.Config{})
+	if _, _, err := h.store.UpsertPrinter(context.Background(), chipp.Printer{
+		Tenant: tenant, Label: "retired", PrincipalID: principal, Status: chipp.PrinterDisabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var first string
 	for name, rq := range map[string]request{
 		"unknown zone":             {host: "ipp.nobody.example"},
 		"subdomain of a real zone": {host: "ipp.sub.dripl.example"},
 		"tenant without _ipp":      {host: "ipp.quiet.example"},
-		"tenant without a secret":  {host: "ipp.nokey.example"},
+		"tenant without a printer": {host: "ipp.noprinter.example"},
+		"unregistered label":       {path: "/p/nosuch"},
+		"disabled printer":         {path: "/p/retired"},
 		"not a printer path":       {path: "/printers/research"},
 		"bad printer label":        {path: "/p/Research_Pony!"},
 		"nested path":              {path: "/p/research/extra"},
@@ -382,7 +454,7 @@ func TestPrinterPage(t *testing.T) {
 				t.Errorf("GET %s%s: page lacks %q", c.host, c.path, want)
 			}
 		}
-		if strings.Contains(body, password) || strings.Contains(body, DefaultUsername+":") {
+		if strings.Contains(body, password) || strings.Contains(body, username) {
 			t.Fatalf("GET %s%s: the page carries a credential", c.host, c.path)
 		}
 	}
@@ -421,8 +493,9 @@ func TestPrinterPage(t *testing.T) {
 
 	// No printer, no page: the one 404, whatever the reason.
 	for _, c := range []struct{ host, path string }{
-		{"ipp.quiet.example", "/p/research"}, // a tenant without an _ipp stack
-		{"ipp.nokey.example", "/p/research"}, // …without the credential
+		{"ipp.quiet.example", "/p/research"},     // a tenant without an _ipp stack
+		{"ipp.noprinter.example", "/p/research"}, // …without a printer
+		{zoneHost, "/p/nosuch"},                  // a label nobody registered
 		{"ipp.nowhere.example", "/p/research"},
 		{zoneHost, "/p/Not_A_Label"},
 	} {
@@ -432,6 +505,16 @@ func TestPrinterPage(t *testing.T) {
 	}
 	if len(h.envelopes()) != 0 {
 		t.Fatal("a page view reached the bus")
+	}
+
+	// A registered display name is the page's heading; without one it is the
+	// label. Either way the fields below it are the URL's.
+	_, body = get(http.MethodGet, zoneHost, "/p/lyon")
+	if !strings.Contains(body, "Lyon") {
+		t.Error("the page does not show the display name")
+	}
+	if !strings.Contains(body, "p/lyon") {
+		t.Error("the display name replaced the queue, which is the label")
 	}
 }
 
@@ -494,36 +577,55 @@ func TestAuthentication(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(resp.Header.Get("WWW-Authenticate"), `realm="ipp"`) {
 		t.Fatalf("no creds: %d %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
-	// Wrong password / wrong user / another tenant's password: all 401.
+	// Every way of not being this printer's principal is one 401.
+	h.grant(tenant, "pony:mailonly", "mailonly@dripl.example", "rstv-opens-mail-and-nothing-else", "imap:*:*")
+	h.grant(tenant, "pony:oneprinter", "oneprinter@dripl.example", "vwxz-prints-to-expenses-only", "ipp:expenses:print")
+	h.printer(tenant, "mailonly", "pony:mailonly", "")
 	for name, rq := range map[string]request{
-		"wrong password":        {pass: "nope"},
-		"wrong user":            {user: "admin"},
-		"other tenant password": {pass: "others-password"},
+		"wrong password":            {pass: "bcdf-nope"},
+		"a password with no id":     {pass: "nope"},
+		"unknown address":           {user: "nobody@dripl.example"},
+		"bare username":             {user: "research"},
+		"the pre-principal default": {user: "print"},
+		"other tenant's password":   {pass: otherPassword},
+		// A valid login — for somebody else. The printer is granted to one
+		// principal; another's password is a wrong password here.
+		"another principal":     {user: lyonUsername, pass: lyonPassword},
+		"no ipp scope":          {path: "/p/mailonly", user: "mailonly@dripl.example", pass: "rstv-opens-mail-and-nothing-else"},
+		"scope for another one": {user: "oneprinter@dripl.example", pass: "vwxz-prints-to-expenses-only"},
 	} {
 		rq.op = goipp.OpGetJobs
-		if resp, _ := h.do(rq); resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s: %d, want 401", name, resp.StatusCode)
+		resp, _ := h.do(rq)
+		if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") == "" {
+			t.Errorf("%s: %d, want a 401 challenge", name, resp.StatusCode)
 		}
 	}
-	// The right one works — and a tenant-chosen username replaces the default.
+	// The right one works, on its own printer: each principal's.
 	if _, m := h.do(request{op: goipp.OpGetJobs}); m == nil || status(m) != goipp.StatusOk {
 		t.Fatalf("valid credential refused: %v", m)
 	}
-	h.secret[tenant+"/"+SecretUsername] = "matt"
-	if resp, _ := h.do(request{op: goipp.OpGetJobs}); resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("default username still accepted after IPP_USERNAME was set: %d", resp.StatusCode)
+	if _, m := h.do(request{op: goipp.OpGetJobs, path: "/p/lyon", user: lyonUsername, pass: lyonPassword}); m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("lyon refused at its own printer: %v", m)
 	}
-	if _, m := h.do(request{op: goipp.OpGetJobs, user: "matt"}); m == nil || status(m) != goipp.StatusOk {
-		t.Fatalf("custom username refused: %v", m)
+	// A scope naming one printer opens that printer once it is granted.
+	h.printer(tenant, "expenses", "pony:oneprinter", "")
+	if _, m := h.do(request{op: goipp.OpGetJobs, path: "/p/expenses", user: "oneprinter@dripl.example", pass: "vwxz-prints-to-expenses-only"}); m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("a printer-scoped credential refused at its printer: %v", m)
 	}
-	delete(h.secret, tenant+"/"+SecretUsername)
 
-	// Rotating the secret invalidates the cached login at once.
-	h.secret[tenant+"/"+SecretPassword] = "a-brand-new-password"
-	if resp, _ := h.do(request{op: goipp.OpGetJobs}); resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("old password survived a rotation: %d", resp.StatusCode)
+	// Revocation is immediate: the login was verified and cached a moment
+	// ago, and the next request is refused all the same.
+	if _, err := h.ids.DB.Exec(`UPDATE credentials SET revoked_at = '2026-09-19T00:00:00Z' WHERE tenant_id = ? AND principal_id = ?`, tenant, "pony:lyon"); err != nil {
+		t.Fatal(err)
 	}
-	h.secret[tenant+"/"+SecretPassword] = password
+	if resp, _ := h.do(request{op: goipp.OpGetJobs, path: "/p/lyon", user: lyonUsername, pass: lyonPassword}); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a revoked credential still prints: %d", resp.StatusCode)
+	}
+	// Re-pointing the printer moves the grant with it, at once.
+	h.printer(tenant, "lyon", principal, "")
+	if _, m := h.do(request{op: goipp.OpGetJobs, path: "/p/lyon"}); m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("the printer's new principal refused: %v", m)
+	}
 
 	// Plaintext is refused BEFORE a credential is read.
 	if resp, _ := h.do(request{op: goipp.OpGetJobs, plain: true}); resp.StatusCode != http.StatusForbidden {
@@ -537,11 +639,13 @@ func TestAuthentication(t *testing.T) {
 }
 
 // Guessing is capped — and the cap binds the correct guess too, which is the
-// point of counting every cache MISS rather than every failure.
+// point of counting every cache MISS rather than every failure. The budget
+// is the chassis's one login budget (--login-rate), shared with the other
+// heads.
 func TestAuthThrottle(t *testing.T) {
-	h := newHarness(t, config.Config{IPPAuthRate: 3})
+	h := newHarness(t, config.Config{LoginRate: 3})
 	for i := 0; i < 3; i++ {
-		if resp, _ := h.do(request{op: goipp.OpGetJobs, pass: "guess"}); resp.StatusCode != http.StatusUnauthorized {
+		if resp, _ := h.do(request{op: goipp.OpGetJobs, pass: "bcdf-guess"}); resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("guess %d: %d", i, resp.StatusCode)
 		}
 	}
@@ -554,7 +658,7 @@ func TestAuthThrottle(t *testing.T) {
 // A legitimate client re-authenticates on every operation and must never
 // throttle itself: only its first request is a cache miss.
 func TestVerifiedLoginIsNotThrottled(t *testing.T) {
-	h := newHarness(t, config.Config{IPPAuthRate: 2})
+	h := newHarness(t, config.Config{LoginRate: 2})
 	for i := 0; i < 10; i++ {
 		if _, m := h.do(request{op: goipp.OpGetJobs}); m == nil || status(m) != goipp.StatusOk {
 			t.Fatalf("request %d throttled", i)
@@ -601,7 +705,7 @@ func TestRefusalsNeverTouchTheBody(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") == "" {
 		t.Errorf("no credential: %d", rec.Code)
 	}
-	rec = serve("wrong password", func(r *http.Request) { r.SetBasicAuth(DefaultUsername, "nope") })
+	rec = serve("wrong password", func(r *http.Request) { r.SetBasicAuth(username, "bcdf-nope") })
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("wrong password: %d", rec.Code)
 	}
@@ -681,6 +785,23 @@ func TestGetPrinterAttributes(t *testing.T) {
 	}
 	if a, _ := attr(m.Printer, "uri-authentication-supported"); a.Values[0].V.String() != "basic" {
 		t.Fatalf("auth: %v", a.Values)
+	}
+
+	// No display name, no printer-dns-sd-name; with one, it is what a client
+	// that adds the printer by URI names its queue — so it is in the
+	// anonymous answer, which is the one that client reads.
+	if _, ok := attr(m.Printer, "printer-dns-sd-name"); ok {
+		t.Fatal("printer-dns-sd-name sent for a printer with no display name")
+	}
+	_, m = h.do(request{op: goipp.OpGetPrinterAttributes, noAuth: true, path: "/p/lyon"})
+	if a, ok := attr(m.Printer, "printer-dns-sd-name"); !ok || a.Values[0].V.String() != "Lyon" {
+		t.Fatalf("printer-dns-sd-name: %v %v", ok, a.Values)
+	}
+	if a, _ := attr(m.Printer, "printer-info"); a.Values[0].V.String() != "Lyon" {
+		t.Fatalf("printer-info: %v", a.Values)
+	}
+	if a, _ := attr(m.Printer, "printer-name"); a.Values[0].V.String() != "lyon" {
+		t.Fatalf("printer-name must stay the label: %v", a.Values)
 	}
 
 	// requested-attributes narrows the answer.
@@ -799,13 +920,23 @@ func TestPrintJobEndToEnd(t *testing.T) {
 	if len(env) > 2048 {
 		t.Errorf("envelope is %d bytes for a %d byte document", len(env), len(pdfDoc))
 	}
+	// WHO printed: pinned on the run's context (the processor stamps
+	// `_txc.principal` from it at every run entry), never written into the
+	// envelope by the head, where a stack could not tell it from a claim.
+	cred := h.credentialID(tenant, principal)
+	if who := h.pinned()[0]; who.Principal.ID != principal || who.Credential != cred {
+		t.Errorf("the run is pinned to %+v, want %s / %s", who, principal, cred)
+	}
+	if gjson.Get(env, "_txc.principal").Exists() {
+		t.Error("the head wrote _txc.principal into the envelope")
+	}
 
 	waitFor(t, "job completed", func() bool {
 		_, m := h.do(request{op: goipp.OpGetJobAttributes, opAttrs: []goipp.Attribute{goipp.MakeAttribute("job-id", goipp.TagInteger, goipp.Integer(jobNo))}})
 		return m != nil && status(m) == goipp.StatusOk && intOf(t, m.Job, "job-state") == 9
 	})
 	j, _ := h.store.GetJob(context.Background(), tenant, "research", 1)
-	if j.State != chipp.StateDelivered || j.Rid == "" {
+	if j.State != chipp.StateDelivered || j.Rid == "" || j.PrincipalID != principal || j.CredentialID != cred {
 		t.Fatalf("stored job: %+v", j)
 	}
 
@@ -951,7 +1082,7 @@ func TestCreateJobSendDocumentAndCancel(t *testing.T) {
 	if _, m = h.do(request{op: goipp.OpGetJobAttributes, path: "/p/expenses", opAttrs: jobID(n)}); status(m) != goipp.StatusErrorNotFound {
 		t.Fatalf("job seen from another printer: %v", status(m))
 	}
-	if _, m = h.do(request{op: goipp.OpGetJobAttributes, host: "ipp.other.example", pass: "others-password", opAttrs: jobID(n)}); status(m) != goipp.StatusErrorNotFound {
+	if _, m = h.do(request{op: goipp.OpGetJobAttributes, host: "ipp.other.example", pass: otherPassword, opAttrs: jobID(n)}); status(m) != goipp.StatusErrorNotFound {
 		t.Fatalf("job seen from another tenant: %v", status(m))
 	}
 	// A printer-uri that names a different printer than the URL is refused.
@@ -981,6 +1112,66 @@ func TestBusyAndDraining(t *testing.T) {
 	// Read-only operations still answer while draining.
 	if _, m := h.do(request{op: goipp.OpGetJobs}); m == nil || status(m) != goipp.StatusOk {
 		t.Fatal("Get-Jobs refused while draining")
+	}
+}
+
+// A job belongs to whoever created it. Create-Job and Send-Document are two
+// requests, so the principal rides the row between them; and a job with no
+// principal — one an older build created mid-roll — is still delivered, with
+// no one pinned, for the stack to judge.
+func TestJobsKeepTheirPrincipal(t *testing.T) {
+	h := newHarness(t, config.Config{})
+	ctx := context.Background()
+
+	_, m := h.do(request{op: goipp.OpCreateJob, opAttrs: []goipp.Attribute{pdfFormat()}})
+	if m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("Create-Job: %v", m)
+	}
+	n := intOf(t, m.Job, "job-id")
+	if j, _ := h.store.GetJob(ctx, tenant, "research", int64(n)); j.PrincipalID != principal {
+		t.Fatalf("Create-Job did not record who created it: %+v", j)
+	}
+
+	// The printer changes hands while the job waits for its document. Its new
+	// principal signs in fine — and may not finish somebody else's job.
+	h.printer(tenant, "research", "pony:lyon", "")
+	send := request{op: goipp.OpSendDocument, user: lyonUsername, pass: lyonPassword, doc: pdfDoc, opAttrs: []goipp.Attribute{
+		goipp.MakeAttribute("job-id", goipp.TagInteger, goipp.Integer(n)),
+		goipp.MakeAttribute("last-document", goipp.TagBoolean, goipp.Boolean(true)), pdfFormat()}}
+	if _, m = h.do(send); m == nil || status(m) != goipp.StatusErrorNotAuthorized {
+		t.Fatalf("another principal's Send-Document: %v", m)
+	}
+	if j, _ := h.store.GetJob(ctx, tenant, "research", int64(n)); j.State != chipp.StateReceiving {
+		t.Fatalf("the refused document changed the job: %+v", j)
+	}
+	// Back in its owner's hands, the owner finishes it.
+	h.printer(tenant, "research", principal, "")
+	send.user, send.pass = "", ""
+	if _, m = h.do(send); m == nil || status(m) != goipp.StatusOk {
+		t.Fatalf("the owner's Send-Document: %v", m)
+	}
+	h.ctrl.pass(ctx)
+	waitFor(t, "delivery", func() bool { return len(h.pinned()) == 1 })
+	if who := h.pinned()[0]; who.Principal.ID != principal {
+		t.Fatalf("pinned to %+v, want %s", who, principal)
+	}
+
+	// A row with no principal: delivered, pinned to no one.
+	old, err := h.store.CreateJob(ctx, chipp.NewJob{Tenant: tenant, Printer: "research", Host: zoneHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.store.SetCommitted(ctx, old.ID, shaOf(pdfDoc), int64(len(pdfDoc)), "application/pdf", ""); !ok || err != nil {
+		t.Fatal(err)
+	}
+	h.ctrl.pass(ctx)
+	waitFor(t, "the unsigned job's delivery", func() bool { return len(h.pinned()) == 2 })
+	if who := h.pinned()[1]; !who.IsZero() {
+		t.Fatalf("a job with no principal was pinned to %+v", who)
+	}
+	// Nor is a principal that does not parse ever guessed at.
+	if _, ok := jobPrincipal(chipp.Job{PrincipalID: "not a principal"}); ok {
+		t.Fatal("an unparseable principal was pinned")
 	}
 }
 
@@ -1175,11 +1366,11 @@ func TestSharedFrontDoor(t *testing.T) {
 	if resp, _ := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobs}); resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("another tenant's handle with our password: %d, want 401", resp.StatusCode)
 	}
-	if _, m := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobs, pass: "others-password"}); m == nil || status(m) != goipp.StatusOk {
+	if _, m := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobs, pass: otherPassword}); m == nil || status(m) != goipp.StatusOk {
 		t.Errorf("the other tenant's own password was refused: %v", m)
 	}
 	// …and its jobs are invisible across handles.
-	if _, m := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobAttributes, pass: "others-password",
+	if _, m := h.do(request{host: door, path: "/p/web-zzz999/paris", op: goipp.OpGetJobAttributes, pass: otherPassword,
 		opAttrs: []goipp.Attribute{goipp.MakeAttribute("job-id", goipp.TagInteger, goipp.Integer(jobNo))}}); status(m) != goipp.StatusErrorNotFound {
 		t.Errorf("a job seen through another tenant's handle: %v", status(m))
 	}
@@ -1196,7 +1387,7 @@ func TestSharedDoorCoexistsWithPlainHost(t *testing.T) {
 	if _, m := h.do(request{host: "ipp.localhost:8443", path: "/p/research", op: goipp.OpGetJobs}); m == nil || status(m) != goipp.StatusOk {
 		t.Fatalf("plain form on the dev host: %v", m)
 	}
-	if _, m := h.do(request{host: "ipp.localhost:8443", path: "/p/demo-abc123/research", op: goipp.OpGetJobs, pass: "others-password"}); m == nil || status(m) != goipp.StatusOk {
+	if _, m := h.do(request{host: "ipp.localhost:8443", path: "/p/demo-abc123/research", op: goipp.OpGetJobs, pass: otherPassword}); m == nil || status(m) != goipp.StatusOk {
 		t.Fatalf("handle form on the dev host: %v", m)
 	}
 }

@@ -95,6 +95,8 @@ var schema = []string{
 	   host            TEXT NOT NULL DEFAULT '',
 	   uri_path        TEXT NOT NULL DEFAULT '',
 	   client_ip       TEXT NOT NULL DEFAULT '',
+	   principal_id    TEXT NOT NULL DEFAULT '',
+	   credential_id   TEXT NOT NULL DEFAULT '',
 	   created_at      TEXT NOT NULL,
 	   updated_at      TEXT NOT NULL,
 	   committed_at    TEXT,
@@ -107,10 +109,30 @@ var schema = []string{
 	   tenant      TEXT PRIMARY KEY,
 	   next_number BIGINT NOT NULL
 	 )`,
+	// A printer is a row: the label in the URL, the principal it is granted
+	// to, and the name a client shows for it. See printers.go.
+	`CREATE TABLE IF NOT EXISTS ipp_printers (
+	   tenant       TEXT NOT NULL,
+	   label        TEXT NOT NULL,
+	   display_name TEXT NOT NULL DEFAULT '',
+	   principal_id TEXT NOT NULL,
+	   status       TEXT NOT NULL DEFAULT 'active',
+	   created_by   TEXT NOT NULL DEFAULT '',
+	   created_at   TEXT NOT NULL,
+	   updated_at   TEXT NOT NULL,
+	   PRIMARY KEY (tenant, label)
+	 )`,
 }
 
 // EnsureSchema creates the tables. Idempotent.
 func (s *Store) EnsureSchema(ctx context.Context) error {
+	return registry.RetrySchema(ctx, s.ensureSchema)
+}
+
+// ensureSchema is one pass of EnsureSchema. Every statement is idempotent and
+// every additive column is probed first, so RetrySchema may run it again
+// after losing a first-boot race to another node.
+func (s *Store) ensureSchema(ctx context.Context) error {
 	for _, q := range schema {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("ipp: ensure schema: %w", err)
@@ -123,6 +145,10 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	// idiom).
 	for _, c := range []struct{ table, column, ddl string }{
 		{"ipp_jobs", "uri_path", `ALTER TABLE ipp_jobs ADD COLUMN uri_path TEXT NOT NULL DEFAULT ''`},
+		// NOT NULL with a default: during a fleet roll, and after a rollback,
+		// an older build keeps inserting jobs without these.
+		{"ipp_jobs", "principal_id", `ALTER TABLE ipp_jobs ADD COLUMN principal_id TEXT NOT NULL DEFAULT ''`},
+		{"ipp_jobs", "credential_id", `ALTER TABLE ipp_jobs ADD COLUMN credential_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.ExecContext(ctx, `SELECT `+c.column+` FROM `+c.table+` WHERE 1 = 0`); err == nil {
 			continue

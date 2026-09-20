@@ -1,0 +1,9 @@
+# POST /ipp/provision — step 1: the body is JSON
+#   {"printer": "research", "email": "you@example.com", "name": "Research Pony"}
+#
+# `printer` is the label in the printer's URL (/p/research). `email` is who
+# may print to it, and what they type as the username. `name` is what their
+# computer calls the queue.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/ipp/provision"
+  EMIT ._prov = &try_json(&b64decode(@web.req.body)),
+       ._prov_req = true

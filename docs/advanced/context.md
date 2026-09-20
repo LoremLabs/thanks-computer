@@ -28,10 +28,11 @@ is a shorthand for `_txc.` Note that this shorthand is for chassis `txcl`, opera
 |---|---|
 | `@src` | Head: `http`, `lmtp`, `cron`, `tcp` |
 | `@rid` | Request id (trace correlation) |
+| `@client.ip` | The client's address, on every run a network head starts (web, websocket, the DAV heads, IPP, IMAP lanes). The socket peer — or, behind [`--web-trusted-proxies`](./serve.md#behind-a-reverse-proxy-whose-address-is-it), the client your proxies recorded. Read-only and chassis-stamped: key a rate limit on this, never on `@web.req.headers.X-Forwarded-For`, which is whatever the client sent |
 | `@tenant` / `@stack` | Resolved by [ingress](../routing.md); pinned per request |
 | `@ingress` / `@hostname_verified` | Matched ingress key / ownership-verification bit |
 | `@op` / `@step` | The firing op's identity and scope (stamped on dispatched envelopes) |
-| `@principal.{id,kind,credential}` | Who the request acts as, when someone signed in: the principal a head verified a [credential](./users.md#signing-in) for (`pony:paris`, `user:usr_…`), and the credential's id. Present only on runs the IMAP, CalDAV and CardDAV heads start; read-only — a copy of what the chassis pinned, never taken from the request |
+| `@principal.{id,kind,credential}` | Who the request acts as, when someone signed in: the principal a head verified a [credential](./users.md#signing-in) for (`pony:paris`, `user:usr_…`), and the credential's id. Present only on runs the IMAP, CalDAV, CardDAV and IPP heads start (a print job's run acts as whoever printed it); read-only — a copy of what the chassis pinned, never taken from the request |
 
 ### Per-head request data:
 

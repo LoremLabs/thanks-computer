@@ -14,7 +14,12 @@ import (
 type PrinterInfo struct {
 	Tenant string // identity only (printer-uuid); never sent
 	Name   string // the path label: /p/<Name>
-	URI    string // the URI the client reached us at
+	// DisplayName is the registered printer's name for people ("Paris"), ""
+	// when it has none. It is what a client that adds the printer by URI
+	// (Add Printer, an `ipps://` link) names the queue: without it the queue
+	// is named after the HOST, which every printer on the host shares.
+	DisplayName string
+	URI         string // the URI the client reached us at
 	// Location is where this printer "is": the ipp host it answers on. The
 	// one honest answer a virtual printer has to "which room?".
 	Location string
@@ -115,6 +120,10 @@ func PrinterAttributes(p PrinterInfo, now time.Time) goipp.Attributes {
 	}
 	const media = fixedMedia
 	res := goipp.Resolution{Xres: 300, Yres: 300, Units: goipp.UnitsDpi}
+	info := "Print to " + p.Name
+	if p.DisplayName != "" {
+		info = p.DisplayName
+	}
 
 	attrs := goipp.Attributes{
 		// Identity + reachability: all real.
@@ -122,7 +131,7 @@ func PrinterAttributes(p PrinterInfo, now time.Time) goipp.Attributes {
 		kw("uri-security-supported", security),
 		kw("uri-authentication-supported", "basic"),
 		strAttr("printer-name", goipp.TagName, p.Name),
-		strAttr("printer-info", goipp.TagText, "Print to "+p.Name),
+		strAttr("printer-info", goipp.TagText, info),
 		strAttr("printer-location", goipp.TagText, p.Location),
 		strAttr("printer-make-and-model", goipp.TagText, "Thanks Computer IPP"),
 		strAttr("printer-device-id", goipp.TagText, "MFG:Thanks Computer;MDL:IPP;CMD:PDF;"),
@@ -177,6 +186,9 @@ func PrinterAttributes(p PrinterInfo, now time.Time) goipp.Attributes {
 		goipp.MakeAttribute("printer-resolution-default", goipp.TagResolution, res),
 		intAttr("orientation-requested-supported", goipp.TagEnum, 3),
 		intAttr("orientation-requested-default", goipp.TagEnum, 3),
+	}
+	if p.DisplayName != "" {
+		attrs.Add(strAttr("printer-dns-sd-name", goipp.TagName, p.DisplayName))
 	}
 	if p.MoreInfo != "" {
 		attrs.Add(strAttr("printer-more-info", goipp.TagURI, p.MoreInfo))

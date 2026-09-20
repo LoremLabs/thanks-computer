@@ -1,0 +1,13 @@
+# POST /ipp/provision — step 2: WHO. A printer is granted to a principal,
+# and a principal must exist before anything can be granted to it.
+#
+# Here it is a person: txco://user/create mints `user:usr_…` and binds the
+# email to it, which is what makes the email a username. It is idempotent on
+# the email — provisioning a second printer for the same address finds the
+# same user (`created: false`). A product with its own nouns names its own
+# principal instead (`pony:paris`) and binds the username with an account op.
+WHEN ._prov.printer =~ /./ && ._prov.email =~ /./
+  EXEC "txco://user/create"
+    WITH email        = ._prov.email,
+         display_name = ._prov.name,
+         into         = "_user"

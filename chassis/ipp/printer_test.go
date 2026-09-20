@@ -77,6 +77,34 @@ func TestPrinterIsLeastFictional(t *testing.T) {
 	}
 }
 
+// A registered printer's display name is what a client names the queue. With
+// none, printer-info keeps its label form and printer-dns-sd-name is absent
+// (an empty name would be a worse answer than none).
+func TestPrinterDisplayName(t *testing.T) {
+	base := PrinterInfo{Tenant: "acme", Name: "paris", URI: "ipps://ipp.example.com/p/paris", UpSince: fixedNow}
+
+	attrs := PrinterAttributes(base, fixedNow)
+	if a, _ := attrByName(attrs, "printer-info"); a.Values[0].V.String() != "Print to paris" {
+		t.Fatalf("printer-info without a display name: %v", a.Values)
+	}
+	if _, ok := attrByName(attrs, "printer-dns-sd-name"); ok {
+		t.Fatal("printer-dns-sd-name sent for a printer with no display name")
+	}
+
+	base.DisplayName = "Paris"
+	attrs = PrinterAttributes(base, fixedNow)
+	if a, _ := attrByName(attrs, "printer-info"); a.Values[0].V.String() != "Paris" {
+		t.Fatalf("printer-info: %v", a.Values)
+	}
+	if a, ok := attrByName(attrs, "printer-dns-sd-name"); !ok || a.Values[0].V.String() != "Paris" {
+		t.Fatalf("printer-dns-sd-name: %v %v", ok, a.Values)
+	}
+	// printer-name stays the label: it is part of the printer's URI identity.
+	if a, _ := attrByName(attrs, "printer-name"); a.Values[0].V.String() != "paris" {
+		t.Fatalf("printer-name: %v", a.Values)
+	}
+}
+
 func TestPrinterUUIDStable(t *testing.T) {
 	a, b := PrinterUUID("acme", "research"), PrinterUUID("acme", "research")
 	if a != b || len(a) != len("urn:uuid:00000000-0000-0000-0000-000000000000") {

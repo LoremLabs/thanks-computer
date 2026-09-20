@@ -18,6 +18,10 @@ chassis/data/secrets/
 # data (SQLite DBs, kv, logs) must never be committed. The rules above are
 # root-anchored and don't reach into examples/, so cover that path too.
 examples/**/chassis/data/
+# A test run with a relative data path writes into its PACKAGE's directory
+# (`go test` runs there). Never commit what lands: it has included a private
+# key (chassis/server/personality/imap/chassis/data, e99b38a).
+chassis/**/chassis/data/
 *.test
 *.out
 *.log

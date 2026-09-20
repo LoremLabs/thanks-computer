@@ -25,10 +25,13 @@
 // the document or throw it away; none of that is a print job, and nothing
 // here waits for it or reports on it.
 //
-// v1 authentication is ONE static credential per tenant, held in the secret
-// store (IPP_PASSWORD, optional IPP_USERNAME). A tenant without the secret
-// has no printers. Printer-scoped accounts arrive with the credential
-// subsystem that is being reworked separately.
+// A printer is a ROW (`txco://ipp/printer`): its label, the principal it is
+// granted to, and its display name. A client signs in with that principal's
+// username and a password `txco://credential/create` issued to it, through
+// the login resolver the IMAP and DAV heads share (chassis/authn); the
+// credential's scopes must cover `ipp:<printer>:print`. The delivered run is
+// pinned to the principal that printed (`@principal`). A label with no active
+// row does not exist.
 package ipp
 
 import (
@@ -43,8 +46,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/apppass"
-	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
+	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
 	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
@@ -61,18 +63,6 @@ const (
 	// the `_imap` / `_dns` idiom. A tenant without an active one has no
 	// printers.
 	SubscriptionStack = "_ipp"
-
-	// Secret names of the v1 static credential. The password is required
-	// (no secret ⇒ no printers); the username defaults to DefaultUsername.
-	SecretPassword  = "IPP_PASSWORD"
-	SecretUsername  = "IPP_USERNAME"
-	DefaultUsername = "print"
-
-	// loginCacheTTL is how long a verified (tenant, user, secret, password)
-	// tuple skips the throttles — a print client re-authenticates on every
-	// operation, so without it a busy queue would throttle itself.
-	loginCacheTTL = 5 * time.Minute
-	loginCacheMax = 10000
 
 	// Streaming budget for one document: a floor plus a per-MiB allowance,
 	// capped — the shape the drive and admin-blob uploads use to escape the
@@ -91,10 +81,6 @@ type HostResolver interface {
 	ResolveErr(key ingress.RouteKey) (ingress.RouteTarget, bool, error)
 }
 
-// SecretSource reads one tenant secret. found=false means "not set" (the
-// tenant has not enabled printing); err is a store/key failure.
-type SecretSource func(ctx context.Context, tenantSlug, name string) (cleartext []byte, found bool, err error)
-
 // Controller owns the head's shared state. It binds no listener — the web
 // head mounts Handler() — but it does own one goroutine: the dispatcher.
 type Controller struct {
@@ -108,11 +94,9 @@ type Controller struct {
 	fcas     filecas.Store
 	ix       blob.Index
 	resolver HostResolver
-	secret   SecretSource
-
-	cache      *apppass.LoginCache
-	authIP     *throttle.Throttle
-	authTenant *throttle.Throttle
+	// auth signs clients in: the node-wide login resolver, with its verified
+	// cache and its per-IP and per-principal limits (--login-rate).
+	auth *authn.Resolver
 
 	// sharedZone is the platform's structured-host suffix, bare
 	// ("stacks.example"): `ipp.<sharedZone>` is the front door every tenant
@@ -158,7 +142,6 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chipp.Store, 
 		pu:       pu,
 		store:    store,
 		resolver: resolver,
-		cache:    apppass.NewLoginCache(loginCacheTTL, loginCacheMax),
 		formats:  []string{chipp.FormatPDF},
 		nudge:    make(chan struct{}, 1),
 		upSince:  time.Now().UTC(),
@@ -188,8 +171,6 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chipp.Store, 
 	c.leaseStale = seconds(conf.IPPLeaseStaleAfter, 600)
 	c.retention = seconds(conf.IPPRetention, 604800)
 	c.maxAttempts = conf.IPPMaxAttempts
-	c.authIP = throttle.New(conf.IPPAuthRate, time.Minute)
-	c.authTenant = throttle.New(conf.IPPAuthRate, time.Minute)
 	c.nodeID = resolveNodeID(conf.Fqdn)
 	// The run a delivered job starts gets the chassis's ordinary sync-op
 	// ceiling as its context budget — NOT the dispatch timeout. The
@@ -214,8 +195,9 @@ func (c *Controller) SetFileCAS(s filecas.Store) { c.fcas = s }
 // a document's hash (so the stack can read it by sha, and nobody else can).
 func (c *Controller) SetBlobIndex(ix blob.Index) { c.ix = ix }
 
-// SetSecretSource hands the head the tenant secret reader.
-func (c *Controller) SetSecretSource(s SecretSource) { c.secret = s }
+// SetAuth hands the head the login resolver. Without one every login answers
+// 503: the node could not open the identity database.
+func (c *Controller) SetAuth(r *authn.Resolver) { c.auth = r }
 
 // Enabled reports whether the head serves anything: the personality is on,
 // the job store opened, and there is somewhere to put documents.
@@ -246,8 +228,8 @@ func (c *Controller) Start() {
 	if c.fcas == nil || c.ix == nil {
 		c.pu.Logger.Warn("ipp personality has no file CAS / blob index: print jobs will be refused")
 	}
-	if c.secret == nil {
-		c.pu.Logger.Warn("ipp personality has no secret store: no tenant can enable a printer")
+	if c.auth == nil {
+		c.pu.Logger.Warn("ipp personality has no login resolver: no client can sign in")
 	}
 	ctx, cancel := context.WithCancel(c.ctx)
 	c.cancel = cancel
@@ -273,12 +255,28 @@ func (c *Controller) Stop() {
 	c.wg.Wait()
 }
 
-func (c *Controller) noteAuth(outcome, tenant, ip string) {
+// noteAuth counts a login outcome and logs it. The username is what the
+// client typed, clipped: it is an address, never a secret, and it is what
+// says WHICH queue is failing.
+func (c *Controller) noteAuth(outcome string, site printerSite, user, ip string, who ...authn.Authenticated) {
+	c.countAuth(outcome)
+	if c.pu != nil && c.pu.Logger != nil {
+		fields := []zap.Field{
+			zap.String("outcome", outcome), zap.String("tenant", site.tenant),
+			zap.String("printer", site.printer.Label), zap.String("user", clip(user, 255)), zap.String("ip", ip),
+		}
+		if len(who) > 0 && !who[0].IsZero() {
+			fields = append(fields, zap.String("principal", who[0].Principal.ID), zap.String("credential", who[0].Credential))
+		}
+		c.pu.Logger.Info("ipp auth", fields...)
+	}
+}
+
+// countAuth counts a login outcome without logging it: the metric sees every
+// request, the log only the ones worth a line.
+func (c *Controller) countAuth(outcome string) {
 	if c.auths != nil {
 		c.auths.Add(context.Background(), 1, metric.WithAttributes(attribute.String("txco.ipp.outcome", outcome)))
-	}
-	if c.pu != nil && c.pu.Logger != nil {
-		c.pu.Logger.Info("ipp auth", zap.String("outcome", outcome), zap.String("tenant", tenant), zap.String("ip", ip))
 	}
 }
 

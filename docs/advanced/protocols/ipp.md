@@ -30,28 +30,77 @@ like `/p/…` on an ordinary hostname stays the stack's own.
 txco serve --personalities cron,web,admin,dns,ipp --dns-ipp
 ```
 
-Two things make a tenant a printer, and it needs **both**:
+Two things make a printer, and it needs **both**:
 
 1. an active **`_ipp` stack** (`OPS/_ipp/0/…`) — the rules that receive
-   print jobs; and
-2. the **`IPP_PASSWORD` secret** — the credential a print client logs in
-   with:
+   the tenant's print jobs; and
+2. a **printer**, registered by a rule — its label, who may print to it,
+   and what a computer should call it:
 
+   ```txcl
+   EXEC "txco://ipp/printer"
+     WITH printer      = "research",          # …/p/research
+          principal    = ._user.principal,    # who may print here
+          display_name = "Research Pony"
    ```
-   txco auth tenant secrets set IPP_PASSWORD --tenant acme <target>
-   ```
 
-   The username is `print`; set an `IPP_USERNAME` secret to change it.
-   Scope either secret to the `_ipp` stack (`--stack _ipp`) or leave it
-   tenant-wide. Rotating the secret takes effect on the next request.
+A printer holds no password. The person (or thing) it is granted to signs
+in with their own username and a password
+[`txco://credential/create`](../users.md#credentials) issued them, whose
+scopes cover `ipp:<printer>:print` — `["ipp:*:*"]` opens every printer they
+are granted, and the same credential can open mail and the drive too. See
+[The printer op](#the-printer-op) and [Users and credentials](../users.md).
 
-A tenant missing either one has no printers, and says so exactly the way
-a hostname nobody owns does: `404`, before the request body is read. There
-is one answer for every reason a printer is not there.
+A label with no active printer, on a tenant with no `_ipp` stack or a
+hostname nobody owns: all one `404`, before the request body is read.
 
-> **v1 credential.** One static credential per tenant. Printer-scoped
-> accounts (a password that opens only `/p/research`) arrive with the
-> reworked account subsystem; this page will change when they do.
+> **Upgrading.** The `IPP_PASSWORD` and `IPP_USERNAME` secrets and
+> `--ipp-auth-rate` are gone, and `/p/<anything>` is no longer a printer.
+> Register each printer with `txco://ipp/printer`, issue its principal a
+> credential with an `ipp` scope, and give the client the new username and
+> password. A queue that signs in as `print` stops working. The old secrets
+> can be deleted once nothing runs the previous release.
+
+### The printer op
+
+`txco://ipp/printer` is tenant-scoped and answers at `into` (default
+`_printer`).
+
+| WITH | |
+|---|---|
+| `printer` | the label: `a-z 0-9 . _ -`, lowercase, starting and ending with a letter or digit. The last segment of the printer's URL |
+| `principal` | who may print to it: `user:usr_…` from `user/create`, or your own `<kind>:<name>` |
+| `display_name?` | what a client calls the printer (its `printer-dns-sd-name`), at most 63 bytes. Left out, an existing name is kept |
+| `status?` | `active` (default) or `disabled` — a disabled printer is a `404` |
+| `delete?` | `true` removes the printer (`principal` not needed). Jobs already accepted are still delivered |
+
+The result is `{printer, principal, display_name, status, created}`, or
+`{printer, deleted}`. It is idempotent: run it on every sign-up, or every
+password reset, and it changes only what you pass.
+
+**One principal per printer.** Only that principal's credential prints
+there; anyone else's valid password is refused exactly like a wrong one.
+Re-point a printer by running the op with another principal.
+
+**The [creator-stack rule](../users.md#which-stack-may-manage-a-principal)
+covers printers.** The calling stack must manage the `principal`, and the
+principal must already exist — have a user record, a bound username or a
+credential — so a printer cannot be pointed at a name another stack could
+later claim. Changing or deleting a printer needs the principal it has now
+as well.
+
+Errors land at `<into>.error.{code, message}` as `txco_ipp_…`:
+`invalid_arg`, `not_found` (the principal), `not_owner`, `no_tenant`,
+`no_stack`, `store`, and `disabled` — the node has no printer store, which
+is opened only where the `ipp` personality runs. Register printers from a
+rule that runs there (a web request on the web tier does).
+
+**What a registered label gives away.** A registered printer answers `401`
+(and serves [its page](#add-the-printer)) where an unregistered label
+answers `404`, so anyone can test whether a label exists; and with
+`--ipp-anonymous-attributes` its display name is in the anonymous answer.
+A label is not a secret — it is in the URL its owner hands out — so choose
+display names you would put on a door.
 
 ### Which hostname
 
@@ -85,8 +134,8 @@ ipps://ipp.stacks.example:443/p/core-hmhzx2isby/research
 
 The handle is resolved through that hostname's own verified binding —
 exactly as `ipp.<hostname>` would be — and then everything is the same:
-that tenant's `_ipp` stack, that tenant's `IPP_PASSWORD`, the same one 404
-for a handle that names nothing. The stack still sees only the printer
+that tenant's `_ipp` stack, that tenant's printers, the same one 404 for a
+handle that names nothing. The stack still sees only the printer
 label; the handle is addressing, like the hostname it stands in for.
 
 It exists because of certificates. `ipp.<suffix>` is ONE label under the
@@ -119,7 +168,7 @@ macOS — Printers & Scanners → Add → **IP**:
 or from a terminal:
 
 ```
-lpadmin -U print -p research -E -v ipps://ipp.acme.example:443/p/research -m everywhere \
+lpadmin -U alice@acme.example -p research -E -v ipps://ipp.acme.example:443/p/research -m everywhere \
   -o printer-is-shared=false -o auth-info-required=username,password
 ```
 
@@ -132,9 +181,12 @@ query the printer's capabilities before they have a password to offer.
 Challenged, the dialog says "Unable to communicate with the printer" and
 never asks for one (macOS 15.8). With the flag on, the dialog asks for the
 username and password once, offers the Keychain, and builds an AirPrint
-queue that asks for credentials from its first print.
+queue that asks for credentials from its first print. The queue is named
+after the printer's `display_name`; a printer without one is named after
+the host, which every printer on that host shares.
 
-**`lpadmin` needs `-U <username>`.** `-U` names the printer's user.
+**`lpadmin` needs `-U <username>`.** `-U` names the printer's user: the
+address its principal signs in with.
 Without it `lpadmin` offers your login name, retries 16 times and fails
 with "Unable to query printer". It then asks once, in the terminal, for the
 printer's password. Without `-o auth-info-required=username,password`,
@@ -143,26 +195,26 @@ from the print queue window; after that, printing asks no more.
 
 **The printer's page.** The printer's address over https, for example
 `https://ipp.acme.example/p/research`, is a web page for that printer. It
-shows the printer's name, an **Add printer** button (the `ipps://` link,
+shows the printer's name (its registered `display_name`, else its label),
+an **Add printer** button (the `ipps://` link,
 which opens macOS's Add Printer),
 and the three fields for setting it up by hand: Address with the port
 spelled out, Protocol, and Queue. Hand people this link rather than the
 fields.
 
-- **Where it appears:** only for a printer that exists. Everything else
-  gets the same 404 as ever.
-- **What it shows:** only what its URL already says. It carries no
-  credential.
+- **Where it appears:** only for a registered, active printer. Everything
+  else gets the same 404 as ever.
+- **What it shows:** what its URL already says, and the display name. It
+  carries no credential and no username.
 - **Where it comes from:** the chassis builds it from `printer-ui/`
   (Svelte, one self-contained file embedded like the continuation page).
-  A product that wants more, such as a setup profile or its own name for
-  the printer, builds that itself and links here.
+  A product that wants more, such as a setup profile or telling each
+  person their username, builds that itself and links here.
 
-`<printer>` is any label you like (`a-z 0-9 . _ -`, lowercase). The chassis
-keeps **no list of printers**: the label reaches the stack as
-`@ipp.printer`, and one tenant can hand out `…/p/research`,
-`…/p/summarize` and `…/p/expenses` as three printers that mean three
-different things.
+**A printer is a row, and what it means is the stack's.** The label
+reaches the stack as `@ipp.printer`, and one tenant can register
+`…/p/research`, `…/p/summarize` and `…/p/expenses` as three printers that
+mean three different things — for one person, or one each.
 
 ## What the stack receives
 
@@ -175,7 +227,8 @@ been told the job completed.
 | `@ipp.job_id` | opaque, durable, unique — key idempotence on this |
 | `@ipp.job_number` | the integer job id the print client saw |
 | `@ipp.job_name` | the title the application gave the job (may be empty) |
-| `@ipp.requesting_user` | who the client **claims** printed it — untrusted |
+| `@principal.id`, `.kind`, `.credential` | who **signed in** to print it: the printer's principal and the credential it used. Pinned by the chassis; no client or rule can set it ([Who is acting](../users.md#signing-in)) |
+| `@ipp.requesting_user` | who the client **claims** printed it — untrusted; use `@principal` |
 | `@ipp.document.sha256` | the document, as a blob reference |
 | `@ipp.document.size`, `.format`, `.name` | bytes, MIME type, file name if sent |
 | `@ipp.host`, `@ipp.printer_uri` | the host and URI the job arrived on (through the shared front door the URI keeps its `/p/<handle>/…`) |
@@ -277,7 +330,24 @@ is `server-error-operation-not-supported`.
 ## Authentication, precisely
 
 Basic over TLS, for **every** operation: nothing on an `ipp.` host is
-answered without the password. A request over plaintext is refused (`403`)
+answered without a password. The username is the address the printer's
+principal signs in with, in full (`alice@acme.example`); the password is a
+credential issued to that principal. A login passes four checks, in order:
+
+```text
+/p/<label> ──▶ printer row ──▶ username ─binding─▶ principal ─id in the password─▶ credential
+                   │                                                                    │
+                   │                                    its scopes cover ipp:<label>:print
+                   └────────── the printer is granted to THAT principal ────────────────┘
+```
+
+Any of them failing is the same `401`. The chassis log tells them apart
+(`ipp auth` with `outcome` = `failed`, `scope`, `grant`, `disabled`,
+`throttled`, `denied`). **Revocation is immediate:** a verified password is
+remembered for a few minutes so a client's stream of requests costs one
+hash, but every request reads the credential, so a revoked one is refused
+on its next use. The run a job starts is pinned to the principal that
+created the job, and only that principal may send a job its document. A request over plaintext is refused (`403`)
 before a credential is read, unless `--ipp-insecure-auth` (dev). A bare
 request is challenged (`401`) and the client authenticates and asks again —
 CUPS does this on its own. `--ipp-anonymous-attributes` (default off) is the
@@ -290,10 +360,13 @@ holds nothing about the tenant: the fixed capability set, the label from
 the URL, and an idle queue. It does confirm that a printer exists at that
 hostname, which a `401` rather than a `404` already tells. Printing is never
 anonymous. Every other operation is challenged, and a request carrying a
-document is challenged before its body is read. Verifications are throttled per
-client IP and per tenant (`--ipp-auth-rate`), counting only logins that are
-not already verified, so a client that re-authenticates on every request
-costs nothing while a guesser is capped — correct guess included.
+document is challenged before its body is read. Password checks are limited
+per client IP and per principal by `--login-rate` — one budget shared with
+the IMAP, CalDAV, CardDAV and WebDAV heads, so a guess here spends the same
+budget as a guess there. It counts only logins that are not already
+verified, so a client that re-authenticates on every request costs nothing
+while a guesser is capped — correct guess included. Over it the answer is
+`429`.
 
 **Who, before what.** The head decides everything it can from the request
 *headers*, before reading one byte of the body: a credential is verified,
@@ -315,7 +388,7 @@ before answering.
 | `--ipp-formats` | `application/pdf` | advertised and accepted formats, first is the default |
 | `--ipp-max-job-bytes` | 256 MiB | per document |
 | `--ipp-max-inflight` | 4 | concurrent uploads per tenant |
-| `--ipp-auth-rate` | 30/min | verifications per IP and per tenant, cache misses only |
+| `--login-rate` | 30/min | password checks per IP and per principal, shared with every head that signs in; cache misses only |
 | `--ipp-anonymous-attributes` | false | let Get-Printer-Attributes (only) through without credentials |
 | `--ipp-insecure-auth` | false | Basic over plaintext (dev) |
 | `--ipp-store`, `--ipp-db-path` | `sqlite`, `./chassis/data/ipp.db` | the job store (its own file, never the runtime DB) |
@@ -329,17 +402,25 @@ before answering.
 | `--dns-ipp` | false | publish `ipp.<zone>` for every delegated pattern zone |
 | `--web-tls-self-signed` | false | dev: serve `--web-tls-addr` with a kept self-signed certificate |
 
-Logs carry tenant, printer, job id, format, size, duration and outcome.
-They never carry a job name, a document name or a user name: a print
-queue's titles are exactly what people do not want in a log.
+Job lines carry tenant, printer, job id, format, size, duration and
+outcome. They never carry a job name, a document name or the name the
+client claims (`requesting-user-name`): a print queue's titles are exactly
+what people do not want in a log. The sign-in line (`ipp auth`) carries the
+login address and, once known, the principal and credential id, as the
+other heads' do.
 
 ## Try it locally
 
 ```
 cd examples/ipp-hello
 txco dev --ipp
-txco auth tenant secrets set IPP_PASSWORD --tenant default dev
+curl -X POST localhost:8080/ipp/provision \
+  -d '{"printer":"research","email":"you@example.com","name":"Research Pony"}'
+# → {"username":"you@example.com","password":"k7m2-…","uri":"ipps://ipp.localhost:8443/p/research",…}
 ```
+
+The example's provision route runs the three ops: `user/create`,
+`ipp/printer`, `credential/create`. The password is shown once.
 
 `txco dev --ipp` adds an HTTPS listener on `127.0.0.1:8443` with a
 self-signed certificate kept under `.txco/dev`, and logs what every client
@@ -348,7 +429,7 @@ sends. `ipp.localhost` resolves to loopback and belongs to the tenant
 (it trusts a self-signed certificate on first use):
 
 ```
-U=ipps://print:<password>@ipp.localhost:8443/p/research
+U='ipps://you%40example.com:<password>@ipp.localhost:8443/p/research'   # the @ in the username is %40
 T=/usr/share/cups/ipptool
 ipptool -t $U get-printer-attributes.test
 ipptool -t -f $T/document-letter.pdf $U validate-job.test

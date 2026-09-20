@@ -1,0 +1,8 @@
+# A provision request without both fields is a 400 before any op runs.
+# Absence is tested with a negative regex (a missing path does not match
+# /./), gated on the request marker from scope 100.
+WHEN ._prov_req == true && (._prov.printer !~ /./ || ._prov.email !~ /./)
+  EMIT @web.res.body = b64"{\"error\":\"missing_field\",\"message\":\"body must be JSON {\\\"printer\\\": \\\"<label>\\\", \\\"email\\\": \\\"<address>\\\", \\\"name\\\": \\\"<optional display name>\\\"}\"}\n",
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

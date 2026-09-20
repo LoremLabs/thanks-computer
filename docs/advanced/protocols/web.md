@@ -13,6 +13,7 @@ envelopes and the merged flow back into responses._
 | `@web.req.cookies.<name>` | Parsed cookies |
 | `@web.req.body` | Body, base64-encoded |
 | `@web.req.host` / `@web.req.proto` | Host header / protocol |
+| `@client.ip` | The client's address: the socket peer, or behind [`--web-trusted-proxies`](../serve.md#behind-a-reverse-proxy-whose-address-is-it) the client your proxies recorded. **Key rate limits on this.** `@web.req.headers.X-Forwarded-For` is a request header like any other — a client can send whatever it likes in it |
 | `@rid` | From `X-Request-ID`, or a fresh UUID |
 
 ```json

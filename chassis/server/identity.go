@@ -334,6 +334,9 @@ func credentialList(ctx context.Context, d identityDeps, _ []byte) (event.Payloa
 //
 //	WITH id                       revoke one → {id, principal, revoked}
 //	                              (revoked=false: it already was)
+//	WITH id, principal            revoke that one ONLY IF it is <principal>'s;
+//	                              anyone else's id is not_found. For an id
+//	                              that came from a request.
 //	WITH principal, except = <id> revoke every live credential but <id> →
 //	                              {principal, revoked_count}
 //	WITH principal, all = true    revoke every live credential
@@ -350,7 +353,21 @@ func credentialRevoke(ctx context.Context, d identityDeps, _ []byte) (event.Payl
 	id, principal := c.str("id"), c.str("principal")
 	switch {
 	case id != "" && principal != "":
-		return c.err("invalid_arg", "pass `id` (revoke one) or `principal` (with `except` or `all`), not both"), nil
+		// The id names the credential, the principal names whose it must be.
+		// `except` and `all` are the OTHER meaning of `principal`; mixing the
+		// two is ambiguous, so it stays an error.
+		if c.str("except") != "" || gjson.GetBytes(c.meta, "all").Exists() {
+			return c.err("invalid_arg", "with `id`, `principal` only checks whose credential it is: drop `except` and `all`"), nil
+		}
+		p, ep, ok := c.principalParam()
+		if !ok {
+			return ep, nil
+		}
+		cr, revoked, err := d.store.RevokeCredentialOf(ctx, c.tenantID, c.stack, p, id)
+		if err != nil {
+			return c.storeErr(err), nil
+		}
+		return identityOK(c.into, map[string]any{"id": cr.ID, "principal": cr.Principal.ID, "revoked": revoked}), nil
 	case id != "":
 		cr, revoked, err := d.store.RevokeCredential(ctx, c.tenantID, c.stack, id)
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -43,6 +44,12 @@ type session struct {
 	who    authn.Authenticated // the principal the credential signed in as
 	domain string
 	slot   bool // holds a per-account connection slot
+
+	// When the credential was last known live, and whether it has been found
+	// revoked since (see revoked). IDLE's ticker and a command can race.
+	liveMu sync.Mutex
+	liveAt time.Time
+	dead   bool
 
 	sel *selected
 }
@@ -139,8 +146,9 @@ func (s *session) Close() error {
 // check, and the per-account connection cap.
 func (s *session) Login(username, password string) error {
 	username = chimap.NormalizeUsername(username)
+	bare := !strings.Contains(username, "@")
 	note := func(outcome string) {
-		s.c.noteLogin(outcome, username, s.ip, s.listener, s.isTLS(), s.proxied, authn.Authenticated{})
+		s.c.noteLogin(outcome, username, s.ip, s.listener, s.isTLS(), s.proxied, bare, authn.Authenticated{})
 	}
 	if s.c.loginIP != nil && s.ip != "" {
 		if ok, _ := s.c.loginIP.Allow(s.ip); !ok {
@@ -155,12 +163,25 @@ func (s *session) Login(username, password string) error {
 	var acct chimap.Account
 	var ok bool
 	var err error
-	if strings.Contains(username, "@") {
+	switch {
+	case !bare:
 		acct, ok, err = s.c.store.GetAccount(s.ctx(), username)
-	} else {
+	case s.c.refuseBare:
+		// --imap-refuse-bare-usernames: a name with no @ names no account.
+		// It falls through to the miss below — the same answer, at the same
+		// cost, as any unknown username.
+	default:
 		// Mail clients routinely send just the local part when the
 		// address domain and the server name line up. Accept it when it
 		// names exactly one account; anything else is a plain failure.
+		//
+		// The lookup spans EVERY tenant: this head knows no hostname at
+		// LOGIN (SNI is not read, and behind an edge TLS ended upstream), so
+		// it has nothing to complete a bare name to. The credential check
+		// that follows still has to pass — a bare name finds an account, it
+		// does not open one — but "exactly one on the chassis" is a property
+		// of the whole fleet's data, not of the tenant, so every such login
+		// is marked `bare` on its login line for an operator to count.
 		var n int
 		acct, n, err = s.c.store.GetAccountByLocalPart(s.ctx(), username)
 		ok = n == 1
@@ -217,8 +238,9 @@ func (s *session) Login(username, password string) error {
 	s.slot = true
 	s.acct = &acct
 	s.who = res.Who
+	s.liveAt = time.Now() // the login itself is the first proof
 	s.domain = domainOf(acct.Username)
-	s.c.noteLogin("ok", username, s.ip, s.listener, s.isTLS(), s.proxied, res.Who)
+	s.c.noteLogin("ok", username, s.ip, s.listener, s.isTLS(), s.proxied, bare, res.Who)
 	return nil
 }
 
@@ -238,7 +260,62 @@ func (s *session) requireAuth() error {
 	if s.acct == nil {
 		return no(imap.ResponseCodeAuthenticationFailed, "Not authenticated")
 	}
+	return s.stillLive()
+}
+
+// liveText is the BYE a session gets when its password was revoked.
+const liveText = "Credential revoked; sign in again"
+
+// stillLive ends a session whose credential has been revoked (or whose user
+// was disabled) since it logged in. LOGIN is the only time a mail client
+// presents its password, and a client holds its connections for hours, so
+// without this a Rotate leaves every already-open mailbox open.
+func (s *session) stillLive() error {
+	if s.revoked() {
+		return s.bye(liveText)
+	}
 	return nil
+}
+
+// revoked is stillLive's check, without the BYE — IDLE must stop its writer
+// goroutine before anything else writes to the connection.
+//
+// At most one read per liveEvery per session, on the commands a client
+// sends anyway (every authenticated command, NOOP's Poll, and IDLE's own
+// ticker — a quiet IDLE sends nothing). Once revoked, always revoked: the
+// answer is not re-asked while the connection winds down. A store error
+// keeps the session: "could not tell" must not drop every client at once.
+func (s *session) revoked() bool {
+	if s.acct == nil || s.c.auth == nil {
+		return false
+	}
+	s.liveMu.Lock()
+	if s.dead {
+		s.liveMu.Unlock()
+		return true
+	}
+	if time.Since(s.liveAt) < s.c.liveEvery() {
+		s.liveMu.Unlock()
+		return false
+	}
+	s.liveAt = time.Now()
+	s.liveMu.Unlock()
+
+	live, err := s.c.auth.Live(s.ctx(), s.who)
+	if err != nil {
+		s.c.pu.Logger.Warn("imap: credential re-check failed; keeping the session",
+			zap.String("user", s.acct.Username), zap.String("err", err.Error()))
+		return false
+	}
+	if live {
+		return false
+	}
+	s.liveMu.Lock()
+	s.dead = true
+	s.liveMu.Unlock()
+	s.c.pu.Logger.Info("imap session ended: credential revoked",
+		zap.String("user", s.acct.Username), zap.String("principal", s.who.Principal.ID), zap.String("credential", s.who.Credential))
+	return true
 }
 
 // ---- authenticated state -------------------------------------------------
@@ -783,6 +860,11 @@ func (s *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *im
 }
 
 func (s *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
+	// NOOP reaches here without passing requireAuth, and it is what an idle
+	// client that does not IDLE sends to stay connected.
+	if err := s.stillLive(); err != nil {
+		return err
+	}
 	if s.sel == nil {
 		return nil
 	}
@@ -793,9 +875,24 @@ func (s *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 }
 
 func (s *session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
+	if err := s.stillLive(); err != nil {
+		return err
+	}
+	// A client in IDLE sends nothing until it leaves, which can be half an
+	// hour, so the re-check needs a clock of its own in both branches.
+	tick := time.NewTicker(s.c.liveEvery())
+	defer tick.Stop()
 	if s.sel == nil {
-		<-stop
-		return nil
+		for {
+			select {
+			case <-stop:
+				return nil
+			case <-tick.C:
+				if err := s.stillLive(); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	if err := s.refresh(); err != nil {
 		return err
@@ -809,14 +906,24 @@ func (s *session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
 	done := make(chan error, 1)
 	tr := s.sel.tracker
 	go func() { done <- tr.Idle(w, inner) }()
-	select {
-	case <-stop:
-		close(inner)
-		return <-done
-	case <-s.sel.st.goneCh:
-		close(inner)
-		<-done
-		return s.bye("Mailbox was reset or deleted; reselect")
+	for {
+		select {
+		case <-stop:
+			close(inner)
+			return <-done
+		case <-s.sel.st.goneCh:
+			close(inner)
+			<-done
+			return s.bye("Mailbox was reset or deleted; reselect")
+		case <-tick.C:
+			// Stop the tracker's writer BEFORE the BYE, as above: two
+			// goroutines must not write to the connection at once.
+			if s.revoked() {
+				close(inner)
+				<-done
+				return s.bye(liveText)
+			}
+		}
 	}
 }
 

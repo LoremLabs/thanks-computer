@@ -1,0 +1,9 @@
+# A failed user step answers 400 with the op's structured code: a bad email address, or one that already belongs to another principal.
+WHEN ._user.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "step", "user",
+         "error", ._user.error.code,
+         "message", ._user.error.message))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

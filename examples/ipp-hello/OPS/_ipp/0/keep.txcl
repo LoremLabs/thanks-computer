@@ -1,6 +1,6 @@
-# The `_ipp` stack is what makes this tenant a printer: while it is active
-# (and the IPP_PASSWORD secret is set) `ipps://ipp.<zone>/p/<anything>` is a
-# printer, and every job printed to it arrives here — AFTER the client was
+# The `_ipp` stack is what makes this tenant printable: while it is active,
+# every printer registered with txco://ipp/printer answers at
+# `ipps://ipp.<zone>/p/<label>`, and every job printed to one arrives here — AFTER the client was
 # told the job completed. The chassis's work ended when this run started;
 # what happens to the document from here on is this rule's business.
 #
@@ -10,9 +10,12 @@
 # the document is already in the tenant's blob store, addressed by sha256.
 # There is no @ipp.copies either — this printer has no paper.
 #
-# @ipp.printer is the label after /p/ in the printer URL. The chassis keeps
-# no list of printers: a label is an operation selector, and this stack
-# decides what it means. Here every printer files its documents under its
+# WHO printed is @principal.id (with .kind and .credential): the principal
+# the printer is granted to, pinned by the chassis after it signed in. A
+# stack that serves several people gates on it here.
+#
+# @ipp.printer is the label after /p/ in the printer URL — a registered
+# printer's. What the label MEANS is this stack's decision. Here every printer files its documents under its
 # own name — print to /p/research and the page lands in research/<job id>.
 # `from_sha` adopts the already-stored object; nothing is copied.
 WHEN @src == "ipp"

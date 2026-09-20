@@ -1,0 +1,14 @@
+# POST /ipp/provision — step 3: the printer. A printer is a ROW: the label
+# in its URL, the principal that may print to it, and its display name —
+# what a computer that adds it by URL names the queue. Until this row exists
+# `/p/<label>` is a 404, whoever asks. Idempotent; `status = "disabled"`
+# turns the printer off, `delete = true` removes it.
+#
+# Only the stack that manages a principal may grant it a printer, so this
+# runs after the user exists (scope 110).
+WHEN ._user.principal != ""
+  EXEC "txco://ipp/printer"
+    WITH printer      = ._prov.printer,
+         principal    = ._user.principal,
+         display_name = ._prov.name,
+         into         = "_printer"

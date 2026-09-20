@@ -8,6 +8,11 @@ service), and the revocable passwords each of them signs in with. One
 person is one user across the tenant, with as many credentials as they have
 devices — each scoped to the doors it may open, each revocable on its own._
 
+> **Upgrading (printing).** The print head signs in with these credentials
+> too. Its `IPP_PASSWORD` secret is gone: register each printer with
+> `txco://ipp/printer` and issue its principal a credential with an `ipp`
+> scope ([IPP](./protocols/ipp.md#turn-it-on)).
+>
 > **Upgrading.** Accounts no longer hold passwords. `txco://imap/account`,
 > `calendar/account`, `contacts/account` and `drive/account` take a
 > `principal` instead and refuse `password` and `rotate`; every mail,
@@ -60,7 +65,7 @@ WHEN ._claim.ok == true
 | `user/disable` | `id`, `disabled?` (default `true`; `false` re-enables) | the user |
 | `credential/create` | `principal`, `scopes` (a list, or one scope as a string — build a computed one with `&concat`), `label?`, `password_style?` (`token` \| `words`), `password_words?` (4–12) | the credential **and its `password`, once** |
 | `credential/list` | `principal`, `include_revoked?` | `{principal, count, items[]}`, newest first — never a secret |
-| `credential/revoke` | `id` — or `principal` with `except` = an id, or `all = true` | `{id, principal, revoked}` — or `{principal, revoked_count}` |
+| `credential/revoke` | `id` (with `principal` to pin whose it must be) — or `principal` with `except` = an id, or `all = true` | `{id, principal, revoked}` — or `{principal, revoked_count}` |
 
 **`user/create` is safe to retry.** It is idempotent on the email: creating
 a user whose address your stack already holds returns that user with
@@ -154,9 +159,27 @@ password that still works. To revoke everything, say so: `all = true`.
 Revocation is permanent. The row stays (`include_revoked = true` lists it),
 and its `short_id` is never reused.
 
+### Revoking one device
+
+```txcl
+# "remove this device": the id came from the person's own request
+WHEN ._req.ok == true
+  EXEC "txco://credential/revoke"
+    WITH id = ._req.credential_id, principal = ._req.principal
+```
+
+**Pass `principal` with an `id` that came from a request.** The
+[creator-stack rule](#which-stack-may-manage-a-principal) is not a wall
+between one stack's own principals: a product's stack manages every one of
+its users, so a bare `id` would let any of them revoke another's
+credential by guessing or learning its id. With `principal`, the id is
+revoked only if it is that principal's; anyone else's answers `not_found`,
+the same as an id that does not exist. Combining `id` with `except` or
+`all` is refused.
+
 ## Signing in
 
-The IMAP, CalDAV, CardDAV and WebDAV heads sign people in with these
+The IMAP, CalDAV, CardDAV, WebDAV and IPP heads sign people in with these
 credentials. An account op (`txco://imap/account` and its siblings) binds
 the account's username to a principal; the client then presents the
 username and a password `credential/create` issued to that principal:
@@ -173,6 +196,7 @@ username ──binding──▶ principal ──id in the password──▶ cred
 | CalDAV | `calendar:<username>:login` |
 | CardDAV | `contacts:<username>:login` |
 | WebDAV | `drive:<collection-id>:login` — the account's own collection |
+| IPP | `ipp:<printer>:print` — and the printer must be granted to the principal |
 
 So `imap:*:*` opens every mailbox the principal has, and nothing else; one
 credential with `["imap:*:*", "calendar:*:*", "contacts:*:*"]` is one
@@ -180,21 +204,32 @@ password for Mail, Calendar and Contacts. A drive account's collection is
 what its principal may reach; the credential's `drive` scope can only
 narrow it.
 
+**Printing has no account op.** A printer is not a login: it is a row
+([`txco://ipp/printer`](./protocols/ipp.md#the-printer-op)) that names the
+one principal who may print to it. That principal signs in with a username
+it already has — a user's email, or one an account op bound — so a pony with
+a mailbox prints with its mail address. `ipp:*:*` opens every printer the
+principal is granted, and nobody else's: the scope narrows, the grant
+decides.
+
 **Revocation is immediate.** Each head remembers a verified password for a
 few minutes so a client's stream of requests costs one hash, but every
 request reads the credential, so a revoked one is refused on its next use.
-(An IMAP session already open stays open.) A disabled user cannot sign in
-until re-enabled.
+An IMAP session is the one thing that signs in once and stays: it re-checks
+its credential about once a minute and is closed (`BYE`) within that minute
+of a revocation ([IMAP](./protocols/imap.md#mail-client-settings)). A
+disabled user cannot sign in until re-enabled, and loses open sessions the
+same way.
 
 **One budget for guesses.** Password checks are limited per client IP and
-per principal across all four heads together (`--login-rate`, 30 a
+per principal across all five heads together (`--login-rate`, 30 a
 minute): guessing over CalDAV spends the same budget as guessing over IMAP.
 Behind a reverse proxy, name it in `--web-trusted-proxies` (and
 `--imap-proxy-protocol`), or "per client IP" means the proxy and every
 client shares one budget ([serve.md](./serve.md#behind-a-reverse-proxy-whose-address-is-it)).
 
 **Who is acting.** A run a head starts on behalf of a signed-in client —
-an IMAP answer lane, a CalDAV observe — carries `@principal.id`,
+an IMAP answer lane, a CalDAV observe, a print job — carries `@principal.id`,
 `@principal.kind` and `@principal.credential`. It is a read-only copy of
 what the chassis pinned; no request, rule or op can set it, and a run
 nobody signed in to has none. Usage lines and traces record the principal
@@ -211,7 +246,9 @@ carries the stack that wrote it (`created_by`). The first stack to write
 anything for a principal — create the user, issue its first credential —
 owns it, and from then on another stack's `user/disable`,
 `credential/create`, `credential/list` or `credential/revoke` for it
-answers `not_owner`, naming the owner.
+answers `not_owner`, naming the owner. Granting it a printer
+(`txco://ipp/printer`) follows the same rule, and needs the principal to
+exist already.
 
 - A **canary slot counts as its stack**: `web/canary` manages what `web`
   created, and so does a channel such as `web/_mail`.

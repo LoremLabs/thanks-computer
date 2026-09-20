@@ -36,7 +36,7 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	site, ok, err := c.site(r.Context(), t)
 	if err != nil {
-		// A saturated mirror or an unreadable secret is not "no such
+		// A saturated mirror or an unreadable printer row is not "no such
 		// printer": say so honestly and let the client retry.
 		c.pu.Logger.Warn("ipp: tenant lookup failed", zap.String("host", t.host), zap.String("err", err.Error()))
 		w.Header().Set("Retry-After", "1")
@@ -46,11 +46,11 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// ONE answer for every reason a printer is not there, given before
 		// the body is read: an unknown zone, a tenant without an `_ipp`
-		// stack and a tenant without a credential are indistinguishable.
+		// stack and a label that is not a registered printer are
+		// indistinguishable.
 		http.NotFound(w, r)
 		return
 	}
-	defer zero(site.password)
 
 	// A browser at the printer's own address (the https twin of its ipps://
 	// URI) gets the printer page. It sits AFTER the existence check, so it
@@ -58,7 +58,7 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// tells nothing a 401 does not — and shows only what the URL already
 	// says.
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && t.job == 0 {
-		c.servePage(w, r, t)
+		c.servePage(w, r, site, t)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -93,9 +93,11 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	authed := false
 	switch {
 	case r.Header.Get("Authorization") != "":
-		if !c.authenticate(w, r, site) {
+		who, ok := c.authenticate(w, r, site)
+		if !ok {
 			return
 		}
+		site.who = who
 		authed = true
 	case !c.anonAttrs || !smallBody(r):
 		c.demand(w, r)
@@ -117,7 +119,8 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if !authed {
 		// A client asks what a printer can do while ADDING it, before it has
-		// a password to offer. The answer holds nothing about the tenant.
+		// a password to offer. The answer holds nothing about the tenant but
+		// the printer's display name, which is what names the client's queue.
 		if op == goipp.OpGetPrinterAttributes && chipp.CharsetFirst(req) && uriAgrees(req, t) {
 			c.getPrinterAttributes(w, r, req, site, t, false)
 			return
@@ -173,7 +176,8 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (c *Controller) getPrinterAttributes(w http.ResponseWriter, r *http.Request, req *goipp.Message, site printerSite, t target, authed bool) {
 	info := chipp.PrinterInfo{
-		Tenant: site.tenant, Name: t.printer, URI: printerURI(r, t), Secure: secure(r),
+		Tenant: site.tenant, Name: t.printer, DisplayName: site.printer.DisplayName,
+		URI: printerURI(r, t), Secure: secure(r),
 		Location: t.host, MoreInfo: "https://" + t.x + "/",
 		Formats: c.formats, UpSince: c.upSince, OperationTimeout: c.receiveTimeout,
 	}
@@ -242,6 +246,14 @@ func (c *Controller) sendDocument(w http.ResponseWriter, r *http.Request, req *g
 	if err != nil {
 		c.discard(w, r)
 		c.storeFail(w, req, "get job", err)
+		return
+	}
+	if job.PrincipalID != "" && job.PrincipalID != site.who.Principal.ID {
+		// The job is somebody else's. With one principal per printer this
+		// cannot happen (the login already matched the printer's); it is
+		// here so that a wider grant cannot let one person finish another's
+		// job. A job from before principals ("") has no one to compare.
+		c.refuse(w, r, req, goipp.StatusErrorNotAuthorized, "this job belongs to another user")
 		return
 	}
 	if job.State != chipp.StateReceiving {
@@ -341,6 +353,7 @@ func (c *Controller) newJob(r *http.Request, req *goipp.Message, site printerSit
 		Tenant: site.tenant, Printer: t.printer,
 		RequestingUser: clip(user, 255), JobName: clip(name, 255), DocumentName: clip(doc, 255),
 		DocumentFormat: format, Host: hostWithPort(r, t), URIPath: t.uriPath(), ClientIP: c.clientIP(r),
+		PrincipalID: site.who.Principal.ID, CredentialID: site.who.Credential,
 	}
 }
 
@@ -509,18 +522,12 @@ func clip(s string, max int) string {
 	return strings.ToValidUTF8(s[:max], "")
 }
 
-func zero(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-}
-
 // servePage answers a browser at a printer's address with the printer page
-// (package ui): the printer's label and the three fields macOS's Add Printer
+// (package ui): the printer's name and the three fields macOS's Add Printer
 // › IP tab asks for, plus an ipps:// link that opens Add Printer itself. The
 // address always spells out its port — IPP's default is 631, which this head
 // does not listen on, and behind the edge the Host carries none.
-func (c *Controller) servePage(w http.ResponseWriter, r *http.Request, t target) {
+func (c *Controller) servePage(w http.ResponseWriter, r *http.Request, site printerSite, t target) {
 	scheme, port := "ipp", ":80"
 	if secure(r) {
 		scheme, port = "ipps", ":443"
@@ -530,7 +537,7 @@ func (c *Controller) servePage(w http.ResponseWriter, r *http.Request, t target)
 		addr += port
 	}
 	page, _ := printerui.Page(printerui.Printer{
-		Name:    t.printer,
+		Name:    site.printer.Name(),
 		URI:     scheme + "://" + addr + t.uriPath(),
 		Address: addr,
 		Queue:   strings.TrimPrefix(t.uriPath(), "/"),

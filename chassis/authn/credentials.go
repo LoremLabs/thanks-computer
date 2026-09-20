@@ -222,6 +222,33 @@ func (s *Store) RevokeCredential(ctx context.Context, tenantID, stack, credentia
 	return c, n > 0, nil
 }
 
+// RevokeCredentialOf is RevokeCredential for a caller that knows WHOSE the
+// credential should be: it revokes credentialID only if it belongs to p, and
+// answers ErrNotFound otherwise — the same answer as an id that does not
+// exist, so a caller learns nothing about another principal's credentials.
+//
+// It exists because the creator-stack rule is not a wall between a stack's
+// own principals: one stack may manage thousands (every pony of a product),
+// and a bare id taken from a request would let one of that stack's users
+// revoke a credential of another's. Naming the principal pins the id to it.
+func (s *Store) RevokeCredentialOf(ctx context.Context, tenantID, stack string, p Principal, credentialID string) (Credential, bool, error) {
+	if err := requireTenant(tenantID); err != nil {
+		return Credential{}, false, err
+	}
+	if _, err := s.authorize(ctx, s.DB, tenantID, stack, p); err != nil {
+		return Credential{}, false, err
+	}
+	var owner string
+	err := s.qr(ctx, s.DB, `SELECT principal_id FROM credentials WHERE id = ? AND tenant_id = ?`, credentialID, tenantID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != p.ID) {
+		return Credential{}, false, ErrNotFound
+	}
+	if err != nil {
+		return Credential{}, false, err
+	}
+	return s.RevokeCredential(ctx, tenantID, stack, credentialID)
+}
+
 // RevokeCredentials revokes every live credential of p except the one named,
 // and returns how many it revoked. It is the second half of a rotation: issue
 // the new credential, then revoke the rest.

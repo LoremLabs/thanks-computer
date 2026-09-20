@@ -1,0 +1,20 @@
+# POST /ipp/provision — step 0: who may call it.
+#
+# The route is open on loopback (the demo) and closed the moment a password
+# is set: `txco auth tenant secrets set IPP_PROVISION_PASSWORD --tenant
+# <slug>`, then callers send `curl -u provision:<password>`. The secret never
+# reaches the envelope: txco://basic-auth-verify consumes it inside the op
+# and emits only a verdict (@computed.basic_auth_ok). `allow_unconfigured =
+# true` is the DECISION, written here where it can be seen: unset ⇒ open.
+# The reject rule in 095 fires on anything but an explicit true, so the
+# route fails CLOSED on a chassis without this op. (imap-hello's 090 says
+# the same at more length.)
+#
+# This is the password of the PROVISIONING ROUTE, not of any printer. A
+# printer has no password of its own: see 120/credential.txcl.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/ipp/provision"
+WITH user = "provision",
+     secrets.password.secret = "IPP_PROVISION_PASSWORD",
+     secrets.password.optional = true,
+     allow_unconfigured = true
+  EXEC "txco://basic-auth-verify"

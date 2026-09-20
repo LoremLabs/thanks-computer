@@ -245,6 +245,22 @@ func Conformance(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 		if _, _, err := s.BindPrincipal(ctx, tn, "core", pony, authn.NewBinding{Kind: authn.BindEmail, Subject: "paris2@onepony.com"}); !errors.Is(err, authn.ErrNotOwner) {
 			t.Errorf("bind from another stack: %v", err)
 		}
+		// RequireOwner is the same rule for a grant kept outside these
+		// tables: the owner and its slots pass, another stack does not, and a
+		// principal nobody has written is not there to be granted anything.
+		if base, err := s.RequireOwner(ctx, tn, "web/canary", pony); err != nil || base != "web" {
+			t.Errorf("RequireOwner for the owner: %q %v", base, err)
+		}
+		var oe *authn.OwnerError
+		if _, err := s.RequireOwner(ctx, tn, "core", pony); !errors.As(err, &oe) || oe.Owner != "web" {
+			t.Errorf("RequireOwner from another stack: %v", err)
+		}
+		if _, err := s.RequireOwner(ctx, tn, "web", other); !errors.Is(err, authn.ErrNotFound) {
+			t.Errorf("RequireOwner for an unwritten principal: %v", err)
+		}
+		if _, err := s.RequireOwner(ctx, tn, "", pony); !errors.Is(err, authn.ErrNoStack) {
+			t.Errorf("RequireOwner with no stack: %v", err)
+		}
 		// A user principal needs its users row.
 		ghost := authn.UserPrincipal("usr_22222222")
 		if _, _, err := s.BindPrincipal(ctx, tn, "web", ghost, authn.NewBinding{Kind: authn.BindEmail, Subject: "ghost@example.com"}); !errors.Is(err, authn.ErrNotFound) {
@@ -377,6 +393,25 @@ func Conformance(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 		}
 		if _, _, err := s.RevokeCredential(ctx, tn, "core", wc.ID); !errors.Is(err, authn.ErrNotOwner) {
 			t.Errorf("revoke from another stack: %v", err)
+		}
+		// Pinned to a principal, an id reaches only that principal's
+		// credentials: another's is not found, and stays live.
+		milan, _ := authn.ParsePrincipal("pony:milan")
+		mc, _, err := s.IssueCredential(ctx, tn, "web", milan, authn.NewCredential{Scopes: []string{"imap:*:*"}})
+		if err != nil {
+			t.Fatalf("issue for milan: %v", err)
+		}
+		if _, _, err := s.RevokeCredentialOf(ctx, tn, "web", wc.Principal, mc.ID); !errors.Is(err, authn.ErrNotFound) {
+			t.Errorf("RevokeCredentialOf another principal's id: %v", err)
+		}
+		if _, _, err := s.RevokeCredentialOf(ctx, tn, "core", milan, mc.ID); !errors.Is(err, authn.ErrNotOwner) {
+			t.Errorf("RevokeCredentialOf from another stack: %v", err)
+		}
+		if live, _ := s.ListCredentials(ctx, tn, "web", milan, false); len(live) != 1 {
+			t.Errorf("a refused pinned revoke touched the credential: %d live", len(live))
+		}
+		if _, revoked, err := s.RevokeCredentialOf(ctx, tn, "web", milan, mc.ID); err != nil || !revoked {
+			t.Errorf("RevokeCredentialOf its own: revoked=%v err=%v", revoked, err)
 		}
 		if _, _, err := s.RevokeCredential(ctx, tn, "web", "crd_missing"); !errors.Is(err, authn.ErrNotFound) {
 			t.Errorf("revoke a missing credential: %v", err)
@@ -611,8 +646,33 @@ func resolverCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 			t.Errorf("disabled = %+v", res)
 		}
 		_, _ = s.SetUserDisabled(ctx, tn, "web", u.ID, false)
-		if res := r.Login(ctx, attempt(tn, "alice@example.com", pw)); res.Outcome != authn.OutcomeOK {
+		res := r.Login(ctx, attempt(tn, "alice@example.com", pw))
+		if res.Outcome != authn.OutcomeOK {
 			t.Errorf("enabled again = %+v", res)
+		}
+
+		// Live is the same answer for a head that holds a session open after
+		// the login: no password, no throttle, one read.
+		live := func(what string, want bool) {
+			t.Helper()
+			if got, err := r.Live(ctx, res.Who); err != nil || got != want {
+				t.Errorf("Live %s = %v err=%v, want %v", what, got, err, want)
+			}
+		}
+		live("after a login", true)
+		_, _ = s.SetUserDisabled(ctx, tn, "web", u.ID, true)
+		live("once the user is disabled", false)
+		_, _ = s.SetUserDisabled(ctx, tn, "web", u.ID, false)
+		live("once re-enabled", true)
+		if _, _, err := s.RevokeCredential(ctx, tn, "web", res.Who.Credential); err != nil {
+			t.Fatal(err)
+		}
+		live("once the credential is revoked", false)
+		if got, err := r.Live(ctx, authn.Authenticated{}); err != nil || got {
+			t.Errorf("Live for no one = %v err=%v", got, err)
+		}
+		if got, err := r.Live(ctx, authn.Authenticated{Principal: u.Principal(), Credential: "crd_nope"}); err != nil || got {
+			t.Errorf("Live for an unknown credential = %v err=%v", got, err)
 		}
 	})
 

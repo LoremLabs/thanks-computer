@@ -203,7 +203,38 @@ func TestCredentialOps(t *testing.T) {
 	wantIdentityCode(t, "revoke from another stack", callIdentity(t, credentialRevoke, d, "acme", "core", `{"id":"`+id+`"}`), "_credential", "txco_credential_not_owner")
 	wantIdentityCode(t, "revoke an unknown id", callIdentity(t, credentialRevoke, d, "acme", "web", `{"id":"crd_nope"}`), "_credential", "txco_credential_not_found")
 	wantIdentityCode(t, "revoke with nothing", callIdentity(t, credentialRevoke, d, "acme", "web", `{}`), "_credential", "txco_credential_invalid_arg")
-	wantIdentityCode(t, "revoke with both", callIdentity(t, credentialRevoke, d, "acme", "web", `{"id":"`+id+`","principal":"pony:paris"}`), "_credential", "txco_credential_invalid_arg")
+
+	// `id` with `principal` pins the id to that principal. One stack manages
+	// many principals (every pony of a product), so an id that came from a
+	// request must not be able to reach another principal's credential: it
+	// is not_found, exactly like an id that does not exist, and nothing is
+	// revoked.
+	out = callIdentity(t, credentialCreate, d, "acme", "web", `{"principal":"pony:lyon","scopes":["imap:*:*"]}`)
+	lyon := gjson.Get(out, "_credential.id").String()
+	if lyon == "" {
+		t.Fatalf("issue for pony:lyon = %s", out)
+	}
+	wantIdentityCode(t, "another principal's id", callIdentity(t, credentialRevoke, d, "acme", "web",
+		`{"id":"`+lyon+`","principal":"pony:paris"}`), "_credential", "txco_credential_not_found")
+	wantIdentityCode(t, "an unknown id, pinned", callIdentity(t, credentialRevoke, d, "acme", "web",
+		`{"id":"crd_nope","principal":"pony:paris"}`), "_credential", "txco_credential_not_found")
+	wantIdentityCode(t, "pinned, from another stack", callIdentity(t, credentialRevoke, d, "acme", "core",
+		`{"id":"`+id+`","principal":"pony:paris"}`), "_credential", "txco_credential_not_owner")
+	out = callIdentity(t, credentialList, d, "acme", "web", `{"principal":"pony:lyon"}`)
+	if gjson.Get(out, "_credential.count").Int() != 1 {
+		t.Fatalf("a refused pinned revoke touched pony:lyon: %s", out)
+	}
+	out = callIdentity(t, credentialRevoke, d, "acme", "web", `{"id":"`+id+`","principal":"pony:paris"}`)
+	if !gjson.Get(out, "_credential.revoked").Bool() || gjson.Get(out, "_credential.id").String() != id {
+		t.Errorf("pinned revoke of its own = %s", out)
+	}
+	// `except` and `all` are the other meaning of `principal`: not with `id`.
+	for what, meta := range map[string]string{
+		"id + principal + except": `{"id":"` + lyon + `","principal":"pony:lyon","except":"` + lyon + `"}`,
+		"id + principal + all":    `{"id":"` + lyon + `","principal":"pony:lyon","all":true}`,
+	} {
+		wantIdentityCode(t, what, callIdentity(t, credentialRevoke, d, "acme", "web", meta), "_credential", "txco_credential_invalid_arg")
+	}
 }
 
 // TestRotationCannotLockThePrincipalOut — a rotation is create, then revoke

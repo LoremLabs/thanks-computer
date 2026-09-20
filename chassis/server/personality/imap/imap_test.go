@@ -67,6 +67,14 @@ func newHarness(t *testing.T, conf config.Config) *harness {
 func newHarnessWithLogger(t *testing.T, conf config.Config, logger *zap.Logger) *harness {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "imap.db")
+	// The dev self-signed certificate is kept beside the index
+	// (SelfSignedPaths), and with no index path that means ./chassis/data —
+	// which under `go test` is THIS package's directory. A test that turned
+	// --imap-self-signed on used to mint a private key into the source tree
+	// (one was committed in e99b38a). Point it at the test's own directory.
+	if conf.IMAPDBPath == "" {
+		conf.IMAPDBPath = dbPath
+	}
 	db, err := sql.Open("sqlite3", testDSN(dbPath))
 	if err != nil {
 		t.Fatal(err)
@@ -376,6 +384,22 @@ func TestLoginWithBareLocalPart(t *testing.T) {
 	}
 	if err := c2.Login("rome@other.example", "bcdf-pw").Wait(); err != nil {
 		t.Errorf("full address still works: %v", err)
+	}
+}
+
+// --imap-refuse-bare-usernames: a name with no @ names no account, however
+// unique its local part is on the chassis, and fails like any unknown name.
+// The full address is untouched.
+func TestRefuseBareUsernames(t *testing.T) {
+	h := newHarness(t, config.Config{IMAPRefuseBareUsernames: true})
+	h.account(t, "acme", "paris@example.com", "bcdf-pw", "")
+
+	c := dial(t, h.addr)
+	if err := c.Login("paris", "bcdf-pw").Wait(); err == nil || !strings.Contains(err.Error(), "Authentication failed") {
+		t.Fatalf("a bare username signed in with the flag on: %v", err)
+	}
+	if err := c.Login("paris@example.com", "bcdf-pw").Wait(); err != nil {
+		t.Fatalf("the full address: %v", err)
 	}
 }
 

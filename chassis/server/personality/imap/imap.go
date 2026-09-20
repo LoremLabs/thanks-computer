@@ -68,6 +68,13 @@ type Controller struct {
 
 	loginIP   *throttle.Throttle
 	loginAcct *throttle.Throttle
+	// liveInterval is how often an open session re-checks that its
+	// credential is still live (nanoseconds; session.revoked). Atomic
+	// because a test shortens it while sessions are running. 0 = default.
+	liveInterval atomic.Int64
+	// refuseBare refuses a LOGIN whose username has no @
+	// (--imap-refuse-bare-usernames); see session.Login.
+	refuseBare bool
 	// throttleDelay is how long a rate-limited LOGIN waits for its refusal
 	// (nanoseconds; see session.throttled). Atomic because a test shortens
 	// it while the accept loop is already running.
@@ -97,6 +104,7 @@ func NewController(ctx context.Context, pu *processor.Unit, store *chimap.Store)
 		hub:   newHub(ctx, store, logger),
 	}
 	if pu != nil {
+		c.refuseBare = pu.Conf.IMAPRefuseBareUsernames
 		c.loginIP = throttle.New(pu.Conf.IMAPLoginRate, time.Minute)
 		c.loginAcct = throttle.New(pu.Conf.IMAPLoginRate, time.Minute)
 		c.throttleDelay.Store(int64(throttledReplyDelay))
@@ -314,18 +322,37 @@ func (c *Controller) boundAddrs() []string {
 // this hop. tls=false with proxied=false is the one that means what it
 // looks like — LOGIN in the clear, which only --imap-insecure-auth
 // permits. A bare `tls` bool could not tell those two apart.
-func (c *Controller) noteLogin(outcome, user, ip, listener string, tlsOn, proxied bool, who authn.Authenticated) {
+//
+// `bare` is set when the client sent a username with no @ (whatever came of
+// it). It is on the line and on the metric so an operator can count the
+// clients that would break before turning --imap-refuse-bare-usernames on.
+func (c *Controller) noteLogin(outcome, user, ip, listener string, tlsOn, proxied, bare bool, who authn.Authenticated) {
 	if c.logins != nil {
-		c.logins.Add(c.ctx, 1, metric.WithAttributes(attrOutcome(outcome)))
+		c.logins.Add(c.ctx, 1, metric.WithAttributes(attrOutcome(outcome), attrBare(bare)))
 	}
 	if c.pu != nil && c.pu.Logger != nil {
 		fields := []zap.Field{zap.String("user", user), zap.String("ip", ip), zap.String("outcome", outcome),
 			zap.Bool("tls", tlsOn), zap.String("listener", listener), zap.Bool("proxied", proxied)}
+		if bare {
+			fields = append(fields, zap.Bool("bare", true))
+		}
 		if !who.IsZero() {
 			fields = append(fields, zap.String("principal", who.Principal.ID), zap.String("credential", who.Credential))
 		}
 		c.pu.Logger.Info("imap login", fields...)
 	}
+}
+
+// defaultLiveInterval bounds how long a revoked password keeps an already
+// open session: long enough to be one cheap read a minute per connection,
+// short enough that "Rotate" means what the owner thinks it means.
+const defaultLiveInterval = time.Minute
+
+func (c *Controller) liveEvery() time.Duration {
+	if d := time.Duration(c.liveInterval.Load()); d > 0 {
+		return d
+	}
+	return defaultLiveInterval
 }
 
 // SelfSignedPaths derives the dev certificate + key file paths from the

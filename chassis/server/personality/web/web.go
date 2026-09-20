@@ -403,6 +403,12 @@ func (web *WebController) Start() {
 				pb.Set("_txc.rid", rid)
 				pb.Set("_txc.web.req.headers", r.Header)
 				pb.Set("_txc.web.req.host", r.Host)
+				// The client's address, as every other head stamps it: the
+				// socket peer, or — behind --web-trusted-proxies — the client
+				// the proxies recorded. A rule that keys a rate limit on the
+				// raw X-Forwarded-For header is keying on something the
+				// client wrote; this is the one it could not.
+				pb.Set("_txc.client.ip", web.clients.IP(r))
 				pb.Set("_txc.web.req.proto", r.Proto)
 				pb.Set("_txc.web.req.method", r.Method)
 

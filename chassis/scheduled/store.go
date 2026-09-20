@@ -58,6 +58,13 @@ func (s *Store) Close() error { return s.db.Close() }
 // DDL is portable (TEXT timestamps RFC3339, JSON as TEXT, native partial
 // index); a backend calls it once at construction.
 func (s *Store) EnsureSchema(ctx context.Context) error {
+	return registry.RetrySchema(ctx, s.ensureSchema)
+}
+
+// ensureSchema is one pass of EnsureSchema. Every statement is idempotent and
+// every additive column is probed first, so RetrySchema may run it again
+// after losing a first-boot race to another node.
+func (s *Store) ensureSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS scheduled_events (
 			id              TEXT PRIMARY KEY,

@@ -1,0 +1,14 @@
+# Success: the printer is registered. The password (a new user only) appears
+# here once and nowhere else.
+WHEN ._printer.printer != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "printer", ._printer.printer,
+         "display_name", ._printer.display_name,
+         "created", ._printer.created,
+         "username", ._user.email,
+         "password", ._cred.password,
+         "uri", &concat("ipps://ipp.localhost:8443/p/", ._printer.printer),
+         "page", &concat("https://ipp.localhost:8443/p/", ._printer.printer)))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

@@ -1834,6 +1834,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 			}))
 	}
 
+	// Printer registry (txco://ipp/printer): the row the `ipp` personality
+	// reads on every request — a printer's label, the principal that may
+	// print to it, its display name. Registered unconditionally so a node
+	// without the store (the ipp personality off) answers
+	// `_printer.error txco_ipp_disabled`. See chassis/server/ipp_ops.go.
+	ippD := ippDeps{store: ippStore, ids: identityStore, snap: dbc.Snapshot}
+	pu.Handle([]byte("txco://ipp/printer"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return ippPrinter(ctx, ippD, in)
+		}))
+
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
 	// delete}). The backend is selected by --vector-store (default "sqlite",
 	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
@@ -2167,13 +2178,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	}
 	// IPP personality (a stack presented as a PRINTER): it claims whole
 	// hostnames — `ipp.<zone>` — rather than a path on everyone's, so it is a
-	// host mount, not a DAV mount. Documents stream into the file CAS; the
-	// v1 credential is a tenant secret (IPP_PASSWORD), read through the same
-	// resolver ops use, `_ipp`-scoped with the tenant-wide fallback.
+	// host mount, not a DAV mount. Documents stream into the file CAS; a
+	// client signs in through the same login resolver as the heads above,
+	// as the principal its printer row (txco://ipp/printer) is granted to.
 	ippCtrl := ippp.NewController(ctx, pu, ippStore, resolver)
 	ippCtrl.SetFileCAS(fcas)
 	ippCtrl.SetBlobIndex(blobIndex)
-	ippCtrl.SetSecretSource(ippSecretSource(secretsResolver))
+	ippCtrl.SetAuth(logins)
 	if ippCtrl.Enabled() {
 		webCtrl.MountHost(ippp.IsIPPHost, ippCtrl.Handler())
 	}
@@ -2716,26 +2727,4 @@ func nonEmptyStrings(in []string) []string {
 		}
 	}
 	return out
-}
-
-// ippSecretSource adapts the chassis secret resolver to the ipp head's seam:
-// `_ipp`-scoped first with the tenant-wide fallback the resolver already
-// implements (so a tenant may scope IPP_PASSWORD to the `_ipp` stack or set
-// it tenant-wide), and the store's not-found mapped to found=false — which
-// for the head means "this tenant has not turned printing on". A nil
-// resolver (some embedders/tests) reads as "no tenant has".
-func ippSecretSource(r *secrets.Resolver) ippp.SecretSource {
-	return func(ctx context.Context, tenantSlug, name string) ([]byte, bool, error) {
-		if r == nil {
-			return nil, false, nil
-		}
-		cleartext, _, err := r.MaterializeForOpSlug(ctx, tenantSlug, ippp.SubscriptionStack, name)
-		if errors.Is(err, secrets.ErrSecretNotFound) {
-			return nil, false, nil
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		return cleartext, true, nil
-	}
 }

@@ -35,11 +35,17 @@ type Job struct {
 	// URIPath is the printer's path on that host: "/p/<printer>", or
 	// "/p/<handle>/<printer>" through the platform's shared front door.
 	// Host + URIPath is the printer URI the client configured.
-	URIPath     string
-	ClientIP    string
-	CreatedAt   time.Time
-	CommittedAt time.Time
-	DeliveredAt time.Time
+	URIPath  string
+	ClientIP string
+	// PrincipalID and CredentialID are who signed in to create the job: the
+	// principal the printer is granted to and the credential it presented.
+	// The dispatcher pins the delivered run to them. Both are "" on a row an
+	// older build wrote; such a job is delivered with no principal.
+	PrincipalID  string
+	CredentialID string
+	CreatedAt    time.Time
+	CommittedAt  time.Time
+	DeliveredAt  time.Time
 }
 
 // NewJob is what a Print-Job / Create-Job request knows before any document
@@ -54,6 +60,8 @@ type NewJob struct {
 	Host           string
 	URIPath        string
 	ClientIP       string
+	PrincipalID    string
+	CredentialID   string
 }
 
 // NewJobID mints a durable job identity.
@@ -61,7 +69,8 @@ func NewJobID() string { return "ipj_" + hxid.New().String() }
 
 const jobCols = `id, tenant, printer, job_number, requesting_user, job_name, document_name,
 	document_format, COALESCE(sha256, ''), size, state, state_reason, attempts, COALESCE(rid, ''),
-	host, uri_path, client_ip, created_at, COALESCE(committed_at, ''), COALESCE(delivered_at, '')`
+	host, uri_path, client_ip, principal_id, credential_id, created_at,
+	COALESCE(committed_at, ''), COALESCE(delivered_at, '')`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -70,7 +79,8 @@ func scanJob(row scanner) (Job, error) {
 	var created, committed, delivered string
 	if err := row.Scan(&j.ID, &j.Tenant, &j.Printer, &j.Number, &j.RequestingUser, &j.JobName,
 		&j.DocumentName, &j.DocumentFormat, &j.SHA256, &j.Size, &j.State, &j.StateReason,
-		&j.Attempts, &j.Rid, &j.Host, &j.URIPath, &j.ClientIP, &created, &committed, &delivered); err != nil {
+		&j.Attempts, &j.Rid, &j.Host, &j.URIPath, &j.ClientIP, &j.PrincipalID, &j.CredentialID,
+		&created, &committed, &delivered); err != nil {
 		return Job{}, err
 	}
 	j.CreatedAt = parseTS(created)
@@ -115,14 +125,17 @@ func (s *Store) CreateJob(ctx context.Context, nj NewJob) (Job, error) {
 		ID: NewJobID(), Tenant: nj.Tenant, Printer: nj.Printer, Number: number,
 		RequestingUser: nj.RequestingUser, JobName: nj.JobName, DocumentName: nj.DocumentName,
 		DocumentFormat: nj.DocumentFormat, State: StateReceiving, Host: nj.Host, URIPath: nj.URIPath, ClientIP: nj.ClientIP,
+		PrincipalID: nj.PrincipalID, CredentialID: nj.CredentialID,
 		CreatedAt: parseTS(now),
 	}
 	if _, err := tx.ExecContext(ctx, s.rb(
 		`INSERT INTO ipp_jobs (id, tenant, printer, job_number, requesting_user, job_name,
-		     document_name, document_format, state, host, uri_path, client_ip, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		     document_name, document_format, state, host, uri_path, client_ip,
+		     principal_id, credential_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		j.ID, j.Tenant, j.Printer, j.Number, j.RequestingUser, j.JobName, j.DocumentName,
-		j.DocumentFormat, j.State, j.Host, j.URIPath, j.ClientIP, now, now); err != nil {
+		j.DocumentFormat, j.State, j.Host, j.URIPath, j.ClientIP,
+		j.PrincipalID, j.CredentialID, now, now); err != nil {
 		return Job{}, fmt.Errorf("ipp: insert job: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

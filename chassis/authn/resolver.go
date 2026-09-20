@@ -212,6 +212,54 @@ func (r *Resolver) Login(ctx context.Context, a Attempt) Result {
 	}
 }
 
+// Live reports whether who may still be signed in: its credential is not
+// revoked and, for a user principal, the user is active. It is for a head
+// that holds a connection open after the login (IMAP): Login re-reads the
+// credential on every request, but a session that logged in once never asks
+// again, so without this a revoked password keeps an open mailbox open.
+//
+// One indexed read, no password and no throttle. It does NOT see a revoked
+// binding or a deleted account — those end a session at its next login. An
+// error means "could not tell"; the caller keeps the session, so a database
+// blip does not drop every mail client at once.
+func (r *Resolver) Live(ctx context.Context, who Authenticated) (bool, error) {
+	if r == nil || r.store == nil {
+		return false, errors.New("authn: no identity store on this node")
+	}
+	if who.IsZero() || who.Credential == "" {
+		return false, nil
+	}
+	return r.store.CredentialLive(ctx, who.Credential)
+}
+
+// CredentialLive is Resolver.Live's read.
+func (s *Store) CredentialLive(ctx context.Context, credentialID string) (bool, error) {
+	var (
+		revoked    sql.NullString
+		pid        string
+		userStatus sql.NullString
+	)
+	err := s.qr(ctx, s.DB, `
+		SELECT c.revoked_at, c.principal_id, u.status
+		  FROM credentials c
+		  LEFT JOIN users u
+		    ON c.principal_id LIKE 'user:%' AND u.id = substr(c.principal_id, 6) AND u.tenant_id = c.tenant_id
+		 WHERE c.id = ?`, credentialID).Scan(&revoked, &pid, &userStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if revoked.Valid && revoked.String != "" {
+		return false, nil
+	}
+	if strings.HasPrefix(pid, "user:") && userStatus.String != StatusActive {
+		return false, nil // disabled, or the users row is gone
+	}
+	return true, nil
+}
+
 // loginRow is what one login reads.
 type loginRow struct {
 	principal  Principal
