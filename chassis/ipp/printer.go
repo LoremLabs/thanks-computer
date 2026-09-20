@@ -135,6 +135,10 @@ func PrinterAttributes(p PrinterInfo, now time.Time) goipp.Attributes {
 		strAttr("printer-location", goipp.TagText, p.Location),
 		strAttr("printer-make-and-model", goipp.TagText, "Thanks Computer IPP"),
 		strAttr("printer-device-id", goipp.TagText, "MFG:Thanks Computer;MDL:IPP;CMD:PDF;"),
+		// What this printer prints. Apple's list is disc, document,
+		// envelope, label, large-format, photo, postcard, receipt, roll; a
+		// stack receiving a print representation gets documents.
+		kw("printer-kind", "document"),
 		strAttr("printer-uuid", goipp.TagURI, PrinterUUID(p.Tenant, p.Name)),
 		// State: a printer that exists is idle and accepting; work waiting
 		// for the bus is the only queue it has.
@@ -196,6 +200,21 @@ func PrinterAttributes(p PrinterInfo, now time.Time) goipp.Attributes {
 	for _, f := range formats {
 		if f == FormatPDF {
 			attrs.Add(kw("pdf-versions-supported", "adobe-1.7", "iso-32000-1_2008"))
+		}
+		if f == FormatURF {
+			// Apple Raster, and the attribute an AirPrint client asks for
+			// before it will LIST a printer a configuration profile told it
+			// about. Measured on iOS 26 (onepony docs/0030): it queries
+			// thirteen attributes, `urf-supported` among them, and a printer
+			// that answers without it never appears in the print sheet —
+			// silently, with nothing shown to the person.
+			//
+			// Every value is this printer's own: URF 1.4, one copy, the
+			// resolution it advertises, and the two colour spaces. No DM
+			// (duplex), because it is one-sided. It rides on image/urf being
+			// a format this head ACCEPTS, so the claim stays a promise it
+			// keeps — see the doc comment above.
+			attrs.Add(kw("urf-supported", "V1.4", "CP1", fmt.Sprintf("RS%d", res.Xres), "SRGB24", "W8"))
 		}
 	}
 	return attrs

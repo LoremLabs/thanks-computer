@@ -1,6 +1,7 @@
 package ipp
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +103,52 @@ func TestPrinterDisplayName(t *testing.T) {
 	// printer-name stays the label: it is part of the printer's URI identity.
 	if a, _ := attrByName(attrs, "printer-name"); a.Values[0].V.String() != "paris" {
 		t.Fatalf("printer-name: %v", a.Values)
+	}
+}
+
+// An AirPrint client (iOS 26, measured in onepony docs/0030) asks for
+// thirteen attributes before it will list a printer a configuration profile
+// told it about, and drops the printer silently if `urf-supported` is not
+// among the answers. It is advertised only when the head accepts Apple
+// Raster, because a capability advertised is a promise.
+func TestAirPrintAttributes(t *testing.T) {
+	base := PrinterInfo{
+		Tenant: "acme", Name: "research", URI: "ipps://ipp.example.com/p/research",
+		Secure: true, UpSince: fixedNow.Add(-time.Hour),
+	}
+
+	pdfOnly := PrinterAttributes(base, fixedNow)
+	if _, ok := attrByName(pdfOnly, "urf-supported"); ok {
+		t.Error("urf-supported advertised by a printer that accepts only PDF")
+	}
+
+	base.Formats = []string{FormatPDF, FormatURF}
+	withURF := PrinterAttributes(base, fixedNow)
+	a, ok := attrByName(withURF, "urf-supported")
+	if !ok {
+		t.Fatal("urf-supported missing although image/urf is accepted")
+	}
+	got := make([]string, 0, len(a.Values))
+	for _, v := range a.Values {
+		got = append(got, v.V.String())
+	}
+	want := []string{"V1.4", "CP1", "RS300", "SRGB24", "W8"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("urf-supported = %v, want %v", got, want)
+	}
+
+	// The rest of what that client asks for, which this printer already had.
+	for _, name := range []string{
+		"document-format-supported", "print-color-mode-supported", "printer-kind",
+		"printer-location", "printer-make-and-model", "printer-name", "printer-uuid",
+		"sides-supported", "uri-authentication-supported",
+	} {
+		if _, ok := attrByName(withURF, name); !ok {
+			t.Errorf("%s missing: an AirPrint client asks for it", name)
+		}
+	}
+	if k, _ := attrByName(withURF, "printer-kind"); len(k.Values) != 1 || k.Values[0].V.String() != "document" {
+		t.Errorf("printer-kind = %v, want document", k.Values)
 	}
 }
 
