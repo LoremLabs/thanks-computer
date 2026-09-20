@@ -113,7 +113,7 @@ var fallback = template.Must(template.New("printer").Parse(`<!doctype html>
       <dt>Protocol</dt><dd>IPP (Internet Printing Protocol)</dd>
       <dt>Queue</dt><dd>{{.Queue}}</dd>
     </dl>
-    <p>On a Mac: System Settings › Printers &amp; Scanners › Add Printer › IP. Elsewhere, add a printer by its address:</p>
+    <p>It asks once for the printer's password; any user name will do. On a Mac: System Settings › Printers &amp; Scanners › Add Printer › IP. Elsewhere, add a printer by its address:</p>
     <code>{{.URI}}</code>
   </div>
 </body>

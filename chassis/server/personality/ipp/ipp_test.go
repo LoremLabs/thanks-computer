@@ -582,12 +582,9 @@ func TestAuthentication(t *testing.T) {
 	h.grant(tenant, "pony:oneprinter", "oneprinter@dripl.example", "vwxz-prints-to-expenses-only", "ipp:expenses:print")
 	h.printer(tenant, "mailonly", "pony:mailonly", "")
 	for name, rq := range map[string]request{
-		"wrong password":            {pass: "bcdf-nope"},
-		"a password with no id":     {pass: "nope"},
-		"unknown address":           {user: "nobody@dripl.example"},
-		"bare username":             {user: "research"},
-		"the pre-principal default": {user: "print"},
-		"other tenant's password":   {pass: otherPassword},
+		"wrong password":          {pass: "bcdf-nope"},
+		"a password with no id":   {pass: "nope"},
+		"other tenant's password": {pass: otherPassword},
 		// A valid login — for somebody else. The printer is granted to one
 		// principal; another's password is a wrong password here.
 		"another principal":     {user: lyonUsername, pass: lyonPassword},
@@ -603,6 +600,26 @@ func TestAuthentication(t *testing.T) {
 	// The right one works, on its own printer: each principal's.
 	if _, m := h.do(request{op: goipp.OpGetJobs}); m == nil || status(m) != goipp.StatusOk {
 		t.Fatalf("valid credential refused: %v", m)
+	}
+	// WHATEVER THE USERNAME. The printer's row names the principal, so the
+	// name a print client sends is decoration — a person typing an address
+	// into a phone's print sheet is where a print gets abandoned. The
+	// password still decides, and it is still this printer's principal's.
+	for name, user := range map[string]string{
+		"no username at all":        "",
+		"the printer's own label":   "research",
+		"the pre-principal default": "print",
+		"somebody else entirely":    "nobody@dripl.example",
+		"another principal's name":  lyonUsername,
+	} {
+		if _, m := h.do(request{op: goipp.OpGetJobs, user: user}); m == nil || status(m) != goipp.StatusOk {
+			t.Errorf("%s: refused, although the password is this printer's: %v", name, m)
+		}
+	}
+	// And a name alone opens nothing: the other principal's own password is
+	// still refused here, whatever it calls itself.
+	if resp, _ := h.do(request{op: goipp.OpGetJobs, user: "research", pass: lyonPassword}); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("another principal's password with this printer's name: %d, want 401", resp.StatusCode)
 	}
 	if _, m := h.do(request{op: goipp.OpGetJobs, path: "/p/lyon", user: lyonUsername, pass: lyonPassword}); m == nil || status(m) != goipp.StatusOk {
 		t.Fatalf("lyon refused at its own printer: %v", m)

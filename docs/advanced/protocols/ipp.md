@@ -181,7 +181,8 @@ query the printer's capabilities before they have a password to offer.
 Challenged, the dialog says "Unable to communicate with the printer" and
 never asks for one (macOS 15.8). With the flag on, the dialog asks for the
 username and password once, offers the Keychain, and builds an AirPrint
-queue that asks for credentials from its first print. The queue is named
+queue that asks for credentials from its first print. Only the password
+matters: put anything in the name field. The queue is named
 after the printer's `display_name`; a printer without one is named after
 the host, which every printer on that host shares.
 
@@ -330,18 +331,25 @@ is `server-error-operation-not-supported`.
 ## Authentication, precisely
 
 Basic over TLS, for **every** operation: nothing on an `ipp.` host is
-answered without a password. The username is the address the printer's
-principal signs in with, in full (`alice@acme.example`); the password is a
-credential issued to that principal. A login passes four checks, in order:
+answered without a password.
+
+**The password alone authenticates. The username is not read.** The URL
+already says whose printer this is — the row names one principal — so the
+name a print client sends adds nothing, and the print sheet on a phone is
+the last place to ask someone to type an address. Send anything, or nothing.
+The password is a credential issued to that printer's principal, and it
+decides:
 
 ```text
-/p/<label> ──▶ printer row ──▶ username ─binding─▶ principal ─id in the password─▶ credential
-                   │                                                                    │
-                   │                                    its scopes cover ipp:<label>:print
-                   └────────── the printer is granted to THAT principal ────────────────┘
+/p/<label> ──▶ printer row ──▶ principal ─the id in the password─▶ credential
+                                                                       │
+                                               its scopes cover ipp:<label>:print
 ```
 
-Any of them failing is the same `401`. The chassis log tells them apart
+Another principal's password is refused here exactly like a wrong one, so it
+learns nothing about whose printer this is. This is the print path's own
+rule: the mail and DAV heads are addressed by an account's name and go on
+resolving it. Either check failing is the same `401`. The chassis log tells them apart
 (`ipp auth` with `outcome` = `failed`, `scope`, `grant`, `disabled`,
 `throttled`, `denied`). **Revocation is immediate:** a verified password is
 remembered for a few minutes so a client's stream of requests costs one

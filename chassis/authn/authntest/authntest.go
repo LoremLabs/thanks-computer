@@ -554,6 +554,53 @@ func resolverCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 		return authn.Attempt{Tenant: tn, Username: username, Password: pw, IP: "192.0.2.1", Want: imapLogin(username)}
 	}
 
+	t.Run("a door that knows its principal needs no username", func(t *testing.T) {
+		// Attempt.Principal is for a door whose address already says whose
+		// it is — a printer's row names the one principal that prints there.
+		// The password alone authenticates; no binding is read, so a
+		// principal with no address at all still signs in.
+		s, tn := newStore(t), tenant()
+		r := authn.NewResolver(s, authn.ResolverConfig{TenantID: sameTenantID})
+		pony, _ := authn.ParsePrincipal("pony:paris")
+		other, _ := authn.ParsePrincipal("pony:lyon")
+		c, pw, err := s.IssueCredential(ctx, tn, "web", pony, authn.NewCredential{Scopes: []string{"ipp:*:print"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, otherPW, err := s.IssueCredential(ctx, tn, "web", other, authn.NewCredential{Scopes: []string{"ipp:*:print"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := func(principal, username, password string) authn.Attempt {
+			return authn.Attempt{
+				Tenant: tn, Principal: principal, Username: username, Password: password, IP: "192.0.2.9",
+				Want: authn.Scope{Domain: "ipp", Instance: "paris", Action: "print"},
+			}
+		}
+		for _, username := range []string{"", "paris", "print", "nobody@example.com"} {
+			res := r.Login(ctx, at(pony.ID, username, pw))
+			if res.Outcome != authn.OutcomeOK || res.Who.Principal != pony || res.Who.Credential != c.ID {
+				t.Fatalf("username %q: %+v", username, res)
+			}
+		}
+		for name, res := range map[string]authn.Result{
+			"wrong password":               r.Login(ctx, at(pony.ID, "", "bcdf-nope")),
+			"a password with no id":        r.Login(ctx, at(pony.ID, "", "nope")),
+			"another principal's password": r.Login(ctx, at(pony.ID, "", otherPW)),
+			"a principal with no rows":     r.Login(ctx, at("pony:nobody", "", pw)),
+		} {
+			if res.Outcome != authn.OutcomeFailed {
+				t.Errorf("%s: %s, want failed", name, res.Outcome)
+			}
+		}
+		// The scope is still checked against the credential.
+		a := at(pony.ID, "", pw)
+		a.Want = authn.Scope{Domain: "imap", Instance: "paris", Action: "login"}
+		if res := r.Login(ctx, a); res.Outcome != authn.OutcomeScope {
+			t.Errorf("a door the credential does not name: %s, want scope", res.Outcome)
+		}
+	})
+
 	t.Run("a bound username and its credential sign in", func(t *testing.T) {
 		s, tn := newStore(t), tenant()
 		r := authn.NewResolver(s, authn.ResolverConfig{TenantID: sameTenantID})

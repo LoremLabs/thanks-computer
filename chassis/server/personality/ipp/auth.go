@@ -54,8 +54,11 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, site p
 		http.Error(w, "TLS required", http.StatusForbidden)
 		return authn.Authenticated{}, false
 	}
+	// No username is required: see the Attempt below. A client that sends
+	// none (iOS offers password-only printers) is as welcome as one that
+	// sends its own name for the printer.
 	user, pass, ok := r.BasicAuth()
-	if !ok || user == "" {
+	if !ok {
 		c.demand(w, r)
 		return authn.Authenticated{}, false
 	}
@@ -66,11 +69,19 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, site p
 		return authn.Authenticated{}, false
 	}
 
-	// The username is the full address its principal was bound under. A name
-	// the resolver cannot read as one (a bare "print", the pre-principal
-	// username) is answered like any unknown name, at the same cost.
+	// WHOSE PRINTER THIS IS, the URL already said: the printer's row names
+	// one principal, and only that principal prints here. So the username is
+	// not consulted — the password alone authenticates, as it does for a
+	// password-only AirPrint printer. It is kept for the log line, because
+	// what a client calls itself is worth seeing.
+	//
+	// This is the print path's own rule, not a loosening of the others: the
+	// mail and DAV heads are addressed by the account's name, and go on
+	// resolving it. Measured on iOS 26 (onepony docs/0030): a phone asks for
+	// the address and the password in one small sheet, and an address typed
+	// on a phone keyboard is where a print gets abandoned.
 	res := c.auth.Login(r.Context(), authn.Attempt{
-		Tenant: site.tenant, Username: user, Password: pass, IP: ip,
+		Tenant: site.tenant, Principal: site.printer.PrincipalID, Username: user, Password: pass, IP: ip,
 		Want: authn.Scope{Domain: "ipp", Instance: site.printer.Label, Action: "print"},
 	})
 	switch res.Outcome {
@@ -89,10 +100,10 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, site p
 		return deny(string(res.Outcome))
 	}
 
-	// The grant. One principal per printer: a valid password for ANOTHER
-	// principal is refused exactly like a wrong one, so it learns nothing
-	// about whose printer this is. Letting others print here widens this
-	// comparison (and the one in sendDocument), nothing else.
+	// The grant, belt and braces: the identity came from the printer's own
+	// row, so this cannot differ today. It is the line that would widen if
+	// others were ever allowed to print here (with the one in sendDocument),
+	// and the place to look when they are.
 	if res.Who.Principal.ID != site.printer.PrincipalID {
 		return deny("grant", res.Who)
 	}

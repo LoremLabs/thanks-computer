@@ -72,7 +72,7 @@
                 >Add printer</a
             >
             <p class="mt-2 text-center text-xs text-neutral-400">
-                Opens Add Printer. You'll be asked for the printer's username and password once.
+                Opens Add Printer. It asks once for the printer's password; any user name will do.
             </p>
         {/if}
 

@@ -55,10 +55,18 @@ type Attempt struct {
 	// stores key on. The resolver turns it into the tenant id.
 	Tenant string
 	// Username is the account's login name, which an email binding resolves
-	// to the principal.
+	// to the principal. It is ignored when Principal is set.
 	Username string
-	Password string
-	IP       string
+	// Principal, when set, IS the identity: the credential is looked up
+	// against it directly and no binding is read. It is for a door whose
+	// address already says whose it is — a printer's row names the one
+	// principal that may print there, so the username a print client sends
+	// adds nothing, and asking a person to type an address into a phone
+	// costs more than it proves. The password alone authenticates, exactly
+	// as a password-only AirPrint printer does.
+	Principal string
+	Password  string
+	IP        string
 	// Want is the door: imap:<username>:login, drive:<collection-id>:login…
 	Want Scope
 }
@@ -152,22 +160,32 @@ func (r *Resolver) Login(ctx context.Context, a Attempt) Result {
 	if err != nil || tenantID == "" {
 		return Result{Outcome: OutcomeError, Err: fmt.Errorf("authn: tenant %q: %v", a.Tenant, err)}
 	}
-	username, err := NormalizeEmail(a.Username)
-	if err != nil {
-		return Result{Outcome: r.Miss(a.IP, a.Username, a.Password)}
-	}
 	// A password the chassis did not issue has no credential id (shortID is
 	// ""): the principal is still resolved, so it spends the same throttle
 	// budget and fails like a wrong password, after the same work.
 	shortID, _ := ShortIDOf(a.Password)
 
-	row, err := r.store.loginRow(ctx, tenantID, username, shortID)
+	var (
+		row     loginRow
+		missSub = a.Username
+	)
+	if a.Principal != "" {
+		missSub = a.Principal
+		row, err = r.store.principalRow(ctx, tenantID, a.Principal, shortID)
+	} else {
+		var username string
+		if username, err = NormalizeEmail(a.Username); err != nil {
+			return Result{Outcome: r.Miss(a.IP, a.Username, a.Password)}
+		}
+		missSub = username
+		row, err = r.store.loginRow(ctx, tenantID, username, shortID)
+	}
 	switch {
 	case errors.Is(err, ErrNotFound):
 		// No binding: the account exists but was never given a principal
 		// (an account made before the chassis bound usernames), or the
 		// binding was revoked.
-		return Result{Outcome: r.Miss(a.IP, tenantID+"/"+username, a.Password)}
+		return Result{Outcome: r.Miss(a.IP, tenantID+"/"+missSub, a.Password)}
 	case err != nil:
 		return Result{Outcome: OutcomeError, Err: err}
 	}
@@ -258,6 +276,49 @@ func (s *Store) CredentialLive(ctx context.Context, credentialID string) (bool, 
 		return false, nil // disabled, or the users row is gone
 	}
 	return true, nil
+}
+
+// principalRow is loginRow for a door that already knows its principal: the
+// credential with this short id, and the user's status when the principal is
+// a user. A principal with no such credential comes back with none, and the
+// login then fails like a wrong password, after the same work.
+func (s *Store) principalRow(ctx context.Context, tenantID, principalID, shortID string) (loginRow, error) {
+	kind, _, _ := strings.Cut(principalID, ":")
+	row := loginRow{principal: Principal{ID: principalID, Kind: PrincipalKind(kind)}}
+	var (
+		cID, cShort, cKind, cScopes, cLabel     sql.NullString
+		cBy, cCreated, cUsed, cHash, userStatus sql.NullString
+	)
+	err := s.qr(ctx, s.DB, `
+		SELECT c.id, c.short_id, c.kind, c.scopes, c.label, c.created_by, c.created_at, c.last_used_at, c.secret_hash,
+		       u.status
+		  FROM credentials c
+		  LEFT JOIN users u
+		    ON c.principal_id LIKE 'user:%' AND u.id = substr(c.principal_id, 6) AND u.tenant_id = c.tenant_id
+		 WHERE c.tenant_id = ? AND c.principal_id = ? AND c.short_id = ? AND c.revoked_at IS NULL`,
+		tenantID, principalID, shortID).
+		Scan(&cID, &cShort, &cKind, &cScopes, &cLabel, &cBy, &cCreated, &cUsed, &cHash, &userStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return row, nil
+	}
+	if err != nil {
+		return loginRow{}, err
+	}
+	row.userStatus = userStatus.String
+	if row.principal.Kind == KindUser && !userStatus.Valid {
+		row.userStatus = StatusDisabled
+	}
+	scopes, err := decodeScopes(cScopes.String)
+	if err != nil {
+		return loginRow{}, fmt.Errorf("authn: credential %s: %w", cID.String, err)
+	}
+	row.credential = Credential{
+		ID: cID.String, TenantID: tenantID, Principal: row.principal, ShortID: cShort.String,
+		Kind: CredentialKind(cKind.String), Scopes: scopes, Label: cLabel.String, CreatedBy: cBy.String,
+		CreatedAt: parseStamp(cCreated.String), LastUsedAt: parseStampPtr(cUsed),
+	}
+	row.secretHash = cHash.String
+	return row, nil
 }
 
 // loginRow is what one login reads.
