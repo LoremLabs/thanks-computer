@@ -246,8 +246,14 @@ func (s *Store) EnsureCollection(_ context.Context, tenant string, c search.Coll
 	if err := col.Close(); err != nil {
 		return err
 	}
+	return writeMeta(dir, tenant, c.Name)
+}
+
+// writeMeta writes the sidecar last and atomically: the collection exists from
+// the moment it appears.
+func writeMeta(dir, tenant, name string) error {
 	raw, _ := json.Marshal(meta{
-		Tenant: tenant, Name: c.Name,
+		Tenant: tenant, Name: name,
 		AnalyzerVersion: AnalyzerVersion, ScoringModel: ScoringModel,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	})
