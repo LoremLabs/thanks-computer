@@ -64,6 +64,8 @@ require (
 
 require (
 	github.com/OpenPrinting/goipp v1.2.0
+	github.com/blevesearch/bleve/v2 v2.6.1
+	github.com/blevesearch/bleve_index_api v1.4.1
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/emersion/go-ical v0.0.0-20240127095438-fc1c9d8fb2b6
@@ -73,11 +75,30 @@ require (
 	github.com/emersion/go-webdav v0.7.0
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/teambition/rrule-go v1.8.2
-	go.etcd.io/bbolt v1.3.6
+	go.etcd.io/bbolt v1.4.0
 	golang.org/x/text v0.37.0
 )
 
 require (
+	github.com/RoaringBitmap/roaring/v2 v2.14.5 // indirect
+	github.com/bits-and-blooms/bitset v1.24.2 // indirect
+	github.com/blevesearch/geo v0.2.6 // indirect
+	github.com/blevesearch/go-faiss v1.1.5 // indirect
+	github.com/blevesearch/go-porterstemmer v1.0.3 // indirect
+	github.com/blevesearch/gtreap v0.1.1 // indirect
+	github.com/blevesearch/mmap-go v1.2.0 // indirect
+	github.com/blevesearch/scorch_segment_api/v2 v2.4.10 // indirect
+	github.com/blevesearch/segment v0.9.1 // indirect
+	github.com/blevesearch/snowballstem v0.9.0 // indirect
+	github.com/blevesearch/upsidedown_store_api v1.0.2 // indirect
+	github.com/blevesearch/vellum v1.2.0 // indirect
+	github.com/blevesearch/zapx/v11 v11.4.3 // indirect
+	github.com/blevesearch/zapx/v12 v12.4.3 // indirect
+	github.com/blevesearch/zapx/v13 v13.4.3 // indirect
+	github.com/blevesearch/zapx/v14 v14.4.3 // indirect
+	github.com/blevesearch/zapx/v15 v15.4.3 // indirect
+	github.com/blevesearch/zapx/v16 v16.3.4 // indirect
+	github.com/blevesearch/zapx/v17 v17.2.3 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cention-sany/utf7 v0.0.0-20170124080048-26cad61bd60a // indirect
@@ -97,10 +118,12 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f // indirect
+	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.1 // indirect
 	github.com/hashicorp/golang-lru v0.5.1 // indirect
+	github.com/json-iterator/go v0.0.0-20171115153421-f7279a603ede // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
 	github.com/lestrrat-go/dsig v1.0.0 // indirect
@@ -117,6 +140,7 @@ require (
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect
+	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/olekukonko/cat v0.0.0-20250911104152-50322a0618f6 // indirect
 	github.com/olekukonko/errors v1.3.0 // indirect
 	github.com/olekukonko/ll v0.1.8 // indirect
