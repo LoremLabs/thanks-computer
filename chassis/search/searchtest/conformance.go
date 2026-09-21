@@ -185,6 +185,11 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) search.Store, opts
 		if got := ids(query(t, tenant, coll, `+luggage -cupboard text:hall*`, 5, search.Filter{})); len(got) != 1 || got[0] != "luggage" {
 			t.Errorf("syntax = %v, want [luggage]", got)
 		}
+		// A quote mark with no partner is punctuation. It must not turn the
+		// rest of a message into one phrase that nothing matches.
+		if got := ids(query(t, tenant, coll, `the 27" rack: can the luggage go in the hall cupboard?`, 5, search.Filter{})); len(got) == 0 || got[0] != "luggage" {
+			t.Errorf("stray quote = %v, want luggage first", got)
+		}
 		// No stemming: "exercises" is not "exercise".
 		if got := ids(query(t, tenant, coll, "exercises", 5, search.Filter{})); len(got) != 0 {
 			t.Errorf("stemming = %v, want none", got)

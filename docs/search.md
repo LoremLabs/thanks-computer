@@ -49,7 +49,10 @@ same thing the day the ranking improves.
 - **Words are OR-ed and ranked.** A record need not contain every word, and rare
   words count for more than common ones.
 - **A quoted string is a phrase.** `"termination for convenience"` lifts the
-  record that holds those words together, in that order.
+  record that holds those words together, in that order. Only a closed pair of
+  double quotes counts, straight or curly, around at most 16 words. A stray
+  quote mark (an inch sign, a bad paste) is just punctuation, and a quoted
+  paragraph is read as the plain words it is.
 - **An identifier is matched whole.** `TXC-4821`, `matt@example.com`,
   `foo.bar.baz`, `2026-09-21` and `github.com/foo/bar` each find the record that
   contains exactly that, ahead of records that merely share one of its parts.
@@ -179,7 +182,7 @@ An empty result is `[]`, never an error.
 | `metadata` | 16 KiB, 64 keys |
 | records per `upsert` | 500 |
 | `ids` per `delete` | 500 |
-| `query` | 8 KiB; its first 64 terms are used |
+| `query` | its first 8 KiB, and of those its first 64 terms, are used; a longer query is cut, never refused |
 | `limit` | default 10, at most 100 |
 
 ## Where the data lives

@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 
@@ -194,5 +197,30 @@ func TestSearchIntoCannotForgeControlFields(t *testing.T) {
 	pl, _ := searchQuery(sctx(`{"collection":"c","query":"hello","into":"_txc.tenant"}`), ss, in)
 	if gjson.Get(pl.Raw, "_txc").Exists() || len(gjson.Get(pl.Raw, "_search.hits").Array()) != 1 {
 		t.Fatalf("reserved into = %s", pl.Raw)
+	}
+}
+
+// A whole email is a fine query. One past the byte limit is cut on a rune
+// boundary and still answered, never refused.
+func TestSearchQueryClipsAnOverlongQuery(t *testing.T) {
+	ss := newSearchStore(t)
+	in := []byte("{}")
+	searchCollection(sctx(`{"collection":"c"}`), ss, in)
+	searchUpsert(sctx(`{"collection":"c","id":"a","text":"the boiler manual"}`), ss, in)
+
+	long := "where is the boiler manual? " + strings.Repeat("é", search.MaxQueryBytes) // 2 bytes each: the cut lands mid-rune
+	meta, _ := json.Marshal(map[string]any{"collection": "c", "query": long})
+	pl, _ := searchQuery(sctx(string(meta)), ss, in)
+	if gjson.Get(pl.Raw, "search.error").Exists() {
+		t.Fatalf("an over-long query was refused: %s", pl.Raw)
+	}
+	if got := matchIDs(gjson.Get(pl.Raw, "_search.hits")); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("hits = %s", pl.Raw)
+	}
+	if c := clipQuery(long); len(c) > search.MaxQueryBytes || !utf8.ValidString(c) {
+		t.Fatalf("clip: %d bytes, valid=%v", len(c), utf8.ValidString(c))
+	}
+	if c := clipQuery("short"); c != "short" {
+		t.Fatalf("clip changed a short query: %q", c)
 	}
 }

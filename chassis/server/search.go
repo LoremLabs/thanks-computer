@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -172,7 +173,7 @@ func searchQuery(ctx context.Context, ss search.Store, in []byte) (event.Payload
 	if err != nil {
 		return searchErrFrom(err), nil
 	}
-	hits, err := ss.Query(ctx, tenant, name, qr.String(), int(gjson.GetBytes(meta, "limit").Int()), filter)
+	hits, err := ss.Query(ctx, tenant, name, clipQuery(qr.String()), int(gjson.GetBytes(meta, "limit").Int()), filter)
 	if err != nil {
 		return searchErrFrom(err), nil
 	}
@@ -182,6 +183,25 @@ func searchQuery(ctx context.Context, ss search.Store, in []byte) (event.Payload
 	hj, _ := json.Marshal(hits)
 	resp, _ := sjson.SetRaw(`{}`, intoPath(meta, "_search.hits"), string(hj))
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
+}
+
+// clipQuery cuts a query at the store's byte limit, on a rune boundary. A
+// stack hands over whatever somebody wrote, a whole email included, and only a
+// query's first terms are used, so an over-long one is cut, never refused. The
+// store keeps its hard limit for callers that bypass this layer.
+func clipQuery(q string) string {
+	if len(q) <= search.MaxQueryBytes {
+		return q
+	}
+	q = q[:search.MaxQueryBytes]
+	// The cut may have fallen inside a rune: drop the partial one.
+	for i := 0; i < utf8.UTFMax && len(q) > 0; i++ {
+		if r, size := utf8.DecodeLastRuneInString(q); r != utf8.RuneError || size > 1 {
+			break
+		}
+		q = q[:len(q)-1]
+	}
+	return q
 }
 
 // searchDelete removes records by id (`ids` array, or a single `id`) or by

@@ -44,7 +44,8 @@ type parsedQuery struct {
 
 // parseQuery applies the v1 query semantics:
 //
-//   - a quoted string is a phrase;
+//   - a quoted string is a phrase, when the quotes are a closed pair and the
+//     run is short enough to be one (maxPhraseTerms);
 //   - a word made of several parts (`TXC-4821`, `matt@example.com`,
 //     `foo.bar.baz`) is an identifier, and is a phrase of its parts;
 //   - every term, from phrases too, is OR-ed, so a whole message can be passed
@@ -70,8 +71,11 @@ func parseQuery(an analysis.Analyzer, q string) parsedQuery {
 			break
 		}
 		if seg.quoted {
-			add(tokens(an, seg.text), true)
-			continue
+			if toks := tokens(an, seg.text); len(toks) <= maxPhraseTerms {
+				add(toks, true)
+				continue
+			}
+			// Too long to be a phrase: read it as the plain words it is.
 		}
 		for _, word := range strings.Fields(seg.text) {
 			if room() == 0 {
@@ -88,27 +92,48 @@ type segment struct {
 	quoted bool
 }
 
-// splitQuoted cuts q into quoted and unquoted runs. Straight and curly double
-// quotes both delimit. An unclosed quote runs to the end of the string.
+// maxPhraseTerms is the longest quoted run that is still a phrase. People
+// quote a clause or a title; a quoted paragraph is a pasted passage, and its
+// words are worth more OR-ed than as one phrase nothing will match.
+const maxPhraseTerms = 16
+
+// splitQuoted cuts q into quoted and unquoted runs. Only a CLOSED pair of
+// double quotes (straight, or curly open then close) delimits a quoted run. A
+// quote with no partner is just punctuation: real messages are full of them
+// (an inch mark, a bad paste, a mis-decoded dash), and one stray mark must not
+// turn the rest of a message into a phrase.
 func splitQuoted(q string) []segment {
 	var out []segment
-	var cur strings.Builder
-	in := false
-	flush := func() {
-		if cur.Len() > 0 {
-			out = append(out, segment{text: cur.String(), quoted: in})
-			cur.Reset()
+	rs := []rune(q)
+	plain := func(from, to int) {
+		if to > from {
+			out = append(out, segment{text: string(rs[from:to])})
 		}
 	}
-	for _, r := range q {
-		if r == '"' || r == '“' || r == '”' {
-			flush()
-			in = !in
+	isOpen := func(r rune) bool { return r == '"' || r == '\u201c' }
+	isClose := func(r rune) bool { return r == '"' || r == '\u201d' }
+	start := 0
+	for i := 0; i < len(rs); i++ {
+		if !isOpen(rs[i]) {
 			continue
 		}
-		cur.WriteRune(r)
+		end := -1
+		for j := i + 1; j < len(rs); j++ {
+			if isClose(rs[j]) {
+				end = j
+				break
+			}
+		}
+		if end < 0 {
+			break // no partner: this and any later quote are plain text
+		}
+		plain(start, i)
+		if end > i+1 {
+			out = append(out, segment{text: string(rs[i+1 : end]), quoted: true})
+		}
+		start, i = end+1, end
 	}
-	flush()
+	plain(start, len(rs))
 	return out
 }
 

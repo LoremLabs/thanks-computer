@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
@@ -323,5 +324,43 @@ func TestRareTermBeatsCommonWordsInShortFields(t *testing.T) {
 	}
 	if len(hits) == 0 || hits[0].ID != "rare" {
 		t.Errorf("got %v, want rare first", hitIDs(hits))
+	}
+}
+
+// Real messages are full of quote marks that are not quotations. None of them
+// may switch off what comes after it.
+func TestStrayQuotesDoNotSwallowTheQuery(t *testing.T) {
+	c := newTestCollection(t)
+	for _, tc := range []struct {
+		q       string
+		phrases [][]string
+	}{
+		// A closed pair is a phrase; the identifier after it is still one.
+		{`"pool pump" and TXC-4821`, [][]string{{"pool", "pump"}, {"txc", "4821"}}},
+		{"\u201cpool pump\u201d and TXC-4821", [][]string{{"pool", "pump"}, {"txc", "4821"}}},
+		// An unclosed quote, an inch mark, a lone closing curly quote (what a
+		// mis-decoded em dash ends in): punctuation, nothing more.
+		{`the 27" screen for TXC-4821`, [][]string{{"txc", "4821"}}},
+		{"Hi \u00e2\u20ac\u201d I got too_many_pages back", [][]string{{"too", "many", "pages"}}},
+		{`he said "never mind and TXC-4821`, [][]string{{"txc", "4821"}}},
+		// Two pairs.
+		{`"late fee" or "grace period"`, [][]string{{"late", "fee"}, {"grace", "period"}}},
+		// An empty pair is nothing.
+		{`"" TXC-4821`, [][]string{{"txc", "4821"}}},
+	} {
+		if got := parseQuery(c.an, tc.q).phrases; !reflect.DeepEqual(got, tc.phrases) {
+			t.Errorf("parseQuery(%q).phrases = %v, want %v", tc.q, got, tc.phrases)
+		}
+	}
+
+	// A quoted paragraph is not a phrase: its words are OR-ed, and an
+	// identifier inside it is still matched whole.
+	long := `"` + strings.Repeat("lorem ipsum ", 10) + `see TXC-4821 for details"`
+	pq := parseQuery(c.an, long)
+	if !reflect.DeepEqual(pq.phrases, [][]string{{"txc", "4821"}}) {
+		t.Errorf("long quoted run: phrases = %v", pq.phrases)
+	}
+	if len(pq.terms) != 25 {
+		t.Errorf("long quoted run: %d terms, want 25", len(pq.terms))
 	}
 }
