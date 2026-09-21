@@ -309,6 +309,7 @@ Some subsystems read a fixed secret name rather than one a rule names:
 | --- | --- | --- |
 | `OPENROUTER_KEY` | `ai://chat` — see [ai.md](../ai.md#set-the-api-key) | yes, `--ai-chat-env-fallback` |
 | `OPENAI_KEY` | `ai://embed` and the OpenAI chat backend | yes, same flag |
+| `VERCEL_AI_KEY` | `ai://decide` — see [ai.md](../ai.md#decisions--exec-aidecide) | yes, same flag |
 | `ANTHROPIC_KEY` | [AI gateway](./protocols/llm-gateway.md) swap mode — the real upstream key | **no** |
 | `LLM_GATEWAY_KEY` | AI gateway swap mode — what clients authenticate with | **no** |
 

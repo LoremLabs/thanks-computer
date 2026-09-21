@@ -1,0 +1,12 @@
+# The decide call failed: no key (txco_decide_missing_secret), a timeout,
+# the provider down. ai://decide never turns a failure into an answer, so
+# the stack chooses what failure means — here, an honest 503 with the code.
+# Gated on the path so it only answers requests that asked a question.
+WHEN @web.req.url.path == "/classify" && ._produce.ok != true
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "item",    @web.req.url.query.item.0,
+         "error",   ._produce.error.code,
+         "message", ._produce.error.message))),
+       @web.res.status = 503,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

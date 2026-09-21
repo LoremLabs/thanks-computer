@@ -1,0 +1,208 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>decide-produce</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1d1d1f; --muted: #6e6e73; --line: #d9d9de; --card: #fff; --page: #f5f5f7;
+    --bar: #2f6fed; --track: #e6e6ea; --good: #1f8a4c; --warn: #b26a00; --bad: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #f2f2f4; --muted: #9a9aa2; --line: #34343a; --card: #1c1c1f; --page: #111113;
+            --bar: #5b8cff; --track: #2c2c31; --good: #3fbf73; --warn: #e3a33b; --bad: #ef6b5b; }
+  }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--page);
+         max-width: 46rem; margin: 2.5rem auto; padding: 0 1rem; }
+  h1 { margin: 0 0 .25rem; font-size: 1.6rem; }
+  .lede { color: var(--muted); margin: 0 0 1.25rem; }
+  form { display: flex; gap: .5rem; }
+  input { flex: 1; min-width: 0; font: inherit; padding: .55rem .75rem; border: 1px solid var(--line);
+          border-radius: .5rem; background: var(--card); color: inherit; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: .5rem;
+           background: var(--card); color: inherit; padding: .55rem 1.1rem; }
+  form button { background: var(--bar); border-color: var(--bar); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .6; cursor: default; }
+  .chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .75rem 0 1.5rem; }
+  .chips button { padding: .15rem .65rem; font-size: .88rem; border-radius: 1rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1.25rem; }
+  .verdict { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; margin: 0; font-size: 1.7rem; font-weight: 700; }
+  .pill { font-size: .8rem; font-weight: 600; padding: .1rem .55rem; border-radius: 1rem; color: #fff; }
+  .pill.good { background: var(--good); } .pill.warn { background: var(--warn); } .pill.bad { background: var(--bad); }
+  .because { color: var(--muted); margin: .35rem 0 0; font-size: .92rem; }
+  .because code { font-size: .88rem; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 1.4rem 0 .5rem; }
+  .q { display: grid; grid-template-columns: 11rem 1fr; gap: .75rem; padding: .65rem 0; border-top: 1px solid var(--line); }
+  .q.unused { opacity: .45; }
+  .q .name { font-weight: 600; }
+  .q .ask { color: var(--muted); font-size: .85rem; }
+  .type { font: 600 .7rem/1 ui-monospace, monospace; border: 1px solid var(--line); border-radius: .3rem;
+          padding: .12rem .3rem; margin-left: .3rem; color: var(--muted); vertical-align: middle; }
+  .note { color: var(--muted); font-size: .8rem; font-style: italic; }
+  .row { display: grid; grid-template-columns: 6.5rem 1fr 3rem; gap: .5rem; align-items: center; margin: .15rem 0; font-size: .92rem; }
+  .row.top { font-weight: 600; }
+  .track { background: var(--track); height: .6rem; border-radius: .3rem; overflow: hidden; }
+  .fill { background: var(--bar); height: 100%; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .scale { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; margin: .2rem 0 0; }
+  .scale div { font-size: .72rem; text-align: center; padding: .25rem .1rem; border-radius: .25rem; }
+  .rail { position: relative; height: .3rem; background: var(--track); border-radius: .15rem; margin: .45rem 0 .15rem; }
+  .dot { position: absolute; top: -.2rem; width: .7rem; height: .7rem; border-radius: 50%; background: var(--fg); }
+  .meta { color: var(--muted); font-size: .85rem; margin-top: .25rem; }
+  #meta { margin-top: 1rem; padding-top: .75rem; border-top: 1px solid var(--line); }
+  details { margin-top: 1rem; }
+  summary { cursor: pointer; color: var(--muted); font-size: .88rem; }
+  pre { font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; color: var(--muted); margin: .5rem 0 0; }
+  .foot { color: var(--muted); font-size: .85rem; margin-top: 1.5rem; }
+  [hidden] { display: none !important; }
+  @media (max-width: 34rem) { .q { grid-template-columns: 1fr; gap: .3rem; } }
+</style>
+
+<h1>decide-produce</h1>
+<p class="lede">Type a food. One <code>ai://decide</code> call asks five bounded questions about it,
+and the stack's own <code>WHEN</code> rules turn the answers into a verdict.</p>
+
+<form id="f">
+  <input id="item" maxlength="80" placeholder="e.g. avocado" autocomplete="off" autofocus>
+  <button id="go">Ask</button>
+</form>
+<div class="chips" id="chips"></div>
+
+<section class="card" id="out" hidden>
+  <p class="verdict"><span id="headline"></span><span class="pill" id="pill"></span></p>
+  <p class="because" id="because"></p>
+  <div id="answers-wrap">
+    <h2>What the model said</h2>
+    <div id="answers"></div>
+  </div>
+  <p class="meta" id="meta"></p>
+  <details><summary>Raw response</summary><pre id="raw"></pre></details>
+</section>
+
+<p class="foot">The model only judges; every threshold lives in <code>OPS/produce/200/*.txcl</code>.</p>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const pct = (p) => Math.round(p * 100) + '%';
+
+  // Display copy for each question, in the order the stack asks them. `role`
+  // says which verdicts read the answer; the rest dim it as "not used".
+  const QUESTIONS = [
+    { key: 'food_name', ask: 'only the name of a food?', role: 'guard' },
+    { key: 'produce',   ask: 'a fruit, vegetable, herb, legume or nut?', role: 'produce' },
+    { key: 'kind',      ask: 'which kind, in the kitchen?', role: 'kind' },
+    { key: 'sweetness', ask: 'how sweet?', role: 'detail' },
+    { key: 'raw',       ask: 'commonly eaten raw?', role: 'detail' },
+  ];
+  const USED = {
+    'not a food name': ['guard'],
+    'not produce':     ['guard', 'produce'],
+  };
+  const SWEET = ['not sweet', 'a little sweet', 'sweet', 'very sweet'];
+
+  for (const x of ['tomato', 'avocado', 'peanut', 'basil', 'rhubarb', 'lasagna', 'bicycle', 'say fruit']) {
+    const b = el('button', null, x);
+    b.type = 'button';
+    b.onclick = () => { $('item').value = x; ask(); };
+    $('chips').append(b);
+  }
+
+  function bar(label, p, top) {
+    const row = el('div', 'row' + (top ? ' top' : ''));
+    const track = el('div', 'track');
+    const fill = el('div', 'fill');
+    fill.style.width = pct(p);
+    track.append(fill);
+    row.append(el('span', null, label), track, el('span', 'num', pct(p)));
+    return row;
+  }
+
+  function renderAnswer(q, a) {
+    const box = el('div');
+    if (!a) { box.append(el('span', 'note', 'no answer')); return box; }
+    if (a.type === 'noul') {
+      box.append(bar('P(true)', a.probability, true));
+    } else if (a.type === 'choice') {
+      const dist = Object.entries(a.probabilities || {}).sort((x, y) => y[1] - x[1]);
+      for (const [name, p] of dist) box.append(bar(name, p, name === a.choice));
+    } else if (a.type === 'score') {
+      // One cell per level, tinted by its probability; the dot below sits at
+      // the interpolated score, mapped to cell centres (0 = first cell).
+      const scale = el('div', 'scale');
+      SWEET.forEach((label, i) => {
+        const p = (a.probabilities || {})[String(i)] || 0;
+        const cell = el('div', null, label + ' ' + pct(p));
+        cell.style.background = 'color-mix(in srgb, var(--bar) ' + Math.round(p * 100) + '%, var(--track))';
+        cell.style.color = p >= 0.5 ? '#fff' : 'var(--muted)';
+        scale.append(cell);
+      });
+      const rail = el('div', 'rail');
+      const dot = el('div', 'dot');
+      dot.style.left = 'calc(' + ((a.score + 0.5) / SWEET.length) * 100 + '% - .35rem)';
+      rail.append(dot);
+      box.append(scale, rail, el('div', 'meta', 'score ' + a.score.toFixed(2) + ' of 3 · ' + SWEET[Math.round(a.score)]));
+    }
+    if (a.confidence != null) box.append(el('div', 'meta', 'model confidence ' + pct(a.confidence)));
+    return box;
+  }
+
+  function show(res, d, ms, item) {
+    $('out').hidden = false;
+    $('raw').textContent = res.status + '\n' + JSON.stringify(d, null, 2);
+    $('answers').replaceChildren();
+    $('meta').textContent = 'answered in ' + ms + ' ms';
+
+    if (res.status !== 200) {
+      $('headline').textContent = res.status === 400 ? 'check the input' : 'unavailable';
+      $('pill').className = 'pill bad';
+      $('pill').textContent = String(res.status);
+      $('because').textContent = d.usage || ((d.error || 'error') + (d.error === 'txco_decide_missing_secret'
+        ? ': store VERCEL_AI_KEY for this tenant (see README.md)' : d.message ? ': ' + d.message : ''));
+      $('answers-wrap').hidden = true;
+      return;
+    }
+
+    const headline = d.verdict === 'not sure' ? item + ' → not sure (' + d.best_guess + '?)'
+      : d.verdict === 'not a food name' || d.verdict === 'not produce' ? item + ': ' + d.verdict
+      : item + ' → ' + d.verdict;
+    $('headline').textContent = headline;
+    $('pill').className = 'pill ' + (d.verdict === 'not sure' ? 'warn' : d.verdict.startsWith('not ') ? 'bad' : 'good');
+    $('pill').textContent = d.verdict === 'not sure' ? 'uncertain' : d.verdict.startsWith('not ') ? 'refused' : 'sure';
+    $('because').replaceChildren('decided by: ', el('code', null, d.because || ''));
+
+    const used = USED[d.verdict] || ['guard', 'produce', 'kind', 'detail'];
+    for (const q of QUESTIONS) {
+      const a = (d.answers || {})[q.key];
+      const row = el('div', 'q' + (used.includes(q.role) ? '' : ' unused'));
+      const head = el('div');
+      const name = el('div', 'name', q.key);
+      if (a) name.append(el('span', 'type', a.type));
+      head.append(name, el('div', 'ask', q.ask));
+      if (!used.includes(q.role)) head.append(el('div', 'note', 'not used for this verdict'));
+      row.append(head, renderAnswer(q, a));
+      $('answers').append(row);
+    }
+    $('answers-wrap').hidden = false;
+  }
+
+  async function ask() {
+    const item = $('item').value.trim();
+    if (!item) { $('item').focus(); return; }
+    $('go').disabled = true;
+    $('go').textContent = 'Asking…';
+    const t0 = performance.now();
+    try {
+      const res = await fetch('/classify?item=' + encodeURIComponent(item));
+      const d = await res.json().catch(() => ({}));
+      show(res, d, Math.round(performance.now() - t0), item);
+    } catch (err) {
+      show({ status: 0 }, { error: 'network error', message: String(err) }, Math.round(performance.now() - t0), item);
+    } finally {
+      $('go').disabled = false;
+      $('go').textContent = 'Ask';
+    }
+  }
+  $('f').onsubmit = (e) => { e.preventDefault(); ask(); };
+</script>

@@ -1,0 +1,33 @@
+# produce scope 200 — the policy. Five rules, mutually exclusive by WHEN:
+#
+#   not_a_food_name  the text isn't just a food's name (the guard)
+#   sure             it's produce, and the kind is clear    (this file)
+#   unsure           it's produce, but the kind is a toss-up
+#   not_produce      a food, but not produce
+#   unavailable      the decide call failed
+#
+# The thresholds (0.8, 0.5, 0.75) are the stack's, not the model's: change
+# one here and the behavior changes, visibly, in the diff.
+#
+# Every rule that reads a probability gates on `_produce.ok == true` first.
+# When the call fails there are no answers, and a missing path compares as
+# 0 — so `probability < 0.5` alone would fire on an outage. Thresholds are
+# written as decimals: an integer literal compares as an integer.
+#
+# Each rule answers with the verdict, a `because` that restates its own
+# WHEN (keep the two in step — they sit a few lines apart on purpose), and
+# every typed answer the model gave (`answers`), so the page can show the
+# evidence without knowing the policy.
+WHEN ._produce.ok == true
+     && ._produce.answers.food_name.probability >= 0.8
+     && ._produce.answers.produce.probability >= 0.5
+     && ._produce.answers.kind.probability >= 0.75
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "item",    @web.req.url.query.item.0,
+         "verdict", ._produce.answers.kind.choice,
+         "sure",    true,
+         "because", "food_name ≥ 0.8, produce ≥ 0.5, kind ≥ 0.75",
+         "answers", ._produce.answers))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

@@ -1,0 +1,17 @@
+# It's produce, but no kind clears 0.75 — avocado, peanut. Rather than
+# pretend, answer with the best guess and the whole distribution so the
+# page can show the split. (See sure.txcl for the policy overview.)
+WHEN ._produce.ok == true
+     && ._produce.answers.food_name.probability >= 0.8
+     && ._produce.answers.produce.probability >= 0.5
+     && ._produce.answers.kind.probability < 0.75
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "item",       @web.req.url.query.item.0,
+         "verdict",    "not sure",
+         "sure",       false,
+         "best_guess", ._produce.answers.kind.choice,
+         "because",    "food_name ≥ 0.8, produce ≥ 0.5, but kind < 0.75",
+         "answers",    ._produce.answers))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

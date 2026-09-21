@@ -1,0 +1,16 @@
+# A food, but not produce ("lasagna", "cheddar"). The `kind` answer still
+# exists — a choice always picks one of its options — so this rule is where
+# the stack ignores it. The `ok` gate matters most here: without it, a
+# failed call (no answers, missing path = 0) would read as "not produce".
+WHEN ._produce.ok == true
+     && ._produce.answers.food_name.probability >= 0.8
+     && ._produce.answers.produce.probability < 0.5
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "item",    @web.req.url.query.item.0,
+         "verdict", "not produce",
+         "sure",    true,
+         "because", "food_name ≥ 0.8, but produce < 0.5 (kind is not used)",
+         "answers", ._produce.answers))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

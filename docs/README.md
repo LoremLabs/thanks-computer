@@ -35,8 +35,9 @@ Read in order, or jump to what you need:
    when it fires and what it contributes.
 6. **[Continuations](./continuations.md)** — built for waiting: how an
    operation suspends a flow and calls back to resume it.
-7. **[AI](./ai.md)** — `ai://chat` and `ai://embed`: a model as an operation,
-   prompts that read the document, structured output, embeddings.
+7. **[AI](./ai.md)** — `ai://chat`, `ai://embed` and `ai://decide`: a model as
+   an operation, prompts that read the document, structured output, embeddings,
+   typed decisions with probabilities.
 8. **[AI Gateway](./gateway.md)** — the other direction: point an AI client at
    the chassis and every request it sends runs through a stack you author.
 9. **[Vectors](./vectors.md)** — the vector store: semantic search as

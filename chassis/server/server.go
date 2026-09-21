@@ -45,6 +45,7 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/cron/local" // registers the "local" cron queue backend
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/dbcache"
+	_ "github.com/loremlabs/thanks-computer/chassis/decide/vercel" // registers the "vercel" ai://decide backend
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	"github.com/loremlabs/thanks-computer/chassis/egress"
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/open"    // registers the "open" policy

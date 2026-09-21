@@ -90,6 +90,115 @@ Pick one embedding model per [collection](./vectors.md#collections) and stay on 
 — vectors are only comparable within the same embedding space, so a collection
 pins its model and rejects a mismatched upsert.
 
+## Decisions — `EXEC "ai://decide"`
+
+Some questions don't need prose back. *Which folder does this belong in? Was
+this sent by a machine? How urgent is it?* `ai://decide` asks them directly:
+you give it the evidence (`state`) and a set of bounded questions, and each
+answer comes back typed, with probabilities. The model can only pick from the
+answers you offered.
+
+```txcl
+WHEN ._doc.ready == true
+WITH state     = ._doc.summary,
+     questions = &object(
+       "folder",    &object("type", "choice",
+                            "instructions", "Which folder does this document belong in?",
+                            "criteria", &object("Invoices",  "bills and receipts",
+                                                "Contracts", "signed agreements")),
+       "automated", &object("type", "noul",
+                            "instructions", "Was this sent by a machine rather than a person?")),
+     into      = "_place",
+     timeout   = 5000
+EXEC "ai://decide"
+```
+
+`state` is data: a string, an object, or an array (never a template). There
+are three kinds of question:
+
+| `type` | Asks | `criteria` | Answer |
+| --- | --- | --- | --- |
+| `noul` | is this proposition true? | optional: `{"true": "…", "false": "…"}` | `probability` = P(true) |
+| `choice` | which of these fits? | required: option name → description | `choice`, `probability` = P(choice), `probabilities` per option |
+| `score` | how far along this rubric? | required: levels, lowest first (≥ 2) | `score` (0 = lowest level), `probabilities` per level index |
+
+When the provider reports its own `confidence` in an answer, that rides along
+too (Jev reports one for `choice` and `score`, not `noul`). It is the
+provider's number, not a probability, and it is never made up when absent.
+
+The result lands under `WITH into` (default `_decide`):
+
+```json
+{
+  "ok": true,
+  "answers": {
+    "folder":    { "type": "choice", "choice": "Invoices", "probability": 0.91,
+                   "confidence": 0.93,
+                   "probabilities": { "Invoices": 0.91, "Contracts": 0.09 } },
+    "automated": { "type": "noul", "probability": 0.04 }
+  },
+  "provider": "vercel", "model": "typesafe-ai/jev",
+  "usage": { "input_tokens": 275, "output_tokens": 20 }, "latency_ms": 180
+}
+```
+
+### Your stack decides what a probability means
+
+The op has no threshold, fallback or allow/deny setting. It returns
+judgments; the next step's WHEN clauses turn them into policy, where they are
+visible and diffable:
+
+```txcl
+WHEN ._place.ok == true && ._place.answers.folder.choice == "Invoices"
+     && ._place.answers.folder.probability > 0.80
+EMIT .folder = "Invoices"
+```
+
+```txcl
+WHEN ._place.ok != true
+EMIT .folder = "Inbox"
+```
+
+The failure lane is yours too: fall back, fail closed, ask a human. The op
+never turns a failure into an answer. Two WHEN rules matter for every
+threshold:
+
+- **Gate on `ok == true` first.** A missing path compares as 0. When the call
+  fails there are no answers, so `probability > 0.8` stays quiet but
+  `probability < 0.2` **fires**.
+- **Write thresholds as decimals.** An integer literal compares as an
+  integer: `probability > 0` is false for 0.91. Use `> 0.0`.
+
+On failure, `ok` is `false`, `answers` is absent, and `error.code` says why:
+
+| `error.code` | Meaning |
+| --- | --- |
+| `txco_decide_invalid_with` | malformed `state`/`questions`/`into`, or a question beyond the provider's limits. Nothing was sent. |
+| `txco_decide_missing_secret` | no `VERCEL_AI_KEY` for this tenant |
+| `txco_decide_timeout` | the op's timeout passed first |
+| `txco_decide_provider_http` / `_provider_net` / `_provider_parse` | the provider refused, was unreachable, or answered garbage |
+| `txco_decide_invalid_answer` | the provider's answers broke the contract (a question unanswered, a choice not offered, a probability out of range) |
+| `txco_decide_no_backend` | `WITH provider` names no registered backend |
+
+Each question key comes back under the same key, so keys are limited to
+letters, digits, `_` and `-`. The one backend today, **`provider = "vercel"`**
+(the default), sends the questions to Vercel AI Gateway's evaluation API. It
+runs TypeSafe AI's Jev (`typesafe-ai/jev`) by default and accepts up to 255
+options per choice. It needs the per-tenant secret `VERCEL_AI_KEY`,
+stored the same way as `OPENROUTER_KEY` below. Decision state is often private
+(mail, documents), so the chassis asks the provider not to retain it
+(`--decide-zero-data-retention`, on by default). Jev honors that; a model
+without a zero-retention agreement refuses the call rather than serving it.
+Decisions take well under a second (about 300 ms warm), so set a tight
+`WITH timeout`; the AI default is 60s.
+
+To test a flow without calling a provider, mock the op with the result shape
+above (what the op merges), not the provider's wire format.
+
+A worked example lives at `examples/decide-produce/`: type a food, and four
+questions plus four `WHEN` rules answer "vegetable", "not sure", or "not
+produce".
+
 ## Set the API key
 
 `ai://chat` routes through [OpenRouter](https://openrouter.ai), so the chassis

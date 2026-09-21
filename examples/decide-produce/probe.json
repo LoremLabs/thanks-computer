@@ -1,0 +1,35 @@
+{
+  "note": "ai://decide classifies a typed food. The smoke runs hermetically: dev_env blanks VERCEL_AI_KEY, so the decide op reports txco_decide_missing_secret and the stack's own failure lane (200/unavailable.txcl) answers — proving route → decide → WHEN without a provider call. With a real key the same /classify returns the verdict (see README.md).",
+  "dev_env": [
+    "VERCEL_AI_KEY="
+  ],
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "produce"
+    }
+  ],
+  "checks": [
+    {
+      "name": "the demo page is served from FILES/ at /",
+      "method": "GET",
+      "path": "/",
+      "status": 200,
+      "contains": "decide-produce"
+    },
+    {
+      "name": "no item → usage hint",
+      "method": "GET",
+      "path": "/classify",
+      "status": 400,
+      "contains": "usage"
+    },
+    {
+      "name": "without a key, the stack's failure lane answers (never a fake verdict)",
+      "method": "GET",
+      "path": "/classify?item=tomato",
+      "status": 503,
+      "contains": "txco_decide_missing_secret"
+    }
+  ]
+}

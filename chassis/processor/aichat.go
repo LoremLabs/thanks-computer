@@ -25,8 +25,9 @@ import (
 // aiSchemePrefix is the EXEC-value prefix this handler claims.
 const aiSchemePrefix = "ai://"
 
-// aiSubOpChat is the only sub-op v1 dispatches. Future ai://embed,
-// ai://transcribe, ai://image slot in here.
+// aiSubOpChat is the chat sub-op. ai://embed (aiembed.go) and ai://decide
+// (aidecide.go) dispatch from the same switch; ai://transcribe, ai://image
+// would slot in there too.
 const aiSubOpChat = "chat"
 
 // Schema validation outcome labels. Surfaced on the trace event and on
@@ -83,6 +84,8 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 	switch subOp {
 	case aiSubOpEmbed:
 		return pu.execEmbed(ctx, op)
+	case aiSubOpDecide:
+		return pu.execDecide(ctx, op)
 	case aiSubOpChat:
 		// fall through to the chat path below
 	default:

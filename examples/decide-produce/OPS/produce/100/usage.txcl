@@ -1,0 +1,10 @@
+# /classify with no item (or one that is too long) → usage hint. The mirror
+# image of classify.txcl's WHEN: rules in one scope run concurrently against
+# the same snapshot, so they are made mutually exclusive by WHEN, not by
+# file order. A missing ?item reads as "", which `!~` matches.
+WHEN @web.req.url.path == "/classify" && @web.req.url.query.item.0 !~ /^.{1,80}$/
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "usage", "GET /classify?item=<a food, up to 80 characters>"))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true
