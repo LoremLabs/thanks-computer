@@ -1,0 +1,76 @@
+{
+  "note": "Lexical search through txco://search/*, the chassis built-in backed by the bundled Bleve store. /seed ensures a collection and upserts four records; /find queries it with plain language under a metadata filter; /rename updates a record without touching its text; /forget deletes a document by filter. The checks run in order and cover all five ops. Binds localhost → search-demo (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "bind": [{ "host": "localhost", "stack": "search-demo" }],
+  "checks": [
+    {
+      "name": "seed: ensure the collection, upsert four records",
+      "method": "GET",
+      "path": "/seed",
+      "status": 200,
+      "contains": "\"seeded\":4"
+    },
+    {
+      "name": "ordinary words: a whole sentence finds its record",
+      "method": "GET",
+      "path": "/find?q=hello%2C+where+can+I+leave+my+luggage+before+we+arrive%3F",
+      "status": 200,
+      "contains": "hall cupboard"
+    },
+    {
+      "name": "filter: the team's ticket is hidden from anyone",
+      "method": "GET",
+      "path": "/find?q=TXC-4821",
+      "status": 200,
+      "contains": "\"hits\":[]"
+    },
+    {
+      "name": "identifier: TXC-4821 finds the ticket for the team",
+      "method": "GET",
+      "path": "/find?q=what+is+TXC-4821+about&as=team",
+      "status": 200,
+      "contains": "pool pump"
+    },
+    {
+      "name": "phrase: the intact clause ranks first",
+      "method": "GET",
+      "path": "/find?q=%22termination+for+convenience%22&as=team",
+      "status": 200,
+      "contains": "\"hits\":[{\"id\":\"contract:0\""
+    },
+    {
+      "name": "update: rename the parking page without re-indexing its text",
+      "method": "GET",
+      "path": "/rename",
+      "status": 200,
+      "contains": "\"renamed\":1"
+    },
+    {
+      "name": "the new filename finds it",
+      "method": "GET",
+      "path": "/find?q=garage.md",
+      "status": 200,
+      "contains": "Parking is behind the building"
+    },
+    {
+      "name": "delete by filter: forget a whole document",
+      "method": "GET",
+      "path": "/forget?doc=contract.md",
+      "status": 200,
+      "contains": "\"forgotten\":1"
+    },
+    {
+      "name": "the forgotten document no longer matches",
+      "method": "GET",
+      "path": "/find?q=thirty+days+notice",
+      "status": 200,
+      "contains": "\"hits\":[]"
+    },
+    {
+      "name": "no query → usage hint",
+      "method": "GET",
+      "path": "/find",
+      "status": 400,
+      "contains": "usage"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+# search-demo scope 100 — /seed, step 1: make sure the collection exists.
+#
+# A collection is one lexical corpus: its own index, and its own term
+# statistics, so what another collection holds never moves this one's
+# ranking. Ensuring is idempotent. It has its own scope on purpose: rules in
+# one scope run concurrently, and the upsert at 150 must not race the create.
+WHEN @src == "http" && @web.req.url.path == "/seed"
+  EXEC "txco://search/collection"
+    WITH collection = "handbook"

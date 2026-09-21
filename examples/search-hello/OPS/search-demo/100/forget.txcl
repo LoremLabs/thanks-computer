@@ -1,0 +1,8 @@
+# search-demo scope 100 — /forget?doc=…: remove a whole document.
+#
+# `delete` takes `ids`, or a `filter` with at least one condition. The filter
+# form removes every chunk of a document without knowing how many there are.
+WHEN @src == "http" && @web.req.url.path == "/forget" && @web.req.url.query.doc.0 != ""
+  EXEC "txco://search/delete"
+    WITH collection = "handbook",
+         filter = &object("doc", @web.req.url.query.doc.0)

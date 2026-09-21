@@ -42,24 +42,27 @@ Read in order, or jump to what you need:
    the chassis and every request it sends runs through a stack you author.
 9. **[Vectors](./vectors.md)** — the vector store: semantic search as
    operations, and deploying a catalog declaratively with `txco data`.
-10. **[Datasets](./datasets.md)** — bundle read-only lookup data (SQLite,
+10. **[Search](./search.md)** — the lexical search store: find records by
+    the words they contain — names, filenames, identifiers, quoted phrases —
+    as operations, beside the vector store.
+11. **[Datasets](./datasets.md)** — bundle read-only lookup data (SQLite,
     FTS5) with a stack and query it locally through named queries.
-11. **[Workspaces](./workspaces.md)** — `workspace://`: run commands in an
+12. **[Workspaces](./workspaces.md)** — `workspace://`: run commands in an
     owned, stateful environment; files persist between calls, exit codes
     are data.
-12. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
+13. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
     fact.
-13. **[Telemetry](./telemetry.md)** — emit your application's metrics from
+14. **[Telemetry](./telemetry.md)** — emit your application's metrics from
     a stack; the chassis ships them to the backend you configure.
-14. **[Schemas](./schemas.md)** — optionally write down the shape a
+15. **[Schemas](./schemas.md)** — optionally write down the shape a
     stack reads and writes, for humans and machines.
-15. **[Packages](./packages.md)** — share a working department; install
+16. **[Packages](./packages.md)** — share a working department; install
     someone else's.
-16. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
+17. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
     runs its DNS: mail records, reputation keys, TLS, handled.
-17. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
+18. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
     stacks, domains, secrets, people, and usage, walled per tenant.
-17. **[Running a chassis](./running.md)** — `txco serve` and the
+19. **[Running a chassis](./running.md)** — `txco serve` and the
     author–apply loop, on your own machine.
 
 Building stacks day to day? The **[authoring guides](./authoring/README.md)**

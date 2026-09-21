@@ -1,0 +1,5 @@
+WHEN @web.req.url.path == "/forget" && ._search.deleted != null
+  EMIT @web.res.body = &b64encode(&to_json(&object("forgotten", ._search.deleted))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

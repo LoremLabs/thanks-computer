@@ -1,0 +1,23 @@
+# search-demo scope 150 — /seed, step 2: index a few records.
+#
+# A record is {id, text} plus optional searched fields (`title`, `heading`,
+# `name`, `entities`) and `metadata`, which is filtered on and never searched.
+# The same id replaces, so re-running /seed changes nothing. Real stacks hand
+# `items` the chunk array they already build for txco://vector/upsert: keys
+# this op does not know (such as `vector`) are ignored.
+WHEN @src == "http" && @web.req.url.path == "/seed" && ._search.collection.name != ""
+  EXEC "txco://search/upsert"
+    WITH collection = "handbook",
+         items = &array(
+           &object("id", "faq:0", "name", "faq.md", "title", "Guest FAQ",
+                   "text", "Luggage can be left in the hall cupboard before check-in.",
+                   "metadata", &object("doc", "faq.md", "audience", "anyone")),
+           &object("id", "parking:0", "name", "parking.md", "title", "Parking",
+                   "text", "Parking is behind the building. The gate code changes every Monday.",
+                   "metadata", &object("doc", "parking.md", "audience", "anyone")),
+           &object("id", "contract:0", "name", "contract.md", "title", "Cleaning contract",
+                   "text", "Either party may exercise termination for convenience on thirty days notice.",
+                   "metadata", &object("doc", "contract.md", "audience", "anyone")),
+           &object("id", "tickets:0", "name", "tickets.md", "title", "Maintenance tickets",
+                   "text", "Ticket TXC-4821 tracks the broken pool pump. For your convenience the termination date of the repair is on the form.",
+                   "metadata", &object("doc", "tickets.md", "audience", "team")))

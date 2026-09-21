@@ -1,0 +1,11 @@
+# Nothing to do → usage hint. Gated on every other responder's input being
+# ABSENT: rules in one scope evaluate concurrently, so responders must be
+# mutually exclusive by WHEN, not by file order.
+WHEN @src == "http" && .search.error.code == ""
+  && ((@web.req.url.path == "/find" && @web.req.url.query.q.0 == "")
+   || (@web.req.url.path == "/forget" && @web.req.url.query.doc.0 == ""))
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "usage", &array("GET /seed", "GET /find?q=<words>[&as=team]", "GET /rename", "GET /forget?doc=<name>")))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

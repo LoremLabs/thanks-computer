@@ -1184,6 +1184,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		"TXCO_FEED_SOURCE_FILE_DIR=" + feedDir,
 		"TXCO_SECRET_MASTER_KEY=" + secretKeyPath,
 		"TXCO_VECTOR_DB_PATH=" + vectorDBPath,
+		"TXCO_SEARCH_PATH=" + filepath.Join(devDir, "search"),
 		"TXCO_NOTEBOOK_DB_PATH=" + filepath.Join(devDir, "notebook.db"),
 	}
 

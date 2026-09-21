@@ -1,0 +1,7 @@
+WHEN @web.req.url.path == "/seed" && ._search.upserted != null
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "seeded", ._search.upserted,
+         "collection", ._search.collection))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

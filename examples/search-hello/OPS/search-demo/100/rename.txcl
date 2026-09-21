@@ -1,0 +1,11 @@
+# search-demo scope 100 — /rename: the parking page was renamed, not rewritten.
+#
+# `update` changes every record `filter` admits without touching its text:
+# `merge` merges metadata keys, and `fields` replaces the short searched fields
+# (`name`, `title`, `heading`). The filter must carry at least one condition.
+WHEN @src == "http" && @web.req.url.path == "/rename"
+  EXEC "txco://search/update"
+    WITH collection = "handbook",
+         filter = &object("doc", "parking.md"),
+         merge = &object("doc", "garage.md"),
+         fields = &object("name", "garage.md", "title", "Garage")

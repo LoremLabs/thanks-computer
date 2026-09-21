@@ -1,0 +1,17 @@
+# search-demo scope 100 — /find?q=…: what anyone may see.
+#
+# `query` is plain language. A quoted string is a phrase, an identifier such
+# as TXC-4821 is matched whole, and everything else is OR-ed and ranked, so a
+# whole sentence works as a query. No engine syntax is recognised.
+#
+# `filter` is the grammar txco://vector/search takes, so one filter object can
+# narrow both retrieval lanes. It admits or rejects; it never moves the order.
+# Hits land at `into` (default `_search.hits`), best first:
+# [{id, rank, text, metadata}]. There is no score.
+WHEN @src == "http" && @web.req.url.path == "/find"
+  && @web.req.url.query.q.0 != "" && @web.req.url.query.as.0 != "team"
+  EXEC "txco://search/query"
+    WITH collection = "handbook",
+         query = @web.req.url.query.q.0,
+         limit = 5,
+         filter = &object("audience", "anyone")

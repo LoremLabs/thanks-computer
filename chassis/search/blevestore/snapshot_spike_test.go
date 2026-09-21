@@ -1,6 +1,7 @@
 package blevestore
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"path/filepath"
@@ -55,7 +56,7 @@ func TestSnapshotCarriesCursorAndResults(t *testing.T) {
 	queries := []string{"TXC-4117", "pool pump building 3", `"front desk"`, "nothing matches this zebra"}
 	before := map[string][]string{}
 	for _, q := range queries {
-		hits, err := src.Query(q, 6, search.Filter{})
+		hits, err := src.Query(context.Background(), q, 6, search.Filter{})
 		if err != nil {
 			t.Fatalf("Query(%q): %v", q, err)
 		}
@@ -91,7 +92,7 @@ func TestSnapshotCarriesCursorAndResults(t *testing.T) {
 		t.Errorf("copy Count = %d, want 200", n)
 	}
 	for _, q := range queries {
-		hits, err := cp.Query(q, 6, search.Filter{})
+		hits, err := cp.Query(context.Background(), q, 6, search.Filter{})
 		if err != nil {
 			t.Fatalf("copy Query(%q): %v", q, err)
 		}
@@ -104,7 +105,7 @@ func TestSnapshotCarriesCursorAndResults(t *testing.T) {
 	if err := cp.Upsert([]search.Item{{ID: "replayed", Text: "zebra crossing"}}, map[string][]byte{cursorKey: seq(105)}); err != nil {
 		t.Fatalf("write to the copy: %v", err)
 	}
-	if hits, _ := cp.Query("zebra", 6, search.Filter{}); len(hits) != 1 || hits[0].ID != "replayed" {
+	if hits, _ := cp.Query(context.Background(), "zebra", 6, search.Filter{}); len(hits) != 1 || hits[0].ID != "replayed" {
 		t.Errorf("copy after write = %v", hitIDs(hits))
 	}
 }

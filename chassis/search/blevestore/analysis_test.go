@@ -1,6 +1,7 @@
 package blevestore
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -94,7 +95,7 @@ func TestIdentifiersRankFirst(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 	for _, id := range ids {
-		hits, err := c.Query("what do we know about "+id+"?", 5, search.Filter{})
+		hits, err := c.Query(context.Background(), "what do we know about "+id+"?", 5, search.Filter{})
 		if err != nil {
 			t.Fatalf("Query(%q): %v", id, err)
 		}
@@ -114,7 +115,7 @@ func TestPhraseAndOrSemantics(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	hits, err := c.Query(`"termination for convenience"`, 5, search.Filter{})
+	hits, err := c.Query(context.Background(), `"termination for convenience"`, 5, search.Filter{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -124,7 +125,7 @@ func TestPhraseAndOrSemantics(t *testing.T) {
 
 	// OR semantics: a long natural-language question still finds the record
 	// that shares only a few of its words.
-	hits, err = c.Query("hello, could you tell me where I might leave my luggage before we arrive?", 5, search.Filter{})
+	hits, err = c.Query(context.Background(), "hello, could you tell me where I might leave my luggage before we arrive?", 5, search.Filter{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestPhraseAndOrSemantics(t *testing.T) {
 	}
 
 	// Engine syntax is not recognised.
-	hits, err = c.Query(`+luggage -cupboard text:hall*`, 5, search.Filter{})
+	hits, err = c.Query(context.Background(), `+luggage -cupboard text:hall*`, 5, search.Filter{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestPhraseAndOrSemantics(t *testing.T) {
 		t.Errorf("syntax query = %v, want [other]", got)
 	}
 
-	if hits, _ := c.Query(`?!… --`, 5, search.Filter{}); len(hits) != 0 {
+	if hits, _ := c.Query(context.Background(), `?!… --`, 5, search.Filter{}); len(hits) != 0 {
 		t.Errorf("empty query returned %v", hitIDs(hits))
 	}
 }
@@ -155,7 +156,7 @@ func TestFieldsAndHitShape(t *testing.T) {
 	}, nil); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	hits, err := c.Query("apollo-launch-plan.pdf", 5, search.Filter{})
+	hits, err := c.Query(context.Background(), "apollo-launch-plan.pdf", 5, search.Filter{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestFieldsAndHitShape(t *testing.T) {
 	if hits[0].Rank != 1 || hits[0].Text != "General notes." || hits[0].Metadata["doc_key"] != "dr_1" || hits[0].Metadata["page"] != float64(7) {
 		t.Errorf("hit shape = %+v", hits[0])
 	}
-	hits, _ = c.Query("what did Marc Dupont say", 5, search.Filter{})
+	hits, _ = c.Query(context.Background(), "what did Marc Dupont say", 5, search.Filter{})
 	if len(hits) == 0 || hits[0].ID != "c" {
 		t.Errorf("entity query = %v, want c first", hitIDs(hits))
 	}
@@ -174,7 +175,7 @@ func TestFieldsAndHitShape(t *testing.T) {
 	if err := c.Upsert([]search.Item{{ID: "c", Text: "Now about gardening."}}, nil); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if hits, _ := c.Query("Marc Dupont", 5, search.Filter{}); len(hits) != 0 {
+	if hits, _ := c.Query(context.Background(), "Marc Dupont", 5, search.Filter{}); len(hits) != 0 {
 		t.Errorf("replaced record still matches: %v", hitIDs(hits))
 	}
 	if n, _ := c.Count(); n != 3 {
@@ -224,7 +225,7 @@ func TestFilters(t *testing.T) {
 		{"id eq", cond("id", vector.OpEq, "p2"), []string{"p2"}},
 		{"id not_in", cond("id", vector.OpNotIn, []any{"p1", "p2"}), []string{"p3", "p4"}},
 	} {
-		hits, err := c.Query("pool hours", 10, tc.f)
+		hits, err := c.Query(context.Background(), "pool hours", 10, tc.f)
 		if err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
@@ -233,7 +234,7 @@ func TestFilters(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	if _, err := c.Query("pool", 10, cond("slug", vector.Op("like"), "x")); err == nil {
+	if _, err := c.Query(context.Background(), "pool", 10, cond("slug", vector.Op("like"), "x")); err == nil {
 		t.Errorf("unsupported op: want an error")
 	}
 }
@@ -249,8 +250,8 @@ func TestFilterDoesNotScore(t *testing.T) {
 	}, nil); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	plain, _ := c.Query("pool hours", 10, search.Filter{})
-	filtered, _ := c.Query("pool hours", 10, cond("slug", vector.OpEq, "paris"))
+	plain, _ := c.Query(context.Background(), "pool hours", 10, search.Filter{})
+	filtered, _ := c.Query(context.Background(), "pool hours", 10, cond("slug", vector.OpEq, "paris"))
 	if !reflect.DeepEqual(hitIDs(plain), hitIDs(filtered)) {
 		t.Errorf("filter changed order: %v vs %v", hitIDs(plain), hitIDs(filtered))
 	}
@@ -316,7 +317,7 @@ func TestRareTermBeatsCommonWordsInShortFields(t *testing.T) {
 	if err := c.Upsert(items, nil); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	hits, err := c.Query("Do we use Firecracker anywhere?", 5, search.Filter{})
+	hits, err := c.Query(context.Background(), "Do we use Firecracker anywhere?", 5, search.Filter{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}

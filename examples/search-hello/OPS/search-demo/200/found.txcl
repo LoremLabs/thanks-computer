@@ -1,0 +1,9 @@
+# Serialize the hits to exact JSON bytes (an explicit body, so the wire shape
+# does not depend on the chassis debug flags).
+WHEN @web.req.url.path == "/find" && ._search.hits != null
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "query", @web.req.url.query.q.0,
+         "hits", ._search.hits))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

@@ -72,6 +72,8 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
 	"github.com/loremlabs/thanks-computer/chassis/scheduled"
+	"github.com/loremlabs/thanks-computer/chassis/search"
+	_ "github.com/loremlabs/thanks-computer/chassis/search/blevestore" // registers the bundled "bleve" search backend
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
@@ -1884,6 +1886,32 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		storeSeedMaterializers = append(storeSeedMaterializers, vecseed.New(vstore, vstore.Shared()))
 	}
 
+	// Durable tenant lexical search (txco://search/{collection,upsert,query,
+	// delete,update}). The backend is selected by --search-store (default
+	// "bleve", one index per collection under --search-path; "none" turns it
+	// off). Tenant-scoped via processor.TenantScope; collections are
+	// tenant-level, like vector's. Unlike the vector ops, these are registered
+	// whatever happens: with no store (off, or a failed open) they answer
+	// txco_search_disabled, so a stack fusing two retrieval lanes can branch on
+	// it instead of failing on an unknown op.
+	sstore, serr := search.Open(conf.SearchStore, search.Config{Path: conf.SearchPath, MaxOpenIndexes: conf.SearchMaxOpenIndexes})
+	if serr != nil {
+		pu.Logger.Warn("txco://search disabled: " + serr.Error())
+		sstore = nil
+	}
+	for name, h := range map[string]func(context.Context, search.Store, []byte) (event.Payload, error){
+		"collection": searchCollection,
+		"upsert":     searchUpsert,
+		"query":      searchQuery,
+		"delete":     searchDelete,
+		"update":     searchUpdate,
+	} {
+		pu.Handle([]byte("txco://search/"+name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return h(ctx, sstore, in)
+			}))
+	}
+
 	// txco://dataset — named-query lookups against the routed stack's
 	// DATASETS/ SQLite artifacts (chassis/dataset). Tenant-scoped via
 	// processor.TenantScope like kv/vector; per-stack like read-file.
@@ -2647,6 +2675,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 		case <-inflight.Idle():
 		case <-time.After(5 * time.Second):
 			logger.Warn("inflight wait timed out; trace records may be incomplete")
+		}
+		// A search index must be closed to flush what it holds. Closed after
+		// the in-flight wait, so no running op loses its store under it.
+		if sstore != nil {
+			if err := sstore.Close(); err != nil {
+				logger.Warn("search store close error", zap.Error(err))
+			}
 		}
 		// Drain the trace sink (async wrapper waits for queued writes;
 		// sync sinks are a no-op).

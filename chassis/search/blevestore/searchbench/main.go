@@ -18,6 +18,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -110,7 +111,7 @@ func run(recordsPath, queriesPath string, limit int, filterJSON string, lift boo
 		}
 		text, _ := q["q"].(string)
 		t0 := time.Now()
-		hits, err := col.Query(text, limit, filter)
+		hits, err := col.Query(context.Background(), text, limit, filter)
 		if err != nil {
 			return err
 		}

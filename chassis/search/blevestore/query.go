@@ -183,7 +183,7 @@ func buildFilter(f search.Filter) (query.Query, error) {
 	var must, mustNot []query.Query
 	for _, c := range f.Conditions {
 		if c.Field == "" || strings.ContainsRune(c.Field, 0) {
-			return nil, &vector.InvalidArgError{Reason: "filter field name required"}
+			return nil, &search.InvalidArgError{Reason: "filter field name required"}
 		}
 		switch c.Op {
 		case vector.OpEq:
@@ -216,7 +216,7 @@ func buildFilter(f search.Filter) (query.Query, error) {
 			}
 			must = append(must, q)
 		default:
-			return nil, &vector.InvalidArgError{Reason: fmt.Sprintf("unsupported filter op %q", c.Op)}
+			return nil, &search.InvalidArgError{Reason: fmt.Sprintf("unsupported filter op %q", c.Op)}
 		}
 	}
 	if len(must) == 0 && len(mustNot) == 0 {
@@ -233,7 +233,7 @@ func eqQuery(field string, v any) (query.Query, error) {
 	if field == "id" {
 		s, ok := v.(string)
 		if !ok {
-			return nil, &vector.InvalidArgError{Reason: "filter on `id` takes strings"}
+			return nil, &search.InvalidArgError{Reason: "filter on `id` takes strings"}
 		}
 		return query.NewDocIDQuery([]string{s}), nil
 	}
@@ -254,12 +254,12 @@ func eqQuery(field string, v any) (query.Query, error) {
 		q.SetField(name)
 		return q, nil
 	}
-	return nil, &vector.InvalidArgError{Reason: fmt.Sprintf("filter on %q: unsupported value type %T", field, v)}
+	return nil, &search.InvalidArgError{Reason: fmt.Sprintf("filter on %q: unsupported value type %T", field, v)}
 }
 
 func rangeQuery(field string, op vector.Op, v any) (query.Query, error) {
 	if field == "id" {
-		return nil, &vector.InvalidArgError{Reason: "filter on `id` supports eq, in and not_in"}
+		return nil, &search.InvalidArgError{Reason: "filter on `id` supports eq, in and not_in"}
 	}
 	name := metaPrefix + field
 	incl := op == vector.OpGte || op == vector.OpLte
@@ -284,7 +284,7 @@ func rangeQuery(field string, op vector.Op, v any) (query.Query, error) {
 		q.SetField(name)
 		return q, nil
 	}
-	return nil, &vector.InvalidArgError{Reason: fmt.Sprintf("filter on %q: %s takes a number or a non-empty string", field, op)}
+	return nil, &search.InvalidArgError{Reason: fmt.Sprintf("filter on %q: %s takes a number or a non-empty string", field, op)}
 }
 
 func asFloat(v any) (float64, bool) {

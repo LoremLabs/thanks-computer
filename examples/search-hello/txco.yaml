@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — lexical search is a chassis built-in
+# (txco://search/*); the workspace ships only rules.

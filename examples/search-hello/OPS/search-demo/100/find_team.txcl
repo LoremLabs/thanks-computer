@@ -1,0 +1,11 @@
+# search-demo scope 100 — /find?q=…&as=team: the team sees its own records too.
+# Mutually exclusive with find.txcl by WHEN: rules in one scope run
+# concurrently against the same snapshot. (A real stack derives the audience
+# from who is asking, never from a query parameter.)
+WHEN @src == "http" && @web.req.url.path == "/find"
+  && @web.req.url.query.q.0 != "" && @web.req.url.query.as.0 == "team"
+  EXEC "txco://search/query"
+    WITH collection = "handbook",
+         query = @web.req.url.query.q.0,
+         limit = 5,
+         filter = &object("audience", &array("anyone", "team"))

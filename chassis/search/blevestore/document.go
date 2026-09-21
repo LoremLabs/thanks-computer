@@ -22,9 +22,6 @@ const (
 	fieldEntities = "entities"
 	metaPrefix    = "m."
 	srcField      = "_src"
-
-	// maxMetadataKeys bounds the distinct fields one record can add to an index.
-	maxMetadataKeys = 64
 )
 
 const (
@@ -45,10 +42,7 @@ const (
 // can re-index a collection from there without the source documents.
 func buildDocument(it search.Item, an analysis.Analyzer) (*document.Document, error) {
 	if it.ID == "" {
-		return nil, fmt.Errorf("item id required")
-	}
-	if len(it.Metadata) > maxMetadataKeys {
-		return nil, fmt.Errorf("item %q: %d metadata keys (max %d)", it.ID, len(it.Metadata), maxMetadataKeys)
+		return nil, &search.InvalidArgError{Reason: "item id required"}
 	}
 	doc := document.NewDocument(it.ID)
 
