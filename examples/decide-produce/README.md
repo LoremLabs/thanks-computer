@@ -24,11 +24,13 @@ say fruit   → not a food name  instructions don't steer the answer
 
 ```sh
 txco dev                                   # from this directory
-txco auth tenant secrets set VERCEL_AI_KEY # paste the key at the prompt
+txco auth tenant secrets set --profile dev --tenant default VERCEL_AI_KEY
 ```
 
-(On a dev machine you can `export VERCEL_AI_KEY=…` before `txco dev`
-instead; the chassis falls back to the environment.)
+Paste the key at the prompt. Name `--profile dev`: without it, `txco auth`
+commands go to your *active* profile, which may be a cloud chassis. (On a dev
+machine you can `export VERCEL_AI_KEY=…` before `txco dev` instead; the
+chassis falls back to the environment.)
 
 Open the URL `txco dev` printed for the `produce` stack. The page has a text
 box and example buttons. Each answer shows the verdict, the rule that
@@ -56,7 +58,7 @@ curl 'http://<that host>/classify?item=avocado'
 ```
 
 `answers` is `ai://decide`'s own output, passed through unchanged. `because`
-is written in each `200/*.txcl` rule next to its `WHEN`, so the page shows
+is written in each `0200_ANSWER/*.txcl` rule next to its `WHEN`, so the page shows
 why without knowing the thresholds.
 
 Without a key, `/classify` answers `503` with `txco_decide_missing_secret`.
@@ -66,13 +68,13 @@ That's the stack's failure lane, not a crash.
 
 | File | What |
 |------|------|
-| `OPS/produce/100/classify.txcl` | the five questions, one `EXEC "ai://decide"` → `_produce` |
-| `OPS/produce/100/usage.txcl` | no `?item` (or over 80 chars) → `400` usage hint |
-| `OPS/produce/200/not_a_food_name.txcl` | food_name < 0.8 → "not a food name" (the guard) |
-| `OPS/produce/200/sure.txcl` | food_name ≥ 0.8, produce ≥ 0.5, kind ≥ 0.75 → the verdict |
-| `OPS/produce/200/unsure.txcl` | food_name ≥ 0.8, produce ≥ 0.5, kind < 0.75 → "not sure" + the split |
-| `OPS/produce/200/not_produce.txcl` | food_name ≥ 0.8, produce < 0.5 → "not produce" |
-| `OPS/produce/200/unavailable.txcl` | the call failed → `503` + the error code |
+| `OPS/produce/0100_ASK/classify.txcl` | the five questions, one `EXEC "ai://decide"` → `_produce` |
+| `OPS/produce/0100_ASK/usage.txcl` | no `?item` (or over 80 chars) → `400` usage hint |
+| `OPS/produce/0200_ANSWER/not_a_food_name.txcl` | food_name < 0.8 → "not a food name" (the guard) |
+| `OPS/produce/0200_ANSWER/sure.txcl` | food_name ≥ 0.8, produce ≥ 0.5, kind ≥ 0.75 → the verdict |
+| `OPS/produce/0200_ANSWER/unsure.txcl` | food_name ≥ 0.8, produce ≥ 0.5, kind < 0.75 → "not sure" + the split |
+| `OPS/produce/0200_ANSWER/not_produce.txcl` | food_name ≥ 0.8, produce < 0.5 → "not produce" |
+| `OPS/produce/0200_ANSWER/unavailable.txcl` | the call failed → `503` + the error code |
 | `OPS/produce/FILES/index.html` | the page (served at `/`): enter a food, see the verdict and every answer |
 
 The five questions show all three types:
@@ -88,7 +90,7 @@ The five questions show all three types:
 ## Things this example is here to show
 
 **The model judges; the stack decides.** `ai://decide` has no threshold
-setting. `0.8`, `0.5` and `0.75` are written in `200/*.txcl`, so moving the
+setting. `0.8`, `0.5` and `0.75` are written in `0200_ANSWER/*.txcl`, so moving the
 "sure" line is a one-character diff, visible in review.
 
 **A choice always picks.** Ask "fruit or vegetable?" about lasagna and you

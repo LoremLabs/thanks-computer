@@ -1,4 +1,4 @@
-# produce scope 200 — the policy. Five rules, mutually exclusive by WHEN:
+# produce 0200_ANSWER — the policy. Five rules, mutually exclusive by WHEN:
 #
 #   not_a_food_name  the text isn't just a food's name (the guard)
 #   sure             it's produce, and the kind is clear    (this file)
