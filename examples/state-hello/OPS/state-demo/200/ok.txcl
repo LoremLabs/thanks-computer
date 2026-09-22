@@ -1,0 +1,6 @@
+# A state result answers 200 with the op's own object.
+WHEN ._st.error.code == "" && (._st.ok == true || ._st.found != null)
+  EMIT @web.res.body = &b64encode(&to_json(._st)),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

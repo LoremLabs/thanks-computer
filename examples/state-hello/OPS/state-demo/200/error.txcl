@@ -1,0 +1,12 @@
+# A state error (exists, conflict, not found, bad argument) answers 409 with
+# the structured code, the reason and the record as it is. The run itself
+# never failed: a conflict is branch-visible control flow.
+WHEN ._st.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error",   ._st.error.code,
+         "reason",  ._st.error.reason,
+         "message", ._st.error.message,
+         "current", ._st.current))),
+       @web.res.status = 409,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

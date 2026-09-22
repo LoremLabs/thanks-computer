@@ -1,0 +1,12 @@
+# POST /task/move?id=<id>&from=<state>&to=<state>&v=<version> — the
+# compare-and-swap. Both `from` and `v` must match what is stored, or the op
+# answers txco_state_conflict (reason "version" or "state") and moves
+# nothing. On success the chassis presents the transition into _state/0.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/task/move"
+  EXEC "txco://state/transition"
+    WITH machine          = "demo.task",
+         id               = @web.req.url.query.id.0,
+         from             = @web.req.url.query.from.0,
+         to               = @web.req.url.query.to.0,
+         expected_version = @web.req.url.query.v.0,
+         into             = "_st"

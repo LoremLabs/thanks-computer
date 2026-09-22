@@ -1,0 +1,9 @@
+# POST /task/create?id=<id>[&owner=<who>] — a record at version 1. A second
+# create of the same id answers txco_state_exists with the record as it is.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/task/create"
+  EXEC "txco://state/create"
+    WITH machine = "demo.task",
+         id      = @web.req.url.query.id.0,
+         state   = "working",
+         data    = &object("owner", @web.req.url.query.owner.0),
+         into    = "_st"

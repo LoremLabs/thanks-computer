@@ -57,8 +57,26 @@ type Envelope struct {
 	// the run's DispatchResult (final payload + trusted tenant/stack)
 	// after the pipeline returns. Streaming responses need ResCh.
 	ResultCh chan DispatchResult
+	// Accepted, when set, is told once — before the tenant's stack runs
+	// — that the chassis has accepted this event for execution: routed
+	// out of _sys/boot into a concrete tenant and admitted. An inlet that
+	// delivers from a durable outbox closes its claim on this signal
+	// rather than at completion, so a long run never holds a delivery
+	// claim open. The send is non-blocking: buffer the channel at 1. It
+	// is never sent for a run that stays in _sys, or for one admission
+	// denies (those answer on ResCh/ResultCh as before).
+	Accepted chan Acceptance
 	Rid      string
 	Src      string
+}
+
+// Acceptance is the trusted routing outcome at the moment the chassis
+// commits to running a tenant's stack: the pinned tenant and the stack
+// the boot handoff routed into, read from immutable pipeline state
+// (processor.TenantObserver), never from the envelope.
+type Acceptance struct {
+	Tenant string
+	Stack  string
 }
 
 // DispatchResult is the bus loop's trusted summary of one run: the final

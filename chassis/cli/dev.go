@@ -91,6 +91,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	uiDev := fs.Bool("ui", false, "also start the admin-ui Vite dev server on "+adminUIDevPort+" (HMR; opens admin-ui/ found by walking up from the workspace)")
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050; override with TXCO_TCP_LISTEN_ADDRS, e.g. 'irc=127.0.0.1:6697;self-signed' for a TLS/SNI listener). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
+	stateHead := fs.Bool("state", false, "start the state personality (the dispatcher behind txco://state/*; presents each committed transition into the tenant's _state stack). Disabled by default; the dev store lands at .txco/dev/state.db.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
 	allowLocalWorkspace := fs.Bool("allow-local-workspace", false, "enable workspace:// ops backed by the local provider: commands run as YOUR uid, unsandboxed, under .txco/dev/workspaces/<tenant>/<stack>/<name>. Off by default and never implied by anything else; the chassis logs a WARN pair when it is on.")
 	sourceHead := fs.Bool("source", false, "start the source personality (the remote-mailbox poller: dials OUT to each SOURCES/-declared IMAP mailbox, reads past a durable cursor, and fires every new message into the source's _source stack). Disabled by default. Needs a mailbox password in the tenant secret store; egress is open in dev, so a source may point at loopback (e.g. this chassis's own --imap head).")
@@ -278,7 +279,7 @@ Flags:
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *sourceHead, *imapHead, *calendarHead, *contactsHead, *webdavHead, *ippHead, *allowLocalWorkspace, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *sourceHead, *imapHead, *calendarHead, *contactsHead, *webdavHead, *ippHead, *stateHead, *allowLocalWorkspace, *verbose, stdout, stderr, &started, &chassisProc)
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -1071,7 +1072,7 @@ func isVersionNotDraftErr(err error) bool {
 // included. Off by default — most dev workflows use only web + cron +
 // admin, and the extra binds otherwise cause spurious "port in use"
 // failures on machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, sourceHead, imapHead, calendarHead, contactsHead, webdavHead, ippHead, allowLocalWorkspace, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, sourceHead, imapHead, calendarHead, contactsHead, webdavHead, ippHead, stateHead, allowLocalWorkspace, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
@@ -1214,6 +1215,10 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	if scheduledHead {
 		heads = append(heads, "scheduled")
 		env = append(env, "TXCO_SCHEDULED_DB_PATH="+filepath.Join(devDir, "scheduled.db"))
+	}
+	if stateHead {
+		heads = append(heads, "state")
+		env = append(env, "TXCO_STATE_DB_PATH="+filepath.Join(devDir, "state.db"))
 	}
 	if sourceHead {
 		// The source poller reads declared sources from the shared runtime DB

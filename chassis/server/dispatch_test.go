@@ -593,3 +593,39 @@ func TestDetectTenantBodyTransientErrorTCP(t *testing.T) {
 		t.Errorf("_txc.route.to must not be set on a transient failure")
 	}
 }
+
+// TestDetectTenantBodyState: a state event (src=state with a trusted
+// _txc.state.tenant stamped by the state dispatcher from the stored row)
+// proposes a route into that tenant's _state/0, even though the resolver
+// would miss.
+func TestDetectTenantBodyState(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"state","state":{"tenant":"acme","event_id":"stev_1","machine":"onepony.task","id":"t1","from":"working","to":"waiting","version":2}}}`))
+	if got := gjson.Get(body, "_txc.route.to").String(); got != "_state/0" {
+		t.Errorf("_txc.route.to = %q, want _state/0", got)
+	}
+	if got := gjson.Get(body, "_txc.route.tenant").String(); got != "acme" {
+		t.Errorf("_txc.route.tenant = %q, want acme", got)
+	}
+	if got := gjson.Get(body, "_txc.route.stack").String(); got != "_state" {
+		t.Errorf("_txc.route.stack = %q, want _state", got)
+	}
+	if got := gjson.Get(body, "_txc.route.ingress").String(); got != "state" {
+		t.Errorf("_txc.route.ingress = %q, want state", got)
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified must be true for a chassis-stamped event")
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+}
+
+// A state event with no _txc.state.tenant must NOT take the state branch —
+// it falls through to the resolver (here a miss → "{}").
+func TestDetectTenantBodyStateNoTenantUnchanged(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"state","state":{"event_id":"stev_1"}}}`)); body != "{}" {
+		t.Errorf("state body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}

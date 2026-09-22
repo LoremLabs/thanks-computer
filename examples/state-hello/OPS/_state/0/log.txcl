@@ -1,0 +1,19 @@
+# _state/0 — every committed transition of every record in this tenant is
+# presented here, at least once, in version order per record. Journal it
+# into the record's notebook. object_key = the event id makes a second
+# presentation of the same event (a retry after a crash) a no-op: the
+# entry already exists, so the log stays exact.
+EXEC "txco://notebook/append"
+  WITH notebook   = @state.id,
+       namespace  = "state-demo",
+       type       = "transition",
+       data       = &object(
+                      "event_id", @state.event_id,
+                      "from",     @state.from,
+                      "to",       @state.to,
+                      "version",  @state.version,
+                      "attempt",  @state.attempt,
+                      "source",   @state.cause.source,
+                      "trace",    @state.cause.trace),
+       object_key = @state.event_id,
+       into       = "_nb"

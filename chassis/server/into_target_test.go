@@ -93,6 +93,7 @@ func TestAuthorChosenTargetsGoThroughTheGuard(t *testing.T) {
 	notEnvelopePaths := map[string]bool{
 		"imap_ops.go:to":  true, // imap/move: destination MAILBOX name
 		"drive_ops.go:to": true, // drive/move, drive/copy: destination DOCUMENT path
+		"state.go:to":     true, // state/transition: the target STATE name (a token, validated by the store)
 	}
 	for _, dir := range []string{".", "../ops"} {
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))

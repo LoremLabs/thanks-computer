@@ -64,6 +64,7 @@ in an opstack's flows into the protocol.
 | [Remote sources](./source.md) | in, pulled — the chassis watches an IMAP mailbox you already own and each new message is one run of `_source` |
 | [Cron](./cron.md) | in |
 | [Scheduled](./scheduled.md) | in, time shifted — `txco://schedule` enqueues, fires later into `_scheduled` |
+| [State](./state.md) | in, on change — `txco://state/transition` moves a record by compare-and-swap; every committed transition is presented into `_state` |
 | [TCP](./tcp.md) | bidirectional |
 | [MCP](./mcp.md) (agent tools) | out, in as diy |
 | [AI gateway](./llm-gateway.md) | in, then proxied out — an AI client's own requests, through a stack |

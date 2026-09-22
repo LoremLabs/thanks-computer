@@ -1,0 +1,6 @@
+# The notebook read answers 200 with its entries.
+WHEN ._nb.error.code == "" && ._nb.count != null
+  EMIT @web.res.body = &b64encode(&to_json(._nb)),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

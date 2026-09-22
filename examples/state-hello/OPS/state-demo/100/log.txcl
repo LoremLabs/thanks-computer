@@ -1,0 +1,7 @@
+# GET /task/log?id=<id> — what _state/0 recorded for this record: one
+# notebook entry per presented transition, oldest first.
+WHEN @src == "http" && @web.req.method == "GET" && @web.req.url.path == "/task/log"
+  EXEC "txco://notebook/read"
+    WITH notebook  = @web.req.url.query.id.0,
+         namespace = "state-demo",
+         into      = "_nb"

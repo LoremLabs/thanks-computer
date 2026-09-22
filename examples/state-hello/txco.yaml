@@ -1,0 +1,6 @@
+target: dev
+
+# No `operations:` block — the state and notebook stores are chassis
+# built-ins (txco://state/*, txco://notebook/*); the workspace ships only
+# operations. Run with `txco dev --state`: the state personality is the
+# dispatcher that presents each committed transition into `_state`.

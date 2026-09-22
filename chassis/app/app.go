@@ -52,6 +52,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server"
 	"github.com/loremlabs/thanks-computer/chassis/snapshot"
 	chsource "github.com/loremlabs/thanks-computer/chassis/source"
+	chstate "github.com/loremlabs/thanks-computer/chassis/state"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
 	"github.com/loremlabs/thanks-computer/chassis/workspace"
 	dbschemas "github.com/loremlabs/thanks-computer/db"
@@ -566,6 +567,32 @@ func Run(bi BuildInfo) int {
 		notebookStore = st
 		logger.Info("notebook store opened", zap.String("store", conf.NotebookStore))
 	}
+	// State store (txco://state/* + the 'state' personality). imap's posture:
+	// the bundled per-node sqlite file opens only with the personality (a
+	// transition committed on a node with no dispatcher would never be
+	// presented, so the ops answer txco_state_disabled there instead); a
+	// shared backend opens on every node, so any node's stack can create and
+	// transition records that the dispatching nodes present.
+	var stateStore *chstate.Store
+	if open, fatal := stateStoreMode(conf.Personalities, conf.StateStore); open {
+		st, serr := chstate.Open(conf.StateStore, chstate.Config{DBPath: conf.StateDBPath})
+		switch {
+		case serr != nil && fatal:
+			logger.Fatal("state store open failed",
+				zap.String("store", conf.StateStore), zap.String("err", serr.Error()))
+		case serr != nil:
+			logger.Warn("state store open failed; txco://state/* answer txco_state_disabled on this node until restart",
+				zap.String("store", conf.StateStore), zap.String("err", serr.Error()))
+		default:
+			defer st.Close()
+			st.SetMaxDataBytes(conf.StateMaxDataBytes)
+			stateStore = st
+			logger.Info("state store opened", zap.String("store", conf.StateStore), zap.Bool("dispatcher", fatal))
+		}
+	} else {
+		logger.Info("skipping state store open — state personality not active and --state-store=sqlite",
+			zap.String("personalities", conf.Personalities))
+	}
 	// Two DAV heads on one prefix would leave the second unreachable; say so
 	// at boot instead.
 	davPrefixes := map[string]string{} // cleaned prefix → flag that claimed it
@@ -713,7 +740,24 @@ func Run(bi BuildInfo) int {
 	}
 
 	// Start chassis Personalities
-	ctx, stopWork, err := server.Start(ctx, conf, logger, kv, runtimeDB, authDB, dbc, secretsResolver, scheduledStore, sourceStore, imapStore, calendarStore, contactsStore, workspaceStore, notebookStore, driveStore, ippStore, identityStore)
+	ctx, stopWork, err := server.Start(ctx, conf, logger, server.Deps{
+		KV:        kv,
+		RuntimeDB: runtimeDB,
+		AuthDB:    authDB,
+		Dbc:       dbc,
+		Secrets:   secretsResolver,
+		Scheduled: scheduledStore,
+		Source:    sourceStore,
+		IMAP:      imapStore,
+		Calendar:  calendarStore,
+		Contacts:  contactsStore,
+		Workspace: workspaceStore,
+		Notebook:  notebookStore,
+		Drive:     driveStore,
+		IPP:       ippStore,
+		Identity:  identityStore,
+		State:     stateStore,
+	})
 	if err != nil {
 		// Include the underlying error so operators can see what
 		// failed (missing env, unreachable broker, bad DSN, etc.)
@@ -1195,6 +1239,16 @@ func imapStoreMode(personalities, store string) (open, fatal bool) {
 // without the head is not opened at all.
 func calendarStoreMode(personalities, store string) (open, fatal bool) {
 	head := config.Config{Personalities: personalities}.HasPersonality("calendar")
+	shared := store != "" && store != "sqlite"
+	return head || shared, head
+}
+
+// stateStoreMode is calendarStoreMode for the state store: the dispatcher
+// needs it (fatal); a shared backend is opened everywhere so txco://state/*
+// on any node write into it (warn-and-continue); the bundled sqlite file
+// without the dispatcher is not opened at all.
+func stateStoreMode(personalities, store string) (open, fatal bool) {
+	head := config.Config{Personalities: personalities}.HasPersonality("state")
 	shared := store != "" && store != "sqlite"
 	return head || shared, head
 }

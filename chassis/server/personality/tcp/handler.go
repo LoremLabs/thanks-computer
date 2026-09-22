@@ -124,6 +124,7 @@ var reservedHandlerNames = map[string]bool{
 	"lmtp": true, "mail": true, "imap": true, "dns": true, "llm": true,
 	"cron": true, "scheduled": true, "source": true, "room": true, "inspect": true,
 	"calendar": true, "contacts": true, "webdav": true, "websocket": true,
+	"state": true,
 }
 
 // RegisterHandler adds a named protocol handler, selectable per listener

@@ -314,6 +314,21 @@ func sourceScope(ctx context.Context) string {
 // Privileged egress ops (e.g. txco://relay) gate on it.
 func SourceScope(ctx context.Context) string { return sourceScope(ctx) }
 
+// RunScope exposes the id of the continuation run this request executes as
+// part of — a resumed run, or the run a deferred-join op created — or ""
+// on an ordinary request. It is the trusted answer to "which run is
+// calling": the identity the processor pinned, never an envelope field.
+// The state ops record it as a transition's cause.
+func RunScope(ctx context.Context) string {
+	if ri, ok := resumeRunFrom(ctx); ok {
+		return ri.runID
+	}
+	if di, ok := deferredRunFrom(ctx); ok {
+		return di.runID
+	}
+	return ""
+}
+
 // WithStack pins the dispatching rule's stack into context. Exposed for tests
 // and out-of-band callers; the data plane pins it itself in dispatch.
 func WithStack(ctx context.Context, stack string) context.Context {
@@ -1610,7 +1625,9 @@ func (pu *Unit) advanceAfterScope(
 		// runs. Gating on pin-changed makes this fire exactly once per
 		// request and never for _sys/boot itself. resp is already
 		// budget-synced above, so ShapeDeny preserves fuel/TTL fields.
-		if newTen := tenantScope(runCtx); pu.Admission != nil && newTen != tenantScope(ctx) {
+		newTen := tenantScope(runCtx)
+		retenanted := newTen != tenantScope(ctx)
+		if pu.Admission != nil && retenanted {
 			// Emit a terminal admission denial and stop (no recurse). Shared
 			// by the three checks below; first-deny-wins.
 			denyAdmission := func(d admission.Decision) (bool, error) {
@@ -1639,6 +1656,16 @@ func (pu *Unit) advanceAfterScope(
 			if !pu.Admission.AcquireConcurrency(newTen, admission.LeaseFromContext(ctx)) {
 				return denyAdmission(admission.Decision{Status: 429, Reason: "at_capacity"})
 			}
+		}
+		// Acceptance: the request is now pinned to a concrete tenant and
+		// admitted, and the call below runs that tenant's stack. Tell the
+		// inlet that asked (Envelope.Accepted) here, before the run, so an
+		// outbox-style inlet can close its delivery claim at acceptance
+		// instead of holding it open for the whole run. Same pin-changed
+		// gate as admission: once per request, never for a run that stays
+		// in _sys, and also on nodes with no admission provider.
+		if retenanted {
+			tenantObserverFromContext(runCtx).accepted()
 		}
 		runCtx = context.WithValue(runCtx, ctxKeyParentStage, stage)
 		endSpan()

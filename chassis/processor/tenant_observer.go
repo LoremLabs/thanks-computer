@@ -3,6 +3,8 @@ package processor
 import (
 	"context"
 	"sync"
+
+	"github.com/loremlabs/thanks-computer/chassis/event"
 )
 
 // TenantObserver records the tenant a request is pinned to, so the server can
@@ -26,6 +28,11 @@ type TenantObserver struct {
 
 	ingress  string
 	verified bool
+
+	// acceptedCh is the inlet's Envelope.Accepted channel, if it set
+	// one; acceptedSent guards the single send.
+	acceptedCh   chan<- event.Acceptance
+	acceptedSent bool
 }
 
 // NewTenantObserver returns a fresh observer with no tenant recorded yet.
@@ -87,6 +94,40 @@ func (o *TenantObserver) Tenant() (slug string, ok bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.slug, o.set
+}
+
+// NotifyAccepted registers the channel the processor's acceptance point
+// sends on (Envelope.Accepted). A nil channel leaves acceptance silent.
+// Nil-safe.
+func (o *TenantObserver) NotifyAccepted(ch chan<- event.Acceptance) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	o.acceptedCh = ch
+	o.mu.Unlock()
+}
+
+// accepted tells the inlet, once, that the chassis has accepted this
+// request for execution in the pinned tenant: the processor calls it
+// after the _sys->tenant handoff has been admitted and before the
+// tenant's stack runs. The tenant and stack are the observer's own
+// immutable record, never the envelope. The send never blocks — the
+// inlet buffers its channel — and a second call is a no-op. Nil-safe.
+func (o *TenantObserver) accepted() {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.acceptedCh == nil || o.acceptedSent {
+		return
+	}
+	o.acceptedSent = true
+	select {
+	case o.acceptedCh <- event.Acceptance{Tenant: o.slug, Stack: o.stack}:
+	default:
+	}
 }
 
 // ctxKeyTenantObserver is the unexported context key for the per-request

@@ -1,0 +1,6 @@
+# A transition INTO "slow" makes this run take a while (the README starts a
+# tiny server that answers /slow after five seconds). The point: the event
+# is already `done` in the state store while this is still running — a
+# claim closes when the chassis accepts the event, not when the run ends.
+WHEN @state.to == "slow"
+  EXEC "http://127.0.0.1:8377/slow"

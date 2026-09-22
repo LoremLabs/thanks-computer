@@ -89,6 +89,7 @@ import (
 	mailmapp "github.com/loremlabs/thanks-computer/chassis/server/personality/mailmap"
 	scheduledp "github.com/loremlabs/thanks-computer/chassis/server/personality/scheduled"
 	sourcep "github.com/loremlabs/thanks-computer/chassis/server/personality/source"
+	statep "github.com/loremlabs/thanks-computer/chassis/server/personality/state"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/sweep"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/tcp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/web"
@@ -98,6 +99,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/signedurl"
 	chsource "github.com/loremlabs/thanks-computer/chassis/source"
 	_ "github.com/loremlabs/thanks-computer/chassis/source/imapsource" // registers the "imap" source kind
+	chstate "github.com/loremlabs/thanks-computer/chassis/state"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/blobseed"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed/calseed"
@@ -177,13 +179,14 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
 		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant",
-		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant")
+		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant", "_txc.state.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
 	dnsTenant, imapTenant, calendarTenant, contactsTenant := fields[9], fields[10], fields[11], fields[12]
 	sourceTenant, sourceStack := fields[13], fields[14]
 	ippTenant := fields[15]
+	stateTenant := fields[16]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -259,6 +262,23 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "scheduled")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_scheduled/0")
+			return b.String()
+		}
+	}
+	// Durable state event. The state dispatcher presents a committed
+	// transition, stamping the record's tenant in `_txc.state.tenant`
+	// (trusted: the stored row's tenant, pinned at transition from
+	// processor.TenantScope, never client input). Propose a route into that
+	// tenant's `_state/0` — the same sanctioned _sys→tenant pin as
+	// scheduled. The stack reads the transition off `@state.*`.
+	if src.String() == "state" {
+		if st := stateTenant.String(); st != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", st)
+			b.Set("_txc.route.stack", "_state")
+			b.Set("_txc.route.ingress", "state")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_state/0")
 			return b.String()
 		}
 	}
@@ -1005,7 +1025,50 @@ type controller interface {
 	Stop()
 }
 
-func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store.Store, runtimeDB, authDB *sql.DB, dbc *dbcache.DbCache, secretsResolver *secrets.Resolver, scheduledStore *scheduled.Store, sourceStore *chsource.Store, imapStore *chimap.Store, calendarStore *chcal.Store, contactsStore *chcon.Store, workspaceStore *workspace.Store, notebookStore *chnotebook.Store, driveStore *chdrive.Store, ippStore *chipp.Store, identityStore *authn.Store) (modCtx context.Context, stop func(reason string), err error) {
+// Deps is everything app.go opens before the personalities start: the
+// tenant KV, the runtime and auth databases, the dbcache mirror, the
+// secrets resolver and one handle per store. A nil store means "this
+// node opened none": its ops answer disabled and its controller (if it
+// has one) is not started, exactly as before this struct existed. New
+// stores are one field here, not one more positional parameter.
+type Deps struct {
+	KV        store.Store
+	RuntimeDB *sql.DB
+	AuthDB    *sql.DB
+	Dbc       *dbcache.DbCache
+	Secrets   *secrets.Resolver
+
+	Scheduled *scheduled.Store
+	Source    *chsource.Store
+	IMAP      *chimap.Store
+	Calendar  *chcal.Store
+	Contacts  *chcon.Store
+	Workspace *workspace.Store
+	Notebook  *chnotebook.Store
+	Drive     *chdrive.Store
+	IPP       *chipp.Store
+	Identity  *authn.Store
+	State     *chstate.Store
+}
+
+func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Deps) (modCtx context.Context, stop func(reason string), err error) {
+	// Local names for the rest of this (long) function; the body reads
+	// exactly as it did when these were parameters.
+	kv := deps.KV
+	runtimeDB, authDB := deps.RuntimeDB, deps.AuthDB
+	dbc := deps.Dbc
+	secretsResolver := deps.Secrets
+	scheduledStore := deps.Scheduled
+	sourceStore := deps.Source
+	imapStore := deps.IMAP
+	calendarStore := deps.Calendar
+	contactsStore := deps.Contacts
+	workspaceStore := deps.Workspace
+	notebookStore := deps.Notebook
+	driveStore := deps.Drive
+	ippStore := deps.IPP
+	identityStore := deps.Identity
+	stateStore := deps.State
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -1670,6 +1733,27 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 				return fn(ctx, notebookD, in)
 			}))
 	}
+	// State ops (txco://state/{create,get,transition}): durable state records
+	// with a compare-and-swap transition that writes an event in the same
+	// transaction; the `state` personality presents each event into the
+	// tenant's `_state/0`. Registered unconditionally so a node without the
+	// store answers `_state.error txco_state_disabled` and a stack can branch.
+	// The wake channel lets a transition committed on this node be presented
+	// at once. See chassis/server/state.go + chassis/state +
+	// docs/advanced/protocols/state.md.
+	stateWake := make(chan struct{}, 1)
+	stateD := stateDeps{store: stateStore, wake: stateWake}
+	for name, fn := range map[string]func(context.Context, stateDeps, []byte) (event.Payload, error){
+		"txco://state/create":     stateCreate,
+		"txco://state/get":        stateGet,
+		"txco://state/transition": stateTransition,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, stateD, in)
+			}))
+	}
 	// Expired entries are invisible to reads from the moment they expire;
 	// the per-node sweep only reclaims their rows. Every node runs it — the
 	// batched DELETE is idempotent, so overlap is harmless.
@@ -2324,6 +2408,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 	controllers := []controller{
 		cronp.NewController(ctx, pu, cq),
 		scheduledp.NewController(ctx, pu, scheduledStore),
+		// state: presents committed state transitions into each tenant's
+		// _state/0 (the 'state' personality); closes each claim at
+		// acceptance, not completion.
+		statep.NewController(ctx, pu, stateStore, stateWake),
 		// source: polls remote mailboxes (the 'source' personality). Off unless
 		// 'source' is in --personalities; shares the egress guard so a source
 		// can't be pointed at private space.
@@ -2507,6 +2595,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, kv store
 						// billing trusts the pinned tenant the processor records
 						// into this observer instead. See processor.TenantObserver.
 						tenantObs := processor.NewTenantObserver()
+						// An inlet that delivers from a durable outbox asks
+						// to hear the moment the run is accepted for a
+						// tenant (routed + admitted, before the stack
+						// runs); the processor sends it through the same
+						// observer. Nil for every other inlet.
+						tenantObs.NotifyAccepted(envelope.Accepted)
 						reqCtx = processor.WithTenantObserver(reqCtx, tenantObs)
 						// kick off processor at the resolved entry stage.
 						// runWithTrace wraps pu.Run with the per-request

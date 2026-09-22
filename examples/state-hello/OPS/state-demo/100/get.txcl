@@ -1,0 +1,6 @@
+# GET /task?id=<id> — the record as it is now: {found, record}.
+WHEN @src == "http" && @web.req.method == "GET" && @web.req.url.path == "/task"
+  EXEC "txco://state/get"
+    WITH machine = "demo.task",
+         id      = @web.req.url.query.id.0,
+         into    = "_st"
