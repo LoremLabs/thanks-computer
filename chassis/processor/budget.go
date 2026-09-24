@@ -53,18 +53,26 @@ const (
 	// LLM-wrapping op pays ~10K. Anchors to the §2 calibration in the
 	// fuel doc (1 unit ≈ 100 µs of typical chassis work).
 	fuelCostComputePerMs int64 = 10
-	// Workspace wall-clock is charged 1 fuel per 30 s (2 per minute),
-	// rounded up, minimum 1 per accounted op — see workspaceFuel. That is
-	// deliberately tiny next to the compute rate (10/ms): during an exec
-	// the chassis holds a goroutine and a socket while the PROVIDER's CPU
-	// does the work. The compute rate made a 20 s exec cost 200k fuel and
-	// exhaust the 100k per-request budget after the command had already
-	// finished (seen in production, 2026-09-11). At this rate a 5 minute
-	// exec is 10 fuel. The command's real cost — machine-seconds — is
-	// carried by the usage event (src="workspace", duration_ms) for the
-	// billing layer to price separately from chassis fuel.
+	// Workspace wall-clock is charged 10 fuel per second (1 per started
+	// 100 ms), rounded up, minimum 1 per accounted op — see workspaceFuel.
+	// A 4 s parse is 40; a 15 minute OCR is 9,000, inside the 100k
+	// per-request ceiling; an 8 hour attach lease bills ~288k across its
+	// heartbeats (leases bill, they do not spend a request's budget).
+	//
+	// The rate is a middle: still 1000× under the compute rate (10/ms),
+	// because during an exec the chassis holds a goroutine and a socket
+	// while the PROVIDER's CPU does the work — the compute rate made a 20 s
+	// exec cost 200k fuel and exhaust the budget after the command had
+	// already finished (production, 2026-09-11) — but no longer free, which
+	// 1-per-30s effectively was (a 5 minute exec cost 10). It was raised
+	// 300× on 2026-09-24, when a subsystem's own page and time caps were
+	// relaxed: what bounds a long document now is what it costs, not an
+	// arbitrary cap (onepony docs/0031). The command's real cost —
+	// machine-seconds — is still carried by the usage event
+	// (src="workspace", duration_ms) for the billing layer to price
+	// alongside this.
 	fuelCostWorkspacePerPeriod int64 = 1
-	workspaceFuelPeriodMS      int64 = 30_000
+	workspaceFuelPeriodMS      int64 = 100
 	// FuelCostBlobPerMiB charges txco://blob/put and blob/get per MiB of
 	// bytes moved (rounded up), on top of the flat dispatch fuel every
 	// EXEC pays. A 1 MiB artifact pays 100 ≈ 10 ms of chassis work —

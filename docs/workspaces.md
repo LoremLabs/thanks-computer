@@ -301,7 +301,7 @@ An attachment refuses `secrets.env.*` (an interactive user could echo the
 value back out), a `LOOP`, and `stream`; a second attach on an
 already-bound session is a `bad_request`. It is a **metered lease**, not a
 long request: it heartbeats every 60 s at the ordinary workspace rate
-(1 fuel per 30 s), charged to the tenant, and a lease that stops
+(10 fuel per second, so 600 a heartbeat), charged to the tenant, and a lease that stops
 heartbeating (a crashed node) is reapable rather than pinning the workspace
 forever. `txco://websocket/send` to an attached session is refused with
 `txco_websocket_attached` — its frames belong to the process.
@@ -370,10 +370,12 @@ same lease, at the same rate.
 `workspace://` may [LOOP](./advanced/txcl/txcl.md#loop--repeat-an-op):
 its failures are in-band data and its wall-clock is fuel-metered, which
 is what a loop needs. Each exec pays the flat EXEC dispatch plus 1 fuel
-per started 30 seconds of wall clock (2 per minute), minimum 1 — a
-5 minute exec is 10 fuel. (Not the nano-op rate of 10 per millisecond:
-while a command runs, the provider's machine does the work and the
-chassis only waits.) The machine time itself is reported on the usage
+per started 100 ms of wall clock (10 a second), minimum 1 — a 4 second
+exec is 40 fuel, a 15 minute one 9,000, against a default ceiling of
+100,000 a request. (Not the nano-op rate of 10 per millisecond, a
+thousand times more: while a command runs, the provider's machine does
+the work and the chassis only waits. Long work is meant to be bounded by
+what it costs rather than by a cap on how long it may be.) The machine time itself is reported on the usage
 event with `src=workspace` (duration, bytes in/out, status), and every
 dispatch writes a trace step with `transport=workspace`.
 

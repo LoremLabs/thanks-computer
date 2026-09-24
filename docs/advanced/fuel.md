@@ -38,6 +38,7 @@ the chassis-wide cap.
 | `EXEC` dispatch              | 25          |
 | `LOOP` pass                  | 25 (the EXEC cost, once per pass) |
 | Nano-op compute, per ms      | 10          |
+| `workspace://` wall clock, per started 100 ms | 1 (10 a second) |
 | Secret materialization       | 100         |
 | Repeated stage transition    | 50          |
 | Blob put / get, per MiB moved | 100        |
@@ -50,6 +51,15 @@ Calibration: 1 fuel ≈ 100 µs of typical chassis work. So a 1 ms
 nano-op costs 35 total (25 dispatch + 10 compute); an op wrapping a
 1-second LLM call costs ~10,000 — meaning the default cap tolerates
 roughly ten such calls per request before cutting off.
+
+A `workspace://` exec is charged a thousand times less than nano-op
+compute for the same wall clock, because the provider's machine does the
+work while the chassis holds a socket: a 4 second exec is 40 fuel, a 15
+minute one 9,000. It is still the meter that bounds long work — a
+subsystem whose own caps are loose (a page limit, a time limit) is meant
+to run until it is too expensive, not until it hits an arbitrary
+number. An attach or connect lease heartbeats at the same rate and bills
+per heartbeat rather than spending one request's budget.
 
 A TCP connection's own cost has no run to be counted in, so it is
 carried onto the connection's **next** run as that run's starting

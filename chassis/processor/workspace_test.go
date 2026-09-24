@@ -602,12 +602,13 @@ func TestWorkspaceFuelRate(t *testing.T) {
 	for wall, want := range map[int64]int64{
 		0:       1, // minimum: every accounted op pays at least 1
 		1:       1,
-		29_999:  1,
-		30_000:  1,
-		30_001:  2,
-		60_000:  2, // 2 per minute
-		300_000: 10,
-		301_000: 11,
+		99:      1,
+		100:     1,
+		101:     2,
+		1_000:   10, // 10 per second
+		60_000:  600,
+		300_000: 3_000,
+		301_000: 3_010,
 	} {
 		if got := workspaceFuel(wall); got != want {
 			t.Errorf("workspaceFuel(%d ms) = %d, want %d", wall, got, want)

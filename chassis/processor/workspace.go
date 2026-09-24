@@ -474,8 +474,8 @@ func (pu *Unit) workspaceAccount(ctx context.Context, rid, tenant, opID string, 
 }
 
 // workspaceFuel is the wall-clock charge for one accounted workspace op:
-// 1 fuel per started 30 s period (2 per minute), never less than 1 —
-// 0 ms → 1, 30 000 ms → 1, 30 001 ms → 2, 5 minutes → 10.
+// 1 fuel per started 100 ms period (10 per second), never less than 1 —
+// 0 ms → 1, 100 ms → 1, 101 ms → 2, 1 s → 10, 5 minutes → 3 000.
 func workspaceFuel(wallMS int64) int64 {
 	if wallMS <= 0 {
 		return fuelCostWorkspacePerPeriod
