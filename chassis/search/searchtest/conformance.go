@@ -227,6 +227,37 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) search.Store, opts
 		}
 	})
 
+	// A script written without spaces is still searchable: Chinese and
+	// Japanese put no space between words, so a whole clause arrives as one
+	// unbroken run of letters. Indexed whole it would be a term no question
+	// ever asks for — measured on production, where a Chinese sentence
+	// matched nothing and only a term that happened to be a complete run
+	// matched at all (2026-09-24).
+	t.Run("ScriptsWithoutSpaces", func(t *testing.T) {
+		const coll = "scripts"
+		ensure(t, tenant, coll)
+		upsert(t, tenant, coll,
+			search.Item{ID: "zh", Text: "本文提出了一种新的分布式训练方法，实验表明该方法优于现有方案。"},
+			search.Item{ID: "ja", Text: "この論文では、大規模言語モデルの事前学習における新しい分散学習手法を提案する。"},
+			search.Item{ID: "ko", Text: "이 논문은 대규모 언어 모델의 사전 학습 방법을 제안한다."},
+			search.Item{ID: "en", Text: "This paper proposes a new distributed training method for large language models."},
+		)
+		for _, tc := range []struct{ q, want string }{
+			// A whole sentence, which is the case that returned nothing.
+			{"这篇论文提出了什么样的分布式训练方法？", "zh"},
+			// A phrase from the middle of a run: neither end is a boundary.
+			{"分布式训练", "zh"},
+			{"大規模言語モデル", "ja"},
+			// Korean is written with spaces, so its own words find it.
+			{"대규모 언어 모델", "ko"},
+			{"distributed training", "en"},
+		} {
+			if got := ids(query(t, tenant, coll, tc.q, 5, search.Filter{})); len(got) == 0 || got[0] != tc.want {
+				t.Errorf("Query(%q) = %v, want %q first", tc.q, got, tc.want)
+			}
+		}
+	})
+
 	t.Run("Fields", func(t *testing.T) {
 		const coll = "fields"
 		ensure(t, tenant, coll)

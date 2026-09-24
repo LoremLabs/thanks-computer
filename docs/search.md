@@ -59,6 +59,12 @@ same thing the day the ranking improves.
 - **Case and accents fold.** `CREME BRULEE` finds `crème brûlée`.
 - **Nothing is stemmed.** `exercises` does not match `exercise`. That keeps the
   behaviour the same in every language, and never mangles an identifier.
+- **A script without spaces is read in pairs.** Chinese and Japanese put no
+  space between words, so a clause arrives as one unbroken run; it is indexed
+  and queried as its overlapping character pairs (`人工智能` → `人工`, `工智`,
+  `智能`), which is what lets any part of a sentence find it. Korean is written
+  with spaces and is left as its words. Full-width forms fold onto ordinary
+  ones (`ＡＢＣ` finds `abc`).
 - **No engine syntax is recognised.** `+`, `-`, `*` and `field:` are just
   punctuation, so a query can never be an injection.
 
@@ -67,13 +73,13 @@ queries in one scope (they run concurrently) and merge above them.
 
 ## Records
 
-| Field | |
-| --- | --- |
-| `id` | Required. Unique within the collection. |
-| `text` | The body. Returned on a hit. |
+| Field                      |                                                                                                          |
+| -------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `id`                       | Required. Unique within the collection.                                                                  |
+| `text`                     | The body. Returned on a hit.                                                                             |
 | `title`, `heading`, `name` | Short searched fields. A filename or a title found intact counts for more than the same words in a body. |
-| `entities` | A list of names to search, up to 64. |
-| `metadata` | An object. **Filtered on, never searched.** Returned on a hit. |
+| `entities`                 | A list of names to search, up to 64.                                                                     |
+| `metadata`                 | An object. **Filtered on, never searched.** Returned on a hit.                                           |
 
 `upsert` takes one record from top-level keys, as above, or a batch as `items`.
 A batch is all or nothing. Keys a record carries beyond these are ignored, so
@@ -92,7 +98,12 @@ another queries.
 describes it at `_search.collection`:
 
 ```json
-{ "name": "handbook", "analyzer_version": "txco_v1", "scoring_model": "bm25", "records": 4 }
+{
+  "name": "handbook",
+  "analyzer_version": "txco_v2",
+  "scoring_model": "bm25",
+  "records": 4
+}
 ```
 
 The analyzer and scoring model are pinned when the collection is created.
@@ -159,31 +170,31 @@ WHEN .search.error.code == "txco_search_disabled"
   EMIT ._lexical = "off"
 ```
 
-| Code | |
-| --- | --- |
-| `txco_search_disabled` | This chassis runs without a search store (`--search-store=none`). A stack that fuses two lanes should carry on with one. |
-| `txco_search_no_tenant` | No tenant in the request scope. |
-| `txco_search_invalid_arg` | A missing `collection`, an unknown filter op, an `update` with no filter, a record with no `id`. |
-| `txco_search_collection_not_found` | Ensure it first with `txco://search/collection`. |
-| `txco_search_too_large` | Past a limit below. |
-| `txco_search_analyzer_mismatch` | The collection is pinned to another analyzer. Re-index it. |
-| `txco_search_unavailable`, `txco_search_recovering` | A remote backend cannot answer right now. Treat it as "no lexical results". |
-| `txco_search_store` | Anything else the backend reported. |
+| Code                                                |                                                                                                                          |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `txco_search_disabled`                              | This chassis runs without a search store (`--search-store=none`). A stack that fuses two lanes should carry on with one. |
+| `txco_search_no_tenant`                             | No tenant in the request scope.                                                                                          |
+| `txco_search_invalid_arg`                           | A missing `collection`, an unknown filter op, an `update` with no filter, a record with no `id`.                         |
+| `txco_search_collection_not_found`                  | Ensure it first with `txco://search/collection`.                                                                         |
+| `txco_search_too_large`                             | Past a limit below.                                                                                                      |
+| `txco_search_analyzer_mismatch`                     | The collection is pinned to another analyzer. Re-index it.                                                               |
+| `txco_search_unavailable`, `txco_search_recovering` | A remote backend cannot answer right now. Treat it as "no lexical results".                                              |
+| `txco_search_store`                                 | Anything else the backend reported.                                                                                      |
 
 An empty result is `[]`, never an error.
 
 ## Limits
 
-| | |
-| --- | --- |
-| `text` per record | 64 KiB |
-| `title`, `heading`, `name` | 1 KiB each |
-| `entities` | 64, of 256 bytes each |
-| `metadata` | 16 KiB, 64 keys |
-| records per `upsert` | 500 |
-| `ids` per `delete` | 500 |
-| `query` | its first 8 KiB, and of those its first 64 terms, are used; a longer query is cut, never refused |
-| `limit` | default 10, at most 100 |
+|                            |                                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `text` per record          | 64 KiB                                                                                           |
+| `title`, `heading`, `name` | 1 KiB each                                                                                       |
+| `entities`                 | 64, of 256 bytes each                                                                            |
+| `metadata`                 | 16 KiB, 64 keys                                                                                  |
+| records per `upsert`       | 500                                                                                              |
+| `ids` per `delete`         | 500                                                                                              |
+| `query`                    | its first 8 KiB, and of those its first 64 terms, are used; a longer query is cut, never refused |
+| `limit`                    | default 10, at most 100                                                                          |
 
 ## Where the data lives
 

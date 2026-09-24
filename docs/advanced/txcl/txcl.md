@@ -733,7 +733,7 @@ WHEN @runtime.loop.blobs.stop != "done" EMIT .partial = true
 
 The [trace](../trace.md) shows one step for the loop, spanning every pass, with `passes` and `stop_reason` (`txco trace <rid> --step <name>` prints them); each pass also writes an `op.pass` timeline event to the file sink.
 
-**What cannot loop.** `txco apply` rejects a LOOP with no EXEC, on `txco://noop`, on a stage jump, or combined with `WITH mode = "async"` / `"continuable"`. This version admits `txco://`, `http(s)://`, `mcp+http(s)://` and `workspace://` EXECs; `compute://` and `ai://` are held back.
+**What cannot loop.** `txco apply` rejects a LOOP with no EXEC, on `txco://noop`, on a stage jump, or combined with `WITH mode = "async"` / `"continuable"`. This version admits `txco://`, `http(s)://`, `mcp+http(s)://`, `workspace://` and `outlet://<name>/query` EXECs; `compute://`, `ai://` and `outlet://<name>/exec` are held back (a looping write could repeat a statement whose outcome is unknown).
 
 ## Streaming the response body
 

@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
+	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
@@ -248,9 +249,12 @@ func lintLoopClause(ops []bundle.Op) []string {
 				"lint: %s LOOP UNTIL compares %s — a missing path reads as false, so the loop exits after the first pass; compare `== true`, `!= \"\"`, or a value the op always writes", where, leaf))
 		}
 		switch {
-		case strings.HasPrefix(r.Exec, "compute://"), strings.HasPrefix(r.Exec, "ai://"), strings.HasPrefix(r.Exec, "outlet://"):
+		case strings.HasPrefix(r.Exec, "compute://"), strings.HasPrefix(r.Exec, "ai://"):
 			warnings = append(warnings, fmt.Sprintf(
 				"lint: %s LOOP is not admitted for EXEC %q in this version; the op is dropped at dispatch", where, r.Exec))
+		case outletLoopIsExec(r.Exec):
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s LOOP is admitted for outlet://<name>/query only — a looping exec would repeat a write whose outcome may be unknown; the op is dropped at dispatch (exec %q)", where, r.Exec))
 		case strings.HasPrefix(r.Exec, "txco://mock"):
 			warnings = append(warnings, fmt.Sprintf(
 				"lint: %s loops txco://mock — a fixture answers the same thing every pass, so the loop either exits at once or runs to MAX", where))
@@ -355,6 +359,18 @@ func isGotoPath(p string) bool {
 func isHaltPath(p string) bool {
 	p = strings.TrimPrefix(p, ".")
 	return p == "_txc.halt" || p == "@halt"
+}
+
+// outletLoopIsExec reports whether an EXEC target is an outlet exec, the
+// one outlet shape the runtime refuses to loop (chassis/processor/loop.go
+// loopTransportAdmitted). A malformed outlet target is left to the outlet
+// check, which reports it as an error.
+func outletLoopIsExec(exec string) bool {
+	if !outlet.IsOutletExec(exec) {
+		return false
+	}
+	_, op, err := outlet.ParseRef(exec)
+	return err == nil && op == outlet.OpExec
 }
 
 // literalString extracts the underlying string from an ast.Literal, or

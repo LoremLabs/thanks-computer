@@ -30,6 +30,10 @@ type Driver struct {
 	RowsAffected int64
 	// ExecReturns makes Exec also return Columns/Rows (a RETURNING clause).
 	ExecReturns bool
+	// RowsAfter makes the first RowsAfter queries return no rows and every
+	// later one return Rows — a poll that eventually finds what it waits
+	// for. Zero means every query returns Rows.
+	RowsAfter int64
 
 	OpenDelay  time.Duration
 	QueryDelay time.Duration
@@ -101,7 +105,10 @@ type conn struct {
 }
 
 func (c *conn) Query(ctx context.Context, req outlet.Request) (*outlet.Result, error) {
-	c.d.Queries.Add(1)
+	n := c.d.Queries.Add(1)
+	if c.d.RowsAfter > 0 && n <= c.d.RowsAfter {
+		return &outlet.Result{Columns: append([]string(nil), c.d.Columns...), RowsJSON: []byte("[]"), Bytes: 2}, nil
+	}
 	return c.run(ctx, req, false)
 }
 

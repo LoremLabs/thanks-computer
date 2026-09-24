@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/runtime"
@@ -63,7 +64,18 @@ const (
 // not meter model time — both need a decision before they loop.
 // workspace:// is admitted: its failures are in-band data (never a
 // fatal single-shot error) and its wall-clock is fuel-metered.
+// outlet://<name>/query is admitted for the same reasons — every failure
+// is data, each pass pays the dispatch fuel plus the rows it returns, and
+// the pool wait and statement run under the op's deadline — so a stack
+// can poll a table until a row appears. outlet://<name>/exec is held
+// back: a pass that ends in txco_outlet_outcome_unknown must not be
+// followed by another attempt at the same write, and a loop is exactly
+// that. Repeat a write with an explicit next op, not a LOOP.
 func loopTransportAdmitted(exec string) bool {
+	if outlet.IsOutletExec(exec) {
+		_, op, err := outlet.ParseRef(exec)
+		return err == nil && op == outlet.OpQuery
+	}
 	for _, prefix := range []string{"txco://", "http://", "https://", "mcp+http://", "mcp+https://", "workspace://"} {
 		if strings.HasPrefix(exec, prefix) {
 			return true

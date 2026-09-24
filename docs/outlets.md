@@ -97,6 +97,28 @@ so gate an error responder on `._crm.error.code != ""` rather than on
 Messages are fixed strings; the database's own error text, which names
 hosts and users, never reaches the envelope.
 
+### Polling
+
+`outlet://<name>/query` may [LOOP](./advanced/txcl/txcl.md#loop--repeat-an-op):
+every failure is data, each pass pays the dispatch fuel plus the rows it
+returns, and the whole loop runs under the op's deadline.
+
+```txcl
+EXEC "outlet://crm/query"
+  WITH sql = "SELECT id FROM exports WHERE job = $1 AND done = true",
+       args = &array(.job), into = "_export"
+  LOOP EVERY "2s" UNTIL ._export.count == 1 MAX 30
+```
+
+A loop merges every pass, and the merge appends arrays: `rows` from every
+pass accumulate (empty polls add nothing), and so do the entries of
+`columns`. Read `ok` and `count` — scalars, so the last pass wins — and
+treat `rows` as everything the poll saw.
+
+`outlet://<name>/exec` is not admitted to LOOP: a pass ending in
+`txco_outlet_outcome_unknown` must not be followed by another attempt at
+the same write. Repeat a write with an explicit next op.
+
 ### Arguments and types
 
 `args` accepts `null`, booleans, strings, numbers, and a homogeneous array

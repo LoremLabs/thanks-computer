@@ -323,3 +323,71 @@ func TestExecOutletRotationSwitchesPool(t *testing.T) {
 		t.Fatalf("rotation: opens=%d closes=%d pools=%d", drv.Opens.Load(), drv.Closes.Load(), pu.Outlets.OpenPools())
 	}
 }
+
+// A LOOP may poll an outlet query until a row appears; an outlet exec is
+// never admitted to LOOP (a pass ending in outcome_unknown must not be
+// followed by another attempt at the same write).
+func TestLoopTransportAdmittedOutlet(t *testing.T) {
+	for exec, want := range map[string]bool{
+		"outlet://crm/query":      true,
+		"outlet://crm/exec":       false,
+		"outlet://crm:5432/query": false,
+		"outlet://crm/drop":       false,
+	} {
+		if got := loopTransportAdmitted(exec); got != want {
+			t.Errorf("loopTransportAdmitted(%q) = %v, want %v", exec, got, want)
+		}
+	}
+}
+
+func TestExecOutletLoopPollsUntilRow(t *testing.T) {
+	pu, drv, _ := newOutletUnit(t, nil)
+	pu.Conf.LoopTimeout = "60s"
+	drv.RowsAfter = 2 // the first two polls find nothing
+	if _, err := pu.Dbc.Db.Exec(`INSERT INTO tenants (tenant_id, slug, created_at) VALUES ('tnt_acme', 'acme', '2026-05-20T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	poll := `EXEC "outlet://crm/query" ` +
+		`WITH sql = "SELECT id, name FROM jobs WHERE done = true", into = "_crm" ` +
+		`LOOP EVERY "2ms" UNTIL ._crm.count == 1 MAX 5`
+	if _, err := pu.Dbc.Db.Exec(`INSERT INTO ops (stack, scope, name, txcl, mock_req, mock_res, tenant_id) VALUES (?, ?, ?, ?, '', '', 'tnt_acme')`,
+		"site", 100, "poll", poll); err != nil {
+		t.Fatal(err)
+	}
+	out := runStage(t, context.Background(), pu, `{"_txc":{"tenant":"acme"}}`, "site/100")
+	if got := drv.Queries.Load(); got != 3 {
+		t.Fatalf("queries = %d, want 3 (two empty polls, then the row); out=%s", got, out)
+	}
+	if !gjson.Get(out, "_crm.ok").Bool() || gjson.Get(out, "_crm.count").Int() != 1 || gjson.Get(out, "_crm.rows.0.name").String() != "Alice" {
+		t.Fatalf("final view: %s", out)
+	}
+	b := book(out, "poll")
+	if b.Get("passes").Int() != 3 || b.Get("stop").String() != "done" {
+		t.Fatalf("bookkeeping = %s, want passes 3 / stop done", b.Raw)
+	}
+	// LOOP merges every pass, and the merge appends arrays: rows from every
+	// pass accumulate, and so do the column names. The general LOOP
+	// contract, documented on the outlets page; count and ok are the last
+	// pass's.
+	if n := len(gjson.Get(out, "_crm.columns").Array()); n != 6 {
+		t.Fatalf("columns after 3 passes = %d entries, want 6 (arrays append across passes): %s", n, gjson.Get(out, "_crm.columns").Raw)
+	}
+}
+
+// The same shape as an exec is dropped at dispatch: nothing runs.
+func TestExecOutletLoopExecDropped(t *testing.T) {
+	pu, drv, _ := newOutletUnit(t, nil)
+	pu.Conf.LoopTimeout = "60s"
+	if _, err := pu.Dbc.Db.Exec(`INSERT INTO tenants (tenant_id, slug, created_at) VALUES ('tnt_acme', 'acme', '2026-05-20T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	write := `EXEC "outlet://crm/exec" WITH sql = "DELETE FROM jobs WHERE done = true", into = "_crm" LOOP EVERY "2ms" UNTIL ._crm.ok == true MAX 3`
+	if _, err := pu.Dbc.Db.Exec(`INSERT INTO ops (stack, scope, name, txcl, mock_req, mock_res, tenant_id) VALUES (?, ?, ?, ?, '', '', 'tnt_acme')`,
+		"site", 100, "write", write); err != nil {
+		t.Fatal(err)
+	}
+	out := runStage(t, context.Background(), pu, `{"_txc":{"tenant":"acme"}}`, "site/100")
+	if drv.Execs.Load() != 0 || drv.Queries.Load() != 0 || gjson.Get(out, "_crm").Exists() {
+		t.Fatalf("a looping exec must be dropped at dispatch: execs=%d queries=%d out=%s", drv.Execs.Load(), drv.Queries.Load(), out)
+	}
+}

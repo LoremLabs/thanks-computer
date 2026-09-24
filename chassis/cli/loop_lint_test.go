@@ -246,6 +246,12 @@ func TestLintLoopHeldBackSchemes(t *testing.T) {
 			t.Errorf("%s: expected not-admitted warning, got: %v", txcl, got)
 		}
 	}
+	if got := lintLoopClause(loopOp(`EXEC "outlet://crm/exec" WITH sql = "DELETE FROM jobs WHERE id = $1" LOOP UNTIL .done == true`)); !containsSubstring(got, "outlet://<name>/query only") {
+		t.Errorf("looping outlet exec: expected the query-only warning, got: %v", got)
+	}
+	if got := lintLoopClause(loopOp(`EXEC "outlet://crm/query" WITH sql = "SELECT id FROM jobs WHERE done" LOOP UNTIL ._outlet.count == 1`)); containsSubstring(got, "not admitted") || containsSubstring(got, "query only") {
+		t.Errorf("looping outlet query is admitted; got: %v", got)
+	}
 	if got := lintLoopClause(loopOp(`EXEC "txco://mock" LOOP UNTIL .done == true`)); !containsSubstring(got, "fixture") {
 		t.Errorf("expected mock warning, got: %v", got)
 	}

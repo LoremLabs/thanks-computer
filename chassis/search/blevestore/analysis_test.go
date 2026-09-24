@@ -50,6 +50,22 @@ func TestAnalyzerTokens(t *testing.T) {
 		{"Crème Brûlée", []string{"creme", "brulee"}},
 		{"Running runs", []string{"running", "runs"}}, // no stemming
 		{"the of and", []string{"the", "of", "and"}},  // no stop words
+
+		// A script written without spaces is indexed as overlapping pairs:
+		// a whole clause is one unbroken run of letters, and one token that
+		// long is a term no query ever asks for.
+		{"人工智能", []string{"人工", "工智", "智能"}},
+		{"中国", []string{"中国"}},
+		{"実験の結果", []string{"実験", "験の", "の結", "結果"}},
+		// A run one character long stays whole rather than vanishing.
+		{"研究者 X", []string{"研究", "究者", "x"}},
+		// The seam between two alphabets is a split, never a pair.
+		{"中国2026年", []string{"中国", "2026", "年"}},
+		{"Wen Zhao 张伟", []string{"wen", "zhao", "张伟"}},
+		// Korean is written with spaces, so it is left as its words.
+		{"서울 대학교", []string{"서울", "대학교"}},
+		// Full-width forms fold onto the ordinary ones.
+		{"ＡＢＣ", []string{"abc"}},
 	} {
 		if got := tokens(c.an, tc.in); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("tokens(%q) = %v, want %v", tc.in, got, tc.want)

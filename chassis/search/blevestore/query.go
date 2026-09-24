@@ -16,7 +16,14 @@ import (
 // maxQueryTerms caps the analysed terms one query contributes. A whole
 // natural-language message is a legitimate query, so the cap is generous, and
 // past it the tail is dropped, never an error.
-const maxQueryTerms = 64
+//
+// It counts TERMS, and since txco_v2 a script written without spaces spends
+// about one term per character (its overlapping pairs), where English spends
+// one per word. At 64 a Chinese question was cut off after ~65 characters —
+// a couple of sentences — so the cap is 160, which is a comparable amount of
+// language in either script and still bounds the work a single query can ask
+// for.
+const maxQueryTerms = 160
 
 // Terms are matched in fieldAll only (document.go says why). A phrase is
 // matched there too, and again in each short field, where finding it intact
