@@ -37,5 +37,5 @@ type Decision struct {
 	Admit  bool
 	Status int           // HTTP status when !Admit (402 | 403 | 429 | ...)
 	Reason string        // machine token for the response header
-	Retry  time.Duration // suggested Retry-After (0 => none); rendered by the outlet
+	Retry  time.Duration // suggested Retry-After (0 => none); rendered by the response writer
 }

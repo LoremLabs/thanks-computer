@@ -69,6 +69,8 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
 	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
 	"github.com/loremlabs/thanks-computer/chassis/ops"
+	"github.com/loremlabs/thanks-computer/chassis/outlet"
+	_ "github.com/loremlabs/thanks-computer/chassis/outlet/postgres" // registers the "postgres" outlet driver
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
 	"github.com/loremlabs/thanks-computer/chassis/scheduled"
@@ -1461,6 +1463,41 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// Per-tenant admission gate (built above, rebuilt on dbcache reload).
 	pu.Admission = admissionProv
 
+	// outlet://<name>/<op>: pooled, bounded calls to external services a
+	// stack declares under OUTLETS/. The runtime needs the egress guard for
+	// every driver dial and the secret resolver for the DSN; declarations
+	// are read from the dbcache snapshot (inline) or the CAS (fleet rows).
+	// Nothing opens until an op runs, and an idle pool closes itself.
+	{
+		poolIdle, _ := time.ParseDuration(conf.OutletPoolIdle)
+		idleClose, _ := time.ParseDuration(conf.OutletIdleClose)
+		odeps := outlet.Deps{
+			Guard:  guard,
+			Decls:  &outletDeclSource{dbc: dbc, fcas: fcas},
+			Logger: logger.Named("outlet"),
+			Limits: outlet.Limits{
+				MaxRows:      conf.OutletMaxRows,
+				MaxBytes:     int64(conf.OutletMaxBytes),
+				PoolMaxConns: conf.OutletPoolMaxConns,
+				PoolIdle:     poolIdle,
+				IdleClose:    idleClose,
+			},
+		}
+		if secretsResolver != nil {
+			odeps.Secrets = secretsResolver
+		} else {
+			logger.Warn("outlet: no secret store (--secret-master-key unset); every outlet op reports txco_outlet_missing_secret")
+		}
+		pu.Outlets = outlet.NewRuntime(odeps)
+		pu.Outlets.Start(ctx)
+		logger.Info("outlet runtime loaded",
+			zap.Strings("drivers", outlet.Registered()),
+			zap.Int("max_rows", conf.OutletMaxRows),
+			zap.Int("max_bytes", conf.OutletMaxBytes),
+			zap.Int("pool_max_conns", conf.OutletPoolMaxConns),
+			zap.String("idle_close", conf.OutletIdleClose))
+	}
+
 	// In-process MCP session cache. Per (tenant, endpoint), 5min TTL.
 	// Drops 3 HTTPS round-trips per MCP call to 1 on hot paths by
 	// reusing the server-minted Mcp-Session-Id across calls. Per-
@@ -2776,6 +2813,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			if err := sstore.Close(); err != nil {
 				logger.Warn("search store close error", zap.Error(err))
 			}
+		}
+		// Outlet pools close after the in-flight wait for the same reason.
+		if pu.Outlets != nil {
+			pu.Outlets.Close()
 		}
 		// Drain the trace sink (async wrapper waits for queued writes;
 		// sync sinks are a no-op).

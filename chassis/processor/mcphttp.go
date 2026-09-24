@@ -423,7 +423,7 @@ func projectMCPResult(result json.RawMessage) (event.Payload, error) {
 // the MCP lifecycle fails at any phase. Two things land:
 //   - `_txc._ops.<opname>` in Raw — visible to downstream rules so
 //     they can branch on op-level outcome (status, message, error,
-//     phase). `_txc.*` is stripped at the web outlet, so this is
+//     phase). `_txc.*` is stripped by the web response writer, so this is
 //     chassis-internal metadata, not a user-facing leak.
 //   - meta.error[] / meta.errorMsg — trace-only fields (unchanged
 //     from prior behavior; the chassis doesn't merge Meta into the

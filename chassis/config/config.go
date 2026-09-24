@@ -209,6 +209,11 @@ type Config struct {
 	DatasetCacheBytes            int      `id:"dataset-cache-bytes" default:"4294967296" desc:"Disk budget (bytes) for the dataset materialise cache; LRU eviction closes the read handle and removes the cached file (4GiB). 0 = unbounded."`
 	DatasetMaxFileBytes          int      `id:"dataset-max-file-bytes" default:"4294967296" desc:"Max size of a single DATASETS/ artifact accepted by the blob upload endpoint and enforced again at activation (4GiB)."`
 	DatasetMaxRows               int      `id:"dataset-max-rows" default:"200" desc:"Hard cap on rows a txco://dataset query returns; a query's manifest max_rows and the rule's WITH limit clamp under it (200)."`
+	OutletMaxRows                int      `id:"outlet-max-rows" default:"500" desc:"Row ceiling for one outlet://<name>/query or /exec result on this node; an outlet's declared max_rows can only tighten it. Crossing it returns txco_outlet_result_too_large with no rows (never a prefix). (500)"`
+	OutletMaxBytes               int      `id:"outlet-max-bytes" default:"1048576" desc:"Byte ceiling for one outlet result, measured while rows stream; crossing it returns txco_outlet_result_too_large with no rows (1MiB)."`
+	OutletPoolMaxConns           int      `id:"outlet-pool-max-conns" default:"4" desc:"Max connections one outlet's pool holds on this node; the minimum is always 0. A customer database sees roughly nodes × this many connections. (4)"`
+	OutletPoolIdle               string   `id:"outlet-pool-idle" default:"60s" desc:"How long an outlet pool keeps an unused connection open before closing it (60s)."`
+	OutletIdleClose              string   `id:"outlet-idle-close" default:"5m" desc:"How long an outlet pool that no op has used stays open before the chassis closes it; the next call reopens it (5m)."`
 	SnapshotBootstrapRef         string   `id:"snapshot-bootstrap-ref" default:"" desc:"If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap."`
 	FeedSource                   string   `id:"feed-source" default:"nop" desc:"Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged."`
 	FeedSourceFileDir            string   `id:"feed-source-file-dir" default:"./chassis/data/feed" desc:"Root directory for the file feed source (./chassis/data/feed)"`
@@ -689,6 +694,13 @@ func Load() (Config, error) {
 	_, err = time.ParseDuration(t)
 	if err != nil {
 		log.Fatalf("unable to parse max idle timeout %s", config.TCPMaxIdleTimeout)
+	}
+
+	if _, err = time.ParseDuration(config.OutletPoolIdle); err != nil {
+		log.Fatalf("unable to parse --outlet-pool-idle %q", config.OutletPoolIdle)
+	}
+	if _, err = time.ParseDuration(config.OutletIdleClose); err != nil {
+		log.Fatalf("unable to parse --outlet-idle-close %q", config.OutletIdleClose)
 	}
 
 	// registry fixed

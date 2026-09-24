@@ -41,7 +41,7 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.tcp.res.action", true},
 		{"_txc.tcp.host", false}, // an observed connection fact, never a verdict
 		{"_txc.tcp.listener", false},
-		{"_txc.server.write", false}, // the old server.* outlet name is NOT an alias
+		{"_txc.server.write", false}, // the old server.* response-writer name is NOT an alias
 		{"_txc.server.hangup", false},
 		{"_txc.imap.msg.text", false},       // an appended message's facts are read-only…
 		{"_txc.imap.tenant", false},         // …and the route hint especially

@@ -85,6 +85,10 @@ const (
 	// (--notebook-max-entry-bytes) bounds bytes in. Exported because the
 	// handlers live in package server and charge via AddFuel.
 	FuelCostNotebookPerMiB int64 = 100
+	// FuelCostOutletPerMiB charges outlet://<name>/query and /exec per MiB
+	// of rows returned (rounded up), on top of the flat dispatch fuel — the
+	// notebook rate. Exported for symmetry with the other per-MiB rates.
+	FuelCostOutletPerMiB int64 = 100
 	// FuelCostKVPerMiB charges txco://kv/mget and kv/list with values per
 	// MiB of stored values returned, and kv/mset per MiB written (rounded
 	// up), on top of the flat dispatch fuel. They are the only KV ops that

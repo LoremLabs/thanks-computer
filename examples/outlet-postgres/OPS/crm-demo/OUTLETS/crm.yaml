@@ -1,0 +1,13 @@
+# The CRM this stack may talk to. Where to connect and the ceilings; the
+# SQL lives in the ops. `secret` is the NAME of a tenant secret whose value
+# is a postgres:// DSN — set it with
+#
+#   txco auth tenant secrets set --stack crm-demo CRM_DSN
+#
+# Nothing here connects at apply time: a database that is down never blocks
+# a deploy, and a missing secret is reported to the op as failure data.
+driver: postgres
+secret: CRM_DSN
+access: read          # outlet://crm/exec is refused; the role behind the DSN should be read-only too
+max_rows: 100         # tightens the node ceiling (--outlet-max-rows), never raises it
+timeout: 3000         # ms; caps every call on this outlet

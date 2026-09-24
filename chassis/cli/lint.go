@@ -69,6 +69,13 @@ Flags:
 		}
 	}
 
+	// Outlet check: every EXEC "outlet://..." against its stack's OUTLETS/
+	// declarations (chassis/outlet.CheckOp). Errors, like on apply — they
+	// fail activation, so they flip the exit code here too.
+	for _, m := range checkOutletOps(ops, dir) {
+		diags = append(diags, bundle.Diag{Msg: "outlet: " + m})
+	}
+
 	// Reuse apply's static loop-shape lint (unconditional self-loops /
 	// 2-stack ping-pongs). Warnings only, same conservative semantics as
 	// apply (see loop_lint.go) — they don't flip the exit code.

@@ -27,14 +27,14 @@ const (
 
 	// StreamHead carries the response status + headers snapshot for a
 	// streamed HTTP response. Sent once, before any StreamChunk; the
-	// outlet writes the head and switches into incremental-flush mode.
+	// response writer writes the head and switches into incremental-flush mode.
 	StreamHead
 
 	// StreamChunk carries a block of raw (already-decoded) response body
 	// bytes in Raw, to be written and flushed immediately.
 	StreamChunk
 
-	// StreamEnd terminates a streamed response. No body; the outlet
+	// StreamEnd terminates a streamed response. No body; the response writer
 	// returns once it receives this.
 	StreamEnd
 

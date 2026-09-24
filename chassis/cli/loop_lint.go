@@ -248,7 +248,7 @@ func lintLoopClause(ops []bundle.Op) []string {
 				"lint: %s LOOP UNTIL compares %s — a missing path reads as false, so the loop exits after the first pass; compare `== true`, `!= \"\"`, or a value the op always writes", where, leaf))
 		}
 		switch {
-		case strings.HasPrefix(r.Exec, "compute://"), strings.HasPrefix(r.Exec, "ai://"):
+		case strings.HasPrefix(r.Exec, "compute://"), strings.HasPrefix(r.Exec, "ai://"), strings.HasPrefix(r.Exec, "outlet://"):
 			warnings = append(warnings, fmt.Sprintf(
 				"lint: %s LOOP is not admitted for EXEC %q in this version; the op is dropped at dispatch", where, r.Exec))
 		case strings.HasPrefix(r.Exec, "txco://mock"):

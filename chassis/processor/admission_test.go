@@ -77,7 +77,7 @@ func TestAdmissionDeniesSuspendedTenantAtHandoff(t *testing.T) {
 	select {
 	case p := <-resCh:
 		// The gate emits a transport-neutral marker; the web/lmtp/tcp
-		// outlets render it. No web shaping here.
+		// response writers render it. No web shaping here.
 		if !gjson.Get(p.Raw, "_txc.admission.denied").Bool() {
 			t.Error("admission.denied marker missing")
 		}

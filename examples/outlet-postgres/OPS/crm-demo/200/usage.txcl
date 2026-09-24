@@ -1,0 +1,9 @@
+# No ?email= given → usage hint. Gated on the query being ABSENT: ops in one
+# scope evaluate concurrently against the same snapshot, so responders must
+# be mutually exclusive by WHEN, not by file order.
+WHEN @src == "http" && @web.req.url.query.email.0 == ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "usage", "GET /customers?email=<address>"))),
+       @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

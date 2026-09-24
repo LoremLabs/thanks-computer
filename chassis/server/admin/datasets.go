@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 
 	"go.uber.org/zap"
 
@@ -260,10 +259,5 @@ func (c *Controller) WarmDatasets(ctx context.Context, tenantID, stackName strin
 
 // datasetIssuesDetail shapes deep-gate issues for a writeJSONError detail.
 func datasetIssuesDetail(issues []datasetIssue) map[string]any {
-	errs := make([]map[string]any, 0, len(issues))
-	for _, i := range issues {
-		errs = append(errs, map[string]any{"path": i.Path, "err": i.Err})
-	}
-	return map[string]any{"errors": errs, "hint": strings.TrimSpace(`
-datasets are validated before activation: artifact uploaded, manifest parses, every query prepares read-only against the shipped schema`)}
+	return issuesDetail(issues, `datasets are validated before activation: artifact uploaded, manifest parses, every query prepares read-only against the shipped schema`)
 }

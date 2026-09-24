@@ -230,7 +230,7 @@ func TestWorkspaceStreamEndToEnd(t *testing.T) {
 	seedWorkspaceOp(t, pu, "site", 100, "build",
 		`EXEC "workspace://tools/exec" WITH command = "make", stream = true, into = "_ws"`)
 
-	resCh := make(chan event.Payload) // unbuffered, like the web outlet's
+	resCh := make(chan event.Payload) // unbuffered, like the web response writer's
 	done := make(chan error, 1)
 	go func() {
 		done <- pu.Run(context.Background(), `{"_txc":{"tenant":"acme","src":"http"}}`, "site/100", resCh)

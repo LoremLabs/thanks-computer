@@ -490,10 +490,10 @@ func workspaceFuel(wallMS int64) int64 {
 // workspaceStreamWriter forwards one command's stdout to the request's
 // response stream. The provider writes to it as bytes arrive (a pipe read
 // locally, a WebSocket frame on the fleet), so each write becomes a body
-// chunk the outlet flushes. head is the status + headers snapshot the sink
+// chunk the response writer flushes. head is the status + headers snapshot the sink
 // emits once, before the first chunk.
 //
-// A send failure — the client went away, so the outlet stopped receiving —
+// A send failure — the client went away, so the response writer stopped receiving —
 // is returned to the provider, which stops copying; the op's context is
 // already cancelled in that case, so the command is killed by the normal
 // path.

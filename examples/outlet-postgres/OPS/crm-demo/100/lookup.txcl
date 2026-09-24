@@ -1,0 +1,15 @@
+# crm-demo scope 100 — look the visitor up in the CRM.
+#
+# `outlet://crm/query` runs the statement written HERE, in a READ ONLY
+# transaction on a pool the chassis owns, with every value bound as a
+# parameter ($1 comes from `args`). The op never sees the DSN. The result
+# lands at `into`: {ok, outlet, columns, rows: [{col: val}...], count} —
+# or {ok: false, error: {code, message}} when anything goes wrong, so the
+# next scope branches on `._crm.ok`.
+#
+# Query params arrive as arrays (?email=a@b → @web.req.url.query.email.0).
+WHEN @src == "http" && @web.req.url.query.email.0 != ""
+  EXEC "outlet://crm/query"
+    WITH sql = "SELECT id, name, plan FROM customers WHERE email = $1 LIMIT 10",
+         args = &array(@web.req.url.query.email.0),
+         into = "_crm"

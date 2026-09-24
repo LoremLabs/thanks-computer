@@ -15,7 +15,7 @@ import (
 // The chassis already streams scope-driven bodies: a `_txc.web.res.body`
 // written in a non-terminal scope is flushed as a chunk by
 // advanceAfterScope, which owns the StreamHead/StreamChunk/StreamEnd
-// sequence the web outlet renders. That granularity is one chunk per scope
+// sequence the web response writer renders. That granularity is one chunk per scope
 // hop. An op that produces output continuously — a `workspace://` exec
 // running a build — has nothing to write to between hops, because an op
 // handler returns exactly ONE payload when it is done.
@@ -23,16 +23,16 @@ import (
 // The sink closes that gap. It is installed on the request context by Run
 // (live HTTP requests only) holding the same response channel
 // advanceAfterScope uses, so an op can emit chunks in the middle of its own
-// dispatch and the outlet writes them as they arrive. advanceAfterScope
+// dispatch and the response writer sends them as they arrive. advanceAfterScope
 // then treats an opened sink exactly like the envelope's
 // `_txc.runtime.http_stream_open` flag: the terminal scope closes the
 // stream instead of emitting a buffered JSON response.
 //
 // Ordering and backpressure: sends are serialized under mu (so the head
-// can never be overtaken by a chunk) and block until the outlet receives,
+// can never be overtaken by a chunk) and block until the response writer receives,
 // which is the natural backpressure — resCh is unbuffered, so a command
 // producing faster than the client reads is throttled at the source. Every
-// send selects on the op's context, so a client that disappears (the outlet
+// send selects on the op's context, so a client that disappears (the response writer
 // cancels) unblocks the writer instead of wedging it.
 //
 // Once a stream is open the response IS the stream: the envelope's JSON
@@ -78,7 +78,7 @@ func (s *streamSink) markClosed() { s.closed.Store(true) }
 
 // Write sends p as a body chunk, emitting head as the StreamHead first if
 // this is the first chunk of the response. head is an envelope carrying the
-// `_txc.web.res.*` status and headers snapshot the outlet renders; it is
+// `_txc.web.res.*` status and headers snapshot the response writer renders; it is
 // used only on that first call. Empty writes are dropped so a command that
 // produces nothing never opens a stream (the request then renders its
 // normal JSON response).
@@ -104,7 +104,7 @@ func (s *streamSink) Write(ctx context.Context, head string, p []byte) error {
 	return nil
 }
 
-// send blocks until the outlet takes the payload or the op's context ends.
+// send blocks until the response writer takes the payload or the op's context ends.
 func (s *streamSink) send(ctx context.Context, p event.Payload) error {
 	select {
 	case s.resCh <- p:

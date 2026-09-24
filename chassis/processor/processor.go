@@ -41,6 +41,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
@@ -162,6 +163,13 @@ type Unit struct {
 	// `secrets` in its WITH clause must fail loud with
 	// `secret_store_unavailable` rather than silently skip.
 	Secrets *secrets.Resolver
+
+	// Outlets runs outlet://<name>/<op>: pooled, bounded calls to external
+	// services a stack declared under OUTLETS/, credentials held by the
+	// chassis. nil-safe — an outlet op then reports txco_outlet_unavailable
+	// as data. Set by the server (chassis/server) once the egress guard and
+	// the secret resolver exist.
+	Outlets *outlet.Runtime
 
 	// Admission gates the one-time _sys -> concrete-tenant handoff: a
 	// suspended/disabled tenant is denied (402/403) before its stack
@@ -1489,7 +1497,7 @@ func (pu *Unit) advanceAfterScope(
 						pu.Logger.Warn("stream chunk decode", zap.String("err", derr.Error()))
 					}
 				}
-				// The terminator carries the FINAL envelope. Every outlet
+				// The terminator carries the FINAL envelope. Every response writer
 				// ignores a StreamEnd's Raw (the body was the chunks), but
 				// the dispatch tee captures it — and without it a streamed
 				// request accounts for nothing: the tee's last payload
@@ -2997,6 +3005,14 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// workspace.go.
 		payload, err = pu.ExecWorkspace(ctx, op)
 		transport = "workspace"
+	case strings.HasPrefix(opName, outlet.SchemePrefix):
+		// A declared external service (OUTLETS/<name>.yaml) reached
+		// through a chassis-owned pool: the op writes its statement and
+		// binds values through args; the chassis holds the DSN, bounds
+		// rows, bytes and time, and reports every failure as data under
+		// `WITH into`. See chassis/outlet and processor/outlet.go.
+		payload, err = pu.ExecOutlet(ctx, op)
+		transport = "outlet"
 	case strings.HasPrefix(opName, "goto://"): // TODO
 	case StagePartsRE.MatchString(opName):
 		// Unschemed `EXEC "<stack>/<scope>"` is a stage jump. We
@@ -3015,7 +3031,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// gRPC was removed in this revision. Any non-recognized scheme is a
 		// rule authoring error — fail loudly so it's spotted at first match
 		// rather than silently dispatched somewhere.
-		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", or a stage like "stack/scope"`)
+		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", "outlet://<name>/<op>", or a stage like "stack/scope"`)
 		payload = pu.MakeMockResponse(op, "unsupported-scheme")
 		transport = "unsupported"
 	}

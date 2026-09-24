@@ -31,6 +31,6 @@ func TestDrainResponseMarker(t *testing.T) {
 	}
 	// Neutral: admission must NOT shape transport-specific fields.
 	if gjson.Get(out, "_txc.web.res.status").Exists() {
-		t.Error("admission must not shape web response fields (that's the outlet's job)")
+		t.Error("admission must not shape web response fields (that's the response writer's job)")
 	}
 }

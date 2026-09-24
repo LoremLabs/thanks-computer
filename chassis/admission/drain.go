@@ -21,7 +21,7 @@ func SetDraining(on bool) { draining.Store(on) }
 func IsDraining() bool { return draining.Load() }
 
 // DrainResponse stamps the transport-neutral admission marker for a 503
-// "draining" denial. Each outlet renders it in its own protocol (web →
+// "draining" denial. Each personality's response writer renders it in its own protocol (web →
 // 503 + Retry-After; lmtp → 451 so mail retries; tcp → close). Used by the
 // server bus loop while the node is draining.
 func DrainResponse(resp string) string {

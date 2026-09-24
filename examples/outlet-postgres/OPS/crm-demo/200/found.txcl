@@ -1,0 +1,11 @@
+# crm-demo scope 200 — serialize the lookup result to exact JSON bytes.
+# Gated on `ok == true`: a failure is data at the same path, and a missing
+# path compares as false, so this never fires on an error.
+WHEN ._crm.ok == true
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "email", @web.req.url.query.email.0,
+         "count", ._crm.count,
+         "customers", ._crm.rows))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

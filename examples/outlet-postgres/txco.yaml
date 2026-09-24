@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — the lookup is a chassis built-in (outlet://);
+# the workspace ships only ops plus the OUTLETS/ declaration.

@@ -1,0 +1,20 @@
+{
+  "note": "A stack that reads the tenant's own PostgreSQL through outlet://crm/query, declared in OPS/crm-demo/OUTLETS/crm.yaml with the DSN held as the tenant secret CRM_DSN. The smoke run sets no secret, so the lookup answers 502 with txco_outlet_missing_secret — proving the declaration deployed, the scheme dispatched and the failure came back as data. See README.md to run it against a real database. Binds localhost → crm-demo (the _sys/boot/75 auto-route also exists for bare `txco dev` use).",
+  "bind": [{ "host": "localhost", "stack": "crm-demo" }],
+  "checks": [
+    {
+      "name": "no secret → failure is data, not a dropped op",
+      "method": "GET",
+      "path": "/customers?email=alice@example.com",
+      "status": 502,
+      "contains": "txco_outlet_missing_secret"
+    },
+    {
+      "name": "no email → usage hint",
+      "method": "GET",
+      "path": "/customers",
+      "status": 400,
+      "contains": "usage"
+    }
+  ]
+}

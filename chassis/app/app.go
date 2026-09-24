@@ -993,9 +993,12 @@ func openAuthDBOrDie(logger *zap.Logger, dsn string) (*sql.DB, registry.Dialect)
 // openSharedDBOrDie opens a control-plane DB that rides the SQLite↔Postgres
 // dialect seam and returns its dialect. A postgres:// (or postgresql://) DSN
 // selects a shared Postgres store for an HA control plane — opened via the
-// `pgx` database/sql driver, which a downstream overlay blank-imports (the
-// chassis never compiles a Postgres driver; SQLite stays the in-tree default
-// and only built-in driver). Anything else is the historical local SQLite
+// `pgx` database/sql driver, which a downstream overlay blank-imports. The
+// bundled chassis never registers a database/sql Postgres driver for its
+// OWN storage — SQLite stays the in-tree default and only built-in storage
+// backend. (It does compile pgx as an outlet protocol client, chassis/outlet/
+// postgres, which is a different thing: a stack talking to a tenant's
+// database, not the chassis persisting itself.) Anything else is the historical local SQLite
 // file, byte-for-byte unchanged. `kind` ("auth" / "scheduled") labels logs.
 //
 // The DSN is logged redacted (it may carry a Postgres password).

@@ -1,6 +1,6 @@
 // Package open registers the "open" egress policy: it allows every
-// outbound op dial. This is the default — local development and testing
-// reach any address, exactly as before any policy existed.
+// outbound op dial. `txco dev` selects it so local development and testing
+// reach any address; `serve` defaults to "private" (--egress-policy).
 package open
 
 import "github.com/loremlabs/thanks-computer/chassis/egress"

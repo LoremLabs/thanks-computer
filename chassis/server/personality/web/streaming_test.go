@@ -13,7 +13,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
-// TestWriteStreamWritesHeadThenChunks verifies the outlet's streaming
+// TestWriteStreamWritesHeadThenChunks verifies the response writer's streaming
 // path: the StreamHead establishes status + headers, each StreamChunk is
 // written and flushed, and StreamEnd returns. The concatenated chunk
 // bytes are the response body.

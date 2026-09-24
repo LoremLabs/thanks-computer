@@ -30,7 +30,7 @@ import (
 // The test simulates two rules from a pure-txcl MCP server: the
 // envelope-parser at the front and one tool handler (`echo`). It
 // runs both through DecorateInput/OverlayResponse and verifies the
-// resulting envelope shape matches what the web outlet would
+// resulting envelope shape matches what the web response writer would
 // serialize as a valid JSON-RPC response.
 func TestE2E_MCPServerInTxcl(t *testing.T) {
 	pu, _ := newTestUnit(t)
@@ -43,7 +43,7 @@ func TestE2E_MCPServerInTxcl(t *testing.T) {
 	//
 	// `@rpc` writes under `_txc.rpc` (the chassis-internal
 	// namespace); this is the right home for parsed request data
-	// — the web outlet strips `_`-prefixed keys on the way out so
+	// — the web response writer strips `_`-prefixed keys on the way out so
 	// the chassis plumbing doesn't leak into the response body.
 	parseRule := `SET @rpc = &json(&b64decode(@web.req.body))`
 
@@ -94,7 +94,7 @@ func TestE2E_MCPServerInTxcl(t *testing.T) {
 
 	// --- assert the JSON-RPC response shape ---------------------
 	//
-	// The web outlet would project the envelope (minus _-prefixed
+	// The web response writer would project the envelope (minus _-prefixed
 	// keys) as the response body, producing the JSON-RPC reply
 	// the MCP client expects.
 	cases := []struct {

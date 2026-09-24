@@ -336,6 +336,18 @@ func loadLocalStackFiles(dir, name string) ([]client.StackFile, error) {
 		return nil, err
 	}
 	files = append(files, assets...)
+	// SOURCES/ and OUTLETS/ are part of the code manifest apply records, so
+	// they must be in the cleanliness hash too.
+	srcPacks, err := collectSourcePacks(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, srcPacks...)
+	outletFiles, err := collectOutletFiles(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, outletFiles...)
 	// Datasets join the code manifest the same way apply records them:
 	// manifests inline, artifacts as fingerprint-only rows (hashed streaming).
 	dsFiles, _, err := collectDatasetFiles(filepath.Join(dir, "OPS", filepath.FromSlash(name)))

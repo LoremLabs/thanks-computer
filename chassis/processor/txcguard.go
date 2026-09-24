@@ -72,7 +72,7 @@ func systemMayWriteTxc(path string) bool { return txcguard.SystemMayWrite(path) 
 // scheme check would.
 func transportAuthorControlled(transport string) bool {
 	switch transport {
-	case "txco", "ai", "goto", "noop":
+	case "txco", "ai", "goto", "noop", "outlet":
 		return false
 	default:
 		// mock, http, https, compute, mcp+http, unsupported, "" (goto:// TODO)

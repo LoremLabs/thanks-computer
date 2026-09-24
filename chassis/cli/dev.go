@@ -31,6 +31,7 @@ import (
 	devpkg "github.com/loremlabs/thanks-computer/chassis/cli/dev"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
+	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
@@ -635,6 +636,19 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
 		files = append(files, packs...)
+		// SOURCES/ and OUTLETS/ are code and ride the same draft as they do
+		// on `txco apply` (apply.go); leaving them out here made dev drop a
+		// stack's source declarations on every upload.
+		srcPacks, serr := collectSourcePacks(filepath.Join(dir, "OPS", stack))
+		if serr != nil {
+			return fmt.Errorf("%s: collect SOURCES/: %w", stack, serr)
+		}
+		files = append(files, srcPacks...)
+		outletFiles, oerr := collectOutletFiles(filepath.Join(dir, "OPS", stack))
+		if oerr != nil {
+			return fmt.Errorf("%s: collect OUTLETS/: %w", stack, oerr)
+		}
+		files = append(files, outletFiles...)
 		dsFiles, dsUploads, derr := collectDatasetFiles(filepath.Join(dir, "OPS", stack))
 		if derr != nil {
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
@@ -959,6 +973,16 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
 		files = append(files, packs...)
+		srcPacks, serr := collectSourcePacks(stackDir)
+		if serr != nil {
+			return fmt.Errorf("%s: collect SOURCES/: %w", stack, serr)
+		}
+		files = append(files, srcPacks...)
+		outletFiles, oerr := collectOutletFiles(stackDir)
+		if oerr != nil {
+			return fmt.Errorf("%s: collect OUTLETS/: %w", stack, oerr)
+		}
+		files = append(files, outletFiles...)
 		dsFiles, dsUploads, derr := collectDatasetFiles(stackDir)
 		if derr != nil {
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
@@ -1015,7 +1039,7 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
 	}
 	// Asset half: stat-only walk of the same trees the collectors read.
-	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, dataset.Dir} {
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, storeseed.DirSources, outlet.Dir, dataset.Dir} {
 		treeDir := filepath.Join(stackDir, top)
 		info, err := os.Stat(treeDir)
 		if err != nil || !info.IsDir() {

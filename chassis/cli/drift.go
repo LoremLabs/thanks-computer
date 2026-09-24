@@ -85,6 +85,17 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 				if derr == nil {
 					files = append(files, dsFiles...)
 				}
+				// SOURCES/ and OUTLETS/ ride the code manifest too.
+				if srcPacks, serr := collectSourcePacks(stackDir); serr == nil {
+					files = append(files, srcPacks...)
+				} else {
+					derr = serr
+				}
+				if outletFiles, oerr := collectOutletFiles(stackDir); oerr == nil {
+					files = append(files, outletFiles...)
+				} else {
+					derr = oerr
+				}
 				if saved.ManifestHash != "" && derr == nil {
 					if localManifestHash(files) == saved.ManifestHash {
 						d.Local += " (clean)"

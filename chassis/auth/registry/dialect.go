@@ -89,8 +89,9 @@ type Dialect interface {
 var SQLite Dialect = sqliteDialect{}
 
 // Postgres is selected when the auth DSN is a postgres:// URL. The
-// driver itself is registered out of tree (overlay blank-import), never
-// compiled into core.
+// database/sql driver for chassis STORAGE is registered out of tree (overlay
+// blank-import); the bundled chassis only compiles pgx as the outlet://
+// protocol client (chassis/outlet/postgres), which never touches this seam.
 var Postgres Dialect = postgresDialect{}
 
 // DialectForDSN picks the dialect from an auth DSN. Anything that isn't a

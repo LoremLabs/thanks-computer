@@ -11,7 +11,7 @@ import (
 // resp: _txc.admission.{denied,status,reason}, plus _txc.tenant (when
 // non-empty) so the usage convergence point attributes the denial to the
 // right tenant. It is deliberately transport-agnostic — each personality's
-// outlet reads this marker (via Denied) and renders the rejection in its
+// response writer reads this marker (via Denied) and renders the rejection in its
 // own protocol: web → HTTP status, lmtp → SMTP code, tcp → line+close,
 // cron → log. The shared gate must not know about transports.
 func MarkDenied(resp string, d Decision, tenant string) string {
@@ -42,7 +42,7 @@ func MarkDenied(resp string, d Decision, tenant string) string {
 }
 
 // Denied reports whether resp carries an admission-denial marker, and if
-// so the status + reason an outlet should render. Each personality calls
+// so the status + reason a response writer should render. Each personality calls
 // this in its response path to map the neutral denial to its protocol.
 func Denied(resp string) (status int, reason string, ok bool) {
 	if !gjson.Get(resp, "_txc.admission.denied").Bool() {

@@ -454,6 +454,18 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		}
 	}
 
+	// Outlet check — every EXEC "outlet://..." against its stack's OUTLETS/
+	// declarations. Errors, not warnings: an undeclared outlet, exec on a
+	// read outlet, a non-literal or multi-statement sql, or the wrong verb
+	// is knowable from source and would fail activation anyway (the server
+	// runs the same check). See chassis/outlet.CheckOp.
+	if oerrs := checkOutletOps(ops, dir); len(oerrs) > 0 {
+		for _, m := range oerrs {
+			fmt.Fprintf(stderr, "%s: outlet error at %s\n", cmd, m)
+		}
+		return 1
+	}
+
 	// Apply-time lint for unconditional loop shapes (self-loops and
 	// 2-stack ping-pongs). Warnings only — design-time complement to the
 	// runtime budget guards in chassis/processor/budget.go. See
@@ -612,6 +624,15 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, srcPacks...)
+		// OUTLETS/ declarations are CODE too: one small YAML per external
+		// service the stack's ops may call through outlet://; inline in the
+		// draft like a dataset manifest, checked at validate/activate.
+		outletFiles, oerr := collectOutletFiles(filepath.Join(dir, "OPS", stack))
+		if oerr != nil {
+			fmt.Fprintf(stderr, "%s: %s: collect OUTLETS/: %v\n", cmd, stack, oerr)
+			return 1
+		}
+		files = append(files, outletFiles...)
 		// Datasets are CODE (the manifest names queries the rules call; a query
 		// and schema change deploy atomically), so they join the code manifest
 		// here — unlike store-seed packs, which are data (`txco data apply`).

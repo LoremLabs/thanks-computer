@@ -34,6 +34,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/opname"
+	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
@@ -433,7 +434,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS":
+		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS":
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -500,6 +501,18 @@ func validateStackFilePath(p string) error {
 		if dataset.Name(p) == "" {
 			return fmt.Errorf("dataset members must be a single %q or %q file directly under %s/ (got %q)",
 				dataset.ArtifactExt, dataset.ManifestExt, dataset.Dir, p)
+		}
+		return nil
+	}
+
+	// OUTLETS/<name>.yaml declares an external service an outlet:// op may
+	// call (chassis/outlet). Single name segment, one extension; the
+	// declaration's contents and the ops that use it are checked at
+	// validate/activate (deepValidateOutlets).
+	if outlet.IsOutletPath(p) {
+		if outlet.Name(p) == "" {
+			return fmt.Errorf("outlet declarations must be a single <name>%s file directly under %s/, name matching [a-z][a-z0-9_-]* (got %q)",
+				outlet.DeclExt, outlet.Dir, p)
 		}
 		return nil
 	}
@@ -1700,7 +1713,8 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 		if f.Encoding != "" &&
 			!strings.HasPrefix(f.Path, "FILES/") &&
 			storeseed.KindForPath(f.Path) == "" &&
-			!dataset.IsDatasetPath(f.Path) {
+			!dataset.IsDatasetPath(f.Path) &&
+			!outlet.IsOutletPath(f.Path) {
 			writeJSONError(w, http.StatusBadRequest, "encoding_not_allowed",
 				map[string]any{"index": i, "path": f.Path, "encoding": f.Encoding,
 					"hint": "base64/cas encodings are for FILES/, VECTORS/, KV/ and DATASETS/ assets; op files are plain UTF-8 strings"})
@@ -2136,7 +2150,7 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 			// this materialises nothing for them; an inline-pushed member (a
 			// small artifact via the raw API, or the .yaml manifest) gets the
 			// same CAS treatment as FILES/.
-			if (strings.HasPrefix(rf.path, "FILES/") || dataset.IsDatasetPath(rf.path)) && rf.content != "" {
+			if (strings.HasPrefix(rf.path, "FILES/") || dataset.IsDatasetPath(rf.path) || outlet.IsOutletPath(rf.path)) && rf.content != "" {
 				assets[rf.path] = rf.content
 			}
 		}
@@ -2170,6 +2184,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 		if dataset.IsDatasetPath(rf.path) {
 			continue // dataset artifact/manifest → filecas + txco://dataset, not an ops row
+		}
+		if outlet.IsOutletPath(rf.path) {
+			continue // outlet declaration → read by outlet:// at run time, not an ops row
 		}
 		pf, ok := parseStackPath(rf.path)
 		if !ok {
@@ -2455,6 +2472,12 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				writeJSONError(w, http.StatusUnprocessableEntity, "dataset_invalid", datasetIssuesDetail(issues))
 				return
 			}
+			// Outlet gate: declarations parse and every outlet:// op is
+			// consistent with them. Source-only, no connection is made.
+			if issues := c.deepValidateOutlets(r.Context(), versionID); len(issues) > 0 {
+				writeJSONError(w, http.StatusUnprocessableEntity, "outlet_invalid", issuesDetail(issues, outletIssuesHint))
+				return
+			}
 		}
 	}
 	// Lookup failures fall through: materialiseStackVersion re-runs both
@@ -2487,7 +2510,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		// activate is never published. Mirrors the in-tx loop's coverage
 		// exactly: rule bodies only — not FILES/, packs, datasets, mocks.
 		for _, f := range files {
-			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) {
+			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) {
 				continue
 			}
 			pf, ok := parseStackPath(f.Path)
@@ -2806,6 +2829,13 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 	// manifest parses, every query prepares read-only), surfaced here so
 	// `txco apply`'s validate phase reports them before any pointer flips.
 	for _, issue := range c.deepValidateDatasets(r.Context(), versionID) {
+		resp.OK = false
+		resp.Checked++
+		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})
+	}
+	// Outlet gate — declarations parse, every outlet:// op names a declared
+	// outlet with a literal, single, verb-matched statement.
+	for _, issue := range c.deepValidateOutlets(r.Context(), versionID) {
 		resp.OK = false
 		resp.Checked++
 		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})

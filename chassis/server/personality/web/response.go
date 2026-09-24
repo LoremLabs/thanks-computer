@@ -36,7 +36,7 @@ func applyResponseHead(w http.ResponseWriter, output string) int {
 
 // applyAdmission translates a transport-neutral admission-denial marker
 // (_txc.admission.{denied,status,reason}, stamped by the shared gate) into
-// the _txc.web.res.* fields this outlet renders. It fires only when the
+// the _txc.web.res.* fields this response writer renders. It fires only when the
 // gate denied the request AND the pipeline didn't already shape an
 // explicit web status — so a stack that emits its own 4xx still wins. A
 // 503 (drain) additionally gets Retry-After + Connection: close so proxies

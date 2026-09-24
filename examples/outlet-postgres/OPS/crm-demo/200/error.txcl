@@ -1,0 +1,14 @@
+# An outlet failure (secret not set, database down or refusing, ceiling
+# crossed, timeout) answers 502 with the structured code so the probe — and
+# a human — can see what broke. The codes are txco_outlet_* (chassis/outlet).
+#
+# Gated on the error CODE being present, not on `._crm.ok == false`: a
+# missing path also compares as false, so that gate would fire on a request
+# where the lookup never ran (no ?email=) and race the usage responder.
+WHEN ._crm.error.code != ""
+  EMIT @web.res.body = &b64encode(&to_json(&object(
+         "error", ._crm.error.code,
+         "message", ._crm.error.message))),
+       @web.res.status = 502,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true
