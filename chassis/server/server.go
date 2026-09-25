@@ -1493,16 +1493,21 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			logger.Warn("outlet: --outlet-egress=relay with no --outlet-egress-relays; every outlet that relies on the default will report txco_outlet_connect_failed")
 		}
 		// An in-process WireGuard tunnel to the relays' private network. A
-		// file that doesn't parse is a misconfiguration and fatal, like a
-		// bad duration; an endpoint that doesn't resolve right now is not
-		// (the tunnel retries on first use).
+		// file that is missing or doesn't parse disables relay egress on
+		// this node with a loud warning — the workspace idiom — rather than
+		// stopping the chassis: every other personality on the node keeps
+		// serving, and an outlet asking for the relay reports
+		// txco_outlet_connect_failed as data. An endpoint that doesn't
+		// resolve right now is not even that: the tunnel retries on first use.
 		if conf.OutletEgressWGConfig != "" {
 			tn, terr := wgtunnel.OpenFile(conf.OutletEgressWGConfig, logger.Named("wgtunnel"))
 			if terr != nil {
-				logger.Fatal("outlet egress tunnel: " + terr.Error())
+				logger.Warn("outlet egress tunnel disabled: " + terr.Error() +
+					" — relays in --outlet-egress-relays are unreachable from this node until the file is fixed and the chassis restarts")
+			} else {
+				egressTunnel = tn
+				odeps.Egress.Forward = tn
 			}
-			egressTunnel = tn
-			odeps.Egress.Forward = tn
 		}
 		if secretsResolver != nil {
 			odeps.Secrets = secretsResolver
