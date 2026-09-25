@@ -186,6 +186,9 @@ func classify(err error, ph phase, mutating bool) *outlet.Error {
 		}
 		return &outlet.Error{Code: outlet.CodeQueryFailed, Message: "the database refused the statement", SQLState: code}
 	}
+	if errors.Is(err, outlet.ErrNoRelay) {
+		return outlet.NewError(outlet.CodeConnectFailed, "relay egress is not configured on this node; the outlet declares egress: relay (or the node defaults to it) but --outlet-egress-relays is empty")
+	}
 	if errors.Is(err, pgx.ErrTxCommitRollback) {
 		return outlet.NewError(outlet.CodeQueryFailed, "the transaction was rolled back")
 	}

@@ -12,8 +12,9 @@ package postgres
 import (
 	"context"
 	"encoding/json"
-	"net"
+	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"github.com/loremlabs/thanks-computer/chassis/egress"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
 )
 
@@ -56,21 +56,18 @@ func (Driver) Open(ctx context.Context, p outlet.OpenParams) (outlet.Conn, error
 		// pgx's message echoes parts of the DSN; report a fixed one.
 		return nil, outlet.NewError(outlet.CodeConnectFailed, "outlet secret is not a valid postgres:// URL")
 	}
-	d := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
-	if p.Guard != nil {
-		// Control runs per resolved IP before connect and before TLS, so
-		// a DSN pointing the chassis at private address space is refused
-		// however the name resolves.
-		d.Control = egress.DialControl(p.Guard)
-	}
-	cfg.ConnConfig.DialFunc = d.DialContext
+	// pgx resolves the DSN host itself and calls the dial hook once per
+	// address with ip:port, before TLS. Direct: the egress guard checks
+	// that IP as the socket connects. Relay: the same check, then a relay
+	// on the fleet's private network makes the connection (outlet.DialFunc).
+	cfg.ConnConfig.DialFunc = outlet.DialFunc(p.Egress, p.Guard, dialTimeout)
 	// DescribeExec: the extended protocol (one statement per call, values
 	// bound out of band) with a describe round trip on every execution —
 	// works behind transaction-mode poolers and never serves a stale
 	// statement description. CacheDescribe is the later optimization;
 	// the simple protocol is never an option (it accepts multiple
 	// statements in one string).
-	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
+	cfg.ConnConfig.DefaultQueryExecMode = execMode()
 	cfg.MinConns = 0
 	cfg.MaxConns = int32(p.Pool.MaxConns)
 	if cfg.MaxConns <= 0 {
@@ -90,6 +87,49 @@ func (Driver) Open(ctx context.Context, p outlet.OpenParams) (outlet.Conn, error
 		log = zap.NewNop()
 	}
 	return &conn{pool: pool, log: log}, nil
+}
+
+// Execution modes the node may select (--outlet-pg-exec-mode). Both use
+// the extended protocol; the difference is whether a statement's
+// description (parameter and result types) is fetched on every execution
+// or cached per connection.
+const (
+	// ExecModeDescribeExec fetches the description every time: one extra
+	// round trip, never a stale description, safe behind any pooler. The
+	// default — correct first.
+	ExecModeDescribeExec = "describe-exec"
+	// ExecModeCacheDescribe caches descriptions per connection: one round
+	// trip per statement, at the cost that a schema change under a cached
+	// statement fails its next execution once. Works behind transaction
+	// poolers (no named statements). The optimization to measure against.
+	ExecModeCacheDescribe = "cache-describe"
+)
+
+var (
+	execModeMu  sync.RWMutex
+	execModeSel = pgx.QueryExecModeDescribeExec
+)
+
+// SetExecMode selects the execution mode for pools opened from now on.
+// Called once at boot from the node's configuration.
+func SetExecMode(mode string) error {
+	execModeMu.Lock()
+	defer execModeMu.Unlock()
+	switch mode {
+	case "", ExecModeDescribeExec:
+		execModeSel = pgx.QueryExecModeDescribeExec
+	case ExecModeCacheDescribe:
+		execModeSel = pgx.QueryExecModeCacheDescribe
+	default:
+		return fmt.Errorf("outlet postgres: unknown exec mode %q (want %s or %s)", mode, ExecModeDescribeExec, ExecModeCacheDescribe)
+	}
+	return nil
+}
+
+func execMode() pgx.QueryExecMode {
+	execModeMu.RLock()
+	defer execModeMu.RUnlock()
+	return execModeSel
 }
 
 // registerJSONCodecs makes json and jsonb values decode with UseNumber, so

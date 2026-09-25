@@ -50,8 +50,9 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/egress"
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/open"    // registers the "open" policy
 	_ "github.com/loremlabs/thanks-computer/chassis/egress/private" // registers the "private" policy
-	_ "github.com/loremlabs/thanks-computer/chassis/embed/ollama"   // registers the "ollama" ai://embed backend
-	_ "github.com/loremlabs/thanks-computer/chassis/embed/openai"   // registers the "openai" ai://embed backend
+	"github.com/loremlabs/thanks-computer/chassis/egress/wgtunnel"
+	_ "github.com/loremlabs/thanks-computer/chassis/embed/ollama" // registers the "ollama" ai://embed backend
+	_ "github.com/loremlabs/thanks-computer/chassis/embed/openai" // registers the "openai" ai://embed backend
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/feed"
 	_ "github.com/loremlabs/thanks-computer/chassis/feed/filesource" // registers the "file" backend
@@ -70,7 +71,7 @@ import (
 	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
 	"github.com/loremlabs/thanks-computer/chassis/ops"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
-	_ "github.com/loremlabs/thanks-computer/chassis/outlet/postgres" // registers the "postgres" outlet driver
+	outletpg "github.com/loremlabs/thanks-computer/chassis/outlet/postgres" // registers the "postgres" outlet driver
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
 	"github.com/loremlabs/thanks-computer/chassis/scheduled"
@@ -1468,6 +1469,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// every driver dial and the secret resolver for the DSN; declarations
 	// are read from the dbcache snapshot (inline) or the CAS (fleet rows).
 	// Nothing opens until an op runs, and an idle pool closes itself.
+	var egressTunnel *wgtunnel.Tunnel
 	{
 		poolIdle, _ := time.ParseDuration(conf.OutletPoolIdle)
 		idleClose, _ := time.ParseDuration(conf.OutletIdleClose)
@@ -1482,6 +1484,25 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 				PoolIdle:     poolIdle,
 				IdleClose:    idleClose,
 			},
+			Egress: outlet.EgressConfig{Default: conf.OutletEgress, Relays: conf.OutletEgressRelays},
+		}
+		if err := outletpg.SetExecMode(conf.OutletPGExecMode); err != nil {
+			logger.Fatal("outlet: " + err.Error())
+		}
+		if conf.OutletEgress == outlet.EgressRelay && len(conf.OutletEgressRelays) == 0 {
+			logger.Warn("outlet: --outlet-egress=relay with no --outlet-egress-relays; every outlet that relies on the default will report txco_outlet_connect_failed")
+		}
+		// An in-process WireGuard tunnel to the relays' private network. A
+		// file that doesn't parse is a misconfiguration and fatal, like a
+		// bad duration; an endpoint that doesn't resolve right now is not
+		// (the tunnel retries on first use).
+		if conf.OutletEgressWGConfig != "" {
+			tn, terr := wgtunnel.OpenFile(conf.OutletEgressWGConfig, logger.Named("wgtunnel"))
+			if terr != nil {
+				logger.Fatal("outlet egress tunnel: " + terr.Error())
+			}
+			egressTunnel = tn
+			odeps.Egress.Forward = tn
 		}
 		if secretsResolver != nil {
 			odeps.Secrets = secretsResolver
@@ -1495,7 +1516,11 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			zap.Int("max_rows", conf.OutletMaxRows),
 			zap.Int("max_bytes", conf.OutletMaxBytes),
 			zap.Int("pool_max_conns", conf.OutletPoolMaxConns),
-			zap.String("idle_close", conf.OutletIdleClose))
+			zap.String("idle_close", conf.OutletIdleClose),
+			zap.String("pg_exec_mode", conf.OutletPGExecMode),
+			zap.String("egress", conf.OutletEgress),
+			zap.Int("egress_relays", len(conf.OutletEgressRelays)),
+			zap.Bool("egress_tunnel", egressTunnel != nil))
 	}
 
 	// In-process MCP session cache. Per (tenant, endpoint), 5min TTL.
@@ -2814,9 +2839,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 				logger.Warn("search store close error", zap.Error(err))
 			}
 		}
-		// Outlet pools close after the in-flight wait for the same reason.
+		// Outlet pools close after the in-flight wait for the same reason;
+		// the egress tunnel after them, since pools dial through it.
 		if pu.Outlets != nil {
 			pu.Outlets.Close()
+		}
+		if egressTunnel != nil {
+			_ = egressTunnel.Close()
 		}
 		// Drain the trace sink (async wrapper waits for queued writes;
 		// sync sinks are a no-op).

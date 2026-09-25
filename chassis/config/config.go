@@ -214,6 +214,10 @@ type Config struct {
 	OutletPoolMaxConns           int      `id:"outlet-pool-max-conns" default:"4" desc:"Max connections one outlet's pool holds on this node; the minimum is always 0. A customer database sees roughly nodes × this many connections. (4)"`
 	OutletPoolIdle               string   `id:"outlet-pool-idle" default:"60s" desc:"How long an outlet pool keeps an unused connection open before closing it (60s)."`
 	OutletIdleClose              string   `id:"outlet-idle-close" default:"5m" desc:"How long an outlet pool that no op has used stays open before the chassis closes it; the next call reopens it (5m)."`
+	OutletEgress                 string   `id:"outlet-egress" default:"direct" desc:"How an outlet dials when its declaration sets no egress: direct (from this node's own address) or relay (through --outlet-egress-relays, so connections originate from the relays' addresses). A declaration's egress field overrides it. (direct)"`
+	OutletEgressRelays           []string `id:"outlet-egress-relays" default:"" desc:"SOCKS5 relays for outlet egress: relay — ip:port on the fleet's private network (or on the tunnel, with --outlet-egress-wg-config), tried in order. Empty means relay egress is unavailable on this node: an outlet asking for it fails with txco_outlet_connect_failed. ()"`
+	OutletPGExecMode             string   `id:"outlet-pg-exec-mode" default:"describe-exec" desc:"pgx execution mode for the postgres outlet driver: describe-exec (default; a describe round trip per statement, never stale, safe behind any pooler) or cache-describe (descriptions cached per connection; one round trip per statement). Both use the extended protocol. (describe-exec)"`
+	OutletEgressWGConfig         string   `id:"outlet-egress-wg-config" default:"" desc:"Path to a WireGuard configuration (wg-quick INI: [Interface] PrivateKey/Address, [Peer] PublicKey/Endpoint/AllowedIPs) the chassis brings up in-process — no kernel interface, no root — to reach --outlet-egress-relays by their tunnel addresses. Empty: relays are reached over the host network. The file holds a private key; keep it readable by the chassis only. ()"`
 	SnapshotBootstrapRef         string   `id:"snapshot-bootstrap-ref" default:"" desc:"If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap."`
 	FeedSource                   string   `id:"feed-source" default:"nop" desc:"Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged."`
 	FeedSourceFileDir            string   `id:"feed-source-file-dir" default:"./chassis/data/feed" desc:"Root directory for the file feed source (./chassis/data/feed)"`
@@ -701,6 +705,16 @@ func Load() (Config, error) {
 	}
 	if _, err = time.ParseDuration(config.OutletIdleClose); err != nil {
 		log.Fatalf("unable to parse --outlet-idle-close %q", config.OutletIdleClose)
+	}
+	switch config.OutletEgress {
+	case "direct", "relay":
+	default:
+		log.Fatalf("invalid --outlet-egress %q: must be direct or relay", config.OutletEgress)
+	}
+	switch config.OutletPGExecMode {
+	case "", "describe-exec", "cache-describe":
+	default:
+		log.Fatalf("invalid --outlet-pg-exec-mode %q: must be describe-exec or cache-describe", config.OutletPGExecMode)
 	}
 
 	// registry fixed

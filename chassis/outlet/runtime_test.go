@@ -299,3 +299,35 @@ func TestCloseShutsEverything(t *testing.T) {
 		t.Fatalf("after close: %v", out.Err)
 	}
 }
+
+// The node's --outlet-egress applies when a declaration says nothing; a
+// declaration's own egress wins either way, and the driver is handed the
+// node's relays.
+func TestEgressDefaultAndOverride(t *testing.T) {
+	e := newEnv(t, nil)
+	relays := []string{"100.64.0.9:1080"}
+	e.rt = outlet.NewRuntime(outlet.Deps{
+		Lookup:  func(string) (outlet.Driver, bool) { return e.drv, true },
+		Secrets: e.sec, Decls: e.dec,
+		Egress: outlet.EgressConfig{Default: outlet.EgressRelay, Relays: relays},
+	})
+	t.Cleanup(e.rt.Close)
+	out := call(e, outlet.OpQuery)
+	if out.Err != nil || out.Egress != outlet.EgressRelay {
+		t.Fatalf("node default relay: egress=%q err=%v", out.Egress, out.Err)
+	}
+	if got := e.drv.LastEgress(); got.Mode != outlet.EgressRelay || len(got.Relays) != 1 || got.Relays[0] != relays[0] {
+		t.Fatalf("driver handed %+v", got)
+	}
+	e.dec.mu.Lock()
+	e.dec.m["crm"].Egress = outlet.EgressDirect
+	e.dec.h["crm"] = "h-direct"
+	e.dec.mu.Unlock()
+	out = call(e, outlet.OpQuery)
+	if out.Err != nil || out.Egress != outlet.EgressDirect || e.drv.LastEgress().Mode != outlet.EgressDirect {
+		t.Fatalf("declared direct must override the node default: egress=%q driver=%+v err=%v", out.Egress, e.drv.LastEgress(), out.Err)
+	}
+	if e.drv.Opens.Load() != 2 {
+		t.Fatalf("a different egress is a different pool: opens=%d", e.drv.Opens.Load())
+	}
+}

@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +122,31 @@ func TestOpenRefusesNonURLDSN(t *testing.T) {
 	_, err = Driver{}.Open(context.Background(), outlet.OpenParams{DSN: []byte("postgres://app:hunter2@db.internal:5432/crm?sslmode=bogus")})
 	if !errors.As(err, &oe) || oe.Code != outlet.CodeConnectFailed || bytes.Contains([]byte(oe.Message), []byte("hunter2")) {
 		t.Fatalf("bad option: %v", err)
+	}
+}
+
+func TestClassifyNoRelay(t *testing.T) {
+	got := classify(&pgconn.ConnectError{}, phaseConnect, false)
+	if got.Code != outlet.CodeConnectFailed {
+		t.Fatalf("connect error: %s", got.Code)
+	}
+	got = classify(errNoRelayWrapped(), phaseConnect, false)
+	if got.Code != outlet.CodeConnectFailed || !strings.Contains(got.Message, "not configured") {
+		t.Fatalf("no relay: %s %q", got.Code, got.Message)
+	}
+}
+
+func errNoRelayWrapped() error { return fmt.Errorf("dial: %w", outlet.ErrNoRelay) }
+
+func TestSetExecMode(t *testing.T) {
+	t.Cleanup(func() { _ = SetExecMode("") })
+	if err := SetExecMode(ExecModeCacheDescribe); err != nil || execMode() != pgx.QueryExecModeCacheDescribe {
+		t.Fatalf("cache-describe: %v %v", err, execMode())
+	}
+	if err := SetExecMode(""); err != nil || execMode() != pgx.QueryExecModeDescribeExec {
+		t.Fatalf("default: %v %v", err, execMode())
+	}
+	if err := SetExecMode("simple"); err == nil {
+		t.Fatal("the simple protocol must never be selectable: it accepts several statements in one string")
 	}
 }

@@ -27,6 +27,7 @@ const (
 //	access: write        # read (default) | write
 //	max_rows: 500        # tightens the node ceiling, never raises it
 //	timeout: 5000        # ms; caps every call on this outlet
+//	egress: relay        # direct | relay; omitted = the node's --outlet-egress
 //
 // Parsed strictly: an unknown key is a deploy error, not a silent ignore.
 type Decl struct {
@@ -35,6 +36,7 @@ type Decl struct {
 	Access  string `yaml:"access"`
 	MaxRows int    `yaml:"max_rows"`
 	Timeout int    `yaml:"timeout"`
+	Egress  string `yaml:"egress"`
 }
 
 // secretNameRe mirrors the secret store's name rule (chassis/secrets:
@@ -76,6 +78,9 @@ func ParseDecl(data []byte, knownDriver func(string) bool) (*Decl, error) {
 	}
 	if d.Timeout < 0 {
 		return nil, fmt.Errorf("outlet declaration: timeout must not be negative (milliseconds)")
+	}
+	if !ValidEgress(d.Egress) {
+		return nil, fmt.Errorf("outlet declaration: egress %q must be %q or %q (omit it for the node's default)", d.Egress, EgressDirect, EgressRelay)
 	}
 	return &d, nil
 }

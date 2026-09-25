@@ -64,3 +64,17 @@ func TestPaths(t *testing.T) {
 		t.Fatal("path helpers")
 	}
 }
+
+func TestParseDeclEgress(t *testing.T) {
+	d, err := ParseDecl([]byte("driver: postgres\nsecret: X\negress: relay\n"), known)
+	if err != nil || d.Egress != EgressRelay {
+		t.Fatalf("egress relay: %+v %v", d, err)
+	}
+	d, err = ParseDecl([]byte("driver: postgres\nsecret: X\n"), known)
+	if err != nil || d.Egress != "" {
+		t.Fatalf("omitted egress stays empty (the node decides): %+v %v", d, err)
+	}
+	if _, err := ParseDecl([]byte("driver: postgres\nsecret: X\negress: fixed\n"), known); err == nil {
+		t.Fatal("unknown egress mode must be refused")
+	}
+}

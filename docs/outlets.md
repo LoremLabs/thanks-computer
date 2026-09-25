@@ -26,6 +26,7 @@ secret: CRM_DSN      # the NAME of a tenant secret; its value is a postgres:// D
 access: read         # read (default) refuses outlet://crm/exec; write allows it
 max_rows: 500        # tightens the node ceiling, never raises it
 timeout: 5000        # ms; caps every call on this outlet
+egress: relay        # direct | relay; omitted = the node's --outlet-egress
 ```
 
 The declaration is code: it deploys with `txco apply` beside the ops that
@@ -177,9 +178,25 @@ offline.
   secret or redeploying the declaration switches to a new pool without a
   restart. The driver's execution mode works behind transaction-mode
   poolers; prefer the provider's pooler.
+- **Egress: direct or relayed.** By default a connection leaves from the
+  node that runs the op. With `egress: relay` (or a node whose
+  `--outlet-egress` is `relay`) the node asks one of its configured relays
+  on the fleet's private network to make the connection, so it originates
+  from the relay's address — the one a customer allowlists. Only the dial
+  changes: the node still resolves the host, checks the address against the
+  egress policy, owns the pool and runs the statement, and TLS runs end to
+  end through the relay (use `sslmode=verify-full` so the certificate is
+  checked against the DSN hostname). A relay is asked for an exact ip:port,
+  never a hostname. A node with no relays configured answers such an
+  outlet with `txco_outlet_connect_failed`. When the relays live on a
+  private network the host isn't on, `--outlet-egress-wg-config` names a
+  standard WireGuard configuration (a peer config issued by
+  `fly wireguard create`, or any client config) and the chassis runs the
+  tunnel itself, in process, without a kernel interface or root.
 - **The trace records the call, not the data.** Outlet, driver, operation,
   a fingerprint of the statement, duration, rows, bytes and the error code
-  — never the SQL text, the values, the rows or the DSN.
+  — never the SQL text, the values, the rows or the DSN. It also says
+  whether the dial was `direct` or `relay`.
 
 ## Limits
 
@@ -190,6 +207,10 @@ offline.
 | `--outlet-pool-max-conns` | 4 | connections per outlet per node (minimum is always 0) |
 | `--outlet-pool-idle` | 60s | how long an unused connection stays open |
 | `--outlet-idle-close` | 5m | how long an unused pool stays open |
+| `--outlet-pg-exec-mode` | `describe-exec` | pgx execution mode: `describe-exec` (a describe round trip per statement, never stale, safe behind any pooler) or `cache-describe` (one round trip; a schema change under a cached statement fails once) |
+| `--outlet-egress` | `direct` | what a declaration without `egress` gets: `direct` or `relay` |
+| `--outlet-egress-relays` | none | SOCKS5 relays (ip:port on the fleet's private network, or on the tunnel) for `relay`, tried in order |
+| `--outlet-egress-wg-config` | none | a wg-quick file the chassis brings up in-process (userspace WireGuard, no root) to reach the relays by their tunnel addresses |
 
 Calls run under the ordinary per-op timeout (`WITH timeout` and the
 declaration's `timeout` can only lower it). Rows returned are charged fuel

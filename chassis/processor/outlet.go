@@ -117,6 +117,9 @@ func emitOutletCompletionEvent(ctx context.Context, name, kind, sql string, out 
 	if out.Driver != "" {
 		fields["driver"] = out.Driver
 	}
+	if out.Egress != "" {
+		fields["egress"] = out.Egress
+	}
 	if sql != "" {
 		sum := sha256.Sum256([]byte(sql))
 		fields["statement_sha256"] = hex.EncodeToString(sum[:8])

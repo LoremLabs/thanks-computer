@@ -48,7 +48,8 @@ type Driver struct {
 	mu sync.Mutex
 	// LastDSN is a copy of the DSN the last Open saw — for a test to prove
 	// the runtime handed the secret over, and that nothing else did.
-	lastDSN string
+	lastDSN    string
+	lastEgress outlet.EgressParams
 }
 
 // LastDSN returns the DSN of the most recent Open.
@@ -56,6 +57,13 @@ func (d *Driver) LastDSN() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.lastDSN
+}
+
+// LastEgress returns the egress the most recent Open was handed.
+func (d *Driver) LastEgress() outlet.EgressParams {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastEgress
 }
 
 func (d *Driver) Name() string {
@@ -72,6 +80,7 @@ func (d *Driver) Open(ctx context.Context, p outlet.OpenParams) (outlet.Conn, er
 	d.Opens.Add(1)
 	d.mu.Lock()
 	d.lastDSN = string(p.DSN)
+	d.lastEgress = p.Egress
 	d.mu.Unlock()
 	if d.OpenDelay > 0 {
 		select {

@@ -47,6 +47,7 @@ type Deps struct {
 	Decls   DeclSource
 	Logger  *zap.Logger
 	Limits  Limits
+	Egress  EgressConfig
 	Now     func() time.Time
 }
 
@@ -71,6 +72,7 @@ type poolKey struct {
 	SecretID              string
 	Version               int
 	DeclHash              string
+	Egress                string
 }
 
 // entry is one pool's place in the open set. ready is closed once the open
@@ -109,6 +111,9 @@ func NewRuntime(d Deps) *Runtime {
 	}
 	if d.Limits.IdleClose <= 0 {
 		d.Limits.IdleClose = 5 * time.Minute
+	}
+	if d.Egress.Default != EgressRelay {
+		d.Egress.Default = EgressDirect
 	}
 	return &Runtime{deps: d, pools: map[poolKey]*entry{}}
 }
@@ -187,6 +192,7 @@ type Outcome struct {
 	Result   *Result
 	Err      *Error
 	Driver   string
+	Egress   string
 	Duration time.Duration
 }
 
@@ -223,7 +229,10 @@ func (r *Runtime) call(ctx context.Context, c Call) Outcome {
 		r.deps.Logger.Warn("outlet declaration lookup failed", zap.String("outlet", c.Outlet), zap.Error(err))
 		return Outcome{Err: NewError(CodeUnavailable, "outlet declaration could not be read")}
 	}
-	out := Outcome{Driver: decl.Driver}
+	out := Outcome{Driver: decl.Driver, Egress: decl.Egress}
+	if out.Egress == "" {
+		out.Egress = r.deps.Egress.Default
+	}
 	if c.Op == OpExec && !decl.Writable() {
 		out.Err = NewError(CodeInvalidRequest, "outlet is declared access: read; exec is refused")
 		return out
@@ -251,7 +260,7 @@ func (r *Runtime) call(ctx context.Context, c Call) Outcome {
 		out.Err = NewError(CodeUnavailable, "outlet secret "+decl.Secret+" could not be read")
 		return out
 	}
-	key := poolKey{Tenant: c.Tenant, Stack: c.Stack, Outlet: c.Outlet, SecretID: meta.SecretID, Version: meta.VersionNo, DeclHash: hash}
+	key := poolKey{Tenant: c.Tenant, Stack: c.Stack, Outlet: c.Outlet, SecretID: meta.SecretID, Version: meta.VersionNo, DeclHash: hash, Egress: out.Egress}
 	e, err := r.acquire(ctx, key, decl.Driver, drv, dsn)
 	secrets.Zero(dsn)
 	if err != nil {
@@ -345,13 +354,14 @@ func (r *Runtime) acquire(ctx context.Context, key poolKey, driver string, drv D
 		Guard:  r.deps.Guard,
 		Logger: r.deps.Logger.With(zap.String("outlet", key.Outlet), zap.String("driver", driver)),
 		Pool:   PoolLimits{MaxConns: r.deps.Limits.PoolMaxConns, IdleTimeout: r.deps.Limits.PoolIdle},
+		Egress: EgressParams{Mode: key.Egress, Relays: r.deps.Egress.Relays, Forward: r.deps.Egress.Forward},
 	})
 	close(e.ready)
 	if e.err != nil {
 		r.release(e)
 		return nil, e.err
 	}
-	r.deps.Logger.Info("outlet pool opened", zap.String("outlet", key.Outlet), zap.String("driver", driver), zap.String("stack", key.Stack))
+	r.deps.Logger.Info("outlet pool opened", zap.String("outlet", key.Outlet), zap.String("driver", driver), zap.String("stack", key.Stack), zap.String("egress", key.Egress))
 	return e, nil
 }
 

@@ -46,6 +46,10 @@ type OpenParams struct {
 	// never SQL, values, rows or the DSN.
 	Logger *zap.Logger
 	Pool   PoolLimits
+	// Egress says how to dial: install DialFunc(Egress, Guard, timeout)
+	// on the client rather than a dialer of the driver's own, so every
+	// driver shares one direct/relay path.
+	Egress EgressParams
 }
 
 // Request is one statement with its bound arguments and ceilings.
