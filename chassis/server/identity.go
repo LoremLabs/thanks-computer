@@ -69,7 +69,7 @@ func identityStoreErr(into, family string, err error) event.Payload {
 		code = "identifier_bound"
 	case errors.Is(err, authn.ErrDisabled):
 		code = "user_disabled"
-	case errors.Is(err, authn.ErrTooMany):
+	case errors.Is(err, authn.ErrTooMany), errors.Is(err, authn.ErrTooManyGrants):
 		code = "too_many"
 	case errors.Is(err, authn.ErrNoStack):
 		code = "no_stack"
@@ -93,6 +93,7 @@ func identityOK(into string, result any) event.Payload {
 // identityCall is what every handler starts from: the pinned tenant (as the
 // tenant ID the identity tables key on), the calling stack, the WITH meta.
 type identityCall struct {
+	tenant          string // the pinned slug
 	tenantID, stack string
 	meta            []byte
 	into, family    string
@@ -120,7 +121,7 @@ func identityPrelude(ctx context.Context, d identityDeps, family string) (identi
 	if err != nil {
 		return c, c.err("no_tenant", err.Error()), false
 	}
-	c.tenantID = tenantID
+	c.tenant, c.tenantID = slug, tenantID
 	return c, event.Payload{}, true
 }
 

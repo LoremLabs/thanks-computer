@@ -1834,8 +1834,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	}
 
 	// Stack-plane identity ops (txco://user/{create,get,disable},
-	// txco://credential/{create,list,revoke}): the users, bindings and
-	// credentials a tenant's stacks manage, in auth.db (chassis/authn). The
+	// txco://credential/{create,list,revoke}, txco://grant/{put,list,revoke}):
+	// the users, bindings, credentials and standing grants a tenant's stacks
+	// manage, in auth.db (chassis/authn). The
 	// app opens that store on every node — not only with the admin
 	// personality — and registers the ops unconditionally, so a node where it
 	// failed to open answers `txco_user_disabled` and a stack can branch.
@@ -1851,11 +1852,33 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		"txco://credential/create": credentialCreate,
 		"txco://credential/list":   credentialList,
 		"txco://credential/revoke": credentialRevoke,
+		// Standing grants (grant.go): what a principal may ever ask for.
+		"txco://grant/put":    grantPut,
+		"txco://grant/list":   grantList,
+		"txco://grant/revoke": grantRevoke,
 	} {
 		fn := fn
 		pu.Handle([]byte(name), event.OpsHandlerFunc(
 			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 				return fn(ctx, identityD, in)
+			}))
+	}
+
+	// Run grants (txco://rungrant/{mint,get,revoke,close}): what one piece of
+	// dispatched work may ask this chassis for. Rows in the identity store,
+	// so they are registered the way the identity ops are. See
+	// chassis/server/rungrant.go.
+	runGrantD := newRunGrantDeps(identityD, conf)
+	for name, fn := range map[string]func(context.Context, runGrantDeps, []byte) (event.Payload, error){
+		"txco://rungrant/mint":   runGrantMint,
+		"txco://rungrant/get":    runGrantGet,
+		"txco://rungrant/revoke": runGrantRevoke,
+		"txco://rungrant/close":  runGrantClose,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, runGrantD, in)
 			}))
 	}
 

@@ -247,7 +247,8 @@ anything for a principal — create the user, issue its first credential —
 owns it, and from then on another stack's `user/disable`,
 `credential/create`, `credential/list` or `credential/revoke` for it
 answers `not_owner`, naming the owner. Granting it a printer
-(`txco://ipp/printer`) follows the same rule, and needs the principal to
+(`txco://ipp/printer`), a capability or a secret
+([grants](./grants.md)) follows the same rule, and needs the principal to
 exist already.
 
 - A **canary slot counts as its stack**: `web/canary` manages what `web`

@@ -29,8 +29,10 @@ func TestOpenIdentityDB(t *testing.T) {
 	if dialect != registry.SQLite {
 		t.Errorf("dialect = %T", dialect)
 	}
-	// Migrated to head: the account plane's tables and the identity tables.
-	for _, table := range []string{"actors", "oidc_subjects", "users", "principal_bindings", "credentials"} {
+	// Migrated to head: the account plane's tables, the identity tables and
+	// the grant tables.
+	for _, table := range []string{"actors", "oidc_subjects", "users", "principal_bindings", "credentials",
+		"resource_grants", "run_grants"} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&n); err != nil || n != 1 {
 			t.Errorf("table %s: n=%d err=%v", table, n, err)
@@ -43,7 +45,7 @@ func TestOpenIdentityDB(t *testing.T) {
 		t.Fatalf("create on the opened store: %v", err)
 	}
 	var changeset string
-	if err := db.QueryRow(`SELECT val FROM varvals WHERE var = 'txco-db-changeset-auth'`).Scan(&changeset); err != nil || changeset != "5" {
+	if err := db.QueryRow(`SELECT val FROM varvals WHERE var = 'txco-db-changeset-auth'`).Scan(&changeset); err != nil || changeset != "7" {
 		t.Errorf("changeset = %q err=%v", changeset, err)
 	}
 	_ = db.Close()

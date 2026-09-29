@@ -280,7 +280,16 @@ Flags:
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
 	if !*noChassis {
-		chassisURL, webURL, err = startChassis(ctx, dir, *chassisAddr, *webAddr, *tcpHead, *dnsHead, *lmtpHead, *scheduledHead, *sourceHead, *imapHead, *calendarHead, *contactsHead, *webdavHead, *ippHead, *stateHead, *allowLocalWorkspace, *verbose, stdout, stderr, &started, &chassisProc)
+		chassisURL, webURL, err = startChassis(ctx, chassisOpts{
+			Workspace: dir, AdminAddr: *chassisAddr, WebAddr: *webAddr,
+			Heads: devHeads{
+				TCP: *tcpHead, DNS: *dnsHead, LMTP: *lmtpHead, Scheduled: *scheduledHead, Source: *sourceHead,
+				IMAP: *imapHead, Calendar: *calendarHead, Contacts: *contactsHead, WebDAV: *webdavHead,
+				IPP: *ippHead, State: *stateHead,
+			},
+			AllowLocalWorkspace: *allowLocalWorkspace, Verbose: *verbose,
+			Stdout: stdout, Stderr: stderr, Started: &started, Out: &chassisProc,
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "dev: %v\n", err)
 			return 1
@@ -1088,21 +1097,50 @@ func isVersionNotDraftErr(err error) bool {
 	return false
 }
 
+// devHeads is the optional heads `txco dev` can start beside cron, web,
+// admin and websocket. All off by default — most dev workflows use only
+// those four, and the extra binds otherwise cause spurious "port in use"
+// failures on machines running other things there.
+type devHeads struct {
+	TCP, DNS, LMTP, Scheduled, Source, IMAP, Calendar, Contacts, WebDAV, IPP, State bool
+}
+
+// chassisOpts is what startChassis is asked for. A new switch is one field
+// here, never another parameter.
+type chassisOpts struct {
+	// Workspace is the directory the chassis runs in; its state lands under
+	// <Workspace>/.txco/dev.
+	Workspace string
+	// AdminAddr and WebAddr override the canonical :8081 and :8080.
+	AdminAddr, WebAddr string
+	Heads              devHeads
+	// AllowLocalWorkspace turns on the local workspace provider, which runs
+	// commands as this uid with no isolation.
+	AllowLocalWorkspace bool
+	Verbose             bool
+	Stdout, Stderr      io.Writer
+	// Started collects every process spawned, for teardown; Out receives
+	// the chassis's own.
+	Started *[]*devpkg.Process
+	Out     **devpkg.Process
+}
+
+// chassisAddrs is where the spawned chassis listens, once defaults and the
+// parent environment have been applied.
+type chassisAddrs struct {
+	Admin, Web, TCP, DNS string
+}
+
 // startChassis spawns a chassis subprocess pointed at a per-workspace
 // temp DB. Returns the admin URL and the web URL (the curlable one
 // developers actually hit during dev).
-//
-// tcpHead/dnsHead/lmtpHead control whether those personalities are
-// included. Off by default — most dev workflows use only web + cron +
-// admin, and the extra binds otherwise cause spurious "port in use"
-// failures on machines running other things there.
-func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride string, tcpHead, dnsHead, lmtpHead, scheduledHead, sourceHead, imapHead, calendarHead, contactsHead, webdavHead, ippHead, stateHead, allowLocalWorkspace, verbose bool, stdout, stderr io.Writer, started *[]*devpkg.Process, out **devpkg.Process) (adminURL, webURL string, err error) {
+func startChassis(ctx context.Context, o chassisOpts) (adminURL, webURL string, err error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", "", fmt.Errorf("locate self: %w", err)
 	}
 
-	devDir := filepath.Join(workspace, ".txco", "dev")
+	devDir := filepath.Join(o.Workspace, ".txco", "dev")
 	dbDir := filepath.Join(devDir, "db")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("mkdir %s: %w", dbDir, err)
@@ -1113,14 +1151,14 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// port is fail-fast: if something's already bound, surface a clear
 	// error rather than silently picking a random port (which leaves
 	// users curling the wrong address).
-	adminAddr := addrOverride
+	adminAddr := o.AdminAddr
 	if adminAddr == "" {
 		adminAddr = ":8081"
 	}
 	if err := requirePortFree(adminAddr, "admin API"); err != nil {
 		return "", "", err
 	}
-	webAddr := webAddrOverride
+	webAddr := o.WebAddr
 	if webAddr == "" {
 		webAddr = ":8080"
 	}
@@ -1135,23 +1173,23 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	if v := strings.TrimSpace(os.Getenv("TXCO_TCP_LISTEN_ADDRS")); v != "" {
 		tcpAddr, tcpOverridden = v, true
 	}
-	if tcpHead && !tcpOverridden {
+	if o.Heads.TCP && !tcpOverridden {
 		if err := requirePortFree(tcpAddr, "TCP inlet"); err != nil {
 			return "", "", err
 		}
 	}
 	dnsAddr := devDNSListenAddr
-	if dnsHead {
+	if o.Heads.DNS {
 		if err := requirePortFree(dnsAddr, "DNS inlet"); err != nil {
 			return "", "", err
 		}
 	}
-	if ippHead {
+	if o.Heads.IPP {
 		if err := requirePortFree(devIPPTLSAddr, "IPPS (web TLS) listener"); err != nil {
 			return "", "", err
 		}
 	}
-	if imapHead {
+	if o.Heads.IMAP {
 		if err := requirePortFree(devIMAPListenAddr, "IMAP head"); err != nil {
 			return "", "", err
 		}
@@ -1159,7 +1197,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 			return "", "", err
 		}
 	}
-	if lmtpHead {
+	if o.Heads.LMTP {
 		if err := requirePortFree(devLMTPListenAddr, "LMTP inlet"); err != nil {
 			return "", "", err
 		}
@@ -1167,8 +1205,46 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 
 	// Locate the schema dir relative to the workspace; fall back to a
 	// known repo-relative path.
-	schemaDir := findSchemaDir(workspace)
+	schemaDir := findSchemaDir(o.Workspace)
 
+	env, _ := chassisEnv(o, chassisAddrs{Admin: adminAddr, Web: webAddr, TCP: tcpAddr, DNS: dnsAddr},
+		devDir, schemaDir, os.LookupEnv)
+
+	// Disable basic auth in dev (chassis emits a WARN at boot).
+
+	tcpDesc := "off"
+	if o.Heads.TCP {
+		tcpDesc = tcpAddr
+	}
+	fmt.Fprintf(o.Stdout, "[txco] starting chassis (admin=%s, web=%s, tcp=%s, db=%s)\n", adminAddr, webAddr, tcpDesc, dbDir)
+	p, err := devpkg.Spawn(ctx, devpkg.SpawnConfig{
+		Name: "chassis",
+		Cmd:  shellEscape(executable) + " serve",
+		Out:  o.Stdout,
+		Env:  env,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("spawn chassis: %w", err)
+	}
+	*o.Started = append(*o.Started, p)
+	*o.Out = p
+
+	adminURL = "http://localhost" + adminAddr
+	webURL = "http://localhost" + webAddr
+	if err := devpkg.WaitHealthy(ctx, adminURL+"/healthz", 30*time.Second, 500*time.Millisecond); err != nil {
+		return "", "", fmt.Errorf("chassis health: %w", err)
+	}
+	return adminURL, webURL, nil
+}
+
+// chassisEnv is the environment of the chassis `txco dev` spawns, and the
+// heads it starts. parent looks a variable up in the environment txco dev
+// itself was started with (os.LookupEnv): the dev defaults are
+// set-if-missing, so whatever the developer exported wins.
+//
+// It spawns and binds nothing, so what a flag does to the chassis can be
+// tested without starting one.
+func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent func(string) (string, bool)) (env, heads []string) {
 	// The chassis defaults a handful of data dirs (kv store, logs,
 	// admin static, docker tmp, repo/continuation store, artifact store,
 	// feed source, secret master key) to `./chassis/data/*` —
@@ -1194,10 +1270,10 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// under .txco/dev/, otherwise chassis defaults would litter the
 	// repo with chassis/data/*. These are always set, never overridden
 	// by the parent env.
-	env := []string{
-		"TXCO_ADMIN_ADDR=" + adminAddr,
-		"TXCO_WEB_ADDR=" + webAddr,
-		"TXCO_DB_ROOT_DIR=" + dbDir,
+	env = []string{
+		"TXCO_ADMIN_ADDR=" + a.Admin,
+		"TXCO_WEB_ADDR=" + a.Web,
+		"TXCO_DB_ROOT_DIR=" + filepath.Join(devDir, "db"),
 		"TXCO_KVSTORE_ADDRS=" + kvDir,
 		"TXCO_LOG_OPS_DIR=" + logsDir,
 		"TXCO_ADMIN_ROOT_DIR=" + adminStaticDir,
@@ -1223,28 +1299,28 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// websocket rides the web listener (no port of its own) and does nothing
 	// until a stack accepts an upgrade, so dev turns it on by default; prod
 	// opts in via TXCO_PERSONALITIES.
-	heads := []string{"cron", "web", "admin", "websocket"}
-	if tcpHead {
+	heads = []string{"cron", "web", "admin", "websocket"}
+	if o.Heads.TCP {
 		heads = append(heads, "tcp")
-		env = append(env, "TXCO_TCP_LISTEN_ADDRS="+tcpAddr)
+		env = append(env, "TXCO_TCP_LISTEN_ADDRS="+a.TCP)
 	}
-	if dnsHead {
+	if o.Heads.DNS {
 		heads = append(heads, "dns")
-		env = append(env, "TXCO_DNS_LISTEN_ADDRS="+dnsAddr)
+		env = append(env, "TXCO_DNS_LISTEN_ADDRS="+a.DNS)
 	}
-	if lmtpHead {
+	if o.Heads.LMTP {
 		heads = append(heads, "lmtp")
 		env = append(env, "TXCO_LMTP_LISTEN_ADDRS="+devLMTPListenAddr)
 	}
-	if scheduledHead {
+	if o.Heads.Scheduled {
 		heads = append(heads, "scheduled")
 		env = append(env, "TXCO_SCHEDULED_DB_PATH="+filepath.Join(devDir, "scheduled.db"))
 	}
-	if stateHead {
+	if o.Heads.State {
 		heads = append(heads, "state")
 		env = append(env, "TXCO_STATE_DB_PATH="+filepath.Join(devDir, "state.db"))
 	}
-	if sourceHead {
+	if o.Heads.Source {
 		// The source poller reads declared sources from the shared runtime DB
 		// (the dev SQLite runtime, always open), materializes each mailbox
 		// password from the secret store, and dials out through the egress
@@ -1252,32 +1328,32 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		// the whole switch.
 		heads = append(heads, "source")
 	}
-	if imapHead {
+	if o.Heads.IMAP {
 		heads = append(heads, "imap")
 		env = append(env, "TXCO_IMAP_LISTEN_ADDRS="+devIMAPListenAddr)
 		env = append(env, "TXCO_IMAP_TLS_ADDRS="+devIMAPTLSAddr)
 		env = append(env, "TXCO_IMAP_DB_PATH="+filepath.Join(devDir, "imap.db"))
 	}
-	if calendarHead {
+	if o.Heads.Calendar {
 		heads = append(heads, "calendar")
 		env = append(env, "TXCO_CALENDAR_DB_PATH="+filepath.Join(devDir, "calendar.db"))
 	}
-	if contactsHead {
+	if o.Heads.Contacts {
 		heads = append(heads, "contacts")
 		env = append(env, "TXCO_CONTACTS_DB_PATH="+filepath.Join(devDir, "contacts.db"))
 	}
-	if webdavHead {
+	if o.Heads.WebDAV {
 		heads = append(heads, "webdav")
 		env = append(env, "TXCO_DRIVE_DB_PATH="+filepath.Join(devDir, "drive.db"))
 		env = append(env, "TXCO_DRIVE_OBJECTS_FILE_DIR="+filepath.Join(devDir, "drive"))
 	}
-	if ippHead {
+	if o.Heads.IPP {
 		heads = append(heads, "ipp")
 		env = append(env, "TXCO_WEB_TLS_ADDR="+devIPPTLSAddr)
 		env = append(env, "TXCO_IPP_DB_PATH="+filepath.Join(devDir, "ipp.db"))
 	}
 	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
-	if allowLocalWorkspace {
+	if o.AllowLocalWorkspace {
 		// Unconditional (NOT a devDefault): the local provider runs
 		// commands as this uid with no isolation, so it is never implied
 		// by the dev posture — only by this flag, and only for this run.
@@ -1304,7 +1380,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		// txco://drive/sign mints its URLs on the dev web inlet, by the name
 		// everything else in dev uses — not this machine's hostname, which a
 		// laptop often cannot resolve.
-		"TXCO_SIGNED_URL_BASE": "http://localhost" + webAddr,
+		"TXCO_SIGNED_URL_BASE": "http://localhost" + a.Web,
 		// Unauthenticated admin on loopback — the documented dev posture.
 		// `basic` mode IGNORES request signatures and, with no basic
 		// creds set, treats every caller as open-dev (admin:all). Without
@@ -1339,7 +1415,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 		// as application stacks, discriminated by the `_` prefix.
 		// Point the loader at the workspace root and hot-reload in dev
 		// only. `txco serve` leaves watch off (static after boot).
-		"TXCO_SYSTEM_OPSTACKS_DIR":   workspace,
+		"TXCO_SYSTEM_OPSTACKS_DIR":   o.Workspace,
 		"TXCO_SYSTEM_OPSTACKS_WATCH": "true",
 	}
 	// DNS synthesis infra defaults (only when the head is on). Edge =
@@ -1348,7 +1424,7 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// names. Set-if-missing like the rest, so
 	// `TXCO_DNS_EDGE_IPS=… txco dev --dns` overrides. The chassis serve
 	// default for these stays empty (operator must configure in prod).
-	if dnsHead {
+	if o.Heads.DNS {
 		devDefaults["TXCO_DNS_NAMESERVERS"] = "ns1.localhost,ns2.localhost"
 		devDefaults["TXCO_DNS_EDGE_IPS"] = "127.0.0.1"
 		devDefaults["TXCO_DNS_MX_HOST"] = "localhost"
@@ -1363,17 +1439,17 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// IMAP dev default: LOGIN over the plaintext loopback listener. The
 	// serve default stays false (a real deployment terminates TLS at the
 	// edge or sets --imap-tls-addrs).
-	if imapHead {
+	if o.Heads.IMAP {
 		devDefaults["TXCO_IMAP_INSECURE_AUTH"] = "true"
 		devDefaults["TXCO_IMAP_SELF_SIGNED"] = "true"
 	}
 	// Calendar dev default: Basic auth over the plaintext web port. The
 	// serve default stays false (a real deployment terminates TLS at the
 	// edge and forwards X-Forwarded-Proto, or sets --web-tls-addr).
-	if calendarHead {
+	if o.Heads.Calendar {
 		devDefaults["TXCO_CALENDAR_INSECURE_AUTH"] = "true"
 	}
-	if webdavHead {
+	if o.Heads.WebDAV {
 		devDefaults["TXCO_DRIVE_INSECURE_AUTH"] = "true"
 	}
 	// IPP dev defaults: the HTTPS listener serves a self-signed certificate
@@ -1382,32 +1458,32 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// plain web port also accepts Basic auth (so `ipp://…:8080` works for
 	// ipptool/curl), and the wire log is on: recording what a print client
 	// actually sends is what dev mode is FOR. Serve defaults stay off.
-	if ippHead {
+	if o.Heads.IPP {
 		devDefaults["TXCO_WEB_TLS_SELF_SIGNED"] = "true"
 		devDefaults["TXCO_WEB_TLS_SELF_SIGNED_CERT_DIR"] = devDir
 		devDefaults["TXCO_IPP_INSECURE_AUTH"] = "true"
 		devDefaults["TXCO_IPP_WIRE_DEBUG"] = "true"
 	}
-	if contactsHead {
+	if o.Heads.Contacts {
 		devDefaults["TXCO_CONTACTS_INSECURE_AUTH"] = "true"
 	}
-	if lmtpHead {
+	if o.Heads.LMTP {
 		devDefaults["TXCO_MAIL_RELAY_ADDR"] = devMailRelayAddr
 		devDefaults["TXCO_MAIL_RELAY_TLS"] = "none"
-		ing := filepath.Join(workspace, "ingress.yaml")
+		ing := filepath.Join(o.Workspace, "ingress.yaml")
 		if _, statErr := os.Stat(ing); statErr == nil {
 			devDefaults["TXCO_INGRESS_CONFIG"] = ing
 		}
 	}
 	for k, v := range devDefaults {
-		if _, set := os.LookupEnv(k); !set {
+		if _, set := parent(k); !set {
 			env = append(env, k+"="+v)
 		}
 	}
 
 	// --verbose wins over both default and parent env. Appended last
 	// so it overrides any prior TXCO_LOG_LEVEL in the env slice.
-	if verbose {
+	if o.Verbose {
 		env = append(env, "TXCO_LOG_LEVEL=debug")
 	}
 
@@ -1417,38 +1493,14 @@ func startChassis(ctx context.Context, workspace, addrOverride, webAddrOverride 
 	// auto-mints on first run via secrets.LoadOrMintFileMasterKey —
 	// same UX as the runtime DB. Honors a parent
 	// TXCO_SECRET_MASTER_KEY override.
-	if _, set := os.LookupEnv("TXCO_SECRET_MASTER_KEY"); !set {
+	if _, set := parent("TXCO_SECRET_MASTER_KEY"); !set {
 		keyPath := filepath.Join(devDir, "secrets", "txco-dev-master.key")
 		env = append(env, "TXCO_SECRET_MASTER_KEY="+keyPath)
 	}
 	if schemaDir != "" {
 		env = append(env, "TXCO_DB_SCHEMA_DIR="+schemaDir)
 	}
-	// Disable basic auth in dev (chassis emits a WARN at boot).
-
-	tcpDesc := "off"
-	if tcpHead {
-		tcpDesc = tcpAddr
-	}
-	fmt.Fprintf(stdout, "[txco] starting chassis (admin=%s, web=%s, tcp=%s, db=%s)\n", adminAddr, webAddr, tcpDesc, dbDir)
-	p, err := devpkg.Spawn(ctx, devpkg.SpawnConfig{
-		Name: "chassis",
-		Cmd:  shellEscape(executable) + " serve",
-		Out:  stdout,
-		Env:  env,
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("spawn chassis: %w", err)
-	}
-	*started = append(*started, p)
-	*out = p
-
-	adminURL = "http://localhost" + adminAddr
-	webURL = "http://localhost" + webAddr
-	if err := devpkg.WaitHealthy(ctx, adminURL+"/healthz", 30*time.Second, 500*time.Millisecond); err != nil {
-		return "", "", fmt.Errorf("chassis health: %w", err)
-	}
-	return adminURL, webURL, nil
+	return env, heads
 }
 
 // startUIDev locates admin-ui/ by walking up from workspace, picks

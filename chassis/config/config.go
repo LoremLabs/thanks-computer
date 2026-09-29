@@ -179,6 +179,10 @@ type Config struct {
 	WorkspaceAttachMaxDuration   string   `id:"workspace-attach-max-duration" default:"8h" desc:"Ceiling on how long one workspace://<name>/attach binding (an interactive terminal on a WebSocket session) may live; the op's WITH max_duration defaults to this and cannot exceed it. When it expires the lease ends, the process is killed and the socket is told. (8h)"`
 	WorkspaceConnectMaxDuration  string   `id:"workspace-connect-max-duration" default:"8h" desc:"Ceiling on how long one workspace://<name>/connect binding (a workspace-local service on a WebSocket session) may live; the op's WITH max_duration defaults to this and cannot exceed it. When it expires the lease ends, the connection is closed and the socket is told. (8h)"`
 	WorkspaceServices            []string `id:"workspace-services" default:"" desc:"Extra services the connect verb may bind, as name=port entries on the workspace's own loopback (comma-separated), added to the built-in table (browser=5900). Operator-declared only: a stack names a service, never a port. ()"`
+	RunGrantTTLDefault           int      `id:"run-grant-ttl-default" default:"600" desc:"Seconds a run grant lasts when txco://rungrant/mint gives no ttl. A run grant is what one piece of dispatched work may ask this chassis for; when it expires the work's next request is refused. (600)"`
+	RunGrantTTLMax               int      `id:"run-grant-ttl-max" default:"3600" desc:"Ceiling, in seconds, on the ttl a stack may give a run grant. Longer work mints again: a grant is never extended. At most 86400. (3600)"`
+	RunGrantBudgetDefault        int      `id:"run-grant-budget-default" default:"50" desc:"Requests a run grant may make when txco://rungrant/mint gives no budget. (50)"`
+	RunGrantBudgetMax            int      `id:"run-grant-budget-max" default:"1000" desc:"Ceiling on the budget, in requests, a stack may give a run grant. At most 1000000. (1000)"`
 	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns,mailmap,scheduled,imap,websocket,calendar,contacts,webdav,source,ipp,state} (cron,tcp,web,admin)"`
 	ShutdownGrace                string   `id:"shutdown-grace" default:"25s" desc:"On SIGTERM/SIGINT, how long in-flight runs get to finish before they are cancelled. The node drains first — new web requests get 503, new LMTP deliveries 451, the scheduled and source pollers claim nothing new — then waits for its requests and detached continuation work. 0 cancels at once. Give the container a stop timeout above this. (25s)"`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
@@ -618,6 +622,17 @@ func Load() (Config, error) {
 	}
 	if d, err := time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceConnectMaxDuration)); err != nil || d <= 0 {
 		log.Fatalf("unable to parse workspace-connect-max-duration %s (want a positive duration)", config.WorkspaceConnectMaxDuration)
+	}
+	// Run grants: each default must fit under its ceiling, and the ceilings
+	// under the store's own (authn.MaxRunTTL, authn.MaxRunBudget), or every
+	// mint that leaned on a default would be refused.
+	if config.RunGrantTTLDefault < 1 || config.RunGrantTTLMax < config.RunGrantTTLDefault || config.RunGrantTTLMax > 86400 {
+		log.Fatalf("run-grant-ttl-default (%d) and run-grant-ttl-max (%d) are seconds: want 1 <= default <= max <= 86400",
+			config.RunGrantTTLDefault, config.RunGrantTTLMax)
+	}
+	if config.RunGrantBudgetDefault < 1 || config.RunGrantBudgetMax < config.RunGrantBudgetDefault || config.RunGrantBudgetMax > 1000000 {
+		log.Fatalf("run-grant-budget-default (%d) and run-grant-budget-max (%d) are requests: want 1 <= default <= max <= 1000000",
+			config.RunGrantBudgetDefault, config.RunGrantBudgetMax)
 	}
 	// Syntax only; the workspace package builds the table and refuses a
 	// redefined built-in or a duplicate at boot (server wiring).

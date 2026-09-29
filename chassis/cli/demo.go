@@ -173,7 +173,10 @@ Flags:
 	}()
 
 	var chassisProc *devpkg.Process
-	adminURL, webURL, err := startChassis(ctx, tmp, aAddr, wAddr, false, false, false, false, false, false, false, false, false, false, false, false, *verbose, stdout, stderr, &started, &chassisProc)
+	adminURL, webURL, err := startChassis(ctx, chassisOpts{
+		Workspace: tmp, AdminAddr: aAddr, WebAddr: wAddr, Verbose: *verbose,
+		Stdout: stdout, Stderr: stderr, Started: &started, Out: &chassisProc,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "demo: %v\n", err)
 		return 1

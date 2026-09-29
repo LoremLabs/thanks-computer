@@ -501,6 +501,8 @@ func Conformance(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 	})
 
 	t.Run("resolver", func(t *testing.T) { resolverCases(t, newStore) })
+	t.Run("grants", func(t *testing.T) { grantCases(t, newStore) })
+	t.Run("run grants", func(t *testing.T) { runGrantCases(t, newStore) })
 }
 
 // SameTenantID is a ResolverConfig.TenantID for tests whose tenants use the
