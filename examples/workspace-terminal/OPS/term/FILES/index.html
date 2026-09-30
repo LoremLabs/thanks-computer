@@ -27,6 +27,7 @@
   <button id="detach" class="warn" disabled>detach</button>
   <button id="full" class="ghost">fullscreen</button>
   <span class="foot" id="status" style="border:0;padding:0">not connected</span>
+  <span class="foot" id="size" style="border:0;padding:0" title="columns × rows"></span>
 </div>
 <div id="term"></div>
 <div class="foot">
@@ -50,16 +51,50 @@ const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open($('term'));
 
-// Refit whenever the terminal box changes size — the reliable trigger for the
-// first layout, font measurement, window resizes and fullscreen. term.onResize
-// then tells the PTY. rAF-debounced.
-let raf = 0;
-const refit = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { try { fit.fit(); } catch (e) {} }); };
-new ResizeObserver(refit).observe($('term'));
-
 let ws = null, attached = false;
 const enc = new TextEncoder();
 const sendControl = (o) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); };
+
+// Two sizes have to agree: the terminal drawn here, and the PTY on the
+// workspace. `refit` makes the first fill its box. `syncSize` tells the second.
+//
+// A resize frame only reaches the PTY once the attachment is live. One sent
+// while the attach is still starting is lost, and the PTY keeps the size it
+// was started with (80×24 when the page had not been fitted yet). So the size
+// is sent again the moment the attachment is live, and once more after the
+// layout has settled.
+const showSize = () => { $('size').textContent = term.cols + '×' + term.rows; };
+let told = '';                                     // the size the PTY was last told
+const syncSize = (always) => {
+  showSize();
+  const now = term.cols + 'x' + term.rows;
+  if (!attached || (always !== true && now === told)) return;
+  told = now;
+  sendControl({ type: 'resize', cols: term.cols, rows: term.rows });
+};
+let raf = 0;
+const refit = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { try { fit.fit(); } catch (e) {} showSize(); }); };
+
+// Refit whenever the terminal's box changes, and when the window does.
+new ResizeObserver(refit).observe($('term'));
+window.addEventListener('resize', refit);
+// The first layout is not the last: fonts load, xterm measures its characters,
+// and the bar above may wrap when the status text changes. Fit again shortly
+// after, and a second or so later, then tell the PTY what it came to.
+const settle = () => { for (const ms of [100, 1000, 2500]) setTimeout(() => { refit(); setTimeout(syncSize, 80); }, ms); };
+settle();
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(refit);
+
+// The attachment is live: the PTY can be told its size now, and again once
+// the page has stopped moving.
+function onAttached() {
+  if (attached) return;
+  attached = true;
+  setStatus('attached', false); $('detach').disabled = false; term.focus();
+  try { fit.fit(); } catch (e) {}
+  syncSize(true);
+  settle();
+}
 
 function connect() {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -75,18 +110,18 @@ function connect() {
       if (m.type === 'error') { setStatus('error: ' + (m.error || m.code || 'attach failed'), true); return; }
       if (m.type === 'expired') { term.write('\r\n[session expired]\r\n'); return; }
       if (m.type === 'exit') { term.write('\r\n[process exited ' + m.code + ']\r\n'); }
-      if (m.type === 'attached') { if (!attached) { attached = true; setStatus('attached', false); $('detach').disabled = false; term.focus(); } }
+      if (m.type === 'attached') onAttached();
       return;
     }
-    if (!attached) { attached = true; setStatus('attached', false); $('detach').disabled = false; term.focus(); }
+    onAttached();
     term.write(new Uint8Array(e.data));
   };
-  ws.onclose = () => { attached = false; $('connect').disabled = false; $('detach').disabled = true; setStatus('disconnected'); };
+  ws.onclose = () => { attached = false; told = ''; $('connect').disabled = false; $('detach').disabled = true; setStatus('disconnected'); };
   ws.onerror = () => setStatus('socket error', true);
 }
 
 term.onData((data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(enc.encode(data)); });
-term.onResize(({ cols, rows }) => sendControl({ type: 'resize', cols, rows }));
+term.onResize(syncSize);
 
 $('connect').onclick = connect;
 $('detach').onclick = () => { sendControl({ type: 'detach' }); setStatus('detached'); $('detach').disabled = true; };

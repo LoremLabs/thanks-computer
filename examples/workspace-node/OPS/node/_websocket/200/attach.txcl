@@ -1,10 +1,16 @@
-# The first message attaches a terminal to the workspace, once.
+# The first message on /term attaches a terminal to the node's workspace, once.
 #
 # `command` is what runs in the PTY. `tmux new -A -s main` gives reattach,
 # scrollback and survival across disconnects for free: the socket's death
 # kills the tmux CLIENT, while the server and the `main` session keep
 # running in the workspace, so the next connection resumes the same screen.
 # (The workspace image must have tmux; the Sprites image does.)
+#
+# The shell is set up to talk to the node: the distribution is on PATH, and
+# the CLI uses the node-local profile setup enrolled, so `txco stacks`,
+# `txco trace <rid>` and `txco apply` reach the node's own chassis on its
+# loopback. tmux keeps the environment it was first started with, so this is
+# fixed when the `main` session is created.
 #
 # `cols`/`rows` are the browser's initial terminal size; the page resizes
 # later with a {"type":"resize"} control frame. `max_duration` bounds the
@@ -14,10 +20,14 @@
 # On success the chassis binds the PTY and returns `_attach.attached = true`
 # with the lease id and expiry; from here the socket is the terminal. A
 # transport/provider failure merges as top-level `workspace.error` (with
-# `_attach = {}`), which the responder below renders.
+# `_attach = {}`), which 300/attach-error renders.
+#
+# An attach refuses secrets by design: a person at a terminal could type one
+# back out. What this shell holds is what is already on the workspace.
 WHEN .msg.type == "attach"
-  EXEC "workspace://tools/attach"
-    WITH command = "tmux new -A -s main",
+  EXEC "workspace://node/attach"
+    WITH command = "PATH=/opt/txco/bin:$PATH exec tmux new -A -s main",
+         env = &object("TXCO_HOME", "/var/lib/txco/home", "TXCO_PROFILE", "node"),
          cols = .msg.cols,
          rows = .msg.rows,
          max_duration = "8h",

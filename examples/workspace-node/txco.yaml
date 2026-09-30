@@ -22,6 +22,7 @@ target: dev
 #   POST /stop      → stop the node chassis; the next GET /setup cold-starts it
 #   GET  /ui        → the node's admin UI, in a browser on its workspace
 #                     (/ui/setup, /ui/open, /ui/shot and the /screen WebSocket)
+#   GET  /terminal  → a shell on the node's workspace (the /term WebSocket)
 #   POST /destroy   → destroy the workspace, and the node with it
 #
 # There is no `operations:` block: workspace:// is a chassis transport, so the

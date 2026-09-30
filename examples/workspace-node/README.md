@@ -52,6 +52,8 @@ GET  /ui/setup  → start that browser (installs it once, about two minutes)
 POST /ui/open   → sign it in to the node's admin UI, at the traces view
 WS   /screen    → the workspace's display, as a VNC stream
 GET  /ui/shot   → a PNG of what that browser shows
+GET  /terminal  → a page: a shell on the node's workspace
+WS   /term      → that shell, as a PTY
 POST /stop      → stop the node chassis, as a cold workspace would have; the
                   next GET /setup cold-starts it
 POST /destroy   → destroy the workspace, and the node with it
@@ -70,7 +72,10 @@ POST /destroy   → destroy the workspace, and the node with it
 | `node/100/ui.txcl` + `ui.html` | the noVNC page, served behind the gate |
 | `node/100/ui_setup.txcl` + `browser.sh` | Chrome, Xvfb and x11vnc on the node's workspace: [`workspace-browser`](../workspace-browser)'s setup without its harness |
 | `node/100/ui_open.txcl`, `ui_shot.txcl` + `ui.py` | drive that browser over its debugging port: sign it in, or take a screenshot |
-| `node/100/screen.txcl`, `node/_websocket/*` | accept the WebSocket, then `workspace://node/connect WITH service = "browser"` |
+| `node/100/screen.txcl`, `node/_websocket/200/connect.txcl` | accept the WebSocket, then `workspace://node/connect WITH service = "browser"` |
+| `node/100/terminal.txcl` + `terminal.html` | the xterm.js page, served behind the gate |
+| `node/100/term.txcl`, `node/_websocket/200/attach.txcl` | accept the WebSocket, then `workspace://node/attach` with `tmux` |
+| `node/_websocket/100/parse.txcl` | reads a socket's first message, which says what it wants bound: `connect` or `attach` |
 | `node/200/*.txcl` | the answers: setup's JSON line, a command's output as text, a PNG, a 503 on a transport failure |
 | `node/300/no_route.txcl` | a 404 that lists the routes when nothing matched. Without it a wrong method gets an empty `200 {}`, which reads as success. Every rule that answers ends with `@halt = true`, so an answered request never reaches it. |
 
@@ -84,10 +89,11 @@ node is kept up by **one idempotent exec with three cases**, the same shape as
 - **Provision** — the marker `/var/lib/txco/version` differs from the `REQ`
   and `VERSION` a `POST /setup` carries:
   1. Make `/var/lib/txco`, mode 0700.
-  2. Run the project's installer, `https://get.thanks.computer/install.sh`,
-     as the workspace's own user, into a staging directory. It picks the
-     architecture, resolves `VERSION` to a release and checks the tarball
-     against that release's `checksums.txt`.
+  2. Fetch the release from GitHub into a staging directory, as the
+     workspace's own user: resolve `VERSION` to a tag (`latest` is whatever
+     `/releases/latest` redirects to), download
+     `txco_<version>_linux_<arch>.tar.gz` and that release's `checksums.txt`,
+     and check the tarball's sha256 against its own line.
   3. If the staged binary runs, stop the chassis and put the binary at
      `/opt/txco/bin/txco`. If anything before this failed, the node keeps
      running what it had.
@@ -125,16 +131,15 @@ so `/setup` returns at once and `GET /setup` reports the latest phase.
   binary and restarts the chassis, in about three seconds. While it runs,
   `GET /setup` reports the phase, not the old chassis's "ready".
 - **A provision that fails leaves the node as it was.** A tag that does not
-  exist stops at the installer; the chassis is never stopped, and `GET /setup`
+  exist stops at the download; the chassis is never stopped, and `GET /setup`
   answers `"ready":true` with the release it still runs and a `setup_error`
   that stays until a provision succeeds.
-- **`latest` trusts the release as published.** The installer's checksum comes
-  from the same release as the tarball, so it catches a damaged download, not
-  a replaced one. A parent that must know exactly what its nodes run pins a
-  release. Once a node and its parent speak a protocol to each other, their
+- **The checksum trusts the release as published.** It comes from the same
+  release as the tarball, so it catches a damaged download, not a replaced
+  one. Once a node and its parent speak a protocol to each other, their
   versions should match.
-- **Every provision depends on `get.thanks.computer`** answering, as well as
-  GitHub.
+- **A provision depends on GitHub and nothing else.** The install is a few
+  lines of `setup.sh`; no installer script is fetched.
 
 **The chassis is started like this,** from `/var/lib/txco`:
 
@@ -276,6 +281,33 @@ for the parent to carry HTTP to the node and sign it, so the UI runs in your
 own browser under your own identity on the parent. That is the request verb of
 `todo-chassis-hierarchy.md` §8, and it is not built.
 
+## A shell on the node: `/terminal`
+
+Open `/terminal` and press **connect** (or open `/terminal#go`). This is
+[`workspace-terminal`](../workspace-terminal) on the node's workspace: the page
+opens `/term`, its first message runs `workspace://node/attach`, and from then
+on the socket is a pseudo-terminal running `tmux new -A -s main`. Close the tab
+and come back, and `tmux` resumes the same screen.
+
+The shell is set up to talk to the node. The distribution is on the path and
+the CLI signs as the node-local key, so these reach the node's own chassis:
+
+```sh
+txco auth whoami          # profile: node, chassis: http://127.0.0.1:8927, source: signed
+txco trace last           # the node's most recent request
+txco versions hello       # a stack the node was given
+```
+
+`/screen` and `/term` share the stack's `_websocket` rules. What a socket gets
+is decided by its first message: `{"type":"connect"}` binds the display,
+`{"type":"attach",…}` binds a terminal.
+
+**What the person at the terminal holds** is a shell as the workspace's own
+user, which can become root, on the machine the node runs on. It is the same
+reach `/ui` and `/call` already give, in a more direct form, behind the same
+one password. An attach refuses secrets by design, so nothing of the parent's
+arrives with it.
+
 ## What this example is not
 
 - **`/call` is a stand-in.** A rule here carries a request someone else signed.
@@ -310,10 +342,10 @@ One workspace, driven from a chassis with the Sprites provider. Release
 
 | What | Result |
 |---|---|
-| Provision, from an empty workspace | Ready in 5 to 10 s. The installer takes 2 to 5 s of that (a 47 MB download). `latest` resolved to `v0.2.31`. |
+| Provision, from an empty workspace | Ready in 5 to 13 s. The install takes 1 to 7 s of that (a 47 MB download). `latest` resolved to `v0.2.31`. |
 | Provision again, in place (`REQ` bumped) | About 3 s. The same key id, the same stacks. |
 | `VERSION` pinned to a tag (`0.2.31`, then `v0.2.31`) | Installed that release each time |
-| `VERSION` naming a tag that does not exist | The node kept running, the same process. `GET /setup`: `"ready":true` with `"setup_error":"the installer could not install VERSION=v9.9.9-nope.1"`. Set back to `latest`: warm, and the error cleared. |
+| `VERSION` naming a tag that does not exist | The node kept running, the same process. `GET /setup`: `"ready":true` with `"setup_error":"there is no release v9.9.9-nope.1 for linux/amd64"`. Set back to `latest`: warm, and the error cleared. |
 | The chassis, from start to `/healthz` | 0.24 to 0.47 s |
 | Warm `/setup` | A no-op: 0.3 s round trip |
 | The node at idle | 54 to 64 MB of memory. The binary is 96 MB on disk; an empty data directory is under 1 MB. |
@@ -342,6 +374,17 @@ One workspace, driven from a chassis with the Sprites provider. Release
 | `POST /ui/open` | 3 s. A screenshot then shows the node's admin UI signed in, at the traces view, listing the node's own requests: `hello/0` from the data plane and `_inspect/0` from the signed call down. |
 | `WS /screen` with the password | `101`, then `{"type":"attached"}`, then the display's `RFB 003.008` greeting |
 | `WS /screen` with a wrong password | `401` |
+
+**A shell on the node, through `/terminal`:**
+
+| What | Result |
+|---|---|
+| `WS /term` with the password | `101`, then `{"type":"attached"}`, then the terminal's bytes |
+| `WS /term` with a wrong password | `401` |
+| Commands typed into it | Run as `sprite` in `/home/sprite`; `txco` resolves to `/opt/txco/bin/txco` |
+| `txco auth whoami`, `txco trace last`, `txco versions hello` | Signed as the node-local key, answered by the node's chassis |
+| The real page in a browser, at three window sizes, no manual resize | The PTY on the workspace had the page's size each time: 188×46, 137×32, 226×54. The page fits again shortly after load and a second or so later, and tells the PTY its size the moment the attachment is live. A resize sent while the attach is still starting is lost, which left the first version of the page at 80×24. |
+| Idle for 75 s with the socket open | Still attached; the next command ran at once. An open terminal keeps the workspace awake, so it needs no keep-alive. |
 
 **What the workspace allows** (`/facts`):
 

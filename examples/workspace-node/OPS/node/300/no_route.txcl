@@ -16,5 +16,5 @@ WHEN @src == "http" && @websocket.upgrade != true
          "error", "no such route",
          "method", @web.req.method,
          "path", @web.req.url.path,
-         "routes", "POST /setup · GET /setup · GET /status · POST /packages · POST /call · GET /unsigned · GET /facts · GET /logs · POST /stop · POST /destroy · GET /ui · GET /ui/setup · POST /ui/open · GET /ui/shot · WS /screen"))),
+         "routes", "POST /setup · GET /setup · GET /status · POST /packages · POST /call · GET /unsigned · GET /facts · GET /logs · POST /stop · POST /destroy · GET /ui · GET /ui/setup · POST /ui/open · GET /ui/shot · WS /screen · GET /terminal · WS /term"))),
        @halt = true

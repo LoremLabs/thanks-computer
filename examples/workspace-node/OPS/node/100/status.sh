@@ -6,7 +6,7 @@ pid="$(cat "$DATA/node.pid" 2>/dev/null || true)"
 echo "admin /healthz : $(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$ADMIN/healthz")"
 echo "web   /healthz : $(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$WEB/healthz")"
 echo "release        : $("$BIN" version 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
-echo "installer      : $(grep -m1 '^Release:' "$DATA/install.log" 2>/dev/null | tr -s ' ' || true)"
+echo "installed tag  : $(cat "$DATA/release" 2>/dev/null || true)"
 echo "pid            : ${pid:-none}"
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
   echo "age            : $(ps -o etimes= -p "$pid" | tr -d ' ') s"

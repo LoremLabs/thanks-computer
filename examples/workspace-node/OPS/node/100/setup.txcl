@@ -2,10 +2,11 @@
 # it, that this chassis (its parent) may call.
 #
 # One idempotent exec, three cases (setup.sh, beside this op):
-#   PROVISION   the node's marker differs from REQ and VERSION below: run the
-#               project's installer into a staging directory, swap the binary
-#               in if it runs, start the chassis, enroll the parent's public
-#               key and a node-local key, restart with enrollment closed.
+#   PROVISION   the node's marker differs from REQ and VERSION below: fetch
+#               the release from GitHub, check it against that release's
+#               checksums, swap the binary in if it runs, start the chassis,
+#               enroll the parent's public key and a node-local key, restart
+#               with enrollment closed.
 #   COLD START  provisioned, but the chassis is not running: start it.
 #   WARM        the admin plane answers /healthz: nothing to do.
 #

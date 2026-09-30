@@ -101,26 +101,48 @@ start_node() {
 if [ "$DO" = provision ]; then
   echo "PHASE provision req=$REQ version=$VERSION"
   sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$DATA"
-  # The project's own installer. It picks the architecture, resolves VERSION
-  # ("latest", or a tag) to a release, and checks the tarball against that
-  # release's checksums.txt.
-  #
-  # It installs into a STAGING directory, as this user and not as root. A tag
-  # that does not exist, or a download that fails its checksum, must not cost
-  # the node the chassis it is running: only a binary that runs is swapped in.
+  # Install the release. Everything comes from the project's GitHub releases:
+  #   1. the architecture of this machine
+  #   2. the tag: VERSION as given, or the one /releases/latest redirects to
+  #   3. that release's tarball for linux, and its checksums.txt
+  #   4. the tarball's sha256, checked against its own line in checksums.txt
+  #   5. the binary, unpacked into a STAGING directory, as this user
+  # A tag that does not exist, or a download that fails its checksum, must not
+  # cost the node the chassis it is running: only a binary that runs is swapped in.
   t0="$(now)"
-  rm -rf "$DATA/stage"
-  curl -fsSL -o "$DATA/install.sh" https://get.thanks.computer/install.sh \
-    || fail "could not fetch the installer"
-  PREFIX="$DATA/stage" VERSION="$VERSION" bash "$DATA/install.sh" >"$DATA/install.log" 2>&1 \
-    || fail "the installer could not install VERSION=$VERSION"
-  "$DATA/stage/bin/txco" version >/dev/null 2>&1 \
-    || fail "the binary installed for VERSION=$VERSION does not run"
+  REPO=https://github.com/loremlabs/thanks-computer
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH=amd64 ;;
+    aarch64|arm64) ARCH=arm64 ;;
+    *) fail "unsupported architecture $(uname -m)" ;;
+  esac
+  if [ "$VERSION" = latest ]; then
+    TAG="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$REPO/releases/latest")" \
+      || fail "could not ask GitHub for the latest release"
+    TAG="${TAG##*/}"
+    if [ -z "$TAG" ] || [ "$TAG" = latest ]; then fail "could not resolve the latest release"; fi
+  else
+    case "$VERSION" in v*) TAG="$VERSION" ;; *) TAG="v$VERSION" ;; esac
+  fi
+  TARBALL="txco_${TAG#v}_linux_$ARCH.tar.gz"
+  STAGE="$DATA/stage"
+  rm -rf "$STAGE"; mkdir -p "$STAGE"
+  curl -fsSL -o "$STAGE/$TARBALL" "$REPO/releases/download/$TAG/$TARBALL" \
+    || fail "there is no release $TAG for linux/$ARCH"
+  curl -fsSL -o "$STAGE/checksums.txt" "$REPO/releases/download/$TAG/checksums.txt" \
+    || fail "release $TAG has no checksums.txt"
+  # A tarball with no line in checksums.txt fails here too: sha256sum is given
+  # nothing to check, and says so.
+  (cd "$STAGE" && grep " $TARBALL\$" checksums.txt | sha256sum -c - >/dev/null 2>&1) \
+    || fail "the checksum of $TARBALL does not match release $TAG"
+  tar -xzf "$STAGE/$TARBALL" -C "$STAGE" txco || fail "release $TAG has no txco in its tarball"
+  "$STAGE/txco" version >/dev/null 2>&1 || fail "the binary of release $TAG does not run here"
   stop_node
   sudo install -d -m 0755 /opt/txco/bin
-  sudo install -m 0755 "$DATA/stage/bin/txco" "$BIN"
-  rm -rf "$DATA/stage"
-  echo "PHASE installed release=$("$BIN" version 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p') install_s=$(since "$t0")"
+  sudo install -m 0755 "$STAGE/txco" "$BIN"
+  rm -rf "$STAGE"
+  printf '%s\n' "$TAG" > "$DATA/release"
+  echo "PHASE installed release=$TAG install_s=$(since "$t0")"
   mkdir -p "$DATA/home"
   # Enrollment is open only while the chassis runs with a secret. Start it
   # with one, enroll the two keys, and start it again without.

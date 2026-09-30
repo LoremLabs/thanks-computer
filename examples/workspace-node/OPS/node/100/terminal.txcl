@@ -1,0 +1,12 @@
+# GET /terminal — the page: a shell on the node's workspace.
+#
+# Served from a gated op, as /ui is, and for the same reason: a static file
+# would bypass the gate in 090/095, and the browser would never be asked for
+# the password the /term WebSocket needs. The page is terminal.html, beside
+# this op.
+WHEN @src == "http" && @web.req.url.path == "/terminal"
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&include("terminal.html")),
+       @halt = true

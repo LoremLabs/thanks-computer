@@ -46,6 +46,12 @@ dies; reconnect and `tmux` resumes the same screen.
   - server → client: `{"type":"attached"}` (once, the binding is live),
     `{"type":"exit","code":N}`, `{"type":"expired"}`,
     `{"type":"error","error":"…"}`
+- **A `resize` counts only once the binding is live.** One sent while the
+  attach is still starting is lost, and the PTY keeps the size it was started
+  with. The page therefore sends its size again when `attached` arrives, and
+  fits itself once more a second or so after load, when the fonts and layout
+  have settled. Without that the terminal stays at 80×24 until the window is
+  resized by hand.
 
 ### Persistence is tmux's job
 
