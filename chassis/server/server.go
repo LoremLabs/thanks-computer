@@ -1432,10 +1432,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		logger.Info("cron queue loaded", zap.String("queue", cq.Name()))
 	}
 
-	// Outbound op-dial policy. Default "open" allows everything, so
-	// local/test behaviour is unchanged; "private" refuses dials into
-	// loopback/private/internal address space. A bad CIDR fails loudly
-	// here at boot rather than at first dial.
+	// Outbound op-dial policy. The default, "private", refuses dials into
+	// loopback/private/internal address space; "open" allows everything
+	// (`txco dev` sets it). A bad CIDR fails loudly here at boot rather
+	// than at first dial.
 	guard, gerr := egress.Open(conf.EgressPolicy, egress.Config{
 		DenyCIDRs:  conf.EgressDenyCIDRs,
 		AllowCIDRs: conf.EgressAllowCIDRs,
