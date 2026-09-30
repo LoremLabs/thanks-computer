@@ -1,0 +1,19 @@
+# POST /call — a call DOWN, from the parent to the node's admin plane.
+#
+# The body is a curl configuration for ONE request, already signed with the
+# parent's key (RFC 9421) for the address the node hears: 127.0.0.1 and its
+# admin port. This rule only carries it: the exec runs `curl -K -` on the node
+# with that configuration on stdin. The workspace has no inbound route, so the
+# provider's exec is the path.
+#
+# Nothing on the workspace can make this request: the node holds the parent's
+# PUBLIC key only. (GET /unsigned is the same request without a signature.)
+#
+# This is the spike's stand-in. The built form is a request verb, where the
+# parent chassis signs what it sends and no rule touches a signature.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/call"
+  EXEC "workspace://node/exec"
+    WITH command = "curl -sS -m 30 -K -",
+         timeout = "40s",
+         into    = "_out",
+         stdin   = &b64decode(@web.req.body)

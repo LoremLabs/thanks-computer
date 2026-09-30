@@ -28,9 +28,13 @@ and activate refuse an op that still carries either: `unresolved_op_ref`,
 - `both` — accept either; signed callers get their registered actor
   identity, basic callers get a synthetic `admin:all` context.
 
-With `both` and *neither* basic credentials *nor* enrolled signing
-keys, the chassis runs **open-dev**: requests are admitted with an
-`admin:all` context and `source: "open"`. Local development only.
+With `both` or `basic`, no basic credentials configured, and a dev
+environment (`--env` starting with `dev`, the default) or
+`--admin-allow-open`, the chassis runs **open-dev**: a request that
+carries no credentials is admitted with an `admin:all` context and
+`source: "open"`. Enrolling a signing key does not close it; only
+`--auth-mode=signed`, basic credentials, or a non-dev `--env` does.
+Local development only.
 
 ### Signed requests
 
@@ -60,7 +64,7 @@ Server-side policy:
 `X-Txco-Enroll-Secret` header) for an actor + key pair:
 
 - **Auto-bootstrap (default).** With no `--auth-dev-enroll-secret` and
-  an empty `actors` table, the chassis generates a 4-word secret at
+  an empty `actors` table, the chassis generates an 8-word secret at
   boot and prints it in a `WARN` line. Single-use: once any actor is
   enrolled the endpoint returns 404, even to the original secret.
 - **Explicit secret.** `--auth-dev-enroll-secret=<s>` (or

@@ -1,0 +1,6 @@
+# POST /setup with no parent_pub: nothing ran.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/setup" && ._in.parent_pub == null
+  EMIT @web.res.status = 400,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.body = &b64encode(&to_json(&object("ready", false,
+                                        "error", "POST a JSON body: {\"parent_pub\": \"<base64 ed25519 public key>\"}")))

@@ -1,0 +1,6 @@
+# GET /logs — the tail of the node chassis's own log. Diagnostic.
+WHEN @src == "http" && @web.req.url.path == "/logs"
+  EXEC "workspace://node/exec"
+    WITH command = "tail -n 60 /var/lib/txco/node.log 2>/dev/null || echo '(no node log)'",
+         timeout = "20s",
+         into    = "_out"

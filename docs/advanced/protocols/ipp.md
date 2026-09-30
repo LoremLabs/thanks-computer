@@ -1,4 +1,4 @@
-<!-- nav: IPP (printing) -->
+<!-- nav: IPP -->
 
 # IPP — a printer as the UI
 
@@ -66,13 +66,13 @@ hostname nobody owns: all one `404`, before the request body is read.
 `txco://ipp/printer` is tenant-scoped and answers at `into` (default
 `_printer`).
 
-| WITH | |
-|---|---|
-| `printer` | the label: `a-z 0-9 . _ -`, lowercase, starting and ending with a letter or digit. The last segment of the printer's URL |
-| `principal` | who may print to it: `user:usr_…` from `user/create`, or your own `<kind>:<name>` |
-| `display_name?` | what a client calls the printer (its `printer-dns-sd-name`), at most 63 bytes. Left out, an existing name is kept |
-| `status?` | `active` (default) or `disabled` — a disabled printer is a `404` |
-| `delete?` | `true` removes the printer (`principal` not needed). Jobs already accepted are still delivered |
+| WITH            |                                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `printer`       | the label: `a-z 0-9 . _ -`, lowercase, starting and ending with a letter or digit. The last segment of the printer's URL |
+| `principal`     | who may print to it: `user:usr_…` from `user/create`, or your own `<kind>:<name>`                                        |
+| `display_name?` | what a client calls the printer (its `printer-dns-sd-name`), at most 63 bytes. Left out, an existing name is kept        |
+| `status?`       | `active` (default) or `disabled` — a disabled printer is a `404`                                                         |
+| `delete?`       | `true` removes the printer (`principal` not needed). Jobs already accepted are still delivered                           |
 
 The result is `{printer, principal, display_name, status, created}`, or
 `{printer, deleted}`. It is idempotent: run it on every sign-up, or every
@@ -159,11 +159,11 @@ instead.
 
 macOS — Printers & Scanners → Add → **IP**:
 
-| Field | Value |
-|---|---|
-| Address | `ipp.acme.example:443` |
+| Field    | Value                            |
+| -------- | -------------------------------- |
+| Address  | `ipp.acme.example:443`           |
 | Protocol | Internet Printing Protocol – IPP |
-| Queue | `p/research` |
+| Queue    | `p/research`                     |
 
 or from a terminal:
 
@@ -222,19 +222,19 @@ mean three different things — for one person, or one each.
 The `_ipp` stack runs once per job, at `_ipp/0`, **after** the client has
 been told the job completed.
 
-| Path | |
-|---|---|
-| `@ipp.printer` | the label after `/p/` — the operation selector |
-| `@ipp.job_id` | opaque, durable, unique — key idempotence on this |
-| `@ipp.job_number` | the integer job id the print client saw |
-| `@ipp.job_name` | the title the application gave the job (may be empty) |
-| `@principal.id`, `.kind`, `.credential` | who **signed in** to print it: the printer's principal and the credential it used. Pinned by the chassis; no client or rule can set it ([Who is acting](../users.md#signing-in)) |
-| `@ipp.requesting_user` | who the client **claims** printed it — untrusted; use `@principal` |
-| `@ipp.document.sha256` | the document, as a blob reference |
-| `@ipp.document.size`, `.format`, `.name` | bytes, MIME type, file name if sent |
-| `@ipp.host`, `@ipp.printer_uri` | the host and URI the job arrived on (through the shared front door the URI keeps its `/p/<handle>/…`) |
-| `@ipp.submitted_at`, `@ipp.attempt`, `@ipp.node` | when, which delivery attempt, which node |
-| `@client.ip` | the submitter's address |
+| Path                                             |                                                                                                                                                                                  |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ipp.printer`                                   | the label after `/p/` — the operation selector                                                                                                                                   |
+| `@ipp.job_id`                                    | opaque, durable, unique — key idempotence on this                                                                                                                                |
+| `@ipp.job_number`                                | the integer job id the print client saw                                                                                                                                          |
+| `@ipp.job_name`                                  | the title the application gave the job (may be empty)                                                                                                                            |
+| `@principal.id`, `.kind`, `.credential`          | who **signed in** to print it: the printer's principal and the credential it used. Pinned by the chassis; no client or rule can set it ([Who is acting](../users.md#signing-in)) |
+| `@ipp.requesting_user`                           | who the client **claims** printed it — untrusted; use `@principal`                                                                                                               |
+| `@ipp.document.sha256`                           | the document, as a blob reference                                                                                                                                                |
+| `@ipp.document.size`, `.format`, `.name`         | bytes, MIME type, file name if sent                                                                                                                                              |
+| `@ipp.host`, `@ipp.printer_uri`                  | the host and URI the job arrived on (through the shared front door the URI keeps its `/p/<handle>/…`)                                                                            |
+| `@ipp.submitted_at`, `@ipp.attempt`, `@ipp.node` | when, which delivery attempt, which node                                                                                                                                         |
+| `@client.ip`                                     | the submitter's address                                                                                                                                                          |
 
 All read-only. There are **no bytes in the envelope** — a 400 KB page and a
 400 MB report make the same size envelope. The document is already in the
@@ -312,17 +312,17 @@ refused (`client-error-document-format-error`) and nothing is stored.
 PostScript is a program, not a page. Treat what arrives as hostile anyway
 — the check is shallow by design, and parsing belongs to the stack.
 
-| Refusal | IPP status |
-|---|---|
-| format not listed | `client-error-document-format-not-supported` |
-| bytes are not the declared format, or empty | `client-error-document-format-error` |
-| over `--ipp-max-job-bytes` | `client-error-request-entity-too-large` |
-| compression other than `none` | `client-error-compression-not-supported` |
-| `--ipp-max-inflight` uploads already running for the tenant | `server-error-busy` (clients retry) |
-| a second document for one job | `server-error-multiple-document-jobs-not-supported` |
-| cancel after delivery | `client-error-not-possible` |
-| storage unavailable | `server-error-temporary-error` |
-| node draining (new documents only) | HTTP `503` + `Retry-After` |
+| Refusal                                                     | IPP status                                          |
+| ----------------------------------------------------------- | --------------------------------------------------- |
+| format not listed                                           | `client-error-document-format-not-supported`        |
+| bytes are not the declared format, or empty                 | `client-error-document-format-error`                |
+| over `--ipp-max-job-bytes`                                  | `client-error-request-entity-too-large`             |
+| compression other than `none`                               | `client-error-compression-not-supported`            |
+| `--ipp-max-inflight` uploads already running for the tenant | `server-error-busy` (clients retry)                 |
+| a second document for one job                               | `server-error-multiple-document-jobs-not-supported` |
+| cancel after delivery                                       | `client-error-not-possible`                         |
+| storage unavailable                                         | `server-error-temporary-error`                      |
+| node draining (new documents only)                          | HTTP `503` + `Retry-After`                          |
 
 Operations: Get-Printer-Attributes, Validate-Job, Print-Job, Create-Job,
 Send-Document, Get-Job-Attributes, Get-Jobs, Cancel-Job. Everything else
@@ -361,7 +361,7 @@ request is challenged (`401`) and the client authenticates and asks again —
 CUPS does this on its own. `--ipp-anonymous-attributes` (default off) is the
 one escape hatch. It lets Get-Printer-Attributes alone through without
 credentials, for a print client that queries a printer's capabilities while
-*adding* it, before it has a password to offer. macOS's Add Printer dialog
+_adding_ it, before it has a password to offer. macOS's Add Printer dialog
 is such a client (see [Add the printer](#add-the-printer)), so a
 deployment that wants that dialog to work turns the flag on. The answer
 holds nothing about the tenant: the fixed capability set, the label from
@@ -377,7 +377,7 @@ while a guesser is capped — correct guess included. Over it the answer is
 `429`.
 
 **Who, before what.** The head decides everything it can from the request
-*headers*, before reading one byte of the body: a credential is verified,
+_headers_, before reading one byte of the body: a credential is verified,
 or a request that is evidently carrying a document without one is
 challenged, first. This is not tidiness. The IPP operation lives in the
 body, and the first read of the body is what makes an HTTP server send
@@ -391,24 +391,24 @@ before answering.
 
 ## Flags
 
-| Flag | Default | |
-|---|---|---|
-| `--ipp-formats` | `application/pdf` | advertised and accepted formats, first is the default |
-| `--ipp-max-job-bytes` | 256 MiB | per document |
-| `--ipp-max-inflight` | 4 | concurrent uploads per tenant |
-| `--login-rate` | 30/min | password checks per IP and per principal, shared with every head that signs in; cache misses only |
-| `--ipp-anonymous-attributes` | false | let Get-Printer-Attributes (only) through without credentials |
-| `--ipp-insecure-auth` | false | Basic over plaintext (dev) |
-| `--ipp-store`, `--ipp-db-path` | `sqlite`, `./chassis/data/ipp.db` | the job store (its own file, never the runtime DB) |
-| `--ipp-poll-interval` | 1 s | dispatcher retry cadence (a new job also wakes it) |
-| `--ipp-dispatch-timeout` | 10 s | how long the bus may take to **accept** a job — never how long the run may take |
-| `--ipp-lease-stale-after` | 600 s | crash recovery for a node that died mid-handoff |
-| `--ipp-max-attempts` | 20 | deliveries before an undeliverable job fails |
-| `--ipp-receive-timeout` | 600 s | a Create-Job waits this long for its document |
-| `--ipp-retention` | 7 d | finished job rows |
-| `--ipp-wire-debug` | false | log each request's operation and attribute **names** |
-| `--dns-ipp` | false | publish `ipp.<zone>` for every delegated pattern zone |
-| `--web-tls-self-signed` | false | dev: serve `--web-tls-addr` with a kept self-signed certificate |
+| Flag                           | Default                           |                                                                                                   |
+| ------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `--ipp-formats`                | `application/pdf`                 | advertised and accepted formats, first is the default                                             |
+| `--ipp-max-job-bytes`          | 256 MiB                           | per document                                                                                      |
+| `--ipp-max-inflight`           | 4                                 | concurrent uploads per tenant                                                                     |
+| `--login-rate`                 | 30/min                            | password checks per IP and per principal, shared with every head that signs in; cache misses only |
+| `--ipp-anonymous-attributes`   | false                             | let Get-Printer-Attributes (only) through without credentials                                     |
+| `--ipp-insecure-auth`          | false                             | Basic over plaintext (dev)                                                                        |
+| `--ipp-store`, `--ipp-db-path` | `sqlite`, `./chassis/data/ipp.db` | the job store (its own file, never the runtime DB)                                                |
+| `--ipp-poll-interval`          | 1 s                               | dispatcher retry cadence (a new job also wakes it)                                                |
+| `--ipp-dispatch-timeout`       | 10 s                              | how long the bus may take to **accept** a job — never how long the run may take                   |
+| `--ipp-lease-stale-after`      | 600 s                             | crash recovery for a node that died mid-handoff                                                   |
+| `--ipp-max-attempts`           | 20                                | deliveries before an undeliverable job fails                                                      |
+| `--ipp-receive-timeout`        | 600 s                             | a Create-Job waits this long for its document                                                     |
+| `--ipp-retention`              | 7 d                               | finished job rows                                                                                 |
+| `--ipp-wire-debug`             | false                             | log each request's operation and attribute **names**                                              |
+| `--dns-ipp`                    | false                             | publish `ipp.<zone>` for every delegated pattern zone                                             |
+| `--web-tls-self-signed`        | false                             | dev: serve `--web-tls-addr` with a kept self-signed certificate                                   |
 
 Job lines carry tenant, printer, job id, format, size, duration and
 outcome. They never carry a job name, a document name or the name the

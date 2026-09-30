@@ -1,0 +1,9 @@
+# The setup script itself failed: exit != 0, and no transport error.
+WHEN ._setup.exit != null && ._setup.exit != 0 && .workspace.error.code == null
+  EMIT @web.res.status = 500,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&to_json(&object("ready", false,
+                                        "error", "setup failed; see GET /status",
+                                        "exit", ._setup.exit,
+                                        "stderr", ._setup.stderr)))

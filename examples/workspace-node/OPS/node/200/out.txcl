@@ -1,0 +1,8 @@
+# Every other route answers with what its command printed, as text. A command
+# that exits non-zero is still an answer: the exit code is data, and it is
+# shown with stderr.
+WHEN ._out.exit != null
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&concat(._out.stdout, "\n[exit ", &to_json(._out.exit), "] ", ._out.stderr, "\n"))

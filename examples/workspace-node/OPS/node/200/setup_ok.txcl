@@ -1,0 +1,9 @@
+# Hand the setup script's one JSON line back verbatim: {"ready":true,…} when
+# the node is up, {"ready":false,"phase":…} while setup runs. The `!= null`
+# matters: a missing value compares equal to 0, so without it this rule would
+# answer every route that ran no setup.
+WHEN ._setup.exit != null && ._setup.exit == 0
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(._setup.stdout)

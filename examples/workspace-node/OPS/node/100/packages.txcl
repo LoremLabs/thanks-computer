@@ -1,0 +1,16 @@
+# POST /packages — give the node stacks.
+#
+# The CLI that ships in the distribution installs packages into a workspace
+# directory on the node and applies them to the node's own admin plane, signing
+# with the node-local key setup enrolled. Three sources, three questions
+# (packages.sh, beside this op):
+#   a registry package                 does the registry reach a node?
+#   a package with a bundled compute   does it apply on a stock image?
+#   a stack written on the node        the _inspect stack /call asks
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/packages"
+  EXEC "workspace://node/exec"
+    WITH command = "bash -s",
+         env     = &object("WEB_PORT", "8926", "ADMIN_PORT", "8927"),
+         timeout = "120s",
+         into    = "_out",
+         stdin   = &include("packages.sh")

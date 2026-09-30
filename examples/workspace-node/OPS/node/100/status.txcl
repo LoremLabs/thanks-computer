@@ -1,0 +1,10 @@
+# GET /status — what the node is, measured on the node: both planes' /healthz,
+# the release, the chassis process's age and memory, the disk it uses, and
+# whether enrollment is closed.
+WHEN @src == "http" && @web.req.url.path == "/status"
+  EXEC "workspace://node/exec"
+    WITH command = "bash -s",
+         env     = &object("WEB_PORT", "8926", "ADMIN_PORT", "8927"),
+         timeout = "20s",
+         into    = "_out",
+         stdin   = &include("status.sh")

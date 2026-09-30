@@ -1,0 +1,7 @@
+# POST /setup carries {"parent_pub": "<base64 ed25519 public key>"}: the public
+# half of the key the parent signs its calls to the node with. The web inlet
+# stamps the raw body base64 at @web.req.body; decode and parse it into a
+# private key for scope 100. A public key is not a secret, and it is the only
+# thing a request may put into the setup command's environment.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/setup"
+  EMIT ._in = &try_json(&b64decode(@web.req.body))

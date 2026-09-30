@@ -1,0 +1,7 @@
+# GET /unsigned — the same call as /call, made by a process ON the workspace
+# with no signature. The node must refuse it: 401.
+WHEN @src == "http" && @web.req.url.path == "/unsigned"
+  EXEC "workspace://node/exec"
+    WITH command = "curl -s -m 10 -o /dev/null -w 'unsigned inspect: HTTP %{http_code}\n' -X POST http://127.0.0.1:8927/v1/tenants/default/inspect -H 'Content-Type: application/json' --data '{\"stack\":\"node\"}'",
+         timeout = "20s",
+         into    = "_out"

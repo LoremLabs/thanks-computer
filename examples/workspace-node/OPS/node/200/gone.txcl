@@ -1,0 +1,5 @@
+# POST /destroy answered.
+WHEN ._gone != null
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.body = &b64encode(&to_json(._gone))

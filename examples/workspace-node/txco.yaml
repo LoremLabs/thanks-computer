@@ -1,0 +1,26 @@
+target: dev
+
+# examples/workspace-node — a chassis INSIDE a workspace (a node), set up and
+# called by the chassis that owns the workspace (its parent). Nothing here needs
+# a chassis change: it is built from workspace://…/exec, the release binary, the
+# admin plane's signed requests and the package CLI.
+#
+# REQUIRES A REAL WORKSPACE PROVIDER (Sprites): setup installs a Linux release
+# of txco and runs it as a long-lived process. The setup script refuses anything
+# that is not Linux, so on a Mac with the local provider it installs nothing.
+# This example is therefore NOT part of scripts/examples-smoke.sh.
+#
+# The shape:
+#   POST /setup     → provision (once), cold start, or a warm no-op; detached
+#   GET  /setup     → poll until {"ready":true}; also what wakes a cold node
+#   GET  /status    → the node, measured on the node
+#   POST /packages  → install packages on the node and apply them there
+#   POST /call      → a signed request to the node's admin plane, carried down
+#   GET  /unsigned  → the same request unsigned: the node refuses it
+#   GET  /facts     → what the workspace allows (users, control groups, egress)
+#   GET  /logs      → the node chassis's log
+#   POST /stop      → stop the node chassis; the next GET /setup cold-starts it
+#   POST /destroy   → destroy the workspace, and the node with it
+#
+# There is no `operations:` block: workspace:// is a chassis transport, so the
+# stack ships only ops.

@@ -1,0 +1,5 @@
+# POST /destroy — destroy the workspace. The node goes with it: a node is
+# replaceable, and the next POST /setup builds it again from nothing.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/destroy"
+  EXEC "workspace://node/destroy"
+    WITH into = "_gone"

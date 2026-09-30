@@ -1,0 +1,8 @@
+# POST /stop — stop the node chassis and leave the workspace as it is: what a
+# workspace that went cold looks like. The next GET /setup cold-starts it.
+# Kill by pidfile, never by a pattern that would match this very shell.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/stop"
+  EXEC "workspace://node/exec"
+    WITH command = "kill $(cat /var/lib/txco/node.pid 2>/dev/null) 2>/dev/null && echo 'the node chassis is stopped' || echo 'no node chassis was running'",
+         timeout = "20s",
+         into    = "_out"

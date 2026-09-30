@@ -1,0 +1,14 @@
+# GET /setup — the poll, and the wake. The same script with no parent key: it
+# reports the phase while setup runs, cold-starts the chassis if the workspace
+# went cold, and answers {"ready":true,"parent_key_id":…} when the node is up.
+#
+# Every call to a node is an exec, and an exec wakes the workspace, so a node is
+# never awake with nobody calling it. It names no release: what a node runs is
+# setup.txcl's to say.
+WHEN @src == "http" && @web.req.method == "GET" && @web.req.url.path == "/setup"
+  EXEC "workspace://node/exec"
+    WITH command = "bash -s",
+         env     = &object("WEB_PORT", "8926", "ADMIN_PORT", "8927"),
+         timeout = "45s",
+         into    = "_setup",
+         stdin   = &include("setup.sh")

@@ -1,0 +1,8 @@
+# GET /facts — what a workspace lets a node do, measured (facts.sh).
+WHEN @src == "http" && @web.req.url.path == "/facts"
+  EXEC "workspace://node/exec"
+    WITH command = "bash -s",
+         env     = &object("UP_HOST", "node-probe.stacks.thanks.computer"),
+         timeout = "60s",
+         into    = "_out",
+         stdin   = &include("facts.sh")

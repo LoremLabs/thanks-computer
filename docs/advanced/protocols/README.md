@@ -6,15 +6,12 @@ Multiple protocols are supported in the [Thanks, Computer](https://www.thanks.co
 
 We call the processes that speak the protocol a `head` in the `txco` chassis. These
 ingress points speak the native protocol and then serialize it to a `JSON` event.
- 
+
 ```json
 {
   "_ts": "2026-06-18T16:58:59+02:00",
   "_txc": {
-    "_seen": [
-      "boot/0->boot/50",
-      "boot/50->boot/100"
-    ],
+    "_seen": ["boot/0->boot/50", "boot/50->boot/100"],
     "flag_breakpoint": true,
     "fuel_used": 105,
     "hostname_verified": true,
@@ -27,12 +24,8 @@ ingress points speak the native protocol and then serialize it to a `JSON` event
     "web": {
       "req": {
         "headers": {
-          "Accept-Encoding": [
-            "gzip"
-          ],
-          "User-Agent": [
-            "Go-http-client/1.1"
-          ]
+          "Accept-Encoding": ["gzip"],
+          "User-Agent": ["Go-http-client/1.1"]
         },
         "host": "build-1.local.thanks.computer",
         "method": "GET",
@@ -49,31 +42,30 @@ ingress points speak the native protocol and then serialize it to a `JSON` event
 
 When these events arrive, the head that received it stamps `_txc.src` and its
 own namespace (`@web.req.*`, `@lmtp.*`, `@cron.*`, `@tcp.*`, `@websocket.*`) onto one flow
-envelope, and the same rules engine takes it from there. 
+envelope, and the same rules engine takes it from there.
 
 Each of these protocol heads also know how to convert back from the JSON event used
 in an opstack's flows into the protocol.
 
 ## Protocols supported
 
-| Channel | Direction |
-|---|---|
-| [HTTP](./web.md) | bidirectional, with streaming |
-| [Email — receiving](./lmtp.md) | in |
-| [Email — sending](./sendmail.md) | out |
-| [Remote sources](./source.md) | in, pulled — the chassis watches an IMAP mailbox you already own and each new message is one run of `_source` |
-| [Cron](./cron.md) | in |
-| [Scheduled](./scheduled.md) | in, time shifted — `txco://schedule` enqueues, fires later into `_scheduled` |
-| [Grant](./grant.md) | in, on request — work you dispatched opens a sandbox; each secret it names is one run of `_grant`, with the chassis's proposed answer, and a rule may change it |
-| [State](./state.md) | in, on change — `txco://state/transition` moves a record by compare-and-swap; every committed transition is presented into `_state` |
-| [TCP](./tcp.md) | bidirectional |
-| [MCP](./mcp.md) (agent tools) | out, in as diy |
-| [AI gateway](./llm-gateway.md) | in, then proxied out — an AI client's own requests, through a stack |
-| [DNS](./dns.md) | authoritative answers for delegated zones; in, post-reply — answered queries flow into `_dns` |
-| [IMAP](./imap.md) | out, read by a mail client — `txco://imap/append` materializes messages into a mailbox the `imap` head serves |
-| [Calendar](./calendar.md) | out, read by a calendar app or a feed subscriber — `txco://calendar/put` materializes events into a calendar the `calendar` head serves over CalDAV and as ICS; client edits can come back as `_calendar` envelopes |
-| [Contacts](./contacts.md) | out, read by a contacts app — `txco://contacts/put` materializes cards into an address book the `contacts` head serves over CardDAV; client edits can come back as `_contacts` envelopes |
-| [WebDAV](./webdav.md) | both ways, as files — `txco://drive/put` writes into a collection the `webdav` head serves as a mountable folder; every client write is a `drive.resource.*` event in `_scheduled`, fetched back with `txco://drive/get` |
-| [IPP (printing)](./ipp.md) | in — a tenant is a printer at `ipps://ipp.<zone>/p/<printer>`; File → Print in any app is one run of `_ipp`, the document delivered by blob reference |
-| [WebSocket](./websocket.md) | bidirectional, session — a stack accepts the upgrade, each message is one run of `_websocket`, `txco://websocket/reply` answers on the socket |
-
+| Channel                          | Direction                                                                                                                                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [HTTP](./web.md)                 | bidirectional, with streaming                                                                                                                                                                                            |
+| [Email — receiving](./lmtp.md)   | in                                                                                                                                                                                                                       |
+| [Email — sending](./sendmail.md) | out                                                                                                                                                                                                                      |
+| [Remote sources](./source.md)    | in, pulled — the chassis watches an IMAP mailbox you already own and each new message is one run of `_source`                                                                                                            |
+| [Cron](./cron.md)                | in                                                                                                                                                                                                                       |
+| [Scheduled](./scheduled.md)      | in, time shifted — `txco://schedule` enqueues, fires later into `_scheduled`                                                                                                                                             |
+| [Grant](./grant.md)              | in, on request — work you dispatched opens a sandbox; each secret it names is one run of `_grant`, with the chassis's proposed answer, and a rule may change it                                                          |
+| [State](./state.md)              | in, on change — `txco://state/transition` moves a record by compare-and-swap; every committed transition is presented into `_state`                                                                                      |
+| [TCP](./tcp.md)                  | bidirectional                                                                                                                                                                                                            |
+| [MCP](./mcp.md) (agent tools)    | out, in as diy                                                                                                                                                                                                           |
+| [AI gateway](./llm-gateway.md)   | in, then proxied out — an AI client's own requests, through a stack                                                                                                                                                      |
+| [DNS](./dns.md)                  | authoritative answers for delegated zones; in, post-reply — answered queries flow into `_dns`                                                                                                                            |
+| [IMAP](./imap.md)                | out, read by a mail client — `txco://imap/append` materializes messages into a mailbox the `imap` head serves                                                                                                            |
+| [Calendar](./calendar.md)        | out, read by a calendar app or a feed subscriber — `txco://calendar/put` materializes events into a calendar the `calendar` head serves over CalDAV and as ICS; client edits can come back as `_calendar` envelopes      |
+| [Contacts](./contacts.md)        | out, read by a contacts app — `txco://contacts/put` materializes cards into an address book the `contacts` head serves over CardDAV; client edits can come back as `_contacts` envelopes                                 |
+| [WebDAV](./webdav.md)            | both ways, as files — `txco://drive/put` writes into a collection the `webdav` head serves as a mountable folder; every client write is a `drive.resource.*` event in `_scheduled`, fetched back with `txco://drive/get` |
+| [IPP](./ipp.md)                  | in — a tenant is a printer at `ipps://ipp.<zone>/p/<printer>`; File → Print in any app is one run of `_ipp`, the document delivered by blob reference                                                                    |
+| [WebSocket](./websocket.md)      | bidirectional, session — a stack accepts the upgrade, each message is one run of `_websocket`, `txco://websocket/reply` answers on the socket                                                                            |

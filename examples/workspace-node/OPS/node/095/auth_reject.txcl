@@ -1,0 +1,11 @@
+# Refuse any request 090 did not vouch for: a wrong or missing Authorization
+# header, and equally an ABSENT verdict (a chassis without
+# txco://basic-auth-verify) — so the gate fails CLOSED, not open. @halt stops
+# the request before the routes in scope 100: nothing runs on the workspace.
+WHEN @src == "http" && @web.req.url.path != "/healthz" && @computed.basic_auth_ok != true
+  EMIT @web.res.status = 401,
+       @web.res.headers.www-authenticate.0 = "Basic realm=workspace-node",
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"authentication required — user 'human', password = the EXAMPLE_NODE_PW tenant secret
+",
+       @halt = true

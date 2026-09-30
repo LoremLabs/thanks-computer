@@ -1,0 +1,35 @@
+# POST /setup — make the workspace a NODE: a chassis of its own, running inside
+# it, that this chassis (its parent) may call.
+#
+# One idempotent exec, three cases (setup.sh, beside this op):
+#   PROVISION   the node's marker differs from REQ and VERSION below: run the
+#               project's installer into a staging directory, swap the binary
+#               in if it runs, start the chassis, enroll the parent's public
+#               key and a node-local key, restart with enrollment closed.
+#   COLD START  provisioned, but the chassis is not running: start it.
+#   WARM        the admin plane answers /healthz: nothing to do.
+#
+# Provision and cold start run DETACHED (setsid) and this call returns at once;
+# poll GET /setup until {"ready":true}. The hosted edge allows 20 s for response
+# headers, and a download takes longer.
+#
+# What is installed is DATA, and it is written here only:
+#   VERSION  "latest", or a tag: "0.2.31", "v0.2.32-rc1". The parent decides
+#            what its nodes run. A build of your own is a tag too: any v* tag
+#            is built and published, and one with a hyphen is a prerelease
+#            that never becomes "latest". "latest" is resolved when a node is
+#            provisioned, not after: bump REQ to move provisioned nodes on.
+#   REQ      the setup's own version. Bump it to provision again.
+# The parent's public key comes from the request (097/parse.txcl); it is a
+# public key, and the script refuses anything that is not base64.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/setup" && ._in.parent_pub != null
+  EXEC "workspace://node/exec"
+    WITH command = "bash -s",
+         env     = &object("REQ", "1",
+                           "VERSION", "latest",
+                           "WEB_PORT", "8926",
+                           "ADMIN_PORT", "8927",
+                           "PARENT_PUB", ._in.parent_pub),
+         timeout = "45s",
+         into    = "_setup",
+         stdin   = &include("setup.sh")
