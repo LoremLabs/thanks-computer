@@ -12,8 +12,10 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/grantwire"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/sandbox"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/usage"
 	"github.com/loremlabs/thanks-computer/chassis/workspace"
@@ -88,7 +90,27 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 	opID := fmt.Sprintf("%s/%d/%s", op.Stack, op.Scope, op.Name)
 	rid, _ := ctx.Value(config.CtxKeyRid).(string)
 	prov := pu.Workspaces.Provider().Name()
-	scrub := func(s string) string { return string(scrubSecrets([]byte(s), op.Secrets)) }
+	// grantScrub is what a run grant put in the command's environment that
+	// must never appear in its output: set by the exec case, read by scrub.
+	var grantScrub [][]byte
+	scrub := func(s string) string {
+		return string(scrubValues(scrubSecrets([]byte(s), op.Secrets), grantScrub))
+	}
+
+	// `WITH grant` hands a run grant to ONE command, and `WITH sandbox` says
+	// which of the grant's sandboxes to open for it. Only exec runs one: an
+	// attached terminal or a connected service outlives the run it was
+	// opened in, and would hold the grant's token with it.
+	grant := gjson.Get(op.Meta, "grant")
+	sandboxes := gjson.Get(op.Meta, "sandbox")
+	if grant.Exists() && verb != "exec" {
+		return workspaceFailure(into, prov, "", "bad_request",
+			fmt.Sprintf("WITH grant is for exec: %s hands a run grant to no command", verb), 0), nil
+	}
+	if sandboxes.Exists() && !grant.Exists() {
+		return workspaceFailure(into, prov, "", "bad_request",
+			"WITH sandbox needs WITH grant: a sandbox is opened with a run grant", 0), nil
+	}
 
 	// Only the env channel exists for a workspace: a secret in a header or
 	// body has no meaning here, and a silently ignored ref would be a
@@ -130,6 +152,9 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 			case len(refs) > 0:
 				return workspaceFailure(into, prov, "", "bad_request",
 					"WITH stream cannot be combined with secrets: a value split across two chunks could not be redacted", 0), nil
+			case grant.Exists():
+				return workspaceFailure(into, prov, "", "bad_request",
+					"WITH stream cannot be combined with grant: a token split across two chunks could not be redacted", 0), nil
 			case sink == nil:
 				return workspaceFailure(into, prov, "", "bad_request",
 					"WITH stream needs a live HTTP request (this run has no response stream)", 0), nil
@@ -138,6 +163,21 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		}
 		if err := applyWorkspaceSecrets(refs, op.Secrets, &req); err != nil {
 			return workspaceFailure(into, prov, "", "bad_request", err.Error(), 0), nil
+		}
+		if grant.Exists() {
+			env, vals, code, msg := pu.handGrant(ctx, tenant, op.Stack, spec, grant, sandboxes)
+			if code != "" {
+				return workspaceFailure(into, prov, "", code, msg, 0), nil
+			}
+			if req.Env == nil {
+				req.Env = map[string]string{}
+			}
+			// Last, so what the sandboxes set and the chassis's own
+			// variables win over WITH env and secrets.env.
+			for k, v := range env {
+				req.Env[k] = v
+			}
+			grantScrub = vals
 		}
 		if d, ok := ctx.Deadline(); ok {
 			req.Timeout = time.Until(d)
@@ -149,8 +189,8 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 			wall = time.Since(start).Milliseconds()
 		}
 		pu.workspaceAccount(ctx, rid, tenant, opID, wall, err, len(req.Stdin), len(res.Stdout)+len(res.Stderr))
-		res.Stdout = scrubSecrets(res.Stdout, op.Secrets)
-		res.Stderr = scrubSecrets(res.Stderr, op.Secrets)
+		res.Stdout = scrubValues(scrubSecrets(res.Stdout, op.Secrets), grantScrub)
+		res.Stderr = scrubValues(scrubSecrets(res.Stderr, op.Secrets), grantScrub)
 		if err != nil {
 			return workspaceFailure(into, prov, h.Ref, workspaceErrorCode(err), scrub(err.Error()), wall), nil
 		}
@@ -333,6 +373,90 @@ func parseWorkspaceGeometry(op operation.Operation, req *workspace.ExecRequest) 
 		}
 	}
 	return nil
+}
+
+// GrantHandoff hands a run grant to one command. The grant gateway
+// implements it (chassis/server/grantgw); it is an interface here so the
+// processor does not import the server.
+type GrantHandoff interface {
+	// ForExec opens each named sandbox of run grant grantID and returns the
+	// variables the command starts with — what the sandboxes set and, where
+	// the command can reach this chassis, what it needs to open more itself
+	// — with the values that must never appear in its output. tenant and
+	// stack are the dispatching rule's own; workspaceID is the workspace the
+	// command is about to run in.
+	ForExec(ctx context.Context, tenant, stack, workspaceID, grantID string, sandboxes []string) (env map[string]string, scrub [][]byte, err error)
+}
+
+// handGrant resolves `WITH grant` and `WITH sandbox` for an exec: the
+// variables to add to the command's environment and the values to keep out
+// of its output, or an in-band error code and message.
+//
+// The sandboxes are opened HERE, so the push form works wherever the
+// command runs: the values travel in the exec, as secrets.env values do.
+// Only the run-time form (`txco sandbox`, over the socket) needs the
+// command on this machine; a provider that cannot reach the socket gets a
+// command with no way to open more, and a `grant` that names no sandbox
+// there would hand over nothing.
+func (pu *Unit) handGrant(ctx context.Context, tenant, stack string, spec workspace.Spec, grant, sandboxes gjson.Result) (map[string]string, [][]byte, string, string) {
+	if grant.Type != gjson.String || grant.String() == "" {
+		return nil, nil, "bad_request", "WITH grant must be a run grant's id, from txco://delegate/mint"
+	}
+	names, err := sandboxNames(sandboxes)
+	if err != nil {
+		return nil, nil, "bad_request", err.Error()
+	}
+	if pu.Grants == nil {
+		return nil, nil, "grant_unavailable",
+			"this node hands out no run grants: it opened no identity store (see the chassis log)"
+	}
+	reach, ok := pu.Workspaces.Provider().(workspace.GrantReacher)
+	if (!ok || !reach.ReachesGrants()) && len(names) == 0 {
+		return nil, nil, "bad_request", fmt.Sprintf(
+			"WITH grant names no sandbox, and a command of the %s provider runs on another machine where it cannot open one itself: nothing would be handed over (add WITH sandbox)",
+			pu.Workspaces.Provider().Name())
+	}
+	env, vals, err := pu.Grants.ForExec(ctx, tenant, stack, workspace.ID(tenant, spec.Stack, spec.Name), grant.String(), names)
+	if err != nil {
+		return nil, nil, "grant_refused", err.Error()
+	}
+	if !ok || !reach.ReachesGrants() {
+		// The command cannot reach the socket: hand it the sandboxes'
+		// variables and none of the chassis's own.
+		for _, k := range grantwire.Env {
+			delete(env, k)
+		}
+	}
+	return env, vals, "", ""
+}
+
+// sandboxNames reads `WITH sandbox`: one name, or a list of them.
+func sandboxNames(v gjson.Result) ([]string, error) {
+	var names []string
+	switch {
+	case !v.Exists() || v.Type == gjson.Null:
+		return nil, nil
+	case v.Type == gjson.String:
+		names = []string{v.String()}
+	case v.IsArray():
+		for _, e := range v.Array() {
+			if e.Type != gjson.String {
+				return nil, errors.New("WITH sandbox must be a sandbox name or an array of them")
+			}
+			names = append(names, e.String())
+		}
+	default:
+		return nil, errors.New("WITH sandbox must be a sandbox name or an array of them")
+	}
+	if len(names) == 0 {
+		return nil, errors.New("WITH sandbox names no sandbox")
+	}
+	for _, n := range names {
+		if !sandbox.ValidName(n) {
+			return nil, fmt.Errorf("WITH sandbox: %q is not a sandbox name (a name matching [a-z][a-z0-9_-]*, at most 64 chars)", n)
+		}
+	}
+	return names, nil
 }
 
 // applyWorkspaceSecrets copies each `secrets.env.<NAME>` ref's materialized

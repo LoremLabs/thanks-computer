@@ -143,6 +143,11 @@ type Unit struct {
 	// --workspace-allow-local).
 	Workspaces *workspace.Manager
 
+	// Grants hands a run grant to a command: `workspace://<name>/exec WITH
+	// grant = <id>`. nil-safe: the op fails in-band when unset (this node
+	// opened no identity store).
+	Grants GrantHandoff
+
 	// Attachments is the registry of attached transports — a live resource
 	// in a workspace (a PTY, or a workspace-local service) bound to one
 	// WebSocket session for the life of a lease. The `workspace://<name>/attach`

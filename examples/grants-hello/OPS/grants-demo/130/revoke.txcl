@@ -1,0 +1,6 @@
+# ?revoked=1 — step 2: revoke the grant before the command runs, to show
+# what a command with a revoked grant is told. The work's next request is
+# refused; here that is its first.
+WHEN ._rg.id != "" && @web.req.url.query.revoked.0 == "1"
+  EXEC "txco://delegate/revoke"
+    WITH id = ._rg.id, into = "_revoked"

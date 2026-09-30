@@ -30,9 +30,12 @@ For operators:
    boot at `./chassis/data/secrets/txco-master.key`
    (`--secret-master-key` to relocate).
 2. **Manage secrets via CLI**: `txco auth tenant secrets {set,
-   generate, list, show, describe, rotate, revoke}`. Operator-supplied
-   values come from a TTY prompt; chassis-generated values are printed
-   exactly once.
+   generate, list, show, describe, policy, rotate, revoke}`.
+   Operator-supplied values come from a TTY prompt; chassis-generated
+   values are printed exactly once. `policy NAME --pull
+   none|reviewed|any` says whether work dispatched to a workspace may be
+   handed the secret itself; every secret starts at `none`
+   ([grants](./grants.md#the-pull-policy)).
 3. **There is no reveal command.** To inspect a value, rotate the
    secret. Both `rotate` (with a new operator value) and `rotate
    --generate` (chassis mints) show you the value once.

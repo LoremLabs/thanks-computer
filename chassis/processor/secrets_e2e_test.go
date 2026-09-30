@@ -17,7 +17,8 @@ import (
 // secretStoreSchema is the subset of 0008_tenant_secrets.sql needed
 // to exercise the runtime path. Kept inline so the test doesn't
 // depend on the embed.FS walker (which would pull in all migrations).
-// Schema MUST stay in sync with db/schema/sqlite/runtime/0008_*.sql.
+// Schema MUST stay in sync with db/schema/sqlite/runtime/0008_*.sql and
+// 0028_secret_pull.sql.
 const secretStoreSchema = `
 CREATE TABLE IF NOT EXISTS tenant_secrets (
     secret_id        TEXT PRIMARY KEY,
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
     created_by       TEXT,
     revoked_at       TEXT,
     last_rotated_at  TEXT,
-    key_version      INTEGER NOT NULL DEFAULT 1
+    key_version      INTEGER NOT NULL DEFAULT 1,
+    pull             TEXT NOT NULL DEFAULT 'none'
 );
 CREATE TABLE IF NOT EXISTS tenant_secret_versions (
     version_id   TEXT PRIMARY KEY,

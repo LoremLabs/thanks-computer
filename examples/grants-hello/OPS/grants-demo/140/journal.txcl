@@ -1,0 +1,8 @@
+# GET /journal — what OPS/_grant/0 recorded: one entry for each request the
+# run made, oldest first.
+WHEN @src == "http" && @web.req.url.path == "/journal"
+  EXEC "txco://notebook/read"
+    WITH notebook  = "grants/demo",
+         namespace = "grants-demo",
+         tail      = 20,
+         into      = "_nb"

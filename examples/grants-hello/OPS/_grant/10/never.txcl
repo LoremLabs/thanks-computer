@@ -1,0 +1,6 @@
+# _grant/10 — and the other way. DEMO_NEVER is open by its policy
+# (`pull: any`), so the chassis proposes to allow. This rule refuses it,
+# whichever sandbox names it.
+WHEN @src == "grant" && @grant.name == "DEMO_NEVER"
+  EMIT @grant.res.allow  = false,
+       @grant.res.reason = "nobody is handed DEMO_NEVER"

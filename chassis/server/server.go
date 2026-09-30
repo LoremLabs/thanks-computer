@@ -74,12 +74,15 @@ import (
 	outletpg "github.com/loremlabs/thanks-computer/chassis/outlet/postgres" // registers the "postgres" outlet driver
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
+	"github.com/loremlabs/thanks-computer/chassis/rungrant"
 	"github.com/loremlabs/thanks-computer/chassis/scheduled"
 	"github.com/loremlabs/thanks-computer/chassis/search"
 	_ "github.com/loremlabs/thanks-computer/chassis/search/blevestore" // registers the bundled "bleve" search backend
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
+	"github.com/loremlabs/thanks-computer/chassis/server/grantgw"
+	"github.com/loremlabs/thanks-computer/chassis/server/grantsock"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 	"github.com/loremlabs/thanks-computer/chassis/server/llmgw"
 	calendarp "github.com/loremlabs/thanks-computer/chassis/server/personality/calendar"
@@ -182,7 +185,8 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.cron.tenant", "_txc.room.tenant", "_txc.inspect.tenant",
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
 		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant",
-		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant", "_txc.state.tenant")
+		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant", "_txc.state.tenant",
+		"_txc.grant.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
@@ -190,6 +194,7 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	sourceTenant, sourceStack := fields[13], fields[14]
 	ippTenant := fields[15]
 	stateTenant := fields[16]
+	grantTenant := fields[17]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -282,6 +287,25 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "state")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_state/0")
+			return b.String()
+		}
+	}
+	// Grant request. The grant gateway presents one request made with a run
+	// grant — dispatched work asking to be handed a secret — stamping the
+	// tenant in `_txc.grant.tenant` (trusted: resolved from the run grant's
+	// own row after its token verified, never from the request). Propose a
+	// route into that tenant's `_grant/0` — the same sanctioned _sys→tenant
+	// pin as state. The stack reads the request and the chassis's proposed
+	// answer off `@grant.*`, and may write `@grant.res`. A tenant with no
+	// `_grant` stack runs no rule, and the proposal stands.
+	if src.String() == "grant" {
+		if gt := grantTenant.String(); gt != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", gt)
+			b.Set("_txc.route.stack", "_grant")
+			b.Set("_txc.route.ingress", "grant")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_grant/0")
 			return b.String()
 		}
 	}
@@ -1026,6 +1050,23 @@ func runWithTrace(
 type controller interface {
 	Start()
 	Stop()
+}
+
+// idle is the controller of a personality this node does not run.
+type idle struct{}
+
+func (idle) Start() {}
+func (idle) Stop()  {}
+
+// personalityOn reports whether name is one of the comma-separated
+// personalities, by whole name.
+func personalityOn(personalities, name string) bool {
+	for _, p := range strings.Split(personalities, ",") {
+		if strings.TrimSpace(p) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Deps is everything app.go opens before the personalities start: the
@@ -1864,16 +1905,16 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			}))
 	}
 
-	// Run grants (txco://rungrant/{mint,get,revoke,close}): what one piece of
+	// Run grants (txco://delegate/{mint,get,revoke,close}): what one piece of
 	// dispatched work may ask this chassis for. Rows in the identity store,
 	// so they are registered the way the identity ops are. See
-	// chassis/server/rungrant.go.
-	runGrantD := newRunGrantDeps(identityD, conf)
+	// chassis/server/delegate.go.
+	runGrantD := newRunGrantDeps(identityD, &sandboxDeclSource{dbc: dbc, fcas: fcas}, conf)
 	for name, fn := range map[string]func(context.Context, runGrantDeps, []byte) (event.Payload, error){
-		"txco://rungrant/mint":   runGrantMint,
-		"txco://rungrant/get":    runGrantGet,
-		"txco://rungrant/revoke": runGrantRevoke,
-		"txco://rungrant/close":  runGrantClose,
+		"txco://delegate/mint":   delegateMint,
+		"txco://delegate/get":    delegateGet,
+		"txco://delegate/revoke": delegateRevoke,
+		"txco://delegate/close":  delegateClose,
 	} {
 		fn := fn
 		pu.Handle([]byte(name), event.OpsHandlerFunc(
@@ -1979,6 +2020,30 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		} else if driveSigner, kerr = signedurl.New(key, ver); kerr != nil {
 			pu.Logger.Warn("txco://drive/sign disabled: " + kerr.Error())
 		}
+	}
+
+	// The grant gateway: where every request made with a run grant is
+	// decided (chassis/server/grantgw), and what hands a grant to a command
+	// (`workspace://…/exec WITH grant`). It needs the identity store; its
+	// token signer is keyed from the master key like the drive's, under a
+	// label of its own, so every node of a fleet that shares the key checks
+	// every other node's tokens. No master key: no token is signed, and a
+	// grant can be handed to no command.
+	var grantGateway *grantgw.Gateway
+	if identityStore != nil {
+		var runSigner *rungrant.Signer
+		if secretsResolver != nil && secretsResolver.Store() != nil {
+			if key, ver, kerr := secrets.DeriveKey(secretsResolver.Store().MK, rungrant.KeyLabel); kerr != nil {
+				pu.Logger.Warn("run grant tokens disabled: " + kerr.Error())
+			} else if runSigner, kerr = rungrant.New(key, ver); kerr != nil {
+				pu.Logger.Warn("run grant tokens disabled: " + kerr.Error())
+			}
+		}
+		decide, _ := time.ParseDuration(conf.GrantDecideTimeout)
+		window, _ := time.ParseDuration(conf.GrantRefusalWindow)
+		grantGateway = grantgw.New(ctx, pu, identityStore, runSigner,
+			grantgw.Config{DecideTimeout: decide, RefusalWindow: window})
+		pu.Grants = grantGateway
 	}
 
 	// Drive store ops (txco://drive/{collection,account,put,get,stat,list,
@@ -2495,7 +2560,32 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		}
 	}
 
+	// grant: the Unix socket the launcher (`txco sandbox`) asks on. Listed
+	// and unable to listen is fatal: a node that was meant to answer and
+	// does not is worse than one that will not start.
+	var grantSock controller = idle{}
+	if personalityOn(conf.Personalities, "grant") {
+		if grantGateway == nil {
+			cancel()
+			return nil, nil, errors.New("the 'grant' personality needs the identity store, and this node opened none (auth.db failed to open at boot; see the log)")
+		}
+		path := strings.TrimSpace(conf.GrantSocket)
+		if path == "" {
+			path = grantsock.DefaultPath(conf.DbRoot)
+		}
+		sock, serr := grantsock.New(ctx, logger, grantGateway, path)
+		if serr == nil {
+			serr = sock.Listen()
+		}
+		if serr != nil {
+			cancel()
+			return nil, nil, serr
+		}
+		grantSock = sock
+	}
+
 	controllers := []controller{
+		grantSock,
 		cronp.NewController(ctx, pu, cq),
 		scheduledp.NewController(ctx, pu, scheduledStore),
 		// state: presents committed state transitions into each tenant's
@@ -2542,6 +2632,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		NodeID: resolveUsageNodeID(conf.Fqdn),
 	})
 	if bgerr != nil {
+		// Nothing has started, but the socket is made: take it down rather
+		// than leave it for the next boot.
+		grantSock.Stop()
 		cancel()
 		return ctx, nil, bgerr
 	}

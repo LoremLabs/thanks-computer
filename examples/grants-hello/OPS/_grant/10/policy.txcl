@@ -1,0 +1,17 @@
+# _grant/10 — the tenant's own rules. The chassis has already proposed an
+# answer (`@grant.proposed.allow`) from the secret's pull policy, the run
+# grant and the principal's standing grants. A rule may change it either
+# way by writing `@grant.res.allow`. No rule writes it: the proposal stands.
+#
+# DEMO_BY_RULE is closed by its policy (`pull: none`), so the chassis
+# proposes to refuse. This rule allows it — through the `by_rule` sandbox,
+# for this principal, and only when the run grant names it and the
+# principal holds the standing grant.
+WHEN @src == "grant"
+  && @grant.sandbox == "by_rule"
+  && @grant.name == "DEMO_BY_RULE"
+  && @grant.principal.id == "service:demo"
+  && @grant.checks.allowlist == true
+  && @grant.checks.standing == true
+  EMIT @grant.res.allow  = true,
+       @grant.res.reason = "service:demo may have DEMO_BY_RULE through by_rule, whatever its pull policy"

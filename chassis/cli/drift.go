@@ -85,7 +85,7 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 				if derr == nil {
 					files = append(files, dsFiles...)
 				}
-				// SOURCES/ and OUTLETS/ ride the code manifest too.
+				// SOURCES/, OUTLETS/ and SANDBOXES/ ride the code manifest too.
 				if srcPacks, serr := collectSourcePacks(stackDir); serr == nil {
 					files = append(files, srcPacks...)
 				} else {
@@ -95,6 +95,11 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 					files = append(files, outletFiles...)
 				} else {
 					derr = oerr
+				}
+				if sandboxFiles, sberr := collectSandboxFiles(stackDir); sberr == nil {
+					files = append(files, sandboxFiles...)
+				} else {
+					derr = sberr
 				}
 				if saved.ManifestHash != "" && derr == nil {
 					if localManifestHash(files) == saved.ManifestHash {

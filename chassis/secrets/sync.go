@@ -81,7 +81,7 @@ func b64col(b []byte) map[string]any {
 // parentRowMap projects a tenant_secrets row onto the full RowsArtifact column
 // map (INSERT OR REPLACE needs every NOT-NULL column; nullable columns are
 // omitted when empty so the consumer writes SQL NULL, not ""). Mirrors the
-// tenant_secrets schema (migration 0008).
+// tenant_secrets schema (migrations 0008 and 0028).
 func parentRowMap(m *SecretMetadata) map[string]any {
 	row := map[string]any{
 		"secret_id":   m.SecretID,
@@ -104,6 +104,12 @@ func parentRowMap(m *SecretMetadata) map[string]any {
 	}
 	if m.RevokedAt != nil {
 		row["revoked_at"] = m.RevokedAt.UTC().Format(time.RFC3339)
+	}
+	// Carried only when it says something. A consumer applies the row with
+	// INSERT OR REPLACE, so an absent column takes its default — "none" —
+	// and a node one release behind never sees a column it does not have.
+	if m.Pull != "" && m.Pull != PullNone {
+		row["pull"] = string(m.Pull)
 	}
 	return row
 }

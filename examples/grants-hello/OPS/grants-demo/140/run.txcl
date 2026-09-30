@@ -1,0 +1,16 @@
+# GET /run?sandbox=NAME — step 3: the chassis opens the sandbox and starts
+# the command with what it sets.
+#
+# `grant` hands the run grant to this one command; `sandbox` says which of
+# the grant's sandboxes to open for it. Each secret the sandbox names is a
+# request to the chassis, decided by this tenant's `_grant` stack starting
+# from the chassis's proposal. One refused, and the command never starts.
+#
+# The command prints how much it holds and never what: whatever a command
+# prints lands in this envelope and in the trace.
+WHEN ._rg.id != "" && @web.req.url.path == "/run"
+  EXEC "workspace://bench/exec"
+    WITH grant   = ._rg.id,
+         sandbox = @web.req.url.query.sandbox.0,
+         command = "echo \"the command sees ${#DEMO} bytes in DEMO, and TXCO_RUN_GRANT is $([ -n \"$TXCO_RUN_GRANT\" ] && echo set || echo 'not set')\"",
+         into    = "_ws"

@@ -75,6 +75,11 @@ Flags:
 	for _, m := range checkOutletOps(ops, dir) {
 		diags = append(diags, bundle.Diag{Msg: "outlet: " + m})
 	}
+	// Sandbox check: every SANDBOXES/ declaration parses (chassis/sandbox).
+	// Errors for the same reason.
+	for _, m := range checkSandboxDecls(ops, dir) {
+		diags = append(diags, bundle.Diag{Msg: "sandbox: " + m})
+	}
 
 	// Reuse apply's static loop-shape lint (unconditional self-loops /
 	// 2-stack ping-pongs). Warnings only, same conservative semantics as

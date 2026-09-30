@@ -36,6 +36,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
+	"github.com/loremlabs/thanks-computer/chassis/sandbox"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
@@ -107,7 +108,7 @@ func (c *Controller) readStackFilesForArtifact(
 		// them lazily (and never inline them into the in-memory runtime DB).
 		// Rule/fixture files stay inline. Single-node deployments never call
 		// this (gated on FeedSink != nop), so the file/disk CAS is fine there.
-		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) {
+		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) {
 			if hash == "" {
 				hash = sha256Hex(content)
 			}
@@ -193,7 +194,7 @@ func (c *Controller) priorActiveFileHashes(
 		  JOIN stacks s ON s.active_version = sf.version_id
 		 WHERE s.tenant_id = ? AND s.name = ?
 		   AND sf.content_hash <> ''
-		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'BLOBS/%' OR sf.path LIKE 'CALENDARS/%' OR sf.path LIKE 'CONTACTS/%' OR sf.path LIKE 'DATASETS/%' OR sf.path LIKE 'OUTLETS/%')`),
+		   AND (sf.path LIKE 'FILES/%' OR sf.path LIKE 'VECTORS/%' OR sf.path LIKE 'KV/%' OR sf.path LIKE 'BLOBS/%' OR sf.path LIKE 'CALENDARS/%' OR sf.path LIKE 'CONTACTS/%' OR sf.path LIKE 'DATASETS/%' OR sf.path LIKE 'OUTLETS/%' OR sf.path LIKE 'SANDBOXES/%')`),
 		tenantID, stackName)
 	if err != nil {
 		return nil

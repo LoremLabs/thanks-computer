@@ -100,7 +100,8 @@ CREATE TABLE tenant_secrets (
     created_by       TEXT,
     revoked_at       TEXT,
     last_rotated_at  TEXT,
-    key_version      INTEGER NOT NULL DEFAULT 1
+    key_version      INTEGER NOT NULL DEFAULT 1,
+    pull             TEXT NOT NULL DEFAULT 'none'
 );
 CREATE TABLE tenant_secret_versions (
     version_id   TEXT PRIMARY KEY,

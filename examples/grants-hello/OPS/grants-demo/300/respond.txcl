@@ -1,0 +1,11 @@
+# Answer with what happened. `_`-prefixed keys never reach the body on
+# their own, so copy what the reader should see onto plain keys.
+WHEN @src == "http"
+  EMIT .setup   = &object("principal", ._cred.principal, "granted",
+                    &array(._g_demo_open.name, ._g_demo_closed.name, ._g_demo_by_rule.name, ._g_demo_never.name)),
+       .grant   = &object("id", ._rg.id, "run", ._rg.run, "generation", ._rg.generation,
+                    "allow", ._rg.allow, "sandboxes", ._rg.sandboxes, "revoked", ._revoked.revoked, "error", ._rg.error),
+       .command = &object("exit", ._ws.exit, "stdout", ._ws.stdout, "stderr", ._ws.stderr, "error", .workspace.error),
+       .journal = ._nb.entries,
+       @web.res.status = 200,
+       @halt = true

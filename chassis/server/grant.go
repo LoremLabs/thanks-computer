@@ -18,7 +18,7 @@ import (
 //   txco://grant/revoke  end one, by id or by what it names
 //
 // A standing grant says what a principal may EVER ask for. It decides
-// nothing on its own: a run grant (rungrant.go) names what one piece of work
+// nothing on its own: a run grant (delegate.go) names what one piece of work
 // may ask for, and can name only what its principal holds here.
 //
 // Scoping is the identity ops' (identity.go): the tenant from the pinned

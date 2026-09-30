@@ -1,0 +1,7 @@
+target: dev
+
+# No `operations:` block — grants, run grants, sandboxes and workspace:// are
+# chassis built-ins; the workspace ships operations only. Run with
+#   txco dev --allow-local-workspace --grant
+# `--grant` is for the /launch route (`txco sandbox` inside the command);
+# /run needs only --allow-local-workspace.

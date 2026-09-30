@@ -278,6 +278,7 @@ var cliCommandTree = []node{
 	{Name: "edit", Desc: "Edit a rule and apply on save"},
 	{Name: "dev", Desc: "Run the dev loop (apps + chassis + hot reload)"},
 	{Name: "demo", Desc: "Start the txcl learning environment"},
+	{Name: "sandbox", Desc: "Start a program inside named sandboxes, opened with its run grant (inside a workspace)"},
 	{Name: "trace", Desc: "Inspect request traces"},
 	{Name: "snapshot", Desc: "Snapshot subcommands", Children: snapshotChildren},
 	{Name: "auth", Desc: "Auth + identity management", Children: authChildren},

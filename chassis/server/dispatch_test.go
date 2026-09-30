@@ -629,3 +629,50 @@ func TestDetectTenantBodyStateNoTenantUnchanged(t *testing.T) {
 		t.Errorf("state body w/o tenant = %q, want {} (resolver miss)", body)
 	}
 }
+
+// TestDetectTenantBodyGrant: a grant request (src=grant with a trusted
+// _txc.grant.tenant stamped by the gateway from the run grant's own row)
+// proposes a route into that tenant's _grant/0, even though the resolver
+// would miss.
+func TestDetectTenantBodyGrant(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"grant","grant":{"tenant":"acme","phase":"request","kind":"secret","name":"DB_DSN","proposed":{"allow":false}}}}`))
+	for path, want := range map[string]string{
+		"_txc.route.to": "_grant/0", "_txc.route.tenant": "acme",
+		"_txc.route.stack": "_grant", "_txc.route.ingress": "grant",
+	} {
+		if got := gjson.Get(body, path).String(); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("_txc.route.hostname_verified must be true for a chassis-stamped request")
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+	// The proposal is about routing only: nothing of the request is echoed,
+	// and no verdict is invented.
+	if gjson.Get(body, "_txc.grant").Exists() {
+		t.Errorf("detect wrote under _txc.grant: %s", body)
+	}
+}
+
+// A grant request with no _txc.grant.tenant must NOT take the grant branch,
+// and the tenant named by another inlet's field is not borrowed.
+func TestDetectTenantBodyGrantNoTenantUnchanged(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	for _, in := range []string{
+		`{"_txc":{"src":"grant","grant":{"name":"DB_DSN"}}}`,
+		`{"_txc":{"src":"grant","state":{"tenant":"acme"},"grant":{"name":"DB_DSN"}}}`,
+		`{"_txc":{"src":"grant","grant":{"tenant":""}}}`,
+	} {
+		if body := detectTenantBody(resolver, []byte(in)); body != "{}" {
+			t.Errorf("grant body %s = %q, want {} (resolver miss)", in, body)
+		}
+	}
+	// …and another source cannot borrow the grant's.
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"http","grant":{"tenant":"acme"}}}`)); gjson.Get(body, "_txc.route.stack").String() == "_grant" {
+		t.Errorf("an http envelope was routed into _grant: %s", body)
+	}
+}

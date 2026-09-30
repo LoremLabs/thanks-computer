@@ -1979,6 +1979,9 @@ type Secret struct {
 	LastRotatedAt string `json:"last_rotated_at,omitempty"`
 	KeyVersion    int    `json:"key_version"`
 	VersionNo     int    `json:"version_no"`
+	// Pull is the pull policy: "none", "reviewed" or "any". Empty from a
+	// chassis that predates it, which is "none".
+	Pull string `json:"pull,omitempty"`
 }
 
 // SecretWithValue is the response shape from GenerateSecret and
@@ -2165,6 +2168,41 @@ func (c *Client) UpdateSecretDescription(ctx context.Context, name, stack, newDe
 	var out secretResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode patch secret: %w", err)
+	}
+	return &out.Secret, nil
+}
+
+// SetSecretPolicy sets a secret's pull policy ("none", "reviewed" or "any")
+// and nothing else: whether work dispatched somewhere else may be handed
+// the secret itself.
+func (c *Client) SetSecretPolicy(ctx context.Context, name, stack, pull string) (*Secret, error) {
+	body, err := json.Marshal(map[string]string{"pull": pull})
+	if err != nil {
+		return nil, err
+	}
+	endpoint := c.scopedURL("/secrets/" + url.PathEscape(name) + "/policy")
+	if stack != "" {
+		endpoint += "?stack=" + url.QueryEscape(stack)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(httpReq, body); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out secretResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode secret policy: %w", err)
 	}
 	return &out.Secret, nil
 }

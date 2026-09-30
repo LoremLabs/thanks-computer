@@ -41,6 +41,8 @@ func runTenantSecrets(args []string, stdout, stderr io.Writer) int {
 		return runSecretsList(args[1:], stdout, stderr)
 	case "show":
 		return runSecretsShow(args[1:], stdout, stderr)
+	case "policy":
+		return runSecretsPolicy(args[1:], stdout, stderr)
 	case "describe":
 		return runSecretsDescribe(args[1:], stdout, stderr)
 	case "revoke", "rm":
@@ -84,6 +86,13 @@ Available commands:
                                   Update the description. Names are
                                   immutable — rename = generate-new +
                                   revoke-old.
+  policy NAME --pull none|reviewed|any [--tenant SLUG] [--stack S]
+                                  Say whether work dispatched to a
+                                  workspace may be handed this secret
+                                  itself. none (the default): never.
+                                  reviewed: only where reviewed code runs.
+                                  any: anywhere, including where code
+                                  nobody has read runs.
   revoke NAME [--tenant SLUG] [--stack S]
                                   Soft-delete (the name is freed for
                                   re-creation; old encrypted versions
@@ -366,10 +375,10 @@ func runSecretsList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTACK\tVERSION\tCREATED_AT\tLAST_ROTATED\tDESCRIPTION")
+	fmt.Fprintln(tw, "NAME\tSTACK\tVERSION\tPULL\tCREATED_AT\tLAST_ROTATED\tDESCRIPTION")
 	for _, s := range rows {
-		fmt.Fprintf(tw, "%s\t%s\tv%d\t%s\t%s\t%s\n",
-			s.Name, dashIfEmpty(s.Stack), s.VersionNo,
+		fmt.Fprintf(tw, "%s\t%s\tv%d\t%s\t%s\t%s\t%s\n",
+			s.Name, dashIfEmpty(s.Stack), s.VersionNo, pullOrNone(s.Pull),
 			s.CreatedAt, dashIfEmpty(s.LastRotatedAt), dashIfEmpty(s.Description))
 	}
 	_ = tw.Flush()
@@ -425,6 +434,7 @@ func runSecretsShow(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "stack:          %s\n", dashIfEmpty(s.Stack))
 	fmt.Fprintf(stdout, "version:        v%d\n", s.VersionNo)
 	fmt.Fprintf(stdout, "key_version:    %d\n", s.KeyVersion)
+	fmt.Fprintf(stdout, "pull:           %s\n", pullOrNone(s.Pull))
 	fmt.Fprintf(stdout, "description:    %s\n", dashIfEmpty(s.Description))
 	fmt.Fprintf(stdout, "created_at:     %s\n", s.CreatedAt)
 	fmt.Fprintf(stdout, "created_by:     %s\n", dashIfEmpty(s.CreatedBy))
@@ -494,6 +504,85 @@ func runSecretsDescribe(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "updated %s description: %q\n", s.Name, s.Description)
+	return 0
+}
+
+// pullOrNone renders a pull policy. A chassis that predates the policy
+// sends none, and hands no secret to dispatched work.
+func pullOrNone(pull string) string {
+	if pull == "" {
+		return "none"
+	}
+	return pull
+}
+
+func runSecretsPolicy(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("auth tenant secrets policy", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	url := fs.String("url", "", "chassis admin endpoint")
+	profile := fs.String("profile", "", "profile name")
+	targetSel := fs.String("target", "", "chassis to act on: a profile name or a raw admin URL")
+	tenant := fs.String("tenant", "", "tenant slug")
+	stack := fs.String("stack", "", "stack scope (empty = tenant-wide)")
+	pull := fs.String("pull", "", "none | reviewed | any (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		PrintCLIError(stderr, "auth tenant secrets policy: NAME is required")
+		return 2
+	}
+	name := fs.Arg(0)
+	// Re-parse trailing flags, so `policy NAME --pull any` sees --pull.
+	if err := fs.Parse(fs.Args()[1:]); err != nil {
+		return 2
+	}
+	if *targetSel == "" { // a trailing positional selects the target, e.g. `secrets policy NAME staging`
+		*targetSel = trailingPositional(fs)
+	}
+	switch *pull {
+	case "none", "reviewed", "any":
+	case "":
+		PrintCLIError(stderr, "auth tenant secrets policy: --pull is required: none, reviewed or any")
+		return 2
+	default:
+		PrintCLIErrorf(stderr, "auth tenant secrets policy: --pull %q: want none, reviewed or any", *pull)
+		return 2
+	}
+
+	applyTargetSelector(*targetSel, url, profile)
+	resolvedProfile, err := resolveProfileForTenant(*profile, "")
+	if err != nil {
+		PrintCLIErrorf(stderr, "auth tenant secrets policy: %v", err)
+		return 1
+	}
+	target, err := buildSignedTarget(resolvedProfile, *url)
+	if err != nil {
+		PrintCLIErrorf(stderr, "auth tenant secrets policy: %v", err)
+		return 1
+	}
+	if target.Auth == nil && !LocalChassis(target.Addr) {
+		PrintCLIError(stderr, "auth tenant secrets policy: no signing key configured")
+		return 1
+	}
+	target.Tenant = ResolveTenant(*tenant, resolvedProfile)
+
+	s, err := client.New(target).SetSecretPolicy(context.Background(), name, *stack, *pull)
+	if err != nil {
+		PrintCLIErrorf(stderr, "auth tenant secrets policy: %v", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s pull policy: %s\n", s.Name, pullOrNone(s.Pull))
+	switch pullOrNone(s.Pull) {
+	case "any":
+		fmt.Fprintln(stdout, "  A run may now be handed this secret on an unreviewed node too: one where")
+		fmt.Fprintln(stdout, "  any program may run. A secret that was handed over cannot be recalled;")
+		fmt.Fprintln(stdout, "  only rotating it ends the exposure.")
+	case "reviewed":
+		fmt.Fprintln(stdout, "  A run may now be handed this secret on a reviewed node: one that runs only")
+		fmt.Fprintln(stdout, "  what was reviewed before it was installed. It still needs a run grant that")
+		fmt.Fprintln(stdout, "  names the secret, and a principal granted its release.")
+	}
 	return 0
 }
 

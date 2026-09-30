@@ -1,0 +1,5 @@
+# DEMO_NEVER's pull policy is `any`, and OPS/_grant/10/never.txcl refuses
+# it anyway.
+description: open by policy, refused by a rule
+env:
+  DEMO: secret:DEMO_NEVER

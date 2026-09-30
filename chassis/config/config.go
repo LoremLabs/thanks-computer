@@ -179,11 +179,14 @@ type Config struct {
 	WorkspaceAttachMaxDuration   string   `id:"workspace-attach-max-duration" default:"8h" desc:"Ceiling on how long one workspace://<name>/attach binding (an interactive terminal on a WebSocket session) may live; the op's WITH max_duration defaults to this and cannot exceed it. When it expires the lease ends, the process is killed and the socket is told. (8h)"`
 	WorkspaceConnectMaxDuration  string   `id:"workspace-connect-max-duration" default:"8h" desc:"Ceiling on how long one workspace://<name>/connect binding (a workspace-local service on a WebSocket session) may live; the op's WITH max_duration defaults to this and cannot exceed it. When it expires the lease ends, the connection is closed and the socket is told. (8h)"`
 	WorkspaceServices            []string `id:"workspace-services" default:"" desc:"Extra services the connect verb may bind, as name=port entries on the workspace's own loopback (comma-separated), added to the built-in table (browser=5900). Operator-declared only: a stack names a service, never a port. ()"`
-	RunGrantTTLDefault           int      `id:"run-grant-ttl-default" default:"600" desc:"Seconds a run grant lasts when txco://rungrant/mint gives no ttl. A run grant is what one piece of dispatched work may ask this chassis for; when it expires the work's next request is refused. (600)"`
+	RunGrantTTLDefault           int      `id:"run-grant-ttl-default" default:"600" desc:"Seconds a run grant lasts when txco://delegate/mint gives no ttl. A run grant is what one piece of dispatched work may ask this chassis for; when it expires the work's next request is refused. (600)"`
 	RunGrantTTLMax               int      `id:"run-grant-ttl-max" default:"3600" desc:"Ceiling, in seconds, on the ttl a stack may give a run grant. Longer work mints again: a grant is never extended. At most 86400. (3600)"`
-	RunGrantBudgetDefault        int      `id:"run-grant-budget-default" default:"50" desc:"Requests a run grant may make when txco://rungrant/mint gives no budget. (50)"`
+	RunGrantBudgetDefault        int      `id:"run-grant-budget-default" default:"50" desc:"Requests a run grant may make when txco://delegate/mint gives no budget. (50)"`
 	RunGrantBudgetMax            int      `id:"run-grant-budget-max" default:"1000" desc:"Ceiling on the budget, in requests, a stack may give a run grant. At most 1000000. (1000)"`
-	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns,mailmap,scheduled,imap,websocket,calendar,contacts,webdav,source,ipp,state} (cron,tcp,web,admin)"`
+	GrantSocket                  string   `id:"grant-socket" default:"" desc:"Path of the Unix socket the launcher ('txco sandbox') reaches this chassis on, for the 'grant' personality. At most 100 bytes. Its directory is made this user's own (0700). Empty puts it in a directory of its own under the system's temp dir, named for --db-root-dir. ()"`
+	GrantDecideTimeout           string   `id:"grant-decide-timeout" default:"5s" desc:"How long a tenant's _grant stack may take to decide one request made with a run grant. Past it the request is refused. (5s)"`
+	GrantRefusalWindow           string   `id:"grant-refusal-window" default:"5s" desc:"How long a refused request is answered from memory, so a program asking again and again cannot run the tenant's _grant stack without end. Only refusals are remembered. A change that would now allow the request takes up to this long to be seen. 0 turns it off. (5s)"`
+	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,sweep,dns,mailmap,scheduled,imap,websocket,calendar,contacts,webdav,source,ipp,state,grant} (cron,tcp,web,admin)"`
 	ShutdownGrace                string   `id:"shutdown-grace" default:"25s" desc:"On SIGTERM/SIGINT, how long in-flight runs get to finish before they are cancelled. The node drains first — new web requests get 503, new LMTP deliveries 451, the scheduled and source pollers claim nothing new — then waits for its requests and detached continuation work. 0 cancels at once. Give the container a stop timeout above this. (25s)"`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
 	PromNamespace                string   `id:"prom-namespace" default:"txco" desc:"Set the Prometheus namespace (txco)"`
@@ -633,6 +636,12 @@ func Load() (Config, error) {
 	if config.RunGrantBudgetDefault < 1 || config.RunGrantBudgetMax < config.RunGrantBudgetDefault || config.RunGrantBudgetMax > 1000000 {
 		log.Fatalf("run-grant-budget-default (%d) and run-grant-budget-max (%d) are requests: want 1 <= default <= max <= 1000000",
 			config.RunGrantBudgetDefault, config.RunGrantBudgetMax)
+	}
+	if d, err := time.ParseDuration(fmt.Sprintf("%v", config.GrantDecideTimeout)); err != nil || d <= 0 {
+		log.Fatalf("unable to parse grant-decide-timeout %s (want a positive duration)", config.GrantDecideTimeout)
+	}
+	if d, err := time.ParseDuration(fmt.Sprintf("%v", config.GrantRefusalWindow)); err != nil || d < 0 {
+		log.Fatalf("unable to parse grant-refusal-window %s (want a duration, or 0)", config.GrantRefusalWindow)
 	}
 	// Syntax only; the workspace package builds the table and refuses a
 	// redefined built-in or a duplicate at boot (server wiring).

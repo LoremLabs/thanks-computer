@@ -23,6 +23,7 @@ delegated zones, required for the built-in ACME TLS path — see
 | admin | `--admin-addr`       | `:8081` | Mutating API + admin UI — see [admin-api.md](./admin-api.md).          |
 | lmtp  | `--lmtp-listen-addrs`| `:2424` | Only binds when `lmtp` is in `--personalities`.                        |
 | cron  | `--cron-period`      | `60`    | Seconds between ticks.                                                 |
+| grant | `--grant-socket`     | under the system's temp dir | A Unix socket, not a port: `txco sandbox` asks the chassis to open a sandbox on it. See [grants](./grants.md#turning-it-on). |
 
 `--web-tls-addr` (e.g. `:8443`) makes the chassis terminate TLS itself,
 obtaining wildcard certificates via ACME DNS-01 against its own DNS

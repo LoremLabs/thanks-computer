@@ -583,6 +583,7 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/secrets/{name}", c.handleShowSecret).Methods(http.MethodGet)
 	tenantR.HandleFunc("/secrets/{name}", c.handleUpdateSecretDescription).Methods(http.MethodPatch)
 	tenantR.HandleFunc("/secrets/{name}", c.handleRevokeSecret).Methods(http.MethodDelete)
+	tenantR.HandleFunc("/secrets/{name}/policy", c.handleSetSecretPolicy).Methods(http.MethodPut)
 	tenantR.HandleFunc("/secrets/{name}/rotate", c.handleRotateSecret).Methods(http.MethodPost)
 	tenantR.HandleFunc("/secrets/{name}/rotate-generated", c.handleRotateSecretGenerated).Methods(http.MethodPost)
 

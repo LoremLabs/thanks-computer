@@ -299,6 +299,19 @@ func RunSession(sess ExecSession, req ExecRequest, lim Limits) (ExecResult, erro
 	return res, err
 }
 
+// GrantReacher is the optional capability behind `exec WITH grant`: a
+// provider whose commands run on the chassis's own machine, and so can reach
+// the socket and the files a run grant is exercised through. A provider
+// lists "grant" in Capabilities, but as with Starter the gate is this
+// interface.
+//
+// A provider whose commands run elsewhere does not implement it, and the op
+// refuses: a grant handed to a command that cannot use it is a token left
+// in an environment for nothing.
+type GrantReacher interface {
+	ReachesGrants() bool
+}
+
 // Checkpointer is the optional capability behind the checkpoint verb. A
 // provider advertises it by listing "checkpoint" in Capabilities and
 // implementing this interface; the returned id is provider-scoped.

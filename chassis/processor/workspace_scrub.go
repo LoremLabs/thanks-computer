@@ -17,6 +17,22 @@ const scrubMinSecretLen = 8
 // stdout, stderr and error text.
 var scrubRedacted = []byte("[REDACTED]")
 
+// scrubValues is scrubSecrets for values that are not in a bag: what a run
+// grant put in the command's environment (its token, the name of its
+// directory). A command that prints its environment prints them.
+func scrubValues(out []byte, values [][]byte) []byte {
+	if len(out) == 0 {
+		return out
+	}
+	for _, v := range values {
+		if len(v) < scrubMinSecretLen {
+			continue
+		}
+		out = bytes.ReplaceAll(out, v, scrubRedacted)
+	}
+	return out
+}
+
 // scrubSecrets replaces every occurrence of every materialized secret's
 // cleartext in out with [REDACTED]. Runs before the payload is built, so
 // the envelope, the trace step, the continuation store and the logs all

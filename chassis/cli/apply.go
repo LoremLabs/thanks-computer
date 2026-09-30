@@ -465,6 +465,14 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		}
 		return 1
 	}
+	// Sandbox check — every SANDBOXES/ declaration of every stack parses.
+	// Errors too: a broken declaration fails activation.
+	if serrs := checkSandboxDecls(ops, dir); len(serrs) > 0 {
+		for _, m := range serrs {
+			fmt.Fprintf(stderr, "%s: sandbox error at %s\n", cmd, m)
+		}
+		return 1
+	}
 
 	// Apply-time lint for unconditional loop shapes (self-loops and
 	// 2-stack ping-pongs). Warnings only — design-time complement to the
@@ -633,6 +641,14 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, outletFiles...)
+		// SANDBOXES/ declarations likewise: one small YAML per named bundle a
+		// run grant may open (chassis/sandbox).
+		sandboxFiles, sberr := collectSandboxFiles(filepath.Join(dir, "OPS", stack))
+		if sberr != nil {
+			fmt.Fprintf(stderr, "%s: %s: collect SANDBOXES/: %v\n", cmd, stack, sberr)
+			return 1
+		}
+		files = append(files, sandboxFiles...)
 		// Datasets are CODE (the manifest names queries the rules call; a query
 		// and schema change deploy atomically), so they join the code manifest
 		// here — unlike store-seed packs, which are data (`txco data apply`).

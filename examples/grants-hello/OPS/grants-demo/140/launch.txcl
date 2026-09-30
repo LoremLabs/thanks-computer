@@ -1,0 +1,14 @@
+# GET /launch?sandbox=NAME — step 3: the command opens the sandbox itself.
+#
+# `grant` alone hands the command what it needs to open sandboxes at run
+# time: its token and the chassis's socket. `txco sandbox NAME -- program`
+# asks the chassis to open NAME, with that token, and then becomes the
+# program. The program sees what the sandbox set and none of the grant's
+# own variables: it cannot open more. Needs `txco dev --grant`.
+WHEN ._rg.id != "" && @web.req.url.path == "/launch"
+  EXEC "workspace://bench/exec"
+    WITH grant = ._rg.id,
+         args  = &array("sh", "-c",
+                   "\"$TXCO_BIN\" sandbox \"$1\" -- sh -c 'echo \"the program sees ${#DEMO} bytes in DEMO, and TXCO_RUN_GRANT is ${TXCO_RUN_GRANT:-not set}\"'",
+                   "sh", @web.req.url.query.sandbox.0),
+         into  = "_ws"

@@ -32,6 +32,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
+	"github.com/loremlabs/thanks-computer/chassis/sandbox"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
@@ -93,6 +94,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050; override with TXCO_TCP_LISTEN_ADDRS, e.g. 'irc=127.0.0.1:6697;self-signed' for a TLS/SNI listener). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	stateHead := fs.Bool("state", false, "start the state personality (the dispatcher behind txco://state/*; presents each committed transition into the tenant's _state stack). Disabled by default; the dev store lands at .txco/dev/state.db.")
+	grantHead := fs.Bool("grant", false, "start the grant personality: the Unix socket `txco sandbox` reaches the chassis on, so a program a command runs can open a sandbox itself. Disabled by default; without it a command holds only what `WITH sandbox` opened for it. Needs --allow-local-workspace to hand a grant to a command.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
 	allowLocalWorkspace := fs.Bool("allow-local-workspace", false, "enable workspace:// ops backed by the local provider: commands run as YOUR uid, unsandboxed, under .txco/dev/workspaces/<tenant>/<stack>/<name>. Off by default and never implied by anything else; the chassis logs a WARN pair when it is on.")
 	sourceHead := fs.Bool("source", false, "start the source personality (the remote-mailbox poller: dials OUT to each SOURCES/-declared IMAP mailbox, reads past a durable cursor, and fires every new message into the source's _source stack). Disabled by default. Needs a mailbox password in the tenant secret store; egress is open in dev, so a source may point at loopback (e.g. this chassis's own --imap head).")
@@ -285,7 +287,7 @@ Flags:
 			Heads: devHeads{
 				TCP: *tcpHead, DNS: *dnsHead, LMTP: *lmtpHead, Scheduled: *scheduledHead, Source: *sourceHead,
 				IMAP: *imapHead, Calendar: *calendarHead, Contacts: *contactsHead, WebDAV: *webdavHead,
-				IPP: *ippHead, State: *stateHead,
+				IPP: *ippHead, State: *stateHead, Grant: *grantHead,
 			},
 			AllowLocalWorkspace: *allowLocalWorkspace, Verbose: *verbose,
 			Stdout: stdout, Stderr: stderr, Started: &started, Out: &chassisProc,
@@ -561,6 +563,15 @@ Flags:
 			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://contacts/account\" WITH username = \"you@<bound-host>\"` and `txco://contacts/addressbook`, then add a CardDAV account in Contacts/Thunderbird:")
 			fmt.Fprintln(stdout, "[txco]        server <bound-host> (e.g. pony.local.thanks.computer), the web port, SSL off, path /carddav/")
 		}
+		if *grantHead {
+			fmt.Fprintln(stdout, "[txco]   run grants: declare a sandbox in OPS/<stack>/SANDBOXES/<name>.yaml, mint a grant with `EXEC \"txco://delegate/mint\" WITH allow = [\"<name>\"]`,")
+			fmt.Fprintln(stdout, "[txco]        open it for a command with `workspace://<ws>/exec WITH grant = <id>, sandbox = \"<name>\"`")
+			fmt.Fprintln(stdout, "[txco]        or let the command open one itself: \"$TXCO_BIN\" sandbox <name> -- program")
+			fmt.Fprintln(stdout, "[txco]        a secret is handed over only if its policy allows: txco auth tenant secrets policy SECRET --pull any   (or a rule in OPS/_grant)")
+			if !*allowLocalWorkspace {
+				fmt.Fprintln(stdout, "[txco]        NOTE: no workspace provider is on, so no command can be handed a grant: add --allow-local-workspace")
+			}
+		}
 		if *webdavHead {
 			fmt.Fprintf(stdout, "[txco]   webdav head: %s/drive/ (WebDAV, Basic auth over plaintext); index at .txco/dev/drive.db, bytes under .txco/dev/drive/\n", webURL)
 			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://drive/collection\" WITH name = \"docs\"` and `txco://drive/account WITH username = \"you@<bound-host>\", collection = \"docs\"`, then mount it:")
@@ -645,9 +656,9 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
 		files = append(files, packs...)
-		// SOURCES/ and OUTLETS/ are code and ride the same draft as they do
-		// on `txco apply` (apply.go); leaving them out here made dev drop a
-		// stack's source declarations on every upload.
+		// SOURCES/, OUTLETS/ and SANDBOXES/ are code and ride the same draft
+		// as they do on `txco apply` (apply.go); leaving them out here made
+		// dev drop a stack's source declarations on every upload.
 		srcPacks, serr := collectSourcePacks(filepath.Join(dir, "OPS", stack))
 		if serr != nil {
 			return fmt.Errorf("%s: collect SOURCES/: %w", stack, serr)
@@ -658,6 +669,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect OUTLETS/: %w", stack, oerr)
 		}
 		files = append(files, outletFiles...)
+		sandboxFiles, sberr := collectSandboxFiles(filepath.Join(dir, "OPS", stack))
+		if sberr != nil {
+			return fmt.Errorf("%s: collect SANDBOXES/: %w", stack, sberr)
+		}
+		files = append(files, sandboxFiles...)
 		dsFiles, dsUploads, derr := collectDatasetFiles(filepath.Join(dir, "OPS", stack))
 		if derr != nil {
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
@@ -992,6 +1008,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			return fmt.Errorf("%s: collect OUTLETS/: %w", stack, oerr)
 		}
 		files = append(files, outletFiles...)
+		sandboxFiles, sberr := collectSandboxFiles(stackDir)
+		if sberr != nil {
+			return fmt.Errorf("%s: collect SANDBOXES/: %w", stack, sberr)
+		}
+		files = append(files, sandboxFiles...)
 		dsFiles, dsUploads, derr := collectDatasetFiles(stackDir)
 		if derr != nil {
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
@@ -1048,7 +1069,7 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
 	}
 	// Asset half: stat-only walk of the same trees the collectors read.
-	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, storeseed.DirSources, outlet.Dir, dataset.Dir} {
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, storeseed.DirSources, outlet.Dir, sandbox.Dir, dataset.Dir} {
 		treeDir := filepath.Join(stackDir, top)
 		info, err := os.Stat(treeDir)
 		if err != nil || !info.IsDir() {
@@ -1103,6 +1124,8 @@ func isVersionNotDraftErr(err error) bool {
 // failures on machines running other things there.
 type devHeads struct {
 	TCP, DNS, LMTP, Scheduled, Source, IMAP, Calendar, Contacts, WebDAV, IPP, State bool
+	// Grant is the launcher's socket: how a command opens a sandbox itself.
+	Grant bool
 }
 
 // chassisOpts is what startChassis is asked for. A new switch is one field
@@ -1219,9 +1242,15 @@ func startChassis(ctx context.Context, o chassisOpts) (adminURL, webURL string, 
 	fmt.Fprintf(o.Stdout, "[txco] starting chassis (admin=%s, web=%s, tcp=%s, db=%s)\n", adminAddr, webAddr, tcpDesc, dbDir)
 	p, err := devpkg.Spawn(ctx, devpkg.SpawnConfig{
 		Name: "chassis",
-		Cmd:  shellEscape(executable) + " serve",
-		Out:  o.Stdout,
-		Env:  env,
+		// `exec`, so the chassis replaces the shell Spawn starts and IS the
+		// process that is waited on. With the shell in front, stopping ended
+		// the shell at once, txco dev returned, and the chassis — its log
+		// pipe gone — died in the middle of its own shutdown: nothing it
+		// holds open was closed, and the grant socket was left in its
+		// directory.
+		Cmd: "exec " + shellEscape(executable) + " serve",
+		Out: o.Stdout,
+		Env: env,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("spawn chassis: %w", err)
@@ -1351,6 +1380,12 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 		heads = append(heads, "ipp")
 		env = append(env, "TXCO_WEB_TLS_ADDR="+devIPPTLSAddr)
 		env = append(env, "TXCO_IPP_DB_PATH="+filepath.Join(devDir, "ipp.db"))
+	}
+	if o.Heads.Grant {
+		// No path of its own: the chassis puts the socket in the system's
+		// temp dir, named for this workspace's database directory. A socket
+		// under .txco/dev could run past the 100 bytes a socket's path may be.
+		heads = append(heads, "grant")
 	}
 	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
 	if o.AllowLocalWorkspace {

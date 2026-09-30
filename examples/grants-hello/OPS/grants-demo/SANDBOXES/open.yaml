@@ -1,0 +1,6 @@
+# A sandbox: what a program that opens it is handed, under which name.
+# DEMO_OPEN's pull policy is `any` (opened at setup), so the chassis
+# proposes to allow.
+description: the open secret
+env:
+  DEMO: secret:DEMO_OPEN

@@ -6,7 +6,7 @@
 --
 -- Run grants: what ONE piece of work may ask the chassis for, until when,
 -- and within what budget. A stack mints one when it dispatches the work
--- (txco://rungrant/mint); every request the work makes reads this row, so
+-- (txco://delegate/mint); every request the work makes reads this row, so
 -- revoking it, closing it or spending its budget takes effect on the next
 -- request. See chassis/authn (rungrants.go).
 --

@@ -45,7 +45,7 @@ func TestOpenIdentityDB(t *testing.T) {
 		t.Fatalf("create on the opened store: %v", err)
 	}
 	var changeset string
-	if err := db.QueryRow(`SELECT val FROM varvals WHERE var = 'txco-db-changeset-auth'`).Scan(&changeset); err != nil || changeset != "7" {
+	if err := db.QueryRow(`SELECT val FROM varvals WHERE var = 'txco-db-changeset-auth'`).Scan(&changeset); err != nil || changeset != "8" {
 		t.Errorf("changeset = %q err=%v", changeset, err)
 	}
 	_ = db.Close()

@@ -1,0 +1,5 @@
+# DEMO_BY_RULE's pull policy is `none`, and OPS/_grant/10/policy.txcl allows
+# it for service:demo anyway.
+description: closed by policy, allowed by a rule
+env:
+  DEMO: secret:DEMO_BY_RULE

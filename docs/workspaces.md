@@ -80,6 +80,8 @@ reports `code = "unsupported"`.
 | `env` | An object of extra environment variables |
 | `into` | Where the result lands (default `_workspace`) |
 | `timeout` | Wall clock for the whole exec — create/wake, the command, output capture; the command is killed when it expires. Default `--workspace-default-timeout` (5m), capped by `--op-timeout-max` (10m). A **synchronous HTTP request** is also bounded by whatever fronts the chassis — the hosted edge allows 20 s for response headers — so anything longer must use `WITH mode = "continuable"` (202 + poll); when the client gives up, the request is cancelled and the command is killed |
+| `grant` | A run grant's id, from `txco://delegate/mint`. With `sandbox`, the chassis opens the named sandboxes and starts the command with what they set; on the chassis's own machine the command may also open more itself with `txco sandbox`. `exec` only, and not with `stream`. See [grants](./advanced/grants.md#opening-a-sandbox-for-a-command) |
+| `sandbox` | A sandbox name, or a list of them, of the grant's: `SANDBOXES/<name>.yaml` of this stack. What they set is put in the command's environment, over `env` and `secrets.env.*`; one refused, and the command never starts. Needs `grant`. |
 | `secrets.env.<NAME>.secret` / `.format` / `.optional` | A stored secret, materialized into the environment as `NAME` (`format = "Bearer {}"` templates it). The only place a workspace op takes a secret — `secrets.headers.*` / `.body.*` are refused |
 | `stream = true` | Send stdout to the client as it is produced (see [Streaming output](#streaming-output)) |
 | `tty = true`, `cols`, `rows` | Run the command with a pseudo-terminal (see [A TTY on exec](#a-tty-on-exec)) |

@@ -1,0 +1,19 @@
+# GET /run and /launch — step 1: a run grant for this piece of work.
+#
+# It names the SANDBOXES the work may open (OPS/grants-demo/SANDBOXES/), for
+# how long, and how often. Every secret they name must be one `service:demo`
+# holds a standing grant for. Minting the same `run` again closes the grant
+# it had, so each request here starts afresh.
+#
+# The result holds the grant's id, each sandbox's variable names, and no
+# token: the chassis signs the token when it hands the grant to a command,
+# and it never enters this envelope.
+WHEN @src == "http" && @web.req.url.path =~ /^\/(run|launch)$/
+  EXEC "txco://delegate/mint"
+    WITH principal = "service:demo",
+         run       = "demo",
+         allow     = ["open", "closed", "by_rule", "never", "all"],
+         workspace = "bench",
+         ttl       = 120,
+         budget    = 10,
+         into      = "_rg"

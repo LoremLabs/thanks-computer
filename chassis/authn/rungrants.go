@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/sandbox"
 )
 
 // A run grant says what ONE piece of work may ask the chassis for, until
@@ -31,6 +32,12 @@ import (
 // A grant stops working when it expires, when it is closed or revoked, when
 // the same run is minted again, or when its budget is spent. Ending a grant
 // ends every grant narrowed from it.
+//
+// What the work is handed is named by SANDBOXES (chassis/sandbox): a grant
+// records each sandbox it may open and what that sandbox sets, as the
+// minting stack declared it at mint time. The allowlist — every secret the
+// sandboxes name — remains the authority a request is checked against; the
+// sandboxes say under which variable names the work receives them.
 
 // NodeClass says what is allowed to run where the work is sent. It is a
 // promise by whoever dispatches the work; the chassis cannot prove it.
@@ -47,6 +54,8 @@ const (
 const (
 	// MaxRunAllow bounds one run grant's allowlist.
 	MaxRunAllow = 64
+	// MaxRunSandboxes bounds the sandboxes one run grant names.
+	MaxRunSandboxes = 16
 	// MaxRunDepth bounds how many times a grant may be narrowed into
 	// another: work that dispatches work that dispatches work.
 	MaxRunDepth = 4
@@ -93,10 +102,17 @@ type RunGrant struct {
 	WorkspaceID string
 	Workspace   string
 	NodeClass   NodeClass
-	// FileKey names the run's directory where grants are presented as
-	// files. It is for the chassis alone: never put it in an envelope.
-	FileKey     string
-	Allow       []Resource
+	// FileKey is a random key of the row's own, minted with it. Nothing
+	// reads a grant by it today; it is for the chassis alone and never put
+	// in an envelope.
+	FileKey string
+	// Allow is what the work may be handed: every secret its sandboxes
+	// name, and anything the minter allowed by name.
+	Allow []Resource
+	// Sandboxes is what the work may OPEN, by name: sandbox → variable →
+	// reference (`secret:NAME`), snapshotted at mint from the minting
+	// stack's declarations (chassis/sandbox).
+	Sandboxes   map[string]map[string]string
 	BudgetCalls int64
 	SpentCalls  int64
 	ParentGrant string
@@ -124,6 +140,24 @@ func (g RunGrant) Allows(res Resource) bool {
 	return false
 }
 
+// Sandbox returns what opening the named sandbox hands the program:
+// variable → reference. The second result is false when the grant does not
+// name the sandbox.
+func (g RunGrant) Sandbox(name string) (map[string]string, bool) {
+	env, ok := g.Sandboxes[name]
+	return env, ok
+}
+
+// SandboxNames is the grant's sandboxes, sorted.
+func (g RunGrant) SandboxNames() []string {
+	out := make([]string, 0, len(g.Sandboxes))
+	for n := range g.Sandboxes {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Remaining is the budget left.
 func (g RunGrant) Remaining() int64 {
 	if g.SpentCalls >= g.BudgetCalls {
@@ -141,7 +175,7 @@ func (g RunGrant) AllowStrings() []string {
 	return out
 }
 
-// NewRunGrant is what txco://rungrant/mint supplies.
+// NewRunGrant is what txco://delegate/mint supplies.
 type NewRunGrant struct {
 	// Run names the work: a task id, a job id. Minting the same run again
 	// replaces the grant it had.
@@ -156,8 +190,13 @@ type NewRunGrant struct {
 	// work that runs nowhere.
 	Workspace, WorkspaceID string
 	NodeClass              NodeClass // "" ⇒ NodeUnreviewed
-	// Allow is the allowlist, each entry in Resource's String form.
-	Allow       []string
+	// Allow names what the work may be handed, each entry in Resource's
+	// String form. Every secret a sandbox names is added to it.
+	Allow []string
+	// Sandboxes is what the work may open: sandbox → variable → reference,
+	// as the minting stack's declarations say (chassis/sandbox.Decl.Env).
+	// The store checks the shape; the caller resolved the names.
+	Sandboxes   map[string]map[string]string
 	BudgetCalls int64
 	TTL         time.Duration
 	// Parent is the run grant this one is narrowed from, or "".
@@ -165,26 +204,109 @@ type NewRunGrant struct {
 	TraceID string
 }
 
-func parseAllow(in []string) ([]Resource, error) {
+// parseAllow reads the allowlist: what the minter named, and every secret
+// the sandboxes name. De-duplicated and sorted.
+func parseAllow(in []string, sandboxes map[string]map[string]string) ([]Resource, error) {
 	seen := map[Resource]bool{}
 	var out []Resource
-	for _, raw := range in {
-		res, err := ParseResource(raw)
-		if err != nil {
-			return nil, invalid("allow: %v", err)
-		}
+	add := func(res Resource) {
 		if !seen[res] {
 			seen[res] = true
 			out = append(out, res)
 		}
 	}
+	for _, raw := range in {
+		res, err := ParseResource(raw)
+		if err != nil {
+			return nil, invalid("allow: %v", err)
+		}
+		add(res)
+	}
+	for _, name := range sortedKeys(sandboxes) {
+		for _, v := range sortedKeys(sandboxes[name]) {
+			kind, sname, err := sandbox.ParseRef(sandboxes[name][v])
+			if err != nil {
+				return nil, invalid("sandbox %s: env.%s: %v", name, v, err)
+			}
+			res, err := NewResource(ResourceKind(kind), sname)
+			if err != nil {
+				return nil, invalid("sandbox %s: env.%s: %v", name, v, err)
+			}
+			add(res)
+		}
+	}
 	if len(out) == 0 {
-		return nil, invalid("allow: name at least one capability or secret")
+		return nil, invalid("allow: name at least one sandbox, capability or secret")
 	}
 	if len(out) > MaxRunAllow {
 		return nil, invalid("allow: at most %d names", MaxRunAllow)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out, nil
+}
+
+// checkSandboxes validates the shape of what the caller resolved: names,
+// variables and references as a declaration would have them, within the
+// row's ceilings.
+func checkSandboxes(in map[string]map[string]string) error {
+	if len(in) > MaxRunSandboxes {
+		return invalid("sandboxes: at most %d", MaxRunSandboxes)
+	}
+	for name, env := range in {
+		if !sandbox.ValidName(name) {
+			return invalid("sandbox %q: want a name matching [a-z][a-z0-9_-]* (1-64 chars)", name)
+		}
+		if len(env) == 0 {
+			return invalid("sandbox %s: sets no variable", name)
+		}
+		if len(env) > sandbox.MaxEnv {
+			return invalid("sandbox %s: sets %d variables, at most %d", name, len(env), sandbox.MaxEnv)
+		}
+		for v, ref := range env {
+			if !sandbox.ValidVar(v) {
+				return invalid("sandbox %s: %q is not a variable a sandbox may set", name, v)
+			}
+			if _, _, err := sandbox.ParseRef(ref); err != nil {
+				return invalid("sandbox %s: env.%s: %v", name, v, err)
+			}
+		}
+	}
+	return nil
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func encodeSandboxes(in map[string]map[string]string) string {
+	if len(in) == 0 {
+		return "{}"
+	}
+	b, _ := json.Marshal(in)
+	return string(b)
+}
+
+// decodeSandboxes reads the column form back. A row that does not parse is
+// an error; an empty object is a grant with no sandboxes.
+func decodeSandboxes(col string) (map[string]map[string]string, error) {
+	if col == "" {
+		return nil, nil
+	}
+	var out map[string]map[string]string
+	if err := json.Unmarshal([]byte(col), &out); err != nil {
+		return nil, fmt.Errorf("stored sandboxes: %w", err)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if err := checkSandboxes(out); err != nil {
+		return nil, fmt.Errorf("stored sandboxes: %w", err)
+	}
 	return out, nil
 }
 
@@ -248,23 +370,26 @@ func (in NewRunGrant) normalize() (NewRunGrant, []Resource, error) {
 	if len(in.TraceID) > 128 {
 		in.TraceID = in.TraceID[:128]
 	}
-	allow, err := parseAllow(in.Allow)
+	if err := checkSandboxes(in.Sandboxes); err != nil {
+		return in, nil, err
+	}
+	allow, err := parseAllow(in.Allow, in.Sandboxes)
 	return in, allow, err
 }
 
 const runGrantCols = `id, tenant_id, principal_id, minted_by, stack, run, generation,
-	workspace_id, workspace, node_class, file_key, allowlist, budget_calls, spent_calls,
+	workspace_id, workspace, node_class, file_key, allowlist, sandboxes, budget_calls, spent_calls,
 	COALESCE(parent_grant, ''), depth, trace_id, issued_at, expires_at, closed_at, close_reason, revoked_at`
 
 func scanRunGrant(row interface{ Scan(...any) error }) (RunGrant, error) {
 	var (
-		g               RunGrant
-		pid, allow      string
-		issued, expires string
-		closed, revoked sql.NullString
+		g                     RunGrant
+		pid, allow, sandboxes string
+		issued, expires       string
+		closed, revoked       sql.NullString
 	)
 	err := row.Scan(&g.ID, &g.TenantID, &pid, &g.MintedBy, &g.Stack, &g.Run, &g.Generation,
-		&g.WorkspaceID, &g.Workspace, &g.NodeClass, &g.FileKey, &allow, &g.BudgetCalls, &g.SpentCalls,
+		&g.WorkspaceID, &g.Workspace, &g.NodeClass, &g.FileKey, &allow, &sandboxes, &g.BudgetCalls, &g.SpentCalls,
 		&g.ParentGrant, &g.Depth, &g.TraceID, &issued, &expires, &closed, &g.CloseReason, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RunGrant{}, ErrNotFound
@@ -275,6 +400,9 @@ func scanRunGrant(row interface{ Scan(...any) error }) (RunGrant, error) {
 	kind, _, _ := strings.Cut(pid, ":")
 	g.Principal = Principal{ID: pid, Kind: PrincipalKind(kind)}
 	if g.Allow, err = decodeAllow(allow); err != nil {
+		return RunGrant{}, err
+	}
+	if g.Sandboxes, err = decodeSandboxes(sandboxes); err != nil {
 		return RunGrant{}, err
 	}
 	g.IssuedAt, g.ExpiresAt = parseStamp(issued), parseStamp(expires)
@@ -338,7 +466,7 @@ func (s *Store) MintRunGrant(ctx context.Context, tenantID, stack string, p Prin
 	g := RunGrant{
 		TenantID: tenantID, Principal: p, MintedBy: base, Stack: in.Stack, Run: in.Run,
 		WorkspaceID: in.WorkspaceID, Workspace: in.Workspace, NodeClass: in.NodeClass,
-		Allow: allow, BudgetCalls: in.BudgetCalls, TraceID: in.TraceID,
+		Allow: allow, Sandboxes: in.Sandboxes, BudgetCalls: in.BudgetCalls, TraceID: in.TraceID,
 	}
 	if in.Parent != "" {
 		parent, err := s.ReadRunGrant(ctx, tenantID, in.Parent)
@@ -463,10 +591,10 @@ func (s *Store) insertRunGrant(ctx context.Context, g RunGrant, generation int64
 	if _, err := s.ex(ctx, tx,
 		`INSERT INTO run_grants
 		   (id, tenant_id, principal_id, minted_by, stack, run, generation, workspace_id, workspace,
-		    node_class, file_key, allowlist, budget_calls, parent_grant, depth, trace_id, issued_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    node_class, file_key, allowlist, sandboxes, budget_calls, parent_grant, depth, trace_id, issued_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		g.ID, g.TenantID, g.Principal.ID, g.MintedBy, g.Stack, g.Run, g.Generation, g.WorkspaceID, g.Workspace,
-		string(g.NodeClass), g.FileKey, encodeAllow(g.Allow), g.BudgetCalls, nullIfEmpty(g.ParentGrant),
+		string(g.NodeClass), g.FileKey, encodeAllow(g.Allow), encodeSandboxes(g.Sandboxes), g.BudgetCalls, nullIfEmpty(g.ParentGrant),
 		g.Depth, g.TraceID, stamp, expires.Format(time.RFC3339)); err != nil {
 		// The head row makes a duplicate generation impossible; should the
 		// index ever catch one, the caller is stale, not the store broken.

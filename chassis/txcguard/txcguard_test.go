@@ -29,6 +29,9 @@ func TestAuthorMayWrite(t *testing.T) {
 		{"_txc.halt", true},
 		{"_txc.telemetry.metrics", true},
 		{"_txc.llm.context.0", true},
+		{"_txc.grant.res", true},
+		{"_txc.grant.res.allow", true},
+		{"_txc.grant.res.reason", true},
 
 		// reserved
 		{"_txc", false},
@@ -40,6 +43,19 @@ func TestAuthorMayWrite(t *testing.T) {
 		{"_txc.computed.sig_valid", false},
 		{"_txc.imap.account", false},
 		{"_txc.principal", false},
+		// the grant inlet's facts: a rule decides with them, it does not
+		// rewrite them. The chassis's own answer least of all.
+		{"_txc.grant", false},
+		{"_txc.grant.proposed", false},
+		{"_txc.grant.proposed.allow", false},
+		{"_txc.grant.checks.pull", false},
+		{"_txc.grant.principal.id", false},
+		{"_txc.grant.tenant", false},
+		{"_txc.grant.name", false},
+		{"_txc.grant.secret.pull", false},
+		{"_txc.grant.resx", false},   // lookalike leaf
+		{"_txc.grant.result", false}, // …and a longer one
+		{`_txc.grant\.res.allow`, false},
 		{"_txc.web", false}, // parent of an allowed subtree
 		{"_txc.web.req.url", false},
 		{"_txc.web.resx", false}, // lookalike leaf

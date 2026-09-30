@@ -38,8 +38,8 @@ type Options struct {
 	Included func(path string) bool
 }
 
-// WatchOps watches dir recursively for changes to *.txcl and *.json
-// files, and to the files opts.Included names. Calls onChange with a
+// WatchOps watches dir recursively for changes to *.txcl, *.json and
+// *.yaml files, and to the files opts.Included names. Calls onChange with a
 // debounced cadence — bursty editor saves coalesce into a single re-apply
 // rather than firing N times.
 //
@@ -209,9 +209,11 @@ func matchAnyGlob(globs []string, rel, base string) bool {
 	return false
 }
 
+// relevantExt: the op text, its mocks, and the declarations that ride the
+// same draft (OUTLETS/, SANDBOXES/ and DATASETS/ manifests are .yaml).
 func relevantExt(p string) bool {
 	ext := strings.ToLower(filepath.Ext(p))
-	return ext == ".txcl" || ext == ".json"
+	return ext == ".txcl" || ext == ".json" || ext == ".yaml"
 }
 
 // isComputeSource matches a compute project's editable source files but

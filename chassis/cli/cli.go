@@ -116,6 +116,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runDev(rest, stdout, stderr), true
 	case "demo":
 		return runDemo(rest, stdout, stderr), true
+	case "sandbox":
+		// Start a program inside named sandboxes, opened with this command's
+		// own run grant. Runs inside a workspace; see chassis/cli/sandbox.go.
+		return runSandbox(rest, stdout, stderr), true
 	case "trace":
 		return runTrace(rest, stdout, stderr), true
 	case "snapshot":

@@ -51,6 +51,7 @@ var authorWritable = []string{
 	"llm.upstream", // AI gateway: upstream base-URL override
 	"llm.headers",  // AI gateway: extra upstream request headers
 	"llm.context",  // AI gateway: stack-emitted context items the gateway serializes into system blocks
+	"grant.res",    // grant inlet: the stack's verdict on one request (allow/reason/hold)
 }
 
 // authorDeletable are reserved `_txc.*` paths an author may DELETE (via

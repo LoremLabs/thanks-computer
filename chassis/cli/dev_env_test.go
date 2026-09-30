@@ -144,6 +144,7 @@ func TestChassisEnvHeads(t *testing.T) {
 		{"contacts", devHeads{Contacts: true}, map[string]string{"TXCO_CONTACTS_DB_PATH": filepath.Join(devDir, "contacts.db"), "TXCO_CONTACTS_INSECURE_AUTH": "true"}},
 		{"webdav", devHeads{WebDAV: true}, map[string]string{"TXCO_DRIVE_DB_PATH": filepath.Join(devDir, "drive.db"), "TXCO_DRIVE_INSECURE_AUTH": "true"}},
 		{"ipp", devHeads{IPP: true}, map[string]string{"TXCO_WEB_TLS_ADDR": devIPPTLSAddr, "TXCO_IPP_DB_PATH": filepath.Join(devDir, "ipp.db"), "TXCO_WEB_TLS_SELF_SIGNED": "true"}},
+		{"grant", devHeads{Grant: true}, nil},
 	} {
 		env, heads := chassisEnv(chassisOpts{Workspace: ws, Heads: tc.heads}, devAddrs, devDir, "", noParentEnv)
 		got := envOf(env)
@@ -159,9 +160,9 @@ func TestChassisEnvHeads(t *testing.T) {
 
 	// Every head at once, in a fixed order.
 	all := devHeads{TCP: true, DNS: true, LMTP: true, Scheduled: true, Source: true, IMAP: true,
-		Calendar: true, Contacts: true, WebDAV: true, IPP: true, State: true}
+		Calendar: true, Contacts: true, WebDAV: true, IPP: true, State: true, Grant: true}
 	_, heads := chassisEnv(chassisOpts{Workspace: ws, Heads: all}, devAddrs, devDir, "", noParentEnv)
-	if got, want := strings.Join(heads, ","), "cron,web,admin,websocket,tcp,dns,lmtp,scheduled,state,source,imap,calendar,contacts,webdav,ipp"; got != want {
+	if got, want := strings.Join(heads, ","), "cron,web,admin,websocket,tcp,dns,lmtp,scheduled,state,source,imap,calendar,contacts,webdav,ipp,grant"; got != want {
 		t.Errorf("all heads = %q, want %q", got, want)
 	}
 
@@ -177,6 +178,22 @@ func TestChassisEnvHeads(t *testing.T) {
 	env, _ = chassisEnv(chassisOpts{Workspace: ws, Heads: devHeads{LMTP: true}}, devAddrs, devDir, "", noParentEnv)
 	if got := envOf(env)["TXCO_INGRESS_CONFIG"]; got != ing {
 		t.Errorf("TXCO_INGRESS_CONFIG = %q, want %q", got, ing)
+	}
+}
+
+// The grant socket's path is the chassis's to choose: one under .txco/dev
+// could be too long for a socket. And the head is off unless asked for.
+func TestChassisEnvGrantSocket(t *testing.T) {
+	ws := t.TempDir()
+	devDir := filepath.Join(ws, ".txco", "dev")
+	env, _ := chassisEnv(chassisOpts{Workspace: ws, Heads: devHeads{Grant: true}, AllowLocalWorkspace: true},
+		devAddrs, devDir, "", noParentEnv)
+	if v, set := envOf(env)["TXCO_GRANT_SOCKET"]; set {
+		t.Errorf("TXCO_GRANT_SOCKET = %q", v)
+	}
+	_, heads := chassisEnv(chassisOpts{Workspace: ws}, devAddrs, devDir, "", noParentEnv)
+	if strings.Contains(strings.Join(heads, ","), "grant") {
+		t.Errorf("heads with nothing asked for: %v", heads)
 	}
 }
 

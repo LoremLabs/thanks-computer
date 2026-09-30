@@ -34,6 +34,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	"github.com/loremlabs/thanks-computer/chassis/sandbox"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 )
@@ -506,7 +507,7 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 	for _, f := range art.Files {
 		content := f.Content
 		hash := f.ContentHash
-		if (strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path)) && hash != "" {
+		if (strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path)) && hash != "" {
 			// Fingerprint-only CAS-backed asset (FILES/ static asset, a
 			// VECTORS//KV/ store-seed pack, or a DATASETS/ member): the bytes
 			// live in the shared content-addressed store, so don't inline them

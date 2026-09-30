@@ -60,8 +60,14 @@ func New(root string) (*Provider, error) {
 // Root is the resolved root directory.
 func (p *Provider) Root() string { return p.root }
 
-func (p *Provider) Name() string           { return "local" }
-func (p *Provider) Capabilities() []string { return []string{"exec", "session", "tty", "connect"} }
+func (p *Provider) Name() string { return "local" }
+func (p *Provider) Capabilities() []string {
+	return []string{"exec", "session", "tty", "connect", "grant"}
+}
+
+// ReachesGrants: a local workspace's commands run on this machine, as this
+// user, so they reach the chassis's grant socket and its mounted files.
+func (p *Provider) ReachesGrants() bool { return true }
 
 // dirFor maps a spec to its directory and refuses anything that would
 // leave root. Tenant and stack are chassis-validated slugs upstream; the

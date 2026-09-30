@@ -1,0 +1,26 @@
+# _grant/0 — every request made with a run grant in this tenant is presented
+# here before it is decided: one for each secret a sandbox names. Keep a
+# record of it.
+#
+# The chassis keeps no journal of its own: the trace of this run is the
+# record (`txco trace`). A tenant that wants one it can read back, keep for
+# longer, or query writes it like this.
+#
+# `@grant` holds the request and the chassis's proposed answer. It never
+# holds the secret's value or the grant's token.
+WHEN @src == "grant" && @grant.phase == "request"
+  EXEC "txco://notebook/append"
+    WITH notebook  = &concat("grants/", @grant.run),
+         namespace = "grants-demo",
+         type      = "grant.request",
+         data      = &object(
+                       "sandbox",   @grant.sandbox,
+                       "env",       @grant.env,
+                       "secret",    @grant.name,
+                       "version",   @grant.secret.version,
+                       "principal", @grant.principal.id,
+                       "grant",     @grant.grant,
+                       "via",       @grant.via,
+                       "checks",    @grant.checks,
+                       "proposed",  @grant.proposed),
+         into      = "_nb"

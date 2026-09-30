@@ -110,6 +110,98 @@ func runGrantCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 		}
 	})
 
+	t.Run("a sandbox names what the work is handed, and how", func(t *testing.T) {
+		s, tn := newStore(t), tenant()
+		p := holder(t, s, tn, "web", "research", "secret:GITHUB_PAT", "secret:GH_HOST", "secret:DB_DSN")
+
+		in := work("task-1")
+		in.Sandboxes = map[string]map[string]string{
+			"github":   {"GH_TOKEN": "secret:GITHUB_PAT", "GH_HOST": "secret:GH_HOST"},
+			"postgres": {"PGDSN": "secret:DB_DSN", "PGDSN_RO": "secret:DB_DSN"},
+		}
+		g, err := s.MintRunGrant(ctx, tn, "web", p, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The allowlist is derived: every secret the sandboxes name, once.
+		if got := strings.Join(g.AllowStrings(), " "); got != "secret:DB_DSN secret:GH_HOST secret:GITHUB_PAT" {
+			t.Errorf("allow = %q", got)
+		}
+		if got := strings.Join(g.SandboxNames(), " "); got != "github postgres" {
+			t.Errorf("sandboxes = %q", got)
+		}
+		if env, ok := g.Sandbox("github"); !ok || env["GH_TOKEN"] != "secret:GITHUB_PAT" || len(env) != 2 {
+			t.Errorf("github = %+v ok=%v", env, ok)
+		}
+		if _, ok := g.Sandbox("deploy"); ok {
+			t.Error("a sandbox the grant does not name")
+		}
+		// What was stored is what was returned.
+		got, err := s.ReadRunGrant(ctx, tn, g.ID)
+		if err != nil || len(got.Sandboxes) != 2 || got.Sandboxes["postgres"]["PGDSN_RO"] != "secret:DB_DSN" ||
+			strings.Join(got.AllowStrings(), " ") != "secret:DB_DSN secret:GH_HOST secret:GITHUB_PAT" {
+			t.Errorf("read: %+v err=%v", got, err)
+		}
+		// Sandboxes and names by name add up; a grant with neither is refused.
+		in = work("task-2", "secret:DB_DSN")
+		in.Sandboxes = map[string]map[string]string{"github": {"GH_TOKEN": "secret:GITHUB_PAT"}}
+		if g, err := s.MintRunGrant(ctx, tn, "web", p, in); err != nil || strings.Join(g.AllowStrings(), " ") != "secret:DB_DSN secret:GITHUB_PAT" {
+			t.Errorf("both: %+v err=%v", g, err)
+		}
+		if g, err := s.MintRunGrant(ctx, tn, "web", p, work("task-3")); !errors.Is(err, authn.ErrInvalid) {
+			t.Errorf("neither: %+v err=%v", g, err)
+		}
+		// A grant with no sandboxes reads back with none.
+		if g, err := s.MintRunGrant(ctx, tn, "web", p, work("task-4", "secret:DB_DSN")); err != nil || len(g.Sandboxes) != 0 {
+			t.Errorf("no sandboxes: %+v err=%v", g, err)
+		} else if got, _ := s.ReadRunGrant(ctx, tn, g.ID); len(got.Sandboxes) != 0 {
+			t.Errorf("no sandboxes, read back: %+v", got)
+		}
+		// A sandbox naming a secret the principal does not hold is refused,
+		// and the refusal names it.
+		in = work("task-5")
+		in.Sandboxes = map[string]map[string]string{"mail": {"SMTP_PASS": "secret:SMTP_PASS"}}
+		if _, err := s.MintRunGrant(ctx, tn, "web", p, in); !errors.Is(err, authn.ErrExceedsStanding) || !strings.Contains(err.Error(), "secret:SMTP_PASS") {
+			t.Errorf("a sandbox past the standing grants: %v", err)
+		}
+		// The shape is checked.
+		for name, sb := range map[string]map[string]map[string]string{
+			"a bad name":         {"GitHub": {"A": "secret:DB_DSN"}},
+			"no variables":       {"github": {}},
+			"a bad variable":     {"github": {"GH-TOKEN": "secret:DB_DSN"}},
+			"a reserved one":     {"github": {"TXCO_RUN": "secret:DB_DSN"}},
+			"a bare secret":      {"github": {"A": "DB_DSN"}},
+			"an unknown kind":    {"github": {"A": "drive:dc_1"}},
+			"too many sandboxes": manySandboxes(authn.MaxRunSandboxes + 1),
+		} {
+			in := work("task-6")
+			in.Sandboxes = sb
+			if _, err := s.MintRunGrant(ctx, tn, "web", p, in); !errors.Is(err, authn.ErrInvalid) {
+				t.Errorf("%s: %v", name, err)
+			}
+		}
+		// A child narrows through the parent's allowlist, whatever it calls
+		// its sandboxes.
+		in = work("task-7")
+		in.Sandboxes = map[string]map[string]string{"github": {"GH_TOKEN": "secret:GITHUB_PAT"}}
+		parent, err := s.MintRunGrant(ctx, tn, "web", p, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cin := work("task-7/push")
+		cin.BudgetCalls, cin.Parent = 1, parent.ID
+		cin.Sandboxes = map[string]map[string]string{"push": {"TOKEN": "secret:GITHUB_PAT"}}
+		if _, err := s.MintRunGrant(ctx, tn, "web", p, cin); err != nil {
+			t.Errorf("a child within the parent: %v", err)
+		}
+		cin = work("task-7/db")
+		cin.BudgetCalls, cin.Parent = 1, parent.ID
+		cin.Sandboxes = map[string]map[string]string{"postgres": {"PGDSN": "secret:DB_DSN"}}
+		if _, err := s.MintRunGrant(ctx, tn, "web", p, cin); !errors.Is(err, authn.ErrExceedsParent) {
+			t.Errorf("a child past the parent: %v", err)
+		}
+	})
+
 	t.Run("a mint cannot exceed the principal's standing grants", func(t *testing.T) {
 		s, tn := newStore(t), tenant()
 		p := holder(t, s, tn, "web", "research", "secret:CRM_KEY")
@@ -609,6 +701,27 @@ func runGrantCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 				t.Errorf("allowlist %q read as %+v", bad, got.Allow)
 			}
 		}
+		// Likewise the sandboxes, except that an empty object is a grant
+		// with none.
+		if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(`UPDATE run_grants SET allowlist = ? WHERE id = ?`), `["crm.lookup"]`, g.ID); err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{`not json`, `[]`, `{"GitHub":{"A":"secret:X"}}`, `{"github":{}}`, `{"github":{"a-b":"secret:X"}}`} {
+			if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(`UPDATE run_grants SET sandboxes = ? WHERE id = ?`), bad, g.ID); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := s.ReadRunGrant(ctx, tn, g.ID); err == nil {
+				t.Errorf("sandboxes %q read as %+v", bad, got.Sandboxes)
+			}
+		}
+		for _, none := range []string{`{}`, ``} {
+			if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(`UPDATE run_grants SET sandboxes = ? WHERE id = ?`), none, g.ID); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := s.ReadRunGrant(ctx, tn, g.ID); err != nil || len(got.Sandboxes) != 0 {
+				t.Errorf("sandboxes %q: %+v err=%v", none, got.Sandboxes, err)
+			}
+		}
 	})
 
 	// Two nodes dispatching the same run at once. Each mint must see the
@@ -670,6 +783,14 @@ func runGrantCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 			}
 		})
 	}
+}
+
+func manySandboxes(n int) map[string]map[string]string {
+	out := make(map[string]map[string]string, n)
+	for i := 0; i < n; i++ {
+		out["sb"+strings.Repeat("x", i)] = map[string]string{"A": "secret:DB_DSN"}
+	}
+	return out
 }
 
 func manyNames(n int) []string {

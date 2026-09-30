@@ -1,0 +1,5 @@
+# DEMO_CLOSED's pull policy is `none` (the default): the chassis proposes to
+# refuse, and no rule in OPS/_grant says otherwise.
+description: the closed secret
+env:
+  DEMO: secret:DEMO_CLOSED

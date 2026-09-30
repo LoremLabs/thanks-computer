@@ -1,0 +1,11 @@
+# POST /setup — step 1: the principal the work acts for.
+#
+# A principal that is not a person exists once it has a credential or a
+# username, and a grant can only name one that exists. The credential is
+# not used here; issuing it is what makes `service:demo` this stack's.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/setup"
+  EXEC "txco://credential/create"
+    WITH principal = "service:demo",
+         scopes    = ["drive:*:*"],
+         label     = "grants-hello",
+         into      = "_cred"

@@ -52,6 +52,9 @@ type SecretMetadata struct {
 	RevokedAt     *time.Time // typically nil for rows the Store returns
 	KeyVersion    int
 	VersionNo     int // active version number (latest non-revoked)
+	// Pull says whether dispatched work may be handed the secret itself
+	// (pull.go). PullNone unless someone set it.
+	Pull PullPolicy
 }
 
 // Store is the thin façade over tenant_secrets + tenant_secret_versions.
@@ -290,7 +293,8 @@ func (s *Store) ListSecrets(ctx context.Context, tenantID string) ([]*SecretMeta
 		SELECT s.secret_id, s.tenant_id, s.stack, s.name, COALESCE(s.description,''),
 		       s.created_at, COALESCE(s.created_by,''), s.last_rotated_at, s.revoked_at, s.key_version,
 		       COALESCE((SELECT MAX(version_no) FROM tenant_secret_versions v
-		                 WHERE v.secret_id = s.secret_id AND v.revoked_at IS NULL), 0) AS version_no
+		                 WHERE v.secret_id = s.secret_id AND v.revoked_at IS NULL), 0) AS version_no,
+		       s.pull
 		FROM tenant_secrets s
 		WHERE s.tenant_id = ? AND s.revoked_at IS NULL
 		ORDER BY s.name, COALESCE(s.stack, '')`, tenantID)
@@ -773,7 +777,8 @@ func (s *Store) lookupMetadataExactVia(ctx context.Context, q rowQueryer,
 		SELECT s.secret_id, s.tenant_id, s.stack, s.name, COALESCE(s.description,''),
 		       s.created_at, COALESCE(s.created_by,''), s.last_rotated_at, s.revoked_at, s.key_version,
 		       COALESCE((SELECT MAX(version_no) FROM tenant_secret_versions v
-		                 WHERE v.secret_id = s.secret_id AND v.revoked_at IS NULL), 0) AS version_no
+		                 WHERE v.secret_id = s.secret_id AND v.revoked_at IS NULL), 0) AS version_no,
+		       s.pull
 		FROM tenant_secrets s
 		WHERE s.tenant_id = ? AND COALESCE(s.stack,'') = COALESCE(?,'')
 		      AND s.name = ? AND s.revoked_at IS NULL
@@ -889,7 +894,7 @@ func scanMetadata(r rowScanner) (*SecretMetadata, error) {
 	if err := r.Scan(
 		&m.SecretID, &m.TenantID, &stack, &m.Name, &m.Description,
 		&createdAtStr, &m.CreatedBy, &lastRotated, &revokedAt, &m.KeyVersion,
-		&m.VersionNo,
+		&m.VersionNo, &m.Pull,
 	); err != nil {
 		return nil, err
 	}

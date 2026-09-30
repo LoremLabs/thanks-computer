@@ -143,7 +143,8 @@ establish one.
 | `txco auth profiles` / `profile {use,show,remove}` (alias `txco use <profile>`) | Named identities; also aliased under `txco config` |
 | `txco auth tenants` / `tenant {create,members,grant,revoke}` | Tenant management |
 | `txco auth tenant hostnames {add,attach,verify,challenge,list,remove}` | Hostname bindings ([ingress](../routing.md)) |
-| `txco auth tenant secrets {set,generate,list,show,describe,rotate,revoke}` | ([Secret store](./runbook-secret-store.md)) |
+| `txco auth tenant secrets {set,generate,list,show,describe,policy,rotate,revoke}` | ([Secret store](./runbook-secret-store.md)); `policy NAME --pull none\|reviewed\|any` says whether dispatched work may be handed the secret ([grants](./grants.md#the-pull-policy)) |
+| `txco sandbox NAME [NAME…] -- PROGRAM` | Inside a workspace: start a program inside named sandboxes, opened with the command's run grant ([grants](./grants.md#txco-sandbox)) |
 | `txco auth login` (alias `txco ui`) | Mint a signed browser session, open the admin UI |
 | `txco auth sessions {list,revoke}` / `logout` | Browser sessions / stop signing |
 | `txco login` / `logout` / `cloud {…}` | **Cloud** account OAuth — distinct from `auth login`, which targets your own chassis |

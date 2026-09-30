@@ -1,0 +1,9 @@
+# POST /setup — step 2: a standing grant. `service:demo` may ever be handed
+# the secret DEMO_BY_RULE. Whether one request is allowed is decided when it is
+# made; this is only the outer bound. Safe to run again.
+WHEN ._cred.id != ""
+  EXEC "txco://grant/put"
+    WITH principal = "service:demo",
+         kind      = "secret",
+         name      = "DEMO_BY_RULE",
+         into      = "_g_demo_by_rule"

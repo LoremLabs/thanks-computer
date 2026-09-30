@@ -54,6 +54,8 @@ type secretRecord struct {
 	LastRotatedAt string `json:"last_rotated_at,omitempty"`
 	KeyVersion    int    `json:"key_version"`
 	VersionNo     int    `json:"version_no"`
+	// Pull is the secret's pull policy: "none", "reviewed" or "any".
+	Pull string `json:"pull"`
 }
 
 type listSecretsResponse struct {
@@ -104,6 +106,12 @@ type updateSecretDescriptionRequest struct {
 	Description string `json:"description"`
 }
 
+// setSecretPolicyRequest carries a secret's policy. `pull` is the one
+// policy there is: whether dispatched work may be handed the secret itself.
+type setSecretPolicyRequest struct {
+	Pull string `json:"pull"`
+}
+
 type rotateSecretRequest struct {
 	Value string `json:"value"`
 }
@@ -150,6 +158,10 @@ func metadataToRecord(m *secrets.SecretMetadata) secretRecord {
 		CreatedBy:   m.CreatedBy,
 		KeyVersion:  m.KeyVersion,
 		VersionNo:   m.VersionNo,
+		Pull:        string(m.Pull),
+	}
+	if rec.Pull == "" {
+		rec.Pull = string(secrets.PullNone)
 	}
 	if m.Stack != nil {
 		rec.Stack = *m.Stack
@@ -173,6 +185,9 @@ func translateStoreErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, secrets.ErrInvalidName):
 		writeJSONError(w, http.StatusBadRequest, "invalid_name",
 			map[string]any{"hint": "name must match [A-Za-z][A-Za-z0-9_]*"})
+	case errors.Is(err, secrets.ErrInvalidPull):
+		writeJSONError(w, http.StatusBadRequest, "invalid_pull",
+			map[string]any{"hint": `pull is "none", "reviewed" or "any"`})
 	default:
 		writeJSONError(w, http.StatusInternalServerError, "secret_store_err",
 			map[string]any{"err": err.Error()})
@@ -363,6 +378,51 @@ func (c *Controller) handleUpdateSecretDescription(w http.ResponseWriter, r *htt
 		}
 	}
 	meta, err := store.UpdateSecretDescription(r.Context(), ac.TenantID, stack, name, req.Description)
+	if err != nil {
+		translateStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, secretResponse{Secret: metadataToRecord(meta)})
+}
+
+// handleSetSecretPolicy sets a secret's pull policy: whether work that was
+// dispatched somewhere else may ask for the secret and be handed it. It
+// changes nothing else about the secret.
+//
+// A route of its own, not a field of PATCH: that handler writes the
+// description it is given, so a PATCH carrying only a policy would blank
+// the description.
+func (c *Controller) handleSetSecretPolicy(w http.ResponseWriter, r *http.Request) {
+	if err := policy.RequireCapability(r.Context(), "secret:*:write"); err != nil {
+		auth.WriteForbidden(w, signature.ErrCapabilityDenied)
+		return
+	}
+	ac := auth.FromContext(r.Context())
+	if ac == nil || ac.TenantID == "" {
+		writeJSONError(w, http.StatusInternalServerError, "tenant_id_missing", nil)
+		return
+	}
+	store, ok := c.secretsStoreOrError(w)
+	if !ok {
+		return
+	}
+	name := mux.Vars(r)["name"]
+	stack := optStackPtr(r.URL.Query().Get("stack"))
+
+	var req setSecretPolicyRequest
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<16))
+	dec.DisallowUnknownFields() // a misspelled `pull` must not read as "no change"
+	if err := dec.Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body",
+			map[string]any{"err": err.Error(), "hint": `send {"pull": "none" | "reviewed" | "any"}`})
+		return
+	}
+	pull, err := secrets.ParsePullPolicy(req.Pull)
+	if err != nil {
+		translateStoreErr(w, err)
+		return
+	}
+	meta, err := store.UpdateSecretPull(r.Context(), ac.TenantID, stack, name, pull)
 	if err != nil {
 		translateStoreErr(w, err)
 		return

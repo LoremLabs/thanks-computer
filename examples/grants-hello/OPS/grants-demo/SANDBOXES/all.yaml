@@ -1,0 +1,7 @@
+# Two secrets in one sandbox. A sandbox opens whole or not at all: DEMO_OPEN
+# is released (and charged), then DEMO_CLOSED is refused, and the program
+# is handed nothing.
+description: whole or not at all
+env:
+  DEMO: secret:DEMO_OPEN
+  DEMO_CLOSED: secret:DEMO_CLOSED
