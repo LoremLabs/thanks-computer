@@ -393,11 +393,12 @@ type GrantHandoff interface {
 // of its output, or an in-band error code and message.
 //
 // The sandboxes are opened HERE, so the push form works wherever the
-// command runs: the values travel in the exec, as secrets.env values do.
-// Only the run-time form (`txco sandbox`, over the socket) needs the
-// command on this machine; a provider that cannot reach the socket gets a
-// command with no way to open more, and a `grant` that names no sandbox
-// there would hand over nothing.
+// command runs: the values travel in the exec, as secrets.env values do,
+// and so does the token (TXCO_RUN_GRANT) — on this machine it opens more
+// sandboxes over the socket (`txco sandbox`); on another it is what a node
+// presents to its parent's capability inlet (`cap://`). Only the socket
+// and the binary stay behind on a provider whose commands run elsewhere:
+// nothing there could use them.
 func (pu *Unit) handGrant(ctx context.Context, tenant, stack string, spec workspace.Spec, grant, sandboxes gjson.Result) (map[string]string, [][]byte, string, string) {
 	if grant.Type != gjson.String || grant.String() == "" {
 		return nil, nil, "bad_request", "WITH grant must be a run grant's id, from txco://delegate/mint"
@@ -410,22 +411,15 @@ func (pu *Unit) handGrant(ctx context.Context, tenant, stack string, spec worksp
 		return nil, nil, "grant_unavailable",
 			"this node hands out no run grants: it opened no identity store (see the chassis log)"
 	}
-	reach, ok := pu.Workspaces.Provider().(workspace.GrantReacher)
-	if (!ok || !reach.ReachesGrants()) && len(names) == 0 {
-		return nil, nil, "bad_request", fmt.Sprintf(
-			"WITH grant names no sandbox, and a command of the %s provider runs on another machine where it cannot open one itself: nothing would be handed over (add WITH sandbox)",
-			pu.Workspaces.Provider().Name())
-	}
 	env, vals, err := pu.Grants.ForExec(ctx, tenant, stack, workspace.ID(tenant, spec.Stack, spec.Name), grant.String(), names)
 	if err != nil {
 		return nil, nil, "grant_refused", err.Error()
 	}
-	if !ok || !reach.ReachesGrants() {
-		// The command cannot reach the socket: hand it the sandboxes'
-		// variables and none of the chassis's own.
-		for _, k := range grantwire.Env {
-			delete(env, k)
-		}
+	if reach, ok := pu.Workspaces.Provider().(workspace.GrantReacher); !ok || !reach.ReachesGrants() {
+		// The command cannot reach the socket: it keeps the run's name and
+		// the token, and not the socket or the binary.
+		delete(env, grantwire.EnvSocket)
+		delete(env, grantwire.EnvBin)
 	}
 	return env, vals, "", ""
 }

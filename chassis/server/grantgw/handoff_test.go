@@ -142,14 +142,21 @@ func TestHandoffWithoutTheSocket(t *testing.T) {
 	ctx := context.Background()
 
 	// No socket: the push form still works, and the command gets the
-	// sandbox's variables and nothing of the chassis's.
+	// sandbox's variables, the run's name and the token — what it presents
+	// to a parent's capability inlet from a node — and no socket.
 	env, scrub, err := r.g.ForExec(ctx, tenantSlug, "web", "ws_bench", g.ID, []string{"db-dsn"})
-	if err != nil || env["DB_DSN"] != "postgres://secret-value" || len(env) != 1 || len(scrub) != 1 {
+	if err != nil || env["DB_DSN"] != "postgres://secret-value" || env[EnvRun] != "task-1" || env[EnvToken] == "" ||
+		env[EnvSocket] != "" || env[EnvBin] != "" || len(env) != 3 || len(scrub) != 2 {
 		t.Errorf("the push form alone: %v %v err=%v", env, scrub, err)
 	}
-	// No socket and no sandbox: nothing would be handed over.
-	if _, _, err := r.g.ForExec(ctx, tenantSlug, "web", "ws_bench", g.ID, nil); err == nil || !strings.Contains(err.Error(), "--personalities") {
-		t.Errorf("with neither the socket nor a sandbox: %v", err)
+	if _, err := r.signer.Verify(env[EnvToken], r.now); err != nil {
+		t.Errorf("the token handed without a socket does not verify: %v", err)
+	}
+	// No socket and no sandbox: the token alone, and no request made.
+	runs := r.runs
+	env, scrub, err = r.g.ForExec(ctx, tenantSlug, "web", "ws_bench", g.ID, nil)
+	if err != nil || env[EnvRun] != "task-1" || env[EnvToken] == "" || len(env) != 2 || len(scrub) != 1 || r.runs != runs {
+		t.Errorf("with neither the socket nor a sandbox: %v err=%v runs=%d", env, err, r.runs-runs)
 	}
 	// The socket alone: the command gets what it needs to open sandboxes
 	// itself, and no value.

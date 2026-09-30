@@ -117,28 +117,42 @@ func TestExecWorkspaceGrantIsHandedToTheCommand(t *testing.T) {
 	}
 
 	// A provider whose commands run elsewhere: the push form works — the
-	// values travel in the exec — and the command gets nothing of the
-	// chassis's, which it could not use there.
-	far := &stubProvider{echoEnv: true}
-	pu2, ctx2 := newGrantUnit(t, far, h)
-	pu2.Workspaces = workspace.NewManager(far, workspace.Limits{}, nil)
-	p, _ = pu2.ExecWorkspace(ctx2, workspaceOp("workspace://bench/exec", `{"command":"env","grant":"rgr_1","sandbox":"github"}`))
-	if code := gjson.Get(p.Raw, "workspace.error.code").String(); code != "" {
-		t.Fatalf("the push form on a far provider: %s", p.Raw)
-	}
-	far.mu.Lock()
-	env = far.seen.Env
-	far.mu.Unlock()
-	if env["SB_GITHUB"] != stubSecret+"-github" {
-		t.Errorf("the far command's SB_GITHUB = %q", env["SB_GITHUB"])
-	}
-	for k := range env {
-		if strings.HasPrefix(k, "TXCO_") {
-			t.Errorf("the far command was given %s, which it cannot use", k)
+	// values travel in the exec — and the command gets the run's name and
+	// the token (what a node presents to its parent's capability inlet),
+	// and not the socket or the binary, which it could not use there.
+	for name, prov := range map[string]func(*stubProvider) workspace.Provider{
+		"a provider without the capability": func(s *stubProvider) workspace.Provider { return s },
+		"a provider that says it cannot":    func(s *stubProvider) workspace.Provider { return farProvider{s} },
+	} {
+		far := &stubProvider{echoEnv: true}
+		pu2, ctx2 := newGrantUnit(t, far, h)
+		pu2.Workspaces = workspace.NewManager(prov(far), workspace.Limits{}, nil)
+		p, _ = pu2.ExecWorkspace(ctx2, workspaceOp("workspace://bench/exec", `{"command":"env","grant":"rgr_1","sandbox":"github"}`))
+		if code := gjson.Get(p.Raw, "workspace.error.code").String(); code != "" {
+			t.Fatalf("%s, the push form: %s", name, p.Raw)
 		}
-	}
-	if strings.Contains(p.Raw, stubSecret) {
-		t.Errorf("the result holds a value: %s", p.Raw)
+		far.mu.Lock()
+		env = far.seen.Env
+		far.mu.Unlock()
+		if env["SB_GITHUB"] != stubSecret+"-github" || env["TXCO_RUN"] != "task-1" || env["TXCO_RUN_GRANT"] != stubToken {
+			t.Errorf("%s: the far command's env = %v", name, env)
+		}
+		for _, k := range []string{"TXCO_GRANT_SOCK", "TXCO_BIN"} {
+			if _, has := env[k]; has {
+				t.Errorf("%s: the far command was given %s, which it cannot use", name, k)
+			}
+		}
+		if strings.Contains(p.Raw, stubSecret) || strings.Contains(p.Raw, stubToken) {
+			t.Errorf("%s: the result holds a value: %s", name, p.Raw)
+		}
+		// And with no sandbox at all: the token is still worth handing over.
+		p, _ = pu2.ExecWorkspace(ctx2, workspaceOp("workspace://bench/exec", `{"command":"env","grant":"rgr_1"}`))
+		far.mu.Lock()
+		env = far.seen.Env
+		far.mu.Unlock()
+		if code := gjson.Get(p.Raw, "workspace.error.code").String(); code != "" || env["TXCO_RUN_GRANT"] != stubToken {
+			t.Errorf("%s, no sandbox: %s env=%v", name, p.Raw, env)
+		}
 	}
 }
 
@@ -169,16 +183,6 @@ func TestExecWorkspaceGrantRefusals(t *testing.T) {
 		"no gateway on this node": {
 			exec: "workspace://bench/exec", meta: `{"command":"env","grant":"rgr_1"}`,
 			code: "grant_unavailable", msg: "hands out no run grants",
-		},
-		"a provider whose commands run elsewhere, and no sandbox": {
-			exec: "workspace://bench/exec", meta: `{"command":"env","grant":"rgr_1"}`,
-			handoff: &stubHandoff{}, provider: func(s *stubProvider) workspace.Provider { return s },
-			code: "bad_request", msg: "stub provider runs on another machine",
-		},
-		"a provider that says it cannot, and no sandbox": {
-			exec: "workspace://bench/exec", meta: `{"command":"env","grant":"rgr_1"}`,
-			handoff: &stubHandoff{}, provider: func(s *stubProvider) workspace.Provider { return farProvider{s} },
-			code: "bad_request", msg: "nothing would be handed over",
 		},
 		"a sandbox and no grant": {
 			exec: "workspace://bench/exec", meta: `{"command":"env","sandbox":"github"}`,

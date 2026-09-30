@@ -32,10 +32,12 @@ func handoffErr(format string, a ...any) error {
 // ForExec hands run grant grantID to one command. It opens each named
 // sandbox — every secret decided, traced and charged as a request of the
 // grant, `via: exec` — and returns the variables the sandboxes set, with
-// the values that must never appear in the command's output. When this
-// node has the grant socket, the command also gets what it needs to open
-// sandboxes itself at run time (`txco sandbox`): the run's name, a token
-// signed here, the socket, the binary.
+// the values that must never appear in the command's output; and always
+// the run's name and a token signed here, which is how the command presents
+// itself: to this node's grant socket (`txco sandbox`, when this node has
+// one — the socket and the binary are handed over too), or to a parent
+// chassis's capability inlet from a node (`cap://`), where no socket could
+// reach.
 //
 // tenant and stack are the dispatching rule's own, and workspaceID is the
 // workspace the command is about to run in. The grant must be live, minted
@@ -54,10 +56,6 @@ func (g *Gateway) ForExec(ctx context.Context, tenant, stack, workspaceID, grant
 	g.mu.RLock()
 	socket, bin := g.socket, g.bin
 	g.mu.RUnlock()
-	if len(sandboxes) == 0 && socket == "" {
-		return nil, nil, handoffErr("no sandbox was named and this node has no grant socket for the command to open one itself " +
-			"(add `grant` to --personalities): nothing would be handed over")
-	}
 	if g.signer == nil {
 		return nil, nil, handoffErr("this node has no master key to sign a run grant with (--secret-master-key)")
 	}
@@ -125,9 +123,6 @@ func (g *Gateway) ForExec(ctx context.Context, tenant, stack, workspaceID, grant
 		}
 	}
 
-	if socket == "" {
-		return env, scrub, nil
-	}
 	token, err := g.signer.Sign(rungrant.Claims{
 		Grant: grant.ID, Tenant: grant.TenantID, Principal: grant.Principal.ID,
 		Run: grant.Run, Generation: grant.Generation, Depth: grant.Depth,
@@ -139,10 +134,13 @@ func (g *Gateway) ForExec(ctx context.Context, tenant, stack, workspaceID, grant
 		}
 		return nil, nil, handoffErr("signing run grant %s: %v", grantID, err)
 	}
-	env[EnvRun], env[EnvToken], env[EnvSocket] = grant.Run, token, socket
+	env[EnvRun], env[EnvToken] = grant.Run, token
 	scrub = append(scrub, []byte(token))
-	if bin != "" {
-		env[EnvBin] = bin
+	if socket != "" {
+		env[EnvSocket] = socket
+		if bin != "" {
+			env[EnvBin] = bin
+		}
 	}
 	return env, scrub, nil
 }
