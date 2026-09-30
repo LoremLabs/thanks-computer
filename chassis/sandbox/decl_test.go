@@ -109,3 +109,30 @@ func TestPaths(t *testing.T) {
 		t.Fatalf("DeclNames = %v", got)
 	}
 }
+
+// A sandbox may name capabilities instead of, or as well as, variables.
+func TestParseDeclCapabilities(t *testing.T) {
+	d, err := ParseDecl([]byte("description: the workstation\ncapabilities:\n  - card.note\n  - ai.chat\n"))
+	if err != nil {
+		t.Fatalf("capabilities-only decl: %v", err)
+	}
+	if len(d.Env) != 0 || !reflect.DeepEqual(d.CapabilityNames(), []string{"ai.chat", "card.note"}) {
+		t.Fatalf("decoded wrong: %+v", d)
+	}
+	d, err = ParseDecl([]byte("env:\n  A: secret:B\ncapabilities: [run.finish]\n"))
+	if err != nil || d.Env["A"] != "secret:B" || !reflect.DeepEqual(d.CapabilityNames(), []string{"run.finish"}) {
+		t.Fatalf("both: %+v %v", d, err)
+	}
+	for name, body := range map[string]string{
+		"neither":        "description: nothing\n",
+		"empty both":     "env: {}\ncapabilities: []\n",
+		"bad name":       "capabilities: [Card.Note]\n",
+		"colon":          "capabilities: ['secret:X']\n",
+		"twice":          "capabilities: [ai.chat, ai.chat]\n",
+		"not a list":     "capabilities: ai.chat\n",
+	} {
+		if _, err := ParseDecl([]byte(body)); err == nil {
+			t.Errorf("%s: parsed, want an error", name)
+		}
+	}
+}

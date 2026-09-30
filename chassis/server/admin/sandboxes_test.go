@@ -55,7 +55,7 @@ func TestDeepValidateSandboxes(t *testing.T) {
 	want := map[string]string{
 		"SANDBOXES/unknown.yaml": "field network not found",
 		"SANDBOXES/bare.yaml":    "want secret:<NAME>",
-		"SANDBOXES/empty.yaml":   "env is required",
+		"SANDBOXES/empty.yaml":   "env or capabilities is required",
 	}
 	if len(issues) != len(want) {
 		t.Fatalf("want %d issues, got %+v", len(want), issues)

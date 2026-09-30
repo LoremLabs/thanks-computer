@@ -53,10 +53,13 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 )
 
-// The ways a sandbox may be opened, stamped as `@grant.via`.
+// The ways a request is made, stamped as `@grant.via`: a sandbox is opened
+// by the rule that starts the command or by the program itself; a
+// capability is called over HTTP (chassis/server/capgw).
 const (
 	ViaExec     = "exec"     // the rule that starts the command: `WITH grant, sandbox`
 	ViaLauncher = "launcher" // the program itself: `txco sandbox`
+	ViaHTTP     = "http"     // a capability call: POST /v1/cap/<name> with the token
 )
 
 // Open is one request to open a sandbox. Exactly one of Token and GrantID
@@ -176,7 +179,7 @@ func New(ctx context.Context, pu *processor.Unit, ids *authn.Store, signer *rung
 		return pu.Secrets.Store().DecryptResolved(ctx, meta)
 	}
 	g.runStack = func(ctx context.Context, payload string) (string, error) {
-		return runOnBus(ctx, g.ctx, pu.Bus, payload)
+		return RunOnBus(ctx, g.ctx, pu.Bus, payload)
 	}
 	return g
 }
@@ -211,12 +214,13 @@ var (
 	errStackStreamed = errors.New("grantgw: the _grant stack streamed a response; it has no client to stream to")
 )
 
-// runOnBus sends one envelope through the bus and waits for its final
-// payload: the round trip every inlet makes. The result channel is buffered
+// RunOnBus sends one envelope through the bus and waits for its final
+// payload: the round trip every inlet makes. Exported for the capability
+// inlet, which runs the tenant's `_cap` stack the same way. The result channel is buffered
 // and, when the wait is abandoned, drained to its end — the processor sends
 // on it without a select, so an unread channel would hold its goroutine for
 // good.
-func runOnBus(ctx, life context.Context, bus chan<- *event.Envelope, payload string) (string, error) {
+func RunOnBus(ctx, life context.Context, bus chan<- *event.Envelope, payload string) (string, error) {
 	if bus == nil {
 		return "", errors.New("grantgw: no bus")
 	}

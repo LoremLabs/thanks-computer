@@ -28,6 +28,7 @@ func detectTenantBodyFrozen(resolver ingress.Resolver, in []byte) string {
 		{"room", "_txc.room.tenant", "_room"},
 		{"inspect", "_txc.inspect.tenant", "_inspect"},
 		{"scheduled", "_txc.scheduled.tenant", "_scheduled"},
+		{"cap", "_txc.cap.tenant", "_cap"},
 	} {
 		if gjson.GetBytes(in, "_txc.src").String() == br.src {
 			if ct := gjson.GetBytes(in, br.tenantPath).String(); ct != "" {

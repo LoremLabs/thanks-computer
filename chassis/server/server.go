@@ -81,6 +81,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
 	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
+	"github.com/loremlabs/thanks-computer/chassis/server/capgw"
 	"github.com/loremlabs/thanks-computer/chassis/server/grantgw"
 	"github.com/loremlabs/thanks-computer/chassis/server/grantsock"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
@@ -186,7 +187,7 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
 		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant",
 		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant", "_txc.state.tenant",
-		"_txc.grant.tenant")
+		"_txc.grant.tenant", "_txc.cap.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
@@ -195,6 +196,7 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	ippTenant := fields[15]
 	stateTenant := fields[16]
 	grantTenant := fields[17]
+	capTenant := fields[18]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -306,6 +308,25 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "grant")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_grant/0")
+			return b.String()
+		}
+	}
+	// Capability call. The capability inlet presents one call made with a
+	// run grant — a run on a node asking this chassis to do something —
+	// stamping the tenant in `_txc.cap.tenant` (trusted: resolved from the
+	// run grant's own row after its token verified and the call was
+	// allowed, never from the request). Propose a route into that tenant's
+	// `_cap/0` — the same sanctioned _sys→tenant pin as grant. The stack
+	// reads the call off `@cap.*` and answers at `_cap.output`. A tenant
+	// with no `_cap` stack answers nothing, and the inlet says so.
+	if src.String() == "cap" {
+		if ct := capTenant.String(); ct != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", ct)
+			b.Set("_txc.route.stack", "_cap")
+			b.Set("_txc.route.ingress", "cap")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_cap/0")
 			return b.String()
 		}
 	}
@@ -2395,6 +2416,14 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		return ctx, nil, lerr
 	}
 	webCtrl.SetLLMGateway(llmGateway.HandleMessages, llmGateway.HandleCountTokens)
+
+	// Capability inlet (POST /v1/cap/{name} on the web head): a run this
+	// chassis dispatched to a node calls back with its run grant; the grant
+	// gateway decides it and the tenant's `_cap` stack runs it. Only where
+	// there is a gateway to decide (an identity store).
+	if grantGateway != nil {
+		webCtrl.SetCapGateway(capgw.New(ctx, pu, grantGateway).Handle)
+	}
 
 	// The serving half of txco://drive/sign. Mounted only when this node can
 	// both verify a token and read the store — otherwise the path is an

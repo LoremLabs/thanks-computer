@@ -210,12 +210,12 @@ func TestRunOnBus(t *testing.T) {
 			e.ResCh <- event.Payload{Type: event.StreamEnd}
 		}, "", "streamed"},
 	} {
-		got, err := runOnBus(ctx, life, fakeBus(t, life, tc.answer), `{"a":1}`)
+		got, err := RunOnBus(ctx, life, fakeBus(t, life, tc.answer), `{"a":1}`)
 		if got != tc.want || (err == nil) != (tc.wantErr == "") || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
 			t.Errorf("%s: %q err=%v", name, got, err)
 		}
 	}
-	if _, err := runOnBus(ctx, life, nil, `{}`); err == nil {
+	if _, err := RunOnBus(ctx, life, nil, `{}`); err == nil {
 		t.Error("no bus, no error")
 	}
 
@@ -232,7 +232,7 @@ func TestRunOnBus(t *testing.T) {
 	})
 	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel()
-	if _, err := runOnBus(short, life, slow, `{}`); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := RunOnBus(short, life, slow, `{}`); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("an abandoned wait: %v", err)
 	}
 	select {
@@ -245,12 +245,12 @@ func TestRunOnBus(t *testing.T) {
 	dead := make(chan *event.Envelope)
 	short2, cancel2 := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel2()
-	if _, err := runOnBus(short2, life, dead, `{}`); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := RunOnBus(short2, life, dead, `{}`); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("a bus nobody reads: %v", err)
 	}
 	stopped, stopNow := context.WithCancel(ctx)
 	stopNow()
-	if _, err := runOnBus(ctx, stopped, dead, `{}`); !errors.Is(err, errShutdown) {
+	if _, err := RunOnBus(ctx, stopped, dead, `{}`); !errors.Is(err, errShutdown) {
 		t.Errorf("a chassis that is stopping: %v", err)
 	}
 }

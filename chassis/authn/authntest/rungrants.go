@@ -702,11 +702,12 @@ func runGrantCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 			}
 		}
 		// Likewise the sandboxes, except that an empty object is a grant
-		// with none.
+		// with none, and a sandbox with no variable is one that only names
+		// capabilities.
 		if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(`UPDATE run_grants SET allowlist = ? WHERE id = ?`), `["crm.lookup"]`, g.ID); err != nil {
 			t.Fatal(err)
 		}
-		for _, bad := range []string{`not json`, `[]`, `{"GitHub":{"A":"secret:X"}}`, `{"github":{}}`, `{"github":{"a-b":"secret:X"}}`} {
+		for _, bad := range []string{`not json`, `[]`, `{"GitHub":{"A":"secret:X"}}`, `{"github":{"a-b":"secret:X"}}`} {
 			if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(`UPDATE run_grants SET sandboxes = ? WHERE id = ?`), bad, g.ID); err != nil {
 				t.Fatal(err)
 			}
@@ -721,6 +722,44 @@ func runGrantCases(t *testing.T, newStore func(t *testing.T) *authn.Store) {
 			if got, err := s.ReadRunGrant(ctx, tn, g.ID); err != nil || len(got.Sandboxes) != 0 {
 				t.Errorf("sandboxes %q: %+v err=%v", none, got.Sandboxes, err)
 			}
+		}
+		if _, err := s.DB.ExecContext(ctx, s.Dialect.Rebind(`UPDATE run_grants SET sandboxes = ? WHERE id = ?`), `{"github":{}}`, g.ID); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.ReadRunGrant(ctx, tn, g.ID); err != nil || len(got.Sandboxes) != 1 || len(got.Sandboxes["github"]) != 0 {
+			t.Errorf("a sandbox with no variable: %+v err=%v", got.Sandboxes, err)
+		}
+	})
+
+	// A sandbox may name only capabilities: the grant records it with no
+	// variable, and the names are in the allowlist, checked against the
+	// principal's standing grants like any other.
+	t.Run("a sandbox of capabilities alone", func(t *testing.T) {
+		s, tn := newStore(t), tenant()
+		p := holder(t, s, tn, "web", "research", "crm.lookup", "ai.chat")
+		in := work("task-1", "crm.lookup", "ai.chat")
+		in.Sandboxes = map[string]map[string]string{"workstation": {}}
+		g, err := s.MintRunGrant(ctx, tn, "web", p, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env, ok := g.Sandbox("workstation")
+		if !ok || len(env) != 0 {
+			t.Errorf("sandbox workstation = %v, %v; want named, empty", env, ok)
+		}
+		for _, name := range []string{"crm.lookup", "ai.chat"} {
+			if res, _ := authn.ParseResource(name); !g.Allows(res) {
+				t.Errorf("the grant does not allow %s", name)
+			}
+		}
+		got, err := s.ReadRunGrant(ctx, tn, g.ID)
+		if err != nil || len(got.Sandboxes["workstation"]) != 0 || len(got.Allow) != 2 {
+			t.Errorf("read back: %+v err=%v", got, err)
+		}
+		in = work("task-2", "card.note")
+		in.Sandboxes = map[string]map[string]string{"workstation": {}}
+		if _, err := s.MintRunGrant(ctx, tn, "web", p, in); !errors.Is(err, authn.ErrExceedsStanding) {
+			t.Errorf("a capability the principal does not hold minted: %v", err)
 		}
 	})
 

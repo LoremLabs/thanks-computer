@@ -676,3 +676,25 @@ func TestDetectTenantBodyGrantNoTenantUnchanged(t *testing.T) {
 		t.Errorf("an http envelope was routed into _grant: %s", body)
 	}
 }
+
+// TestDetectTenantBodyCap: a capability call (src=cap with a trusted
+// _txc.cap.tenant stamped by the capability inlet from the run grant's row)
+// proposes a route into that tenant's _cap/0, even though the resolver
+// would miss; without the tenant it falls through like any other.
+func TestDetectTenantBodyCap(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"cap","cap":{"tenant":"acme","name":"card.note","run":"t1/r9"}}}`))
+	for path, want := range map[string]string{
+		"_txc.route.to": "_cap/0", "_txc.route.tenant": "acme", "_txc.route.stack": "_cap", "_txc.route.ingress": "cap",
+	} {
+		if got := gjson.Get(body, path).String(); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+	if body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"cap","cap":{"name":"card.note"}}}`)); body != "{}" {
+		t.Errorf("cap body w/o tenant = %q, want {} (resolver miss)", body)
+	}
+}

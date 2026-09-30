@@ -948,6 +948,13 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					timeout = aiTimeout
 				}
 			}
+			// cap:// is a round trip to the parent that may run a model
+			// there: the ai:// default, for the same reason.
+			if op.Resonator != nil && strings.HasPrefix(op.Resonator.Exec, "cap://") {
+				if aiTimeout, err := time.ParseDuration(pu.Conf.AIDefaultTimeout); err == nil {
+					timeout = aiTimeout
+				}
+			}
 			// workspace:// runs a real command in a real runtime (a build,
 			// a test suite), so it gets its own default the same way ai://
 			// does. WITH timeout still wins; op-timeout-max still caps.
@@ -3010,6 +3017,14 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// workspace.go.
 		payload, err = pu.ExecWorkspace(ctx, op)
 		transport = "workspace"
+	case strings.HasPrefix(opName, "cap://"):
+		// A capability of this node's PARENT chassis, called with the run
+		// grant the request arrived with (processor/cap.go). The parent
+		// decides and runs it; the answer merges under `WITH into`, and
+		// every failure is data at `cap.error`. The output is the parent's,
+		// not a rule's: it is sanitized like any remote transport's.
+		payload, err = pu.ExecCap(ctx, op)
+		transport = "cap"
 	case strings.HasPrefix(opName, outlet.SchemePrefix):
 		// A declared external service (OUTLETS/<name>.yaml) reached
 		// through a chassis-owned pool: the op writes its statement and
@@ -3036,7 +3051,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// gRPC was removed in this revision. Any non-recognized scheme is a
 		// rule authoring error — fail loudly so it's spotted at first match
 		// rather than silently dispatched somewhere.
-		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", "outlet://<name>/<op>", or a stage like "stack/scope"`)
+		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", "outlet://<name>/<op>", "cap://<name>", or a stage like "stack/scope"`)
 		payload = pu.MakeMockResponse(op, "unsupported-scheme")
 		transport = "unsupported"
 	}

@@ -164,7 +164,9 @@ func (c identityCall) wholeParam(key, unit string, dflt, lo, hi int64) (int64, e
 // `allow` names the SANDBOXES the work may open: each is a
 // SANDBOXES/<name>.yaml of the calling app stack, read from its active
 // version now and copied into the grant. The principal must hold a standing
-// grant for every secret they name.
+// grant for every secret they name, and for every capability: a sandbox's
+// `capabilities:` go into the grant's allowlist by name, and each call is
+// decided when it is made (chassis/server/grantgw).
 //
 // `workspace` is a workspace of the CALLING stack, by name — the one the
 // work is about to be sent to with `workspace://<name>/exec WITH grant`. It
@@ -206,11 +208,11 @@ func delegateMint(ctx context.Context, d runGrantDeps, _ []byte) (event.Payload,
 	}
 	// The sandboxes are the app stack's own — a canary slot declares its
 	// own, as it does its outlets — read from its active version now.
-	sandboxes, ep, ok := c.sandboxesParam(ctx, d.sandboxes, in.Stack)
+	sandboxes, capabilities, ep, ok := c.sandboxesParam(ctx, d.sandboxes, in.Stack)
 	if !ok {
 		return ep, nil
 	}
-	in.Sandboxes = sandboxes
+	in.Sandboxes, in.Allow = sandboxes, capabilities
 	if name := c.str("workspace"); name != "" {
 		if err := workspace.ValidateName(name); err != nil {
 			return c.err("invalid_arg", err.Error()), nil
@@ -227,24 +229,25 @@ func delegateMint(ctx context.Context, d runGrantDeps, _ []byte) (event.Payload,
 }
 
 // sandboxesParam reads `allow`: the names of sandboxes the app stack
-// declares, resolved through decls to what each sets. An unknown name is
-// refused with the names the stack has.
-func (c identityCall) sandboxesParam(ctx context.Context, decls sandboxDecls, stack string) (map[string]map[string]string, event.Payload, bool) {
+// declares, resolved through decls to what each sets and what each lets
+// the work call. An unknown name is refused with the names the stack has.
+func (c identityCall) sandboxesParam(ctx context.Context, decls sandboxDecls, stack string) (map[string]map[string]string, []string, event.Payload, bool) {
 	names := c.stringsParam("allow")
 	if len(names) == 0 {
-		return nil, c.err("invalid_arg", "`allow` is required: the sandboxes the work may open, by name (SANDBOXES/<name>.yaml of this stack)"), false
+		return nil, nil, c.err("invalid_arg", "`allow` is required: the sandboxes the work may open, by name (SANDBOXES/<name>.yaml of this stack)"), false
 	}
 	if len(names) > authn.MaxRunSandboxes {
-		return nil, c.err("invalid_arg", fmt.Sprintf("`allow` names %d sandboxes, at most %d", len(names), authn.MaxRunSandboxes)), false
+		return nil, nil, c.err("invalid_arg", fmt.Sprintf("`allow` names %d sandboxes, at most %d", len(names), authn.MaxRunSandboxes)), false
 	}
 	if decls == nil {
-		return nil, c.err("no_sandbox", "this chassis has no sandbox declarations"), false
+		return nil, nil, c.err("no_sandbox", "this chassis has no sandbox declarations"), false
 	}
 	out := map[string]map[string]string{}
+	var capabilities []string
 	for _, raw := range names {
 		name := strings.TrimSpace(raw)
 		if !sandbox.ValidName(name) {
-			return nil, c.err("invalid_arg", fmt.Sprintf("`allow`: %q is not a sandbox name (a name matching [a-z][a-z0-9_-]*, at most 64 chars)", raw)), false
+			return nil, nil, c.err("invalid_arg", fmt.Sprintf("`allow`: %q is not a sandbox name (a name matching [a-z][a-z0-9_-]*, at most 64 chars)", raw)), false
 		}
 		if _, dup := out[name]; dup {
 			continue
@@ -259,17 +262,18 @@ func (c identityCall) sandboxesParam(ctx context.Context, decls sandboxDecls, st
 			} else {
 				msg += " (it has none: add SANDBOXES/" + name + sandbox.DeclExt + " and apply)"
 			}
-			return nil, c.err("no_sandbox", msg), false
+			return nil, nil, c.err("no_sandbox", msg), false
 		case err != nil:
-			return nil, c.err("store", err.Error()), false
+			return nil, nil, c.err("store", err.Error()), false
 		}
 		env := make(map[string]string, len(d.Env))
 		for v, ref := range d.Env {
 			env[v] = ref
 		}
 		out[name] = env
+		capabilities = append(capabilities, d.CapabilityNames()...)
 	}
-	return out, event.Payload{}, true
+	return out, capabilities, event.Payload{}, true
 }
 
 // idParam reads the required `id` WITH param.

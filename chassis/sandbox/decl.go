@@ -16,22 +16,34 @@ import (
 const (
 	// MaxEnv bounds the variables one sandbox sets.
 	MaxEnv = 32
+	// MaxCapabilities bounds the capabilities one sandbox names.
+	MaxCapabilities = 32
 	// MaxDescription bounds the free-text note.
 	MaxDescription = 256
 )
 
 // Decl is one SANDBOXES/<name>.yaml: what a program that opens the sandbox
-// is handed, under which names. Only what the chassis enforces is declared
-// here; a key it does not enforce is a deploy error, not a promise.
+// is handed, under which names, and what it may CALL. Only what the chassis
+// enforces is declared here; a key it does not enforce is a deploy error,
+// not a promise.
 //
 //	description: what a deploy step holds   # optional
 //	env:
 //	  GH_TOKEN: secret:GITHUB_PAT           # variable: reference
+//	capabilities:                           # what a run may call on this
+//	  - ai.chat                             # chassis, by bare name
+//	  - card.note
+//
+// A sandbox sets variables, names capabilities, or both; one that does
+// neither is a deploy error. A capability is not handed over: a run grant
+// that names the sandbox carries the names in its allowlist, and the call
+// is decided when it is made (chassis/server/grantgw).
 //
 // Parsed strictly: an unknown key is a deploy error, not a silent ignore.
 type Decl struct {
-	Description string            `yaml:"description"`
-	Env         map[string]string `yaml:"env"`
+	Description  string            `yaml:"description"`
+	Env          map[string]string `yaml:"env"`
+	Capabilities []string          `yaml:"capabilities"`
 }
 
 // Reference kinds. A reference is `<kind>:<name>`; `secret:` is the one
@@ -49,6 +61,11 @@ var (
 	// ErrInvalidName) so a declaration can't reference a name the store
 	// could never hold.
 	secretNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
+	// CapabilityRE is the grammar of a capability's name: lowercase words
+	// joined by dots, such as `crm.lookup`. It is the one grammar for the
+	// name everywhere it appears — here, in a standing grant and in a run
+	// grant's allowlist (chassis/authn reads it from here).
+	CapabilityRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}(\.[a-z][a-z0-9_-]{0,63}){0,7}$`)
 )
 
 // ReservedVarPrefix names the variables the chassis sets itself when it
@@ -60,6 +77,9 @@ const ReservedVarPrefix = "TXCO_"
 func ValidVar(s string) bool {
 	return varRe.MatchString(s) && !strings.HasPrefix(s, ReservedVarPrefix)
 }
+
+// ValidCapability reports whether s is a capability name.
+func ValidCapability(s string) bool { return CapabilityRE.MatchString(s) }
 
 // ParseRef reads a reference: `secret:GITHUB_PAT` → ("secret", "GITHUB_PAT").
 func ParseRef(s string) (kind, name string, err error) {
@@ -89,11 +109,14 @@ func ParseDecl(data []byte) (*Decl, error) {
 	if len(d.Description) > MaxDescription {
 		return nil, fmt.Errorf("sandbox declaration: description is longer than %d characters", MaxDescription)
 	}
-	if len(d.Env) == 0 {
-		return nil, fmt.Errorf("sandbox declaration: env is required (at least one VARIABLE: secret:NAME)")
+	if len(d.Env) == 0 && len(d.Capabilities) == 0 {
+		return nil, fmt.Errorf("sandbox declaration: env or capabilities is required (at least one VARIABLE: secret:NAME, or one capability name)")
 	}
 	if len(d.Env) > MaxEnv {
 		return nil, fmt.Errorf("sandbox declaration: env sets %d variables, at most %d", len(d.Env), MaxEnv)
+	}
+	if len(d.Capabilities) > MaxCapabilities {
+		return nil, fmt.Errorf("sandbox declaration: capabilities names %d, at most %d", len(d.Capabilities), MaxCapabilities)
 	}
 	for v, ref := range d.Env {
 		if !ValidVar(v) {
@@ -105,6 +128,18 @@ func ParseDecl(data []byte) (*Decl, error) {
 		if _, _, err := ParseRef(ref); err != nil {
 			return nil, fmt.Errorf("sandbox declaration: env.%s: %w", v, err)
 		}
+	}
+	seen := map[string]bool{}
+	for i, c := range d.Capabilities {
+		c = strings.TrimSpace(c)
+		if !ValidCapability(c) {
+			return nil, fmt.Errorf("sandbox declaration: capabilities[%d]: %q is not a capability name (lowercase words joined by dots, such as crm.lookup)", i, c)
+		}
+		if seen[c] {
+			return nil, fmt.Errorf("sandbox declaration: capabilities names %q twice", c)
+		}
+		seen[c] = true
+		d.Capabilities[i] = c
 	}
 	return &d, nil
 }
@@ -133,6 +168,14 @@ func (d *Decl) Secrets() []string {
 		seen[name] = true
 		out = append(out, name)
 	}
+	sort.Strings(out)
+	return out
+}
+
+// CapabilityNames is the sorted list of capabilities the sandbox names:
+// what a run grant that names the sandbox may call.
+func (d *Decl) CapabilityNames() []string {
+	out := append([]string(nil), d.Capabilities...)
 	sort.Strings(out)
 	return out
 }

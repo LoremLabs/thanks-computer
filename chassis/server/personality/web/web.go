@@ -60,6 +60,12 @@ type WebController struct {
 	llmHandler      http.HandlerFunc
 	llmCountHandler http.HandlerFunc
 
+	// capHandler, when set (via SetCapGateway), serves POST /v1/cap/{name}
+	// — the capability inlet, where a run this chassis dispatched to a node
+	// calls back with its run grant. Nil ⇒ the path falls through to the
+	// catch-all like any other request.
+	capHandler http.HandlerFunc
+
 	// signedHandler, when set (via SetSignedHandler), serves GET/HEAD
 	// /_txc/signed/<token>: the by-reference read of one drive document
 	// (txco://drive/sign). Nil ⇒ the path falls through to the catch-all.
@@ -103,6 +109,10 @@ func (web *WebController) SetLLMGateway(messages, countTokens http.HandlerFunc) 
 	web.llmHandler = messages
 	web.llmCountHandler = countTokens
 }
+
+// SetCapGateway wires the capability inlet's handler onto POST
+// /v1/cap/{name}. Call before Start.
+func (web *WebController) SetCapGateway(h http.HandlerFunc) { web.capHandler = h }
 
 // SetSignedHandler wires the signed-URL endpoint onto GET/HEAD
 // /_txc/signed/<token>. Call before Start. The token is the whole
@@ -330,6 +340,15 @@ func (web *WebController) Start() {
 				r.Path("/v1/messages/count_tokens").HandlerFunc(web.llmCountHandler).Methods(http.MethodPost)
 			}
 
+			// Capability inlet: a run on a node, dispatched by this chassis,
+			// asking it to do something with the run's grant
+			// (chassis/server/capgw). Registered BEFORE the catch-all for the
+			// AI gateway's reasons: the token is the authorization, and the
+			// inlet shapes its own JSON answers.
+			if web.capHandler != nil {
+				r.Path("/v1/cap/{name}").HandlerFunc(web.capHandler).Methods(http.MethodPost)
+			}
+
 			// Host-claimed personalities (ipp: `ipp.<zone>`): the whole
 			// hostname belongs to the head. Registered BEFORE the DAV prefixes
 			// and the catch-all so nothing else answers on such a host.
@@ -401,7 +420,13 @@ func (web *WebController) Start() {
 				pb := jsonx.New()
 				pb.Set("_txc.src", "http")
 				pb.Set("_txc.rid", rid)
-				pb.Set("_txc.web.req.headers", r.Header)
+				// A run grant's token, when a parent chassis dispatched this
+				// request to us as a node, goes into the run's CONTEXT and
+				// nowhere else: not the envelope, so no rule and no trace
+				// sees it; `cap://` reads it from there (processor/cap.go).
+				var headers http.Header
+				ctx, headers = intakeRunGrant(ctx, r.Header)
+				pb.Set("_txc.web.req.headers", headers)
 				pb.Set("_txc.web.req.host", r.Host)
 				// The client's address, as every other head stamps it: the
 				// socket peer, or — behind --web-trusted-proxies — the client
@@ -899,4 +924,18 @@ func (web *WebController) Stop() {
 			}
 		}
 	}
+}
+
+// intakeRunGrant moves a run grant's token, when the request carries one,
+// out of the headers the envelope will hold and into the run's context.
+// The headers come back as they were when there is no token, and as a copy
+// without it when there is: the request's own map is never changed.
+func intakeRunGrant(ctx context.Context, h http.Header) (context.Context, http.Header) {
+	tok := h.Get(processor.RunGrantHeader)
+	if tok == "" {
+		return ctx, h
+	}
+	out := h.Clone()
+	out.Del(processor.RunGrantHeader)
+	return processor.WithRunGrant(ctx, tok), out
 }

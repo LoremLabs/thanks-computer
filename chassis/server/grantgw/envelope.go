@@ -1,6 +1,7 @@
 package grantgw
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -84,6 +85,10 @@ type facts struct {
 	res    authn.Resource
 	rq     request
 	meta   *secrets.SecretMetadata // nil: no such secret
+	// input is what a capability call carried, as the caller sent it. It is
+	// presented to the rules, which may hold or refuse on it; the chassis
+	// itself reads nothing in it.
+	input  json.RawMessage
 	checks checks
 	prop   proposal
 	at     time.Time
@@ -92,8 +97,10 @@ type facts struct {
 // requestPayload builds the envelope the tenant's `_grant` stack is
 // presented with. Everything in it is stamped here, from the run grant's own
 // row and the stores — nothing the asking program sent except the name of
-// the sandbox it opened, which the row was checked to name first. It never
-// holds a secret's value, the grant's token or its file key.
+// the sandbox it opened, which the row was checked to name first, or, for a
+// capability call, the call's input under `_txc.grant.input` (data for the
+// rules to decide on, never read by the chassis). It never holds a secret's
+// value, the grant's token or its file key.
 func requestPayload(f facts) string {
 	pb := jsonx.New()
 	pb.Set("_txc.src", srcName)
@@ -104,8 +111,15 @@ func requestPayload(f facts) string {
 	pb.Set("_txc.grant.name", f.res.Name)
 	pb.Set("_txc.grant.verb", f.res.Verb())
 	pb.Set("_txc.grant.via", f.rq.via)
-	pb.Set("_txc.grant.sandbox", f.rq.sandbox)
-	pb.Set("_txc.grant.env", f.rq.variable)
+	if f.rq.sandbox != "" {
+		pb.Set("_txc.grant.sandbox", f.rq.sandbox)
+	}
+	if f.rq.variable != "" {
+		pb.Set("_txc.grant.env", f.rq.variable)
+	}
+	if len(f.input) > 0 && json.Valid(f.input) {
+		pb.SetRaw("_txc.grant.input", string(f.input))
+	}
 
 	pb.Set("_txc.grant.principal.id", f.grant.Principal.ID)
 	pb.Set("_txc.grant.principal.kind", string(f.grant.Principal.Kind))

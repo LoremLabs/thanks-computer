@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/sandbox"
 )
 
 // A standing grant says what a principal may EVER ask the chassis for: one
@@ -60,7 +61,9 @@ type resourceRule struct {
 // resourceRules is every kind a grant may name. A new kind is one entry.
 var resourceRules = map[ResourceKind]resourceRule{
 	ResourceCapability: {
-		name:  regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}(\.[a-z][a-z0-9_-]{0,63}){0,7}$`),
+		// One grammar for the name everywhere it appears: here, in a
+		// SANDBOXES/ declaration and in a run grant's allowlist.
+		name:  sandbox.CapabilityRE,
 		verbs: []string{VerbInvoke},
 		want:  "lowercase words joined by dots, such as crm.lookup",
 	},

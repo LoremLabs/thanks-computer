@@ -44,7 +44,7 @@ func TestCheckSandboxDecls(t *testing.T) {
 	writeFile(t, filepath.Join(root, "OPS/site/SANDBOXES/broken.yaml"), "env:\n  A: secret:B\nnetwork: [github.com]\n")
 	writeFile(t, filepath.Join(root, "OPS/other/SANDBOXES/empty.yaml"), "description: nothing\n")
 	msgs := checkSandboxDecls(ops, root)
-	if len(msgs) != 2 || !strings.Contains(msgs[0], "other/SANDBOXES/empty.yaml") || !strings.Contains(msgs[0], "env is required") ||
+	if len(msgs) != 2 || !strings.Contains(msgs[0], "other/SANDBOXES/empty.yaml") || !strings.Contains(msgs[0], "env or capabilities is required") ||
 		!strings.Contains(msgs[1], "site/SANDBOXES/broken.yaml") || !strings.Contains(msgs[1], "field network not found") {
 		t.Fatalf("broken declarations: %s", strings.Join(msgs, "\n"))
 	}

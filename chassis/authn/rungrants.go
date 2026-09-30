@@ -195,7 +195,9 @@ type NewRunGrant struct {
 	Allow []string
 	// Sandboxes is what the work may open: sandbox → variable → reference,
 	// as the minting stack's declarations say (chassis/sandbox.Decl.Env).
-	// The store checks the shape; the caller resolved the names.
+	// The store checks the shape; the caller resolved the names. A sandbox
+	// that only names capabilities is an empty map here: its names are in
+	// Allow.
 	Sandboxes   map[string]map[string]string
 	BudgetCalls int64
 	TTL         time.Duration
@@ -256,9 +258,8 @@ func checkSandboxes(in map[string]map[string]string) error {
 		if !sandbox.ValidName(name) {
 			return invalid("sandbox %q: want a name matching [a-z][a-z0-9_-]* (1-64 chars)", name)
 		}
-		if len(env) == 0 {
-			return invalid("sandbox %s: sets no variable", name)
-		}
+		// A sandbox that only names capabilities sets no variable: what it
+		// allows is in the allowlist, and opening it hands over nothing.
 		if len(env) > sandbox.MaxEnv {
 			return invalid("sandbox %s: sets %d variables, at most %d", name, len(env), sandbox.MaxEnv)
 		}
