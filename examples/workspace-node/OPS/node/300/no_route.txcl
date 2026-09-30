@@ -1,0 +1,20 @@
+# Nothing answered: the path or the method matched no route. Say so. A request
+# no rule touches otherwise gets an empty 200, which reads as "it worked":
+# `GET /packages` looks exactly like a `POST /packages` that did nothing.
+#
+# Every rule that answers ends with `@halt = true`, so a request that was
+# answered never reaches this scope. That is what this rule relies on, and it
+# must: a body written in a scope that is not the last is SENT at once and
+# cleared from the envelope (the chassis streams it), so "is there a body yet?"
+# cannot be asked here. `txco dev` does not stream, and would hide the mistake.
+# (An accepted WebSocket upgrade is not a miss.)
+WHEN @src == "http" && @websocket.upgrade != true
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "application/json",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&to_json(&object(
+         "error", "no such route",
+         "method", @web.req.method,
+         "path", @web.req.url.path,
+         "routes", "POST /setup · GET /setup · GET /status · POST /packages · POST /call · GET /unsigned · GET /facts · GET /logs · POST /stop · POST /destroy · GET /ui · GET /ui/setup · POST /ui/open · GET /ui/shot · WS /screen"))),
+       @halt = true

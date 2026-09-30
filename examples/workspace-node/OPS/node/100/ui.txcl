@@ -1,0 +1,16 @@
+# GET /ui — the page: the node's browser, in yours.
+#
+# Served from a gated op, not a static FILES/index.html. Static files bypass
+# the rules, and so the gate in 090/095: a static page would be world-readable,
+# and would load without the browser ever asking for the password (a fetch or a
+# WebSocket that gets 401 does not prompt; only a top-level 401 does). Served
+# here, an unauthenticated GET /ui gets 401, the browser prompts, and the
+# credentials then flow to the /screen WebSocket and the fetch() calls.
+#
+# The page is ui.html, beside this op.
+WHEN @src == "http" && @web.req.url.path == "/ui"
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&include("ui.html")),
+       @halt = true

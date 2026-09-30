@@ -1,0 +1,10 @@
+# GET /ui/shot — a PNG of what the node's browser shows, without opening the
+# screen. ui.py asks Chrome for a screenshot and prints it base64, which is
+# what a response body already is.
+WHEN @src == "http" && @web.req.url.path == "/ui/shot"
+  EXEC "workspace://node/exec"
+    WITH command = "python3 -",
+         env     = &object("MODE", "shot"),
+         timeout = "40s",
+         into    = "_shot",
+         stdin   = &include("ui.py")

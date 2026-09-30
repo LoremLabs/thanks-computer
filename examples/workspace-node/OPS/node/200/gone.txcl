@@ -1,5 +1,7 @@
-# POST /destroy answered.
-WHEN ._gone != null
+# POST /destroy answered. A destroy that failed leaves `_gone` empty and sets
+# workspace.error, which err.txcl reports: this rule must not answer for it.
+WHEN ._gone != null && .workspace.error.code == null
   EMIT @web.res.status = 200,
        @web.res.headers.content-type.0 = "application/json",
-       @web.res.body = &b64encode(&to_json(._gone))
+       @web.res.body = &b64encode(&to_json(._gone)),
+       @halt = true

@@ -6,4 +6,5 @@ WHEN ._setup.exit != null && ._setup.exit != 0 && .workspace.error.code == null
        @web.res.body = &b64encode(&to_json(&object("ready", false,
                                         "error", "setup failed; see GET /status",
                                         "exit", ._setup.exit,
-                                        "stderr", ._setup.stderr)))
+                                        "stderr", ._setup.stderr))),
+       @halt = true

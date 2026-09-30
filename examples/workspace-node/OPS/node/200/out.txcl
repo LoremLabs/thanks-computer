@@ -5,4 +5,5 @@ WHEN ._out.exit != null
   EMIT @web.res.status = 200,
        @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
        @web.res.headers.cache-control.0 = "no-store",
-       @web.res.body = &b64encode(&concat(._out.stdout, "\n[exit ", &to_json(._out.exit), "] ", ._out.stderr, "\n"))
+       @web.res.body = &b64encode(&concat(._out.stdout, "\n[exit ", &to_json(._out.exit), "] ", ._out.stderr, "\n")),
+       @halt = true

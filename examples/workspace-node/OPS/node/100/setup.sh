@@ -21,15 +21,17 @@ failed() {
   e="$(tr -d '"\\' < "$DATA/setup.err" 2>/dev/null | tr '\n' ' ')"
   [ -z "$e" ] || printf ',"setup_error":"%s"' "$e"
 }
+# A setup that is running is reported first. While a node is provisioned
+# again its old chassis keeps answering for a moment, and that is not "ready".
+if pgrep -f txco-node-provision.sh >/dev/null 2>&1; then
+  ph="$(tail -n1 "$LOG" 2>/dev/null | tr -d '"\\' | tr '\n' ' ')"
+  echo "{\"ready\":false,\"phase\":\"${ph:-working}\"}"; exit 0
+fi
 # WARM: the marker is current and the admin plane answers. Nothing to do. On
 # a POST that means the node runs what was asked for, so an old failure is moot.
 if marked && up; then
   [ -z "${REQ:-}" ] || rm -f "$DATA/setup.err"
   echo "{\"ready\":true,\"release\":\"$(release)\",\"parent_key_id\":\"$(keyid)\",\"admin\":\"$ADMIN\"$(failed)}"; exit 0
-fi
-if pgrep -f txco-node-provision.sh >/dev/null 2>&1; then
-  ph="$(tail -n1 "$LOG" 2>/dev/null | tr -d '"\\' | tr '\n' ' ')"
-  echo "{\"ready\":false,\"phase\":\"${ph:-working}\"}"; exit 0
 fi
 # PROVISION needs the parent's public key, and only a POST carries one. The key
 # goes into a JSON body below, so it must look like base64 and nothing else.
@@ -70,13 +72,25 @@ stop_node() {
 # it. Every data path defaults to ./chassis/data under the working directory,
 # so the working directory IS the data directory. SECRET is the enroll secret
 # for the one start that enrolls keys, and empty for every start after.
+#
+# --env=prod is the posture, not a label. The default, dev, is for a laptop:
+# it answers with the chassis's private keys (_txc, _ts) in every response,
+# logs every envelope in full at debug, and would leave the admin plane open
+# were it not for --auth-mode=signed. A node is a deployment, so it runs as one.
+# The environment also names the two database files, so a node that moves from
+# one to another starts with empty stores.
+#
+# Tracing is off unless asked for; the node keeps full traces so its admin UI
+# has something to show (/ui).
 start_node() {
   cd "$DATA"
   t0="$(now)"
   TXCO_AUTH_DEV_ENROLL_SECRET="$1" setsid "$BIN" serve \
+    --env=prod \
     --admin-addr "$ADMIN" --web-addr "$WEB" \
     --auth-mode=signed --personalities=web,admin,grant \
     --structured-host-suffix=.localhost \
+    --trace-mode=full \
     --workspace-provider=local --workspace-allow-local \
     </dev/null >>"$DATA/node.log" 2>&1 &
   echo $! > "$DATA/node.pid"
@@ -122,10 +136,18 @@ if [ "$DO" = provision ]; then
     200|409) mv "$DATA/parent-key.json.new" "$DATA/parent-key.json" ;;
     *) fail "enrolling the parent key: HTTP $code" ;;
   esac
-  # The node-local key: what `txco apply` on the node signs with.
-  TXCO_HOME="$DATA/home" "$BIN" auth bootstrap-local --url "http://$ADMIN" --secret "$SECRET" \
-    --profile node --new-key --label node-local --kind service >"$DATA/bootstrap.log" 2>&1 \
-    || echo "PHASE note bootstrap-local exit=$? (see $DATA/bootstrap.log)"
+  # The node-local key: what `txco apply` on the node signs with. A node that
+  # is provisioned again already has one, and the chassis still knows it. A
+  # node whose stores are new (its environment changed) does not: the chassis
+  # refuses the old key, so it is dropped and a fresh one enrolled.
+  enroll_local() {
+    TXCO_HOME="$DATA/home" "$BIN" auth bootstrap-local --url "http://$ADMIN" --secret "$SECRET" \
+      --profile node --new-key --label node-local --kind service >"$DATA/bootstrap.log" 2>&1
+  }
+  if ! enroll_local; then
+    rm -f "$DATA/home/keys/node."*
+    enroll_local || fail "could not enroll the node-local key (see $DATA/bootstrap.log)"
+  fi
   stop_node
   start_node ""
   printf '%s %s\n' "$REQ" "$VERSION" > "$MARK"

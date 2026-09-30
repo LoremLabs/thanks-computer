@@ -1,0 +1,20 @@
+# GET /ui/setup — a browser on the node's workspace, to look at the node with.
+#
+# The node's admin UI listens on the node's loopback and the workspace has no
+# inbound route, so nobody outside can open it. What can reach it is a browser
+# running beside it. This is examples/workspace-browser's setup on the node's
+# workspace (browser.sh, beside this op, is that example's script without its
+# harness): Chrome under Xvfb, served by x11vnc on 127.0.0.1:5900, which the
+# chassis's built-in `browser` service names.
+#
+# Fast every call, as /setup is: it reports readiness, and starts the install
+# (about a minute, once) and the launch DETACHED. The page polls it, and keeps
+# polling while the screen is open so the workspace is not frozen under it.
+# REQ is the browser runtime's version; bump it to install again.
+WHEN @src == "http" && @web.req.url.path == "/ui/setup"
+  EXEC "workspace://node/exec"
+    WITH command = "bash -s",
+         env     = &object("REQ", "2"),
+         timeout = "45s",
+         into    = "_setup",
+         stdin   = &include("browser.sh")

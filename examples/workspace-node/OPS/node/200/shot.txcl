@@ -1,0 +1,7 @@
+# GET /ui/shot answered: the PNG, or why there is none.
+WHEN ._shot.exit != null && ._shot.exit == 0
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "image/png",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = ._shot.stdout,
+       @halt = true

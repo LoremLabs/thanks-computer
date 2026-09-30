@@ -45,7 +45,13 @@ POST /call      → a request to the node's admin plane, signed with the
 GET  /unsigned  → the same request with no signature: 401
 GET  /facts     → what the workspace allows a node: users, control groups,
                   egress, and what it does to a process while idle
-GET  /logs      → the node chassis's own log
+GET  /logs      → the node chassis's own log, and the browser stack's
+GET  /ui        → a page: the node's admin UI, in a browser on the node's
+                  workspace, shown in yours
+GET  /ui/setup  → start that browser (installs it once, about two minutes)
+POST /ui/open   → sign it in to the node's admin UI, at the traces view
+WS   /screen    → the workspace's display, as a VNC stream
+GET  /ui/shot   → a PNG of what that browser shows
 POST /stop      → stop the node chassis, as a cold workspace would have; the
                   next GET /setup cold-starts it
 POST /destroy   → destroy the workspace, and the node with it
@@ -61,7 +67,12 @@ POST /destroy   → destroy the workspace, and the node with it
 | `node/100/call.txcl` / `unsigned.txcl` | the signed call down, and its unsigned twin |
 | `node/100/facts.txcl` + `facts.sh` | measurements |
 | `node/100/stop.txcl` / `logs.txcl` / `destroy.txcl` | one exec or one verb each |
-| `node/200/*.txcl` | the answers: setup's JSON line, a command's output as text, a 503 on a transport failure |
+| `node/100/ui.txcl` + `ui.html` | the noVNC page, served behind the gate |
+| `node/100/ui_setup.txcl` + `browser.sh` | Chrome, Xvfb and x11vnc on the node's workspace: [`workspace-browser`](../workspace-browser)'s setup without its harness |
+| `node/100/ui_open.txcl`, `ui_shot.txcl` + `ui.py` | drive that browser over its debugging port: sign it in, or take a screenshot |
+| `node/100/screen.txcl`, `node/_websocket/*` | accept the WebSocket, then `workspace://node/connect WITH service = "browser"` |
+| `node/200/*.txcl` | the answers: setup's JSON line, a command's output as text, a PNG, a 503 on a transport failure |
+| `node/300/no_route.txcl` | a 404 that lists the routes when nothing matched. Without it a wrong method gets an empty `200 {}`, which reads as success. Every rule that answers ends with `@halt = true`, so an answered request never reaches it. |
 
 ## Provision, cold start, warm
 
@@ -111,7 +122,8 @@ so `/setup` returns at once and `GET /setup` reports the latest phase.
   provisioned node keeps its release until `REQ` or `VERSION` changes, or the
   workspace is re-created. Bump `REQ` to move nodes to a newer release.
 - **Provisioning again keeps the node's keys and stacks.** It reinstalls the
-  binary and restarts the chassis, in about three seconds.
+  binary and restarts the chassis, in about three seconds. While it runs,
+  `GET /setup` reports the phase, not the old chassis's "ready".
 - **A provision that fails leaves the node as it was.** A tag that does not
   exist stops at the installer; the chassis is never stopped, and `GET /setup`
   answers `"ready":true` with the release it still runs and a `setup_error`
@@ -128,17 +140,30 @@ so `/setup` returns at once and `GET /setup` reports the latest phase.
 
 ```sh
 setsid /opt/txco/bin/txco serve \
+  --env=prod \
   --admin-addr 127.0.0.1:8927 --web-addr 127.0.0.1:8926 \
   --auth-mode=signed --personalities=web,admin,grant \
   --structured-host-suffix=.localhost \
+  --trace-mode=full \
   --workspace-provider=local --workspace-allow-local \
   </dev/null >>node.log 2>&1 &
 ```
 
 - **The working directory is the data directory.** The chassis has no single
   data flag; its paths default to `./chassis/data/*`.
-- **`--auth-mode=signed`** closes open-dev, which `--env=dev` (the default)
-  would otherwise leave on.
+- **`--env=prod` is the posture, not a label.** The default, `dev`, is for a
+  laptop. It answers with the chassis's private keys (`_txc`, `_ts`) in every
+  response, logs every envelope in full at debug, and leaves the admin plane
+  open unless something else closes it. A node is a deployment, so it runs as
+  one: a stack's response is what the stack emitted (`{"say":"hello world"}`),
+  and the log is JSON at info.
+- **The environment also names the two database files.** A node that moves
+  from one environment to another starts with empty stores: a new key id for
+  the parent's key, a fresh node-local key, and no stacks until `/packages`
+  runs again.
+- **`--auth-mode=signed`**: every admin request is signed, or carries a
+  browser session the node issued.
+- **`--trace-mode=full`**, so the node's admin UI has traces to show.
 - **Loopback only.** The workspace has no inbound route, and the parent reaches
   the node through the provider's `exec`.
 - **`local`** is the node's own workspace provider, so a node stack can act on
@@ -196,6 +221,61 @@ key).Sign(req, body)` sets the three headers on an `*http.Request`. The
 signature covers `@authority`, so the request must be signed for the host and
 port the node receives.
 
+## Looking at the node: `/ui`
+
+The node's admin UI is at `http://127.0.0.1:8927/admin/`, on the node's own
+loopback, and the workspace has no inbound route. Nobody outside can open it.
+What can is a browser running beside it, and the chassis can already show a
+workspace's browser to a person: that is `workspace-browser`.
+
+```text
+your browser ── WebSocket /screen ──▶ parent ── connect "browser" ──▶ WORKSPACE
+   noVNC                                                              x11vnc :5900
+                                                                         │
+                                                                       Chrome ──▶ node admin UI
+                                                                                  127.0.0.1:8927/admin/
+```
+
+Open `/ui` in a browser and press **open the node's UI** (or open `/ui#go`,
+which starts at once). While it works the page shows a spinner, the step it is
+on, and the last line the workspace reported. The page:
+
+1. Checks the node is up (`GET /setup`).
+2. Starts the browser on the workspace (`GET /ui/setup`). The first time it
+   installs Chrome, Xvfb, x11vnc and openbox, which took about two minutes.
+3. Signs that browser in (`POST /ui/open`). On the node, `txco ui --no-open`
+   asks the node's admin plane for a one-time sign-in link, signed with the
+   node-local key, and `ui.py` points Chrome at it. The link is used on the
+   node and never leaves it.
+4. Opens `/screen` and binds the workspace's display. From then on the socket
+   is the VNC stream, and you are using the node's admin UI: its stacks, its
+   secrets, and its **traces**, which is where the browser lands.
+
+The node keeps full traces (`--trace-mode=full` on its start line). Tracing is
+off by default, and there would be nothing to look at.
+
+**What the person at the screen holds** is an admin session on the node's
+chassis, with the node-local key's authority, behind this stack's one
+password. The parent's stacks and secrets are not reachable from it. Two things
+follow from how it is built:
+
+- **The display has no password of its own** (`x11vnc -nopw`). Port 5900 is
+  reachable only through the chassis's `connect`, which this stack's gate
+  authorizes. The page names the service `browser`; it cannot name a port, so
+  it cannot ask for the node's admin port directly.
+- **Chrome's debugging port is open on the workspace's loopback.** Anything
+  running on the workspace can drive the signed-in browser. A workspace is one
+  trust zone already.
+- **Chrome runs with its own sandbox.** The workspace allows unprivileged user
+  namespaces, so `--no-sandbox` is not needed here, and Chrome's warning bar
+  about it does not appear.
+
+**This is the screen, not the byte path.** It needs no chassis change, and it
+works for anything with a window. The better path for the admin UI itself is
+for the parent to carry HTTP to the node and sign it, so the UI runs in your
+own browser under your own identity on the parent. That is the request verb of
+`todo-chassis-hierarchy.md` §8, and it is not built.
+
 ## What this example is not
 
 - **`/call` is a stand-in.** A rule here carries a request someone else signed.
@@ -250,6 +330,19 @@ One workspace, driven from a chassis with the Sprites provider. Release
 | The chassis stopped by hand (`/stop`), then `GET /setup` | Cold start: ready on the next poll, 0.26 s to `/healthz`. Keys and stacks were kept. |
 | Destroy, then setup and the steps above again | The same results from nothing, twice |
 
+**The node's admin UI, through `/ui`:**
+
+| What | Result |
+|---|---|
+| `GET /ui/setup`, first time | Ready in 134 s (the package install). It reports ready only once Chrome's debugging port answers, so the sign-in that follows does not race it. |
+| `GET /ui/setup` after its `REQ` is bumped | The browser stack is retired and relaunched in 10 s |
+| A node moved from `--env=dev` to `--env=prod` in place | Empty stores, as expected. The parent's key enrolled under a new id; the old node-local key was refused, dropped and replaced; `/packages` applied again. `hello` then answered `{"say":"hello world"}` and nothing else. The signed call, the unsigned refusal and `/ui` all worked as before. |
+| Chrome without `--no-sandbox` | Runs sandboxed. Under `dbus-run-session` its log went from hundreds of "Failed to connect to the bus" lines to five, all about the system bus the workspace does not run. |
+| The page, in a real browser through the prod edge | The node's admin UI, usable: stacks, ops and traces |
+| `POST /ui/open` | 3 s. A screenshot then shows the node's admin UI signed in, at the traces view, listing the node's own requests: `hello/0` from the data plane and `_inspect/0` from the signed call down. |
+| `WS /screen` with the password | `101`, then `{"type":"attached"}`, then the display's `RFB 003.008` greeting |
+| `WS /screen` with a wrong password | `401` |
+
 **What the workspace allows** (`/facts`):
 
 | Question | Answer |
@@ -274,3 +367,9 @@ One workspace, driven from a chassis with the Sprites provider. Release
 3. **A missing value compares equal to 0.** `WHEN ._setup.exit == 0` is true
    on a route that ran no setup. The response rules test `!= null` first.
 4. **Ports 8926 and 8927 were free** on the stock image.
+5. **A body written before the last scope is sent at once.** The chassis
+   streams it and clears it from the envelope, so a later rule cannot ask
+   whether a body was written. A fallback rule that did ran after every answer
+   and appended itself to the page. `txco dev` does not stream
+   (`TXCO_DEBUG_BREAKPOINTS`), so it only showed on a hosted chassis. Answer
+   and `@halt` together.

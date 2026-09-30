@@ -6,4 +6,5 @@ WHEN ._setup.exit != null && ._setup.exit == 0
   EMIT @web.res.status = 200,
        @web.res.headers.content-type.0 = "application/json",
        @web.res.headers.cache-control.0 = "no-store",
-       @web.res.body = &b64encode(._setup.stdout)
+       @web.res.body = &b64encode(._setup.stdout),
+       @halt = true

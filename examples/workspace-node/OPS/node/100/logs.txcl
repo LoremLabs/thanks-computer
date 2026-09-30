@@ -1,6 +1,8 @@
-# GET /logs — the tail of the node chassis's own log. Diagnostic.
+# GET /logs — the tail of the node chassis's own log, and of the browser
+# stack's when /ui has been used (x11vnc's says why a VNC handshake stalls).
+# Diagnostic.
 WHEN @src == "http" && @web.req.url.path == "/logs"
   EXEC "workspace://node/exec"
-    WITH command = "tail -n 60 /var/lib/txco/node.log 2>/dev/null || echo '(no node log)'",
+    WITH command = "for f in /var/lib/txco/node.log /tmp/txco-node-setup.log /tmp/ws-setup.log /tmp/ws-x11vnc.log /tmp/ws-chromium.log /tmp/ws-xvfb.log; do echo \"===== $f =====\"; tail -n 30 $f 2>/dev/null || echo '(none)'; echo; done",
          timeout = "20s",
          into    = "_out"

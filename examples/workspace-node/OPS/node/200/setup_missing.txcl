@@ -3,4 +3,5 @@ WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/setup
   EMIT @web.res.status = 400,
        @web.res.headers.content-type.0 = "application/json",
        @web.res.body = &b64encode(&to_json(&object("ready", false,
-                                        "error", "POST a JSON body: {\"parent_pub\": \"<base64 ed25519 public key>\"}")))
+                                        "error", "POST a JSON body: {\"parent_pub\": \"<base64 ed25519 public key>\"}"))),
+       @halt = true

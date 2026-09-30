@@ -25,7 +25,7 @@
 WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/setup" && ._in.parent_pub != null
   EXEC "workspace://node/exec"
     WITH command = "bash -s",
-         env     = &object("REQ", "1",
+         env     = &object("REQ", "4",
                            "VERSION", "latest",
                            "WEB_PORT", "8926",
                            "ADMIN_PORT", "8927",

@@ -1,0 +1,24 @@
+# The first message attaches a terminal to the workspace, once.
+#
+# `command` is what runs in the PTY. `tmux new -A -s main` gives reattach,
+# scrollback and survival across disconnects for free: the socket's death
+# kills the tmux CLIENT, while the server and the `main` session keep
+# running in the workspace, so the next connection resumes the same screen.
+# (The workspace image must have tmux; the Sprites image does.)
+#
+# `cols`/`rows` are the browser's initial terminal size; the page resizes
+# later with a {"type":"resize"} control frame. `max_duration` bounds the
+# whole session — the lease expires, the process is killed and the socket is
+# told, whatever the client is doing — capped by --workspace-attach-max-duration.
+#
+# On success the chassis binds the PTY and returns `_attach.attached = true`
+# with the lease id and expiry; from here the socket is the terminal. A
+# transport/provider failure merges as top-level `workspace.error` (with
+# `_attach = {}`), which the responder below renders.
+WHEN .msg.type == "attach"
+  EXEC "workspace://tools/attach"
+    WITH command = "tmux new -A -s main",
+         cols = .msg.cols,
+         rows = .msg.rows,
+         max_duration = "8h",
+         into = "_attach"

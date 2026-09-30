@@ -1,0 +1,18 @@
+# POST /ui/open — sign the node's browser in to the node's admin UI.
+#
+# On the node, `txco ui --no-open` asks the node's admin plane for a one-time
+# sign-in link, signed with the node-local key, and ui.py points the browser at
+# it over Chrome's debugging port. The link is used on the node and never
+# printed: it enters no envelope and no trace here. GOTO is the view the
+# browser lands on: the node's traces.
+#
+# What the person at the screen then holds is an admin session on the NODE's
+# chassis, with the node-local key's authority. The parent is not involved,
+# and nothing of the parent's is reachable from that session.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/ui/open"
+  EXEC "workspace://node/exec"
+    WITH command = "python3 -",
+         env     = &object("MODE", "open", "ADMIN_PORT", "8927", "GOTO", "traces"),
+         timeout = "40s",
+         into    = "_out",
+         stdin   = &include("ui.py")

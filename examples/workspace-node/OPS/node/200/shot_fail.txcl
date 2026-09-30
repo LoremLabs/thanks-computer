@@ -1,0 +1,7 @@
+# The screenshot script failed (no browser running, most likely): say why.
+WHEN ._shot.exit != null && ._shot.exit != 0
+  EMIT @web.res.status = 503,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-store",
+       @web.res.body = &b64encode(&concat("no screenshot: ", ._shot.stderr, "\n")),
+       @halt = true

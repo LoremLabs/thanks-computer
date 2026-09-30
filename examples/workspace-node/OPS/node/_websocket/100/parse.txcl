@@ -1,0 +1,8 @@
+# Every message is one run. The FIRST message a page sends says what it wants
+# bound to its socket: {"type":"connect"} for the display (/screen), or
+# {"type":"attach","cols":C,"rows":R} for a terminal (/term). Parse it so the
+# rules in scope 200 can read it. Once a socket is bound the chassis stops
+# making runs for it — the frames go straight through — so this only ever
+# sees that one message (and any sent after a detach).
+WHEN @websocket.phase == "message" && @websocket.msg.text != ""
+  EMIT .msg = &json(@websocket.msg.text)

@@ -6,4 +6,5 @@ WHEN .workspace.error.code != null
        @web.res.headers.cache-control.0 = "no-store",
        @web.res.body = &b64encode(&to_json(&object("ready", false,
                                         "code", .workspace.error.code,
-                                        "error", .workspace.error.message)))
+                                        "error", .workspace.error.message))),
+       @halt = true

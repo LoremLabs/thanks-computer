@@ -1,0 +1,170 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>workspace-node — the node's admin UI</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{height:100%;margin:0}
+  body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b0b0b;color:#ddd;display:flex;flex-direction:column;height:100vh}
+  .bar{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px}
+  .bar h1{font-size:14px;font-weight:600;margin:0 8px 0 0}
+  button,.link{font:inherit;padding:5px 12px;border:0;border-radius:4px;background:#3b82f6;color:#fff;cursor:pointer;text-decoration:none}
+  button:disabled{opacity:.5;cursor:default}
+  .ghost{background:#27272a;color:#ddd}
+  #status{font-size:12px}#status.err{color:#f87171}
+  #stage{flex:1 1 auto;min-height:0;position:relative;background:#000}
+  #screen{position:absolute;inset:0}
+  /* What is happening while there is no screen yet: a spinner, the step, and
+     the last line the workspace reported. */
+  #boot{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0b0b0b;text-align:center;padding:24px}
+  #boot.on{display:flex}
+  .spin{width:34px;height:34px;border:3px solid #27272a;border-top-color:#3b82f6;border-radius:50%;animation:spin .9s linear infinite}
+  #boot.err .spin{display:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion: reduce){.spin{animation-duration:3s}}
+  #step{font-size:16px;color:#eee}
+  #boot.err #step{color:#f87171}
+  #phase{font-size:12px;color:#888;max-width:min(90%,900px);min-height:1.5em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #steps{display:flex;gap:6px;font-size:11px;color:#555}
+  #steps span{padding:2px 8px;border-radius:999px;border:1px solid #27272a}
+  #steps span.done{color:#9ca3af;border-color:#3f3f46}
+  #steps span.now{color:#fff;border-color:#3b82f6}
+  .foot{flex:0 0 auto;color:#888;font-size:11px;padding:6px 12px;border-top:1px solid #1c1c1c}
+  .foot b{color:#bbb} code{color:#bbb}
+</style>
+<div class="bar">
+  <h1>workspace-node — the node's admin UI</h1>
+  <button id="go">open the node's UI</button>
+  <button id="again" class="ghost" disabled>sign in again</button>
+  <a class="link ghost" href="/status" target="_blank">status</a>
+  <a class="link ghost" href="/ui/shot" target="_blank">screenshot</a>
+  <a class="link ghost" href="/logs" target="_blank">logs</a>
+  <span id="status">idle</span>
+</div>
+<div id="stage">
+  <div id="screen"></div>
+  <div id="boot" role="status" aria-live="polite">
+    <div class="spin"></div>
+    <div id="step">booting</div>
+    <div id="phase"></div>
+    <div id="steps">
+      <span data-s="node">the node</span>
+      <span data-s="browser">its browser</span>
+      <span data-s="signin">sign in</span>
+      <span data-s="display">the display</span>
+    </div>
+  </div>
+</div>
+<div class="foot">
+  The node's admin UI listens on the node's own loopback, and the workspace has
+  no inbound route. What you see here is a browser running <b>on the node's
+  workspace</b>, beside the chassis, shown through the parent.
+  <b>open the node's UI</b> checks the node is up (<code>/setup</code>), starts
+  that browser (<code>/ui/setup</code>, about two minutes the first time), signs
+  it in to the node's admin UI with the node's own key
+  (<code>/ui/open</code>), then binds the workspace's display to a WebSocket
+  (<code>/screen</code>) that noVNC renders. The page polls
+  <code>/ui/setup</code> every 15 s so the workspace is not frozen under you.
+</div>
+<script type="module">
+import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.7.0/core/rfb.js';
+const $ = id => document.getElementById(id);
+const setStatus = (s, err) => { $('status').textContent = s; $('status').className = err ? 'err' : ''; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let ws = null, rfb = null, keepalive = null;
+
+// The boot panel: which step is running, and the workspace's latest line.
+const ORDER = ['node', 'browser', 'signin', 'display'];
+function boot(step, title, phase) {
+  $('boot').className = 'on';
+  $('step').textContent = title;
+  $('phase').textContent = (phase || '').replace(/^PHASE\s+/, '').trim();
+  const at = ORDER.indexOf(step);
+  for (const el of $('steps').children) {
+    const i = ORDER.indexOf(el.dataset.s);
+    el.className = i < at ? 'done' : i === at ? 'now' : '';
+  }
+  setStatus(title);
+}
+function bootFailed(title, detail) {
+  $('boot').className = 'on err';
+  $('step').textContent = title;
+  $('phase').textContent = detail || '';
+  setStatus(title + (detail ? ': ' + detail : ''), true);
+}
+const bootDone = () => { $('boot').className = ''; };
+
+function stop() { if (keepalive) { clearInterval(keepalive); keepalive = null; } $('go').disabled = false; $('again').disabled = true; }
+
+// Poll a setup route (uncached, so each call is a real exec that also wakes
+// the workspace) until it reports ready. Returns the verdict, or null.
+async function poll(path, step, title) {
+  boot(step, title, '');
+  for (;;) {
+    let r;
+    try { r = await fetch(path, { cache: 'no-store' }); }
+    catch (e) { bootFailed(title + ' — request failed', String(e)); return null; }
+    if (r.status >= 502 && r.status <= 504) { boot(step, title, 'gateway ' + r.status + ', retrying'); await sleep(2000); continue; }
+    let j; try { j = await r.json(); } catch { boot(step, title, 'unreadable answer (' + r.status + '), retrying'); await sleep(2000); continue; }
+    if (j.ready) return j;
+    if (j.error) { bootFailed(title + ' — not ready', j.error); return null; }
+    boot(step, title, j.phase || 'working'); await sleep(3000);
+  }
+}
+
+// Sign the node's browser in to the node's admin UI. The sign-in link is made
+// and used on the node; this page never sees it. A browser that has only just
+// started may need a moment, so try a few times before giving up.
+async function signIn(quiet) {
+  let last = '';
+  for (let i = 0; i < 3; i++) {
+    if (!quiet) boot('signin', 'signing the node\'s browser in', i ? 'trying again' : '');
+    try {
+      const r = await fetch('/ui/open', { method: 'POST', cache: 'no-store' });
+      const t = (await r.text()).trim();
+      if (r.ok && t.startsWith('the node')) return true;
+      last = t.slice(0, 200);
+    } catch (e) { last = String(e); }
+    await sleep(2000);
+  }
+  if (quiet) setStatus('sign-in failed: ' + last, true); else bootFailed('sign-in failed', last);
+  return false;
+}
+$('again').onclick = async () => { $('again').disabled = true; setStatus('signing in again…'); if (await signIn(true)) setStatus('signed in'); $('again').disabled = false; };
+
+async function go() {
+  $('go').disabled = true;
+  const node = await poll('/setup', 'node', 'booting the node');
+  if (!node) { stop(); return; }
+  const browser = await poll('/ui/setup', 'browser', 'booting the node\'s browser');
+  if (!browser) { stop(); return; }
+  keepalive = setInterval(() => { fetch('/ui/setup', { cache: 'no-store' }).catch(() => {}); }, 15000);
+  if (!await signIn(false)) { stop(); return; }
+  boot('display', 'connecting to the display', '');
+
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(scheme + '://' + location.host + '/screen');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'connect', service: 'browser' }));
+  ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'error') { bootFailed('the display refused the connection', m.error || m.code); stop(); return; }
+    if (m.type !== 'attached') return;
+    boot('display', 'connecting to the display', 'bound — starting the VNC handshake');
+    ws.onmessage = null;                              // hand the socket to noVNC
+    rfb = new RFB($('screen'), ws, { shared: true });
+    rfb.scaleViewport = true;
+    rfb.addEventListener('connect', () => { bootDone(); setStatus('node ' + (node.release || '') + ' — this is the browser on the node\'s workspace'); $('again').disabled = false; });
+    rfb.addEventListener('securityfailure', (ev) => bootFailed('VNC security failure', (ev.detail && ev.detail.reason) || ''));
+    rfb.addEventListener('disconnect', (ev) => {
+      const clean = ev.detail && ev.detail.clean;
+      if (clean) { bootDone(); setStatus('disconnected'); } else bootFailed('disconnected unexpectedly', 'see /logs');
+      stop();
+    });
+  };
+  ws.onclose = () => { if ($('boot').className === 'on') bootFailed('the socket closed', ''); stop(); };
+  ws.onerror = () => setStatus('socket error', true);
+}
+$('go').onclick = go;
+if (location.hash === '#go') go();                   // /ui#go starts at once
+</script>

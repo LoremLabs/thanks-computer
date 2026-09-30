@@ -1,0 +1,6 @@
+# Take the WebSocket on /screen. The upgrade is an HTTP request like any other,
+# so it has already passed the password gate in 090/095: whoever holds this
+# socket may bind the node's display, and that decision is made here, once.
+# The messages that follow run at node/_websocket.
+WHEN @websocket.upgrade == true && @web.req.url.path == "/screen"
+  EXEC "txco://websocket/accept"
