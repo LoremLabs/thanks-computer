@@ -9,8 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
@@ -48,34 +52,137 @@ type Resolver interface {
 	Resolved() Provenance
 }
 
-// newRepository builds an oras target for an OCI repository reference. The real
-// impl talks to a registry with docker-config (or TXCO_OCI_* env) auth; tests
-// swap it via SetRepositoryFactory to point at an in-process content store.
-var newRepository = func(repository string) (oras.ReadOnlyTarget, error) {
-	repo, err := remote.NewRepository(repository)
-	if err != nil {
-		return nil, err
+// CredentialProvider answers a registry's Bearer challenge with a token it
+// obtained some other way than the registry's own token realm. It is given
+// the registry (host[:port]) and the scopes the operation in flight needs
+// (`repository:<name>:pull,push`). handled=false means "not mine": the
+// caller falls back to docker-config credentials. A token must be fresh on
+// every call — the client asks again exactly when the last one was refused.
+type CredentialProvider func(ctx context.Context, hostport string, scopes []string) (token string, handled bool, err error)
+
+// credentialProvider is set by the CLI layer (SetCredentialProvider), which
+// owns profiles and the admin client that this package cannot import.
+var credentialProvider CredentialProvider
+
+// SetCredentialProvider installs the token provider consulted for a Bearer
+// challenge, returning the previous one (tests restore it in t.Cleanup).
+func SetCredentialProvider(p CredentialProvider) CredentialProvider {
+	prev := credentialProvider
+	credentialProvider = p
+	return prev
+}
+
+// LoopbackHost reports whether a registry or service host[:port] is this
+// machine: `localhost` or a loopback ADDRESS. Such a registry is reached
+// over plain HTTP, as docker does. A name that merely should resolve to
+// loopback (`x.localhost`) does not count: where it resolves is the
+// resolver's decision, and plain HTTP must not depend on it.
+func LoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
 	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// bearerChallenges remembers, per registry host, whether its last 401 asked
+// for a Bearer token. The credential function is told only the host, never
+// the challenge, and a token provider must not answer a Basic challenge:
+// that one wants the docker-config username and password.
+type bearerChallenges struct {
+	base http.RoundTripper
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func (b *bearerChallenges) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := b.base.RoundTrip(req)
+	if err == nil && resp.StatusCode == http.StatusUnauthorized {
+		scheme, _, _ := strings.Cut(strings.TrimSpace(resp.Header.Get("Www-Authenticate")), " ")
+		b.mu.Lock()
+		b.seen[req.URL.Host] = strings.EqualFold(scheme, "Bearer")
+		b.mu.Unlock()
+	}
+	return resp, err
+}
+
+func (b *bearerChallenges) bearer(host string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.seen[host]
+}
+
+// newAuthClient is the one place a registry client's credentials are
+// decided, for pulls and pushes alike. In order:
+//
+//  1. TXCO_OCI_USERNAME / TXCO_OCI_PASSWORD, when set — an explicit override.
+//  2. The credential provider, for a Bearer challenge it handles: a registry
+//     whose token service is a chassis (`txco package publish` to a tenant's
+//     own namespace, signed in as that tenant).
+//  3. docker-config credentials.
+//  4. Anonymous.
+//
+// Credentials are asked for only after a 401, so pulling a public package
+// consults none of them.
+func newAuthClient(registryHost string) *auth.Client {
 	if u := os.Getenv("TXCO_OCI_USERNAME"); u != "" {
-		repo.Client = &auth.Client{
+		return &auth.Client{
 			Client: retry.DefaultClient,
 			Cache:  auth.NewCache(),
-			Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
+			Credential: auth.StaticCredential(registryHost, auth.Credential{
 				Username: u,
 				Password: os.Getenv("TXCO_OCI_PASSWORD"),
 			}),
 		}
-		return repo, nil
 	}
-	// Default: docker-config credentials (anonymous for public repos).
+	var docker auth.CredentialFunc
 	if store, err := credentials.NewStoreFromDocker(credentials.StoreOptions{}); err == nil {
-		repo.Client = &auth.Client{
-			Client:     retry.DefaultClient,
-			Cache:      auth.NewCache(),
-			Credential: credentials.Credential(store),
-		}
+		docker = credentials.Credential(store)
 	}
+	challenges := &bearerChallenges{base: retry.DefaultClient.Transport, seen: map[string]bool{}}
+	return &auth.Client{
+		Client: &http.Client{Transport: challenges},
+		Cache:  auth.NewCache(),
+		Credential: func(ctx context.Context, hostport string) (auth.Credential, error) {
+			if p := credentialProvider; p != nil && challenges.bearer(hostport) {
+				token, handled, err := p(ctx, hostport, auth.GetAllScopesForHost(ctx, hostport))
+				if err != nil {
+					return auth.EmptyCredential, err
+				}
+				if handled {
+					return auth.Credential{AccessToken: token}, nil
+				}
+			}
+			if docker != nil {
+				return docker(ctx, hostport)
+			}
+			return auth.EmptyCredential, nil
+		},
+	}
+}
+
+// newRemoteRepository opens a registry repository with newAuthClient's
+// credentials; a registry on this machine is spoken to over plain HTTP.
+func newRemoteRepository(repository string) (*remote.Repository, error) {
+	repo, err := remote.NewRepository(repository)
+	if err != nil {
+		return nil, err
+	}
+	repo.PlainHTTP = LoopbackHost(repo.Reference.Registry)
+	repo.Client = newAuthClient(repo.Reference.Registry)
 	return repo, nil
+}
+
+// newRepository builds an oras target for an OCI repository reference. The real
+// impl talks to a registry with newAuthClient's credentials; tests
+// swap it via SetRepositoryFactory to point at an in-process content store.
+var newRepository = func(repository string) (oras.ReadOnlyTarget, error) {
+	return newRemoteRepository(repository)
 }
 
 // SetRepositoryFactory swaps the repository constructor (for tests). Returns the
@@ -251,29 +358,7 @@ func packPackageArtifact(ctx context.Context, dst oras.Target, layerBytes, manif
 // pushArtifact copies a packed artifact from a local store to a remote
 // repository, returning the manifest digest. Used by `txco package publish`.
 var newPushRepository = func(repository string) (oras.Target, error) {
-	repo, err := remote.NewRepository(repository)
-	if err != nil {
-		return nil, err
-	}
-	if u := os.Getenv("TXCO_OCI_USERNAME"); u != "" {
-		repo.Client = &auth.Client{
-			Client: retry.DefaultClient,
-			Cache:  auth.NewCache(),
-			Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
-				Username: u,
-				Password: os.Getenv("TXCO_OCI_PASSWORD"),
-			}),
-		}
-		return repo, nil
-	}
-	if store, err := credentials.NewStoreFromDocker(credentials.StoreOptions{}); err == nil {
-		repo.Client = &auth.Client{
-			Client:     retry.DefaultClient,
-			Cache:      auth.NewCache(),
-			Credential: credentials.Credential(store),
-		}
-	}
-	return repo, nil
+	return newRemoteRepository(repository)
 }
 
 // SetPushRepositoryFactory swaps the push-target constructor (tests only).

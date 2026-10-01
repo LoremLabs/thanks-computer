@@ -133,11 +133,56 @@ Tenant-scoped, under `/v1/tenants/{tenant}`:
 | `GET /traces/requests.json` · `/requests/{rid}.json` · `/traces/stream` | Trace list / detail / live stream ([trace.md](./trace.md)) |
 | `GET /kv/{namespace}` | Keys an op accumulated in the KV store (`kv:*:read`) |
 | `GET /notebooks/{namespace}` · `/notebooks/{namespace}/{name}` | Notebooks in a namespace / a notebook's entries — `?after&since&until&tail&type&limit`, `?format=ndjson` streams (`notebook:*:read`, [notebooks.md](./notebooks.md)) |
+| `POST /registry/token` | A short-lived package-registry token for the tenant's own namespace (`package:<name>:push` · `:pull`); 404 unless configured — [below](#registry-tokens) |
 
 Also present: `POST /v1/cli` (the admin UI's command bridge),
 `POST /v1/fleet/resync`, `GET·PUT /v1/dns/config`, and the delegated-zone
 CRUD under `/v1/tenants/{t}/dns/zones` (`GET·POST`, `DELETE·PATCH /{origin}`
 — PATCH sets `answer_mode` / `stack_fallback`, see [dns.md](./protocols/dns.md)).
+
+### Registry tokens
+
+A chassis can be the **token service** of an OCI package registry, so that a
+tenant publishes under its own name and nowhere else
+([setup](./txco-oci-packages.md#13-running-a-registry-your-tenants-publish-to)).
+`txco package publish` calls this for you.
+
+```http
+POST /v1/tenants/acme/registry/token
+{"service": "registry.example.com", "scopes": ["repository:acme/sales:pull,push"]}
+
+200 {"token": "…", "access_token": "…", "expires_in": 300,
+     "issued_at": "2026-10-01T12:00:00Z",
+     "access": [{"type": "repository", "name": "acme/sales", "actions": ["pull", "push"]}]}
+```
+
+- **`service`** must be the registry this chassis mints for
+  (`--registry-token-service`), and each **scope** is one the registry's
+  challenge named: `repository:<name>:<actions>`, one to four of them.
+- **The name's first path segment must be the tenant in the URL.** The rest
+  is the package: `push` needs `package:<rest>:push` and is granted with the
+  `pull` a registry also requires of a writer; `pull` alone needs
+  `package:<rest>:pull` (or `:push`). Grants are written with `*` for the
+  package today (`package:*:push`); the check is already per package.
+- **A reserved namespace** (`txco`, `library`, …) is granted only to the
+  tenant ID an operator pinned to it (`--registry-token-platform-namespaces`).
+- **`delete` and `registry:catalog:*`** are a super-admin's.
+- **All or nothing**: one scope the caller may not have refuses the request.
+  Nothing narrower is ever returned.
+
+| Status | `error` | When |
+|---|---|---|
+| `400` | `scope_invalid` · `namespace_invalid` | Not a scope; not a `<namespace>/<name>` repository name |
+| `403` | `service_mismatch` | A registry this chassis does not mint for |
+| `403` | `namespace_forbidden` | Another tenant's namespace, or a reserved one not pinned to this tenant |
+| `403` | `capability_missing` | The caller lacks the package capability |
+| `403` | `tenant_suspended` | A suspended or disabled tenant asked to push |
+| `403` | `source_forbidden` | A browser session: tokens go to signed requests |
+| `404` | `registry_token_disabled` | The chassis is not configured as a token service |
+
+The token is an ES256 JWT whose `access` claim the registry enforces by
+itself. Each one issued is logged — tenant, actor, key, the access granted —
+and the token itself never is.
 
 ### Stack versions, not rule imports
 

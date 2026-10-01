@@ -181,6 +181,29 @@ func TestReservedSlug(t *testing.T) {
 	}
 }
 
+func TestPlatformSlug(t *testing.T) {
+	for _, s := range []string{"txco", "txco-packages", "txco-", "thanks", "thanks-computer", "thankscomputer",
+		"loremlabs", "library", "official", "registry", "admin", "system", "public", "private", "v1", "v2"} {
+		if !PlatformSlug(s) {
+			t.Errorf("PlatformSlug(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"txcobalt", "mytxco", "acme", "onepony", "thanksgiving", "v3", "adminer", "default"} {
+		if PlatformSlug(s) {
+			t.Errorf("PlatformSlug(%q) = true, want false", s)
+		}
+	}
+}
+
+// A platform slug is held back from sign-up only: an operator creates the
+// platform's own tenant through the store like any other.
+func TestCreateAllowsPlatformSlug(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := s.Create(context.Background(), Tenant{TenantID: "tnt_txco", Slug: "txco"}); err != nil {
+		t.Fatalf("create platform tenant: %v", err)
+	}
+}
+
 func TestCreateRejectsReservedSlug(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()

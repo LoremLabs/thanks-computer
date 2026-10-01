@@ -122,6 +122,16 @@ func (c *Controller) handleOAuthEnroll(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The platform's own names are an operator's to create, never a
+	// sign-up's: a slug is the tenant's namespace in the package registry.
+	if tenants.PlatformSlug(slug) {
+		writeJSONError(w, http.StatusConflict, "tenant_slug_reserved", map[string]any{
+			"slug":                  slug,
+			"suggested_tenant_slug": c.freeSlugSuggestion(r.Context(), suggestSlug(sub)),
+			"hint":                  "that name is reserved",
+		})
+		return
+	}
 	if _, err := c.tenants.LookupBySlug(r.Context(), slug); err == nil {
 		writeJSONError(w, http.StatusConflict, "tenant_slug_taken", map[string]any{
 			"slug":                  slug,
@@ -306,12 +316,12 @@ func (c *Controller) oauthEnrollIntoTenant(w http.ResponseWriter, r *http.Reques
 }
 
 // freeSlugSuggestion returns an available slug derived from base, appending
-// -2, -3, … on collision. A blank / reserved / malformed base falls back to a
-// random label. On a lookup error it returns a random label rather than
+// -2, -3, … on collision. A blank / reserved / platform / malformed base falls
+// back to a random label. On a lookup error it returns a random label rather than
 // suggest a name it couldn't verify as free.
 func (c *Controller) freeSlugSuggestion(ctx context.Context, base string) string {
 	base = strings.ToLower(strings.TrimSpace(base))
-	if base == "" || tenants.ReservedSlug(base) || !oauthSlugRe.MatchString(base) {
+	if base == "" || tenants.ReservedSlug(base) || tenants.PlatformSlug(base) || !oauthSlugRe.MatchString(base) {
 		base = tenants.RandLabel()
 	}
 	cand := base

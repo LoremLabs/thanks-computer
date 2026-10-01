@@ -83,6 +83,15 @@ var KnownCapabilities = map[string]bool{
 	"notebook:*:read":  true,
 	"notebook:*:write": true,
 	"notebook:*:*":     true,
+
+	// Packages in the registry, under the tenant's own namespace (its
+	// slug). `push` publishes — and so may pull, which a push needs;
+	// `pull` reads. Checked when the admin plane mints a registry token
+	// (POST /v1/tenants/{t}/registry/token), against the package's name
+	// as the instance: package:<name>:push.
+	"package:*:pull": true,
+	"package:*:push": true,
+	"package:*:*":    true,
 }
 
 // ErrUnknownCapability is returned by ValidateCapabilities and

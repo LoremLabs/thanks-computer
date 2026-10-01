@@ -35,13 +35,20 @@ func runPackagePublish(args []string, stdout, stderr io.Writer) int {
 	doSign := fs.Bool("sign", false, "sign the artifact with an ed25519 key after pushing")
 	keyPath := fs.String("key", "", "signing key path (default: $TXCO_HOME/keys/signing.ed25519)")
 	noPrebuild := fs.Bool("no-prebuild", false, "publish .js source only (do not build bundled computes to wasm)")
+	profile := fs.String("profile", "", "txco profile that signs in to a registry whose tokens a chassis issues (default: the profile for the package's tenant)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
 		fmt.Fprint(stderr, `
 Usage: txco package publish --to <oci-ref> [<dir>]
 
 Validate the package at <dir> (default "."), pack it into a single-layer OCI
-artifact, and push it. Auth comes from your docker config (or TXCO_OCI_*).
+artifact, and push it.
+
+A package is published as <tenant>/<name>. On a registry whose tokens a
+chassis issues (registry.thanks.computer), you are signed in by your txco
+profile and may publish under your own tenant's name; no registry password
+is involved. On any other registry, auth comes from your docker config (or
+TXCO_OCI_USERNAME / TXCO_OCI_PASSWORD).
 
 Flags:
 `)
@@ -54,6 +61,7 @@ Flags:
 		fmt.Fprintln(stderr, "package publish: --to <oci-ref> is required")
 		return 2
 	}
+	registryTokenProfile = *profile
 	dir := fs.Arg(0)
 	if dir == "" {
 		dir = "."

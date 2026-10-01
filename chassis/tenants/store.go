@@ -164,6 +164,26 @@ func ReservedSlug(slug string) bool {
 	return strings.HasPrefix(slug, "_")
 }
 
+// platformSlugs are names a self-service sign-up may not take: the
+// platform's own (a tenant's slug is its namespace in the package
+// registry, so whoever holds `txco` publishes as the platform), and names
+// that read as official or collide with a registry path.
+var platformSlugs = map[string]bool{
+	"txco": true, "thanks": true, "thanks-computer": true, "thankscomputer": true,
+	"loremlabs": true, "library": true, "official": true, "registry": true,
+	"admin": true, "system": true, "public": true, "private": true,
+	"v1": true, "v2": true,
+}
+
+// PlatformSlug reports whether a slug is held back for the platform: it
+// may be created by an operator (a super-admin), never claimed by a user
+// signing up. Unlike ReservedSlug it is NOT enforced in Create — the
+// platform's own tenant is an ordinary tenant with one of these names.
+// Caller should pass the already-normalised (lower/trim) slug.
+func PlatformSlug(slug string) bool {
+	return platformSlugs[slug] || strings.HasPrefix(slug, "txco-")
+}
+
 // Create inserts a new tenants row. Caller supplies the pre-generated
 // tenant_id (hxid "tnt_…") and a slug. Slug is lower-cased and trimmed
 // before insert because the UNIQUE index is case-sensitive.

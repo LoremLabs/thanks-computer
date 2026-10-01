@@ -28,6 +28,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
+	"github.com/loremlabs/thanks-computer/chassis/ocitoken"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/room"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin/ui"
@@ -139,6 +140,13 @@ type Controller struct {
 	oauthIssuer   string
 	oauthAudience string
 	oauthJWKS     jwk.Set
+
+	// registrySigner mints package-registry tokens for POST
+	// /v1/tenants/{t}/registry/token; nil ⇒ the endpoint answers 404 (the
+	// open-core default). registryPlatformNS pins the platform's own
+	// registry namespaces to a tenant ID. See resolveRegistryToken.
+	registrySigner     *ocitoken.Signer
+	registryPlatformNS map[string]string
 }
 
 func NewController(ctx context.Context, pu *processor.Unit) *Controller {
@@ -233,6 +241,7 @@ func (c *Controller) Start() {
 
 	c.resolveDevEnrollSecret()
 	c.resolveOAuthIssuer()
+	c.resolveRegistryToken()
 
 	r := mux.NewRouter()
 	// Surface non-2xx admin responses in the chassis log alongside
@@ -523,6 +532,11 @@ func (c *Controller) Start() {
 	// The tenant's capability catalogue: what its active stacks declare
 	// under CAPS/ (chassis/capdecl), by name. Read-only; `txco caps list`.
 	tenantR.HandleFunc("/caps", c.handleListCaps).Methods(http.MethodGet)
+
+	// The package registry's token service: a short-lived bearer token for
+	// the tenant's own namespace (`txco package publish`). 404 unless
+	// --registry-token-* is configured.
+	tenantR.HandleFunc("/registry/token", c.handleRegistryToken).Methods(http.MethodPost)
 
 	// Hostname → tenant routing. Each row binds `Host: foo.local` to
 	// a (tenant, stack) for the data-plane router; the ingress DB

@@ -24,6 +24,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
+	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
 
 const (
@@ -211,13 +212,13 @@ func TestOAuthEnrollFirstWithSlug(t *testing.T) {
 		t.Fatalf("actor_id = %v", body["actor_id"])
 	}
 	caps, _ := body["capabilities"].([]any)
-	if len(caps) != 7 {
-		t.Fatalf("capabilities = %v, want 7 owner caps", body["capabilities"])
+	if len(caps) != 8 {
+		t.Fatalf("capabilities = %v, want 8 owner caps", body["capabilities"])
 	}
 	// A tenant owner must be able to manage their own tenant's secrets, read
-	// their own tenant's KV (e.g. list a namespace via the admin API), and use
-	// the inspect inlet.
-	hasSecret, hasKV, hasInspect := false, false, false
+	// their own tenant's KV (e.g. list a namespace via the admin API), use
+	// the inspect inlet, and publish packages under the tenant's name.
+	hasSecret, hasKV, hasInspect, hasPackage := false, false, false, false
 	for _, cp := range caps {
 		switch s, _ := cp.(string); s {
 		case "secret:*:*":
@@ -226,7 +227,12 @@ func TestOAuthEnrollFirstWithSlug(t *testing.T) {
 			hasKV = true
 		case "inspect:*:*":
 			hasInspect = true
+		case "package:*:*":
+			hasPackage = true
 		}
+	}
+	if !hasPackage {
+		t.Fatalf("owner caps missing package:*:*: %v", body["capabilities"])
 	}
 	if !hasSecret {
 		t.Fatalf("owner caps missing secret:*:*: %v", body["capabilities"])
@@ -259,6 +265,45 @@ func TestOAuthEnrollReservedSlug(t *testing.T) {
 	}
 	if got := detailStr(body, "suggested_tenant_slug"); got != "mankins" {
 		t.Fatalf("suggested = %q, want mankins (from github:mankins)", got)
+	}
+}
+
+// A sign-up may not take the platform's own names: the slug is the tenant's
+// namespace in the package registry.
+func TestOAuthEnrollPlatformSlug(t *testing.T) {
+	e := newOAuthTestEnv(t)
+	for _, slug := range []string{"txco", "TXCO", "txco-packages", "registry"} {
+		code, body := e.enroll(t, oauthEnrollRequest{
+			IDToken:    e.token(t, "github:mankins"),
+			PublicKey:  newEd25519B64(t),
+			TenantSlug: slug,
+		})
+		if code != http.StatusConflict || body["error"] != "tenant_slug_reserved" {
+			t.Fatalf("platform slug %q: status=%d error=%v, want 409 tenant_slug_reserved", slug, code, body["error"])
+		}
+		if got := detailStr(body, "suggested_tenant_slug"); got != "mankins" {
+			t.Fatalf("suggested = %q, want mankins", got)
+		}
+	}
+	if _, err := e.c.tenants.LookupBySlug(context.Background(), "txco"); err == nil {
+		t.Fatal("a refused sign-up created the txco tenant")
+	}
+}
+
+// An identity whose subject would suggest a platform name is offered a
+// random label, never the name.
+func TestOAuthSuggestionSkipsPlatformSlug(t *testing.T) {
+	e := newOAuthTestEnv(t)
+	code, body := e.enroll(t, oauthEnrollRequest{
+		IDToken:   e.token(t, "github:txco"),
+		PublicKey: newEd25519B64(t),
+	})
+	if code != http.StatusConflict || body["error"] != "tenant_slug_required" {
+		t.Fatalf("status=%d error=%v, want 409 tenant_slug_required", code, body["error"])
+	}
+	got := detailStr(body, "suggested_tenant_slug")
+	if got == "" || tenants.PlatformSlug(got) {
+		t.Fatalf("suggested = %q, want a non-platform label", got)
 	}
 }
 

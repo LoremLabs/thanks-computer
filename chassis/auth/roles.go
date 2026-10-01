@@ -20,11 +20,13 @@ const RoleTenantOwner = "tenant_owner"
 // the op-writable KV store (kv:*:read — list a namespace's keys via the admin
 // API), and the inspect inlet (inspect:*:* — ask the tenant's own _inspect
 // ops for structured state cards), and the notebook store (notebook:*:* —
-// read a tenant's own append-only records via the admin API). It
+// read a tenant's own append-only records via the admin API), and the tenant's
+// packages (package:*:* — publish to and read its own namespace in the
+// package registry). It
 // deliberately EXCLUDES chassis-wide
 // authority that an unverified tenant must not self-grant: notably dns:*:*
 // (delegated DNS zones confer DKIM/verified-sender/routing without ownership
 // proof — super-admin gated) and *:*:* (super-admin).
 func TenantOwnerCaps() []string {
-	return []string{"opstack:*:*", "stack:*:*", "hostname:*:*", "secret:*:*", "kv:*:*", "inspect:*:*", "notebook:*:*"}
+	return []string{"opstack:*:*", "stack:*:*", "hostname:*:*", "secret:*:*", "kv:*:*", "inspect:*:*", "notebook:*:*", "package:*:*"}
 }

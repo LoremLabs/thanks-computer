@@ -2,10 +2,10 @@
 
 # TxCo Packages
 
-A **package** lets you share an operational "department" — a stack of `.txcl` ops — and
+A **package** lets you share an operational "capability" — a stack of `.txcl` ops — and
 install it into another workspace. A package is an `OPS/`-shaped tree plus a
 `txco.package.yaml` manifest at its root. Distribute it from a public GitHub repo (zero
-infrastructure) or an OCI registry (auth, immutable digests, private repos).
+infrastructure) or an OCI registry (auth, immutable digests, per-publisher namespaces).
 
 ```
 support-basic/
@@ -22,19 +22,19 @@ support-basic/
 Consuming a package is part of the everyday workflow; authoring/publishing lives under
 `txco package`:
 
-| Command | Flow |
-|---|---|
-| `txco install <ref> --as <stack>` | registry/package → local `OPS/<stack>/` |
-| `txco apply` | local `OPS/` → chassis (active) |
-| `txco package init <name>` | scaffold a new package |
-| `txco package validate [<dir>]` | validate a package's manifest + tree |
-| `txco package inspect <ref>` | show identity + exports (`--provenance` to check the signature) |
-| `txco package pull <ref>` | fetch into `.txco/vendor/`, no install |
-| `txco package publish --to <oci-ref>` | build + push to a registry (`--sign` to sign) |
-| `txco package key generate` | make an ed25519 package-signing keypair |
-| `txco package list` | list installed packages (alias: `txco packages`) |
-| `txco package upgrade <stack>… \| --all` | re-resolve + re-materialize when a ref's content changed |
-| `txco package remove <stack>` | delete `OPS/<stack>/` + drop its lockfile entry |
+| Command                                  | Flow                                                            |
+| ---------------------------------------- | --------------------------------------------------------------- |
+| `txco install <ref> --as <stack>`        | registry/package → local `OPS/<stack>/`                         |
+| `txco apply`                             | local `OPS/` → chassis (active)                                 |
+| `txco package init <name>`               | scaffold a new package                                          |
+| `txco package validate [<dir>]`          | validate a package's manifest + tree                            |
+| `txco package inspect <ref>`             | show identity + exports (`--provenance` to check the signature) |
+| `txco package pull <ref>`                | fetch into `.txco/vendor/`, no install                          |
+| `txco package publish --to <oci-ref>`    | build + push to a registry (`--sign` to sign)                   |
+| `txco package key generate`              | make an ed25519 package-signing keypair                         |
+| `txco package list`                      | list installed packages (alias: `txco packages`)                |
+| `txco package upgrade <stack>… \| --all` | re-resolve + re-materialize when a ref's content changed        |
+| `txco package remove <stack>`            | delete `OPS/<stack>/` + drop its lockfile entry                 |
 
 Install **materializes then stops** — it writes reviewable files into `OPS/` and prints
 the next step. You review, wire any external ops (below), then `txco apply` to deploy.
@@ -45,14 +45,14 @@ Install never contacts a chassis.
 ```yaml
 apiVersion: thanks.computer/v1alpha1
 kind: Package
-name: support-basic            # IDENTITY only — registry/namespace are provenance, not here
+name: support-basic # IDENTITY only — registry/namespace are provenance, not here
 version: 0.1.0
 package:
   kind: department
   install:
     defaultMode: as-stack
     suggestedStack: support
-operations:                    # the op:// resolution contract — see §4
+operations: # the op:// resolution contract — see §4
   bundled:
     - name: classify
       path: OPS/support/0100_TRIAGE/classify.js
@@ -60,7 +60,7 @@ operations:                    # the op:// resolution contract — see §4
     - name: AUDIT
       kind: http
       example: https://audit.example.com/op
-capabilities: [http.fetch]     # advisory only — nothing enforces
+capabilities: [http.fetch] # advisory only — nothing enforces
 ```
 
 The manifest carries **identity** (`name` + `version`). The registry, namespace, and
@@ -79,7 +79,7 @@ Package content lives under `OPS/<stack>/<scope>/<name>.txcl`, exactly the shape
 
 Rules reference operations as `op://NAME`. Each ref resolves one of two ways:
 
-- **bundled** — a colocated `<name>.js`/`.ts` sibling next to the `.txcl`. It ships *with*
+- **bundled** — a colocated `<name>.js`/`.ts` sibling next to the `.txcl`. It ships _with_
   the package. List it under `operations.bundled`. Install lays it down; nothing to wire.
   At `txco apply`, the ref becomes `compute://sha256/<digest>`:
   - if the package shipped a prebuilt `<name>.wasm` (see §10), apply uses it directly — **no
@@ -118,12 +118,12 @@ lifecycle verbs and the local-edit guard.
 
 User-facing refs map to OCI references:
 
-| You type | Resolves to |
-|---|---|
-| `sales@v3` | `registry.thanks.computer/txco/sales:v3` (default registry + namespace) |
-| `acme/sales@v3` | `registry.thanks.computer/acme/sales:v3` (explicit namespace) |
-| `oci://ghcr.io/you/sales:v3` | used verbatim |
-| `oci://…@sha256:…` | pinned by digest |
+| You type                     | Resolves to                                                             |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| `sales@v3`                   | `registry.thanks.computer/txco/sales:v3` (default registry + namespace) |
+| `acme/sales@v3`              | `registry.thanks.computer/acme/sales:v3` (explicit namespace)           |
+| `oci://ghcr.io/you/sales:v3` | used verbatim                                                           |
+| `oci://…@sha256:…`           | pinned by digest                                                        |
 
 The default registry (`registry.thanks.computer`) and namespace (`txco`) are **baked in**,
 so bare refs work with zero config. Override them — or add aliases — in the **workspace**
@@ -138,8 +138,11 @@ registry:
     txco: registry.thanks.computer/txco
 ```
 
-Auth uses your docker credentials (`docker login ghcr.io`), or `TXCO_OCI_USERNAME` /
-`TXCO_OCI_PASSWORD`. Public pulls need no auth.
+On the default registry a **namespace is a tenant**: `acme/sales` is the package `sales`
+published by the tenant `acme`, and only `acme` can publish it (§10). `txco/` is the
+platform's own.
+
+Public pulls need no auth and contact no chassis. Publishing is covered in §10.
 
 ## 7. The lockfile (`txco.packages.lock.yaml`)
 
@@ -147,12 +150,12 @@ Install records provenance in a **committed** `txco.packages.lock.yaml` at the r
 
 ```yaml
 packages:
-  - ref: sales@v3                         # what you typed
-    registry: registry.thanks.computer    # provenance, from the resolved ref
+  - ref: sales@v3 # what you typed
+    registry: registry.thanks.computer # provenance, from the resolved ref
     namespace: txco
     name: sales
     version: 3.0.0
-    resolved: oci://registry.thanks.computer/txco/sales@sha256:…   # the digest pin
+    resolved: oci://registry.thanks.computer/txco/sales@sha256:… # the digest pin
     installedAs: sales
     mode: as-stack
     installedAt: "2026-05-31T12:00:00Z"
@@ -187,7 +190,7 @@ support-basic  0.1.0    support       as-stack  b2e046bde6e5  yes
 **Upgrade re-pulls whatever the recorded ref points to now.** A ref pinned to a fixed
 version (`sales@3.0.0`) stays put — `upgrade` reports "up to date"; a moving ref (`sales`,
 `sales@latest`) or a `dir:`/`github:` source picks up new content, re-materializes
-`OPS/<stack>/`, and re-pins the lockfile digest + version. To jump to a *different* version,
+`OPS/<stack>/`, and re-pins the lockfile digest + version. To jump to a _different_ version,
 re-install over the stack: `txco install sales@4.0.0 --as sales`. `--all` upgrades every
 installed stack and continues past any that fail, reporting a summary.
 
@@ -216,6 +219,41 @@ txco package publish --to oci://ghcr.io/you/sales:3.0.0 ./packages/sales
 
 Publish validates, packs the tree into a single-layer OCI artifact, pushes it, and prints
 the resolved digest. Tags are convenience; the digest is truth.
+
+### Who may publish where
+
+A package is published as `<namespace>/<name>`. What signs you in depends on the registry:
+
+| Registry                               | You are signed in by                                       |
+| -------------------------------------- | ---------------------------------------------------------- |
+| `registry.thanks.computer`             | your **txco profile** (`txco login`): no registry password |
+| any other (GHCR, Docker Hub, your own) | docker credentials (`docker login ghcr.io`)                |
+| either, overridden                     | `TXCO_OCI_USERNAME` / `TXCO_OCI_PASSWORD`                  |
+
+On `registry.thanks.computer`:
+
+- **Your namespace is your tenant's name.** Signed in to the tenant `acme`, you publish
+  `oci://registry.thanks.computer/acme/<name>:<tag>` and nothing outside `acme/`. A name may
+  be a path (`acme/tools/web`); the tenant is always its first segment.
+- **It takes the `package:*:push` capability** on that tenant. A tenant's owner has it
+  (`package:*:*`; an owner enrolled before it existed picks it up at the next `txco login`).
+  Invite a teammate with `package:*:push` to let them publish.
+- **The profile is chosen for you**: the one whose tenant is the namespace you are
+  publishing to, else your active profile. `--profile <name>` (or `TXCO_PROFILE`) says
+  otherwise.
+- **Nothing long-lived is stored.** Each push asks the chassis for a token that names that
+  one repository and lasts five minutes
+  ([`POST /registry/token`](./admin-api.md#registry-tokens)).
+- **`docker push` and `oras push` do not work** against it: there is no password to give
+  them. `txco package publish` is the way in. Pulling with any OCI tool still works.
+- **Names you cannot take.** `txco`, `txco-…`, `library`, `official`, `registry` and a few
+  like them are the platform's: a sign-up cannot claim one as a tenant name, so nobody can
+  publish as the platform by being called it.
+- **Tags can be overwritten by their publisher, and nothing is deleted.** Pin by digest (the
+  lockfile does) and require a signature (§11) where it matters.
+- **Every package there is public.** Private packages are not offered yet.
+
+A registry on this machine (`localhost`, `127.0.0.1`) is spoken to over plain HTTP.
 
 **Prebuilt wasm.** Publish auto-builds each bundled compute (`<name>.js` → `<name>.wasm`)
 into the published artifact — fetching the pinned `javy` toolchain automatically if it isn't
@@ -299,4 +337,70 @@ A package is a standard OCI artifact:
 - **artifactType** = `application/vnd.thanks.computer.package.v1alpha1`.
 
 Any OCI registry (GHCR, Docker Hub, ECR, Harbor, self-hosted) can store it; standard tools
-(`oras`) can inspect it. 
+(`oras`) can inspect it.
+
+## 13. Running a registry your tenants publish to
+
+Any registry works with docker credentials. To give each tenant of a chassis its own
+namespace instead of sharing one password, make the chassis the registry's **token
+service** — the arrangement `registry.thanks.computer` runs:
+
+```text
+ txco ──► edge ──┬─ GET / HEAD ───────► registry  (read-only, no auth)   public pulls
+                 └─ everything else ──► registry  (token auth)           pushes
+ txco ──► chassis admin   POST /v1/tenants/{t}/registry/token            signs the token
+```
+
+1. **A key and a certificate**, once. The certificate is all the registry knows of the
+   chassis; the key never leaves the chassis.
+
+   ```sh
+   openssl ecparam -name prime256v1 -genkey -noout -out token.key
+   openssl req -x509 -new -key token.key -days 3650 -subj "/CN=registry tokens" -out root.crt
+   ```
+
+2. **The registry** ([CNCF Distribution](https://distribution.github.io/distribution/), 2.8
+   or 3.x) with token auth, trusting that certificate:
+
+   ```yaml
+   auth:
+     token:
+       realm: https://admin.example.com/v1/registry/token # shown in challenges; txco does not use it
+       service: registry.example.com
+       issuer: https://admin.example.com
+       rootcertbundle: /etc/registry-token/root.crt
+   ```
+
+   Token auth is all or nothing, so for anonymous pulls run a **second** registry process on
+   the same storage with no `auth` and `storage.maintenance.readonly.enabled: true`, and
+   route `GET`/`HEAD` (except `*/blobs/uploads/*` and `/v2/_catalog`) to it. A request that
+   reaches the wrong one fails closed: the read-only process has no write handlers, the
+   other demands a token.
+
+3. **The chassis**, which mints only when all four are set:
+
+   | Flag (`TXCO_…` env)                    | What                                                                   |
+   | -------------------------------------- | ---------------------------------------------------------------------- |
+   | `--registry-token-key` / `-key-b64`    | the PEM private key (P-256), as a path or base64                       |
+   | `--registry-token-cert` / `-cert-b64`  | the certificate, the same bytes as the registry's `rootcertbundle`     |
+   | `--registry-token-issuer`              | the registry's `auth.token.issuer`                                     |
+   | `--registry-token-service`             | the registry's `auth.token.service`: its `host[:port]`                 |
+   | `--registry-token-ttl`                 | token lifetime in seconds (300; 60–900)                                |
+   | `--registry-token-platform-namespaces` | `namespace=tenant_id` pairs: the tenant that owns a reserved name      |
+
+   A reserved name (`txco`, `library`, …) is granted only to the tenant **ID** pinned here,
+   never to whichever tenant holds the slug.
+
+4. **The registry says who its token service is**, so the CLI can find it:
+
+   ```text
+   GET https://registry.example.com/.well-known/txco-registry.json
+   {"token_service": "https://admin.example.com"}
+   ```
+
+   `txco` follows it only to an `https` chassis you already have a profile for, and the
+   chassis refuses a request that names any registry but its own — so a registry cannot
+   talk the CLI into fetching a token for somewhere else.
+
+`scripts/registry-token-e2e.sh` stands the whole arrangement up on localhost (two registry
+containers, Caddy, a dev chassis) and checks it end to end.

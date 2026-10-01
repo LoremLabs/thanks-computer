@@ -53,7 +53,7 @@ func fetchRegistrySigningKeys(ctx context.Context, registryHost string) []sign.T
 	if registryHost == "" || os.Getenv("TXCO_NO_KEY_DISCOVERY") != "" {
 		return nil
 	}
-	url := "https://" + registryHost + signingKeysWellKnownPath
+	url := registryBaseURL(registryHost) + signingKeysWellKnownPath
 	keys, _ := fetchSigningKeysFrom(ctx, http.DefaultClient, url, registryHost)
 	return keys
 }
