@@ -210,7 +210,7 @@ func matchAnyGlob(globs []string, rel, base string) bool {
 }
 
 // relevantExt: the op text, its mocks, and the declarations that ride the
-// same draft (OUTLETS/, SANDBOXES/ and DATASETS/ manifests are .yaml).
+// same draft (OUTLETS/, SANDBOXES/, CAPS/ and DATASETS/ manifests are .yaml).
 func relevantExt(p string) bool {
 	ext := strings.ToLower(filepath.Ext(p))
 	return ext == ".txcl" || ext == ".json" || ext == ".yaml"

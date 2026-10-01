@@ -80,6 +80,11 @@ Flags:
 	for _, m := range checkSandboxDecls(ops, dir) {
 		diags = append(diags, bundle.Diag{Msg: "sandbox: " + m})
 	}
+	// Capability check: every CAPS/ declaration parses and its entry names a
+	// scope of the stack (chassis/capdecl). Errors for the same reason.
+	for _, m := range checkCapDecls(ops, dir) {
+		diags = append(diags, bundle.Diag{Msg: "cap: " + m})
+	}
 
 	// Reuse apply's static loop-shape lint (unconditional self-loops /
 	// 2-stack ping-pongs). Warnings only, same conservative semantics as

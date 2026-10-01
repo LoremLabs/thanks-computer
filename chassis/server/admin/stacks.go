@@ -27,6 +27,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
+	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
@@ -435,7 +436,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES":
+		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS":
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -525,6 +526,19 @@ func validateStackFilePath(p string) error {
 		if sandbox.Name(p) == "" {
 			return fmt.Errorf("sandbox declarations must be a single <name>%s file directly under %s/, name matching [a-z][a-z0-9_-]* (got %q)",
 				sandbox.DeclExt, sandbox.Dir, p)
+		}
+		return nil
+	}
+
+	// CAPS/<name>.yaml declares a capability this stack answers
+	// (chassis/capdecl). Same shape, with a capability's dotted name;
+	// contents, the entry scope and the name's uniqueness across the
+	// tenant's active stacks are checked at validate/activate
+	// (deepValidateCaps).
+	if capdecl.IsCapPath(p) {
+		if capdecl.Name(p) == "" {
+			return fmt.Errorf("capability declarations must be a single <name>%s file directly under %s/, name lowercase words joined by dots, such as crm.lookup (got %q)",
+				capdecl.DeclExt, capdecl.Dir, p)
 		}
 		return nil
 	}
@@ -1727,7 +1741,8 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			storeseed.KindForPath(f.Path) == "" &&
 			!dataset.IsDatasetPath(f.Path) &&
 			!outlet.IsOutletPath(f.Path) &&
-			!sandbox.IsSandboxPath(f.Path) {
+			!sandbox.IsSandboxPath(f.Path) &&
+			!capdecl.IsCapPath(f.Path) {
 			writeJSONError(w, http.StatusBadRequest, "encoding_not_allowed",
 				map[string]any{"index": i, "path": f.Path, "encoding": f.Encoding,
 					"hint": "base64/cas encodings are for FILES/, VECTORS/, KV/ and DATASETS/ assets; op files are plain UTF-8 strings"})
@@ -2163,7 +2178,7 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 			// this materialises nothing for them; an inline-pushed member (a
 			// small artifact via the raw API, or the .yaml manifest) gets the
 			// same CAS treatment as FILES/.
-			if (strings.HasPrefix(rf.path, "FILES/") || dataset.IsDatasetPath(rf.path) || outlet.IsOutletPath(rf.path) || sandbox.IsSandboxPath(rf.path)) && rf.content != "" {
+			if (strings.HasPrefix(rf.path, "FILES/") || dataset.IsDatasetPath(rf.path) || outlet.IsOutletPath(rf.path) || sandbox.IsSandboxPath(rf.path) || capdecl.IsCapPath(rf.path)) && rf.content != "" {
 				assets[rf.path] = rf.content
 			}
 		}
@@ -2203,6 +2218,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 		if sandbox.IsSandboxPath(rf.path) {
 			continue // sandbox declaration → read by txco://delegate/mint at run time, not an ops row
+		}
+		if capdecl.IsCapPath(rf.path) {
+			continue // capability declaration → read by the capability inlet at run time, not an ops row
 		}
 		pf, ok := parseStackPath(rf.path)
 		if !ok {
@@ -2499,6 +2517,13 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				writeJSONError(w, http.StatusUnprocessableEntity, "sandbox_invalid", issuesDetail(issues, sandboxIssuesHint))
 				return
 			}
+			// Capability gate: every declaration parses, its entry names a
+			// scope of this version, and no other active stack of the tenant
+			// declares the same name.
+			if issues := c.deepValidateCaps(r.Context(), ac.TenantID, stackID, versionID); len(issues) > 0 {
+				writeJSONError(w, http.StatusUnprocessableEntity, "cap_invalid", issuesDetail(issues, capIssuesHint))
+				return
+			}
 		}
 	}
 	// Lookup failures fall through: materialiseStackVersion re-runs both
@@ -2531,7 +2556,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		// activate is never published. Mirrors the in-tx loop's coverage
 		// exactly: rule bodies only — not FILES/, packs, datasets, mocks.
 		for _, f := range files {
-			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) {
+			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) || capdecl.IsCapPath(f.Path) {
 				continue
 			}
 			pf, ok := parseStackPath(f.Path)
@@ -2863,6 +2888,13 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 	}
 	// Sandbox gate — every declaration parses.
 	for _, issue := range c.deepValidateSandboxes(r.Context(), versionID) {
+		resp.OK = false
+		resp.Checked++
+		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})
+	}
+	// Capability gate — every declaration parses, names a scope of this
+	// version, and a name no other active stack of the tenant declares.
+	for _, issue := range c.deepValidateCaps(r.Context(), ac.TenantID, stackID, versionID) {
 		resp.OK = false
 		resp.Checked++
 		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})

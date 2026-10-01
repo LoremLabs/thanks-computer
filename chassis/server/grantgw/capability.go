@@ -27,7 +27,8 @@ import (
 //     `http`, the call's input under `@grant.input` — and may allow, refuse
 //     or HOLD it (`@grant.res.hold`: a person decides later).
 //  4. THE VERDICT. Allowed: one request is charged to the grant, and the
-//     caller (chassis/server/capgw) runs the tenant's `_cap` stack.
+//     caller (chassis/server/capgw) runs the stack that declares the
+//     capability (CAPS/<name>.yaml), or the tenant's `_cap` stack.
 //
 // The chassis does not know what a capability does: that is the `_cap`
 // stack's. It knows only whether this run may ask for it now.
@@ -120,10 +121,15 @@ func (g *Gateway) Invoke(ctx context.Context, c Call) Verdict {
 		return v.refused(reason)
 	}
 
-	// The chassis's own reading of the call. A capability has no row of
-	// its own yet: the standing grant is its declaration, and a stack's
-	// CAPS/ come later — so `exists` and `pull` hold, and the allowlist,
-	// the standing grant and the budget decide.
+	// The chassis's own reading of the call. `exists` and `pull` hold: the
+	// allowlist, the standing grant and the budget decide. A stack declares
+	// who ANSWERS a capability (CAPS/<name>.yaml, chassis/capdecl), and the
+	// inlet routes by it, but `exists` is not read from the declarations
+	// yet: an undeclared name still reaches the tenant's `_cap` stack, the
+	// router written before declarations existed, and a tenant between the
+	// two must not have every call refused. Once no tenant routes through
+	// `_cap`, the inlet answers 404 for an undeclared name before it asks
+	// here at all.
 	standing, err := g.ids.Granted(ctx, grant.TenantID, grant.Principal, res, res.Verb())
 	if err != nil {
 		g.log.Warn("grant: reading the standing grant failed", append(fields, zap.Error(err))...)

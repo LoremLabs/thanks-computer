@@ -4,13 +4,16 @@
 // its behalf: call a model, note a card, finish the run. The request
 // carries the run's grant as a token (Txco-Run-Grant) and the call's input
 // as JSON; the grant gateway decides it (chassis/server/grantgw.Invoke) and,
-// when it is allowed, the tenant's `_cap` stack runs it as an ordinary
-// pipeline run (`@src == "cap"`, the call at `@cap.*`) and answers at the
-// top-level `_cap.output` — or `_cap.error {code, message}`.
+// when it is allowed, the stack that DECLARES the capability runs it as an
+// ordinary pipeline run (`@src == "cap"`, the call at `@cap.*`), entered at
+// the scope its declaration names (CAPS/<name>.yaml, chassis/capdecl), and
+// answers at the top-level `_cap.output` — or `_cap.error {code, message}`.
+// A name no active stack declares still runs the tenant's `_cap` stack from
+// its first scope: the router a tenant wrote before declarations existed.
 //
 // The inlet owns the transport and the identity; the stacks own the
-// policy (`_grant`) and the work (`_cap`). The chassis does not know what a
-// capability does.
+// policy (`_grant`) and the work (the declaring stack). The chassis does
+// not know what a capability does.
 //
 // Answers, always JSON. The decision is answered with its status:
 //
@@ -21,14 +24,14 @@
 //	503 {"ok":false,"error":{"code":"unavailable"}}    the chassis could not decide
 //
 // An ALLOWED call answers 200 at once — headers sent and flushed before the
-// `_cap` run starts — and the body when the run ends. A model call can take
+// capability's run starts — and the body when the run ends. A model call can take
 // a minute; a proxy on the way (the fleet's edge allows 20 s for response
 // headers) must see headers, and then bytes: until the body, the inlet
 // writes one space every keepalive interval. So what the run came to is in
 // the body, with the status it would otherwise have carried:
 //
 //	200 {"ok":true,"output":…}
-//	200 {"ok":false,"error":{"code":"no_capability","status":404}}        no `_cap` rule answered
+//	200 {"ok":false,"error":{"code":"no_capability","status":404}}        no rule answered
 //	200 {"ok":false,"error":{"code":…,"message":…,"status":422}}         the stack's own error
 //	200 {"ok":false,"error":{"code":"timeout","status":504}}             the run passed its ceiling
 //	200 {"ok":false,"error":{"code":"unavailable","status":503}}         the run failed, or the tenant could not be routed
@@ -52,6 +55,7 @@ import (
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
@@ -71,8 +75,8 @@ const (
 	CallerRIDHeader = "Txco-Caller-Rid"
 
 	defaultMaxBody = 4 << 20
-	// keepalive is how often a space goes to the client while the `_cap`
-	// run is still running; well under any proxy's idle limit.
+	// keepalive is how often a space goes to the client while the
+	// capability's run is still running; well under any proxy's idle limit.
 	keepalive = 10 * time.Second
 )
 
@@ -80,16 +84,27 @@ const (
 type Gateway struct {
 	ctx     context.Context
 	log     *zap.Logger
-	maxWait time.Duration // the `_cap` run's ceiling (OpTimeoutMax)
+	maxWait time.Duration // the run's ceiling (OpTimeoutMax)
 	maxBody int64
 
 	// Seams for tests; New wires the real ones.
 	invoke func(ctx context.Context, c grantgw.Call) grantgw.Verdict
 	run    func(ctx context.Context, payload string) (string, error)
+	// lookup finds the stack that declares a capability; nil routes every
+	// call to the tenant's `_cap` stack.
+	lookup func(ctx context.Context, tenant, name string) (string, *capdecl.Decl, error)
 }
 
-// New builds the inlet over the grant gateway and the processor's bus.
-func New(ctx context.Context, pu *processor.Unit, grants *grantgw.Gateway) *Gateway {
+// Decls is where the inlet finds who answers a capability: the tenant's
+// active stack that declares the name, and the declaration. It answers
+// capdecl.ErrNotDeclared for a name no active stack declares.
+type Decls interface {
+	Lookup(ctx context.Context, tenant, name string) (stack string, d *capdecl.Decl, err error)
+}
+
+// New builds the inlet over the grant gateway, the capability declarations
+// and the processor's bus. A nil decls routes every call to `_cap`.
+func New(ctx context.Context, pu *processor.Unit, grants *grantgw.Gateway, decls Decls) *Gateway {
 	maxWait, err := time.ParseDuration(pu.Conf.OpTimeoutMax)
 	if err != nil || maxWait <= 0 {
 		maxWait = 10 * time.Minute
@@ -103,6 +118,9 @@ func New(ctx context.Context, pu *processor.Unit, grants *grantgw.Gateway) *Gate
 		g.log = zap.NewNop()
 	}
 	g.invoke = grants.Invoke
+	if decls != nil {
+		g.lookup = decls.Lookup
+	}
 	life := ctx
 	g.run = func(ctx context.Context, payload string) (string, error) {
 		return grantgw.RunOnBus(ctx, life, pu.Bus, payload)
@@ -250,6 +268,28 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Who answers: the active stack that declares the name, entered at the
+	// scope its declaration names. The route is the inlet's to stamp —
+	// detect-tenant has no declarations to read — and a declared timeout can
+	// only shorten the wait. A name nobody declares goes to `_cap`.
+	wait := g.maxWait
+	var implStack, implTo string
+	if g.lookup != nil {
+		switch stack, d, lerr := g.lookup(r.Context(), v.Tenant, name); {
+		case lerr == nil:
+			implStack, implTo = stack, d.Stage(stack)
+			if t := d.TimeoutDuration(); t > 0 && t < wait {
+				wait = t
+			}
+		case errors.Is(lerr, capdecl.ErrNotDeclared):
+		default:
+			g.log.Warn("cap: the capability's declaration could not be read",
+				zap.String("tenant", v.Tenant), zap.String("capability", name), zap.Error(lerr))
+			fail(w, http.StatusServiceUnavailable, "unavailable", "")
+			return
+		}
+	}
+
 	rid := hxid.NewTimeSort().String()
 	w.Header().Set("X-Request-ID", rid)
 	pb := jsonx.New()
@@ -272,6 +312,10 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	if caller := strings.TrimSpace(r.Header.Get(CallerRIDHeader)); caller != "" && len(caller) <= 64 {
 		pb.Set("_txc.cap.caller.rid", caller)
 	}
+	if implTo != "" {
+		pb.Set("_txc.cap.impl.stack", implStack)
+		pb.Set("_txc.cap.impl.to", implTo)
+	}
 	pb.SetRaw("_txc.cap.input", string(input))
 	pb.Set("_ts", start.UTC().Format(time.RFC3339))
 
@@ -279,9 +323,9 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	// run ends. From here every failure is in the body, with its status.
 	e := startEarly(w)
 
-	// The `_cap` run: a context of its own, off the inlet's, with the
+	// The capability's run: a context of its own, off the inlet's, with the
 	// caller's rid; it ends when the caller goes away and at the ceiling.
-	rctx, cancel := context.WithTimeout(g.ctx, g.maxWait)
+	rctx, cancel := context.WithTimeout(g.ctx, wait)
 	rctx = context.WithValue(rctx, config.CtxKeyRid, rid)
 	stop := context.AfterFunc(r.Context(), cancel)
 	final, runErr := g.run(rctx, pb.String())
@@ -292,15 +336,15 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	fields := []zap.Field{
 		zap.String("rid", rid), zap.String("tenant", v.Tenant), zap.String("capability", name),
 		zap.String("run", v.Grant.Run), zap.String("grant", v.Grant.ID),
-		zap.Duration("took", time.Since(start)),
+		zap.String("impl", implTo), zap.Duration("took", time.Since(start)),
 	}
 	switch {
 	case timedOut:
-		g.log.Warn("cap: the _cap run timed out", fields...)
+		g.log.Warn("cap: the run timed out", fields...)
 		e.fail(http.StatusGatewayTimeout, "timeout", "")
 		return
 	case runErr != nil:
-		g.log.Warn("cap: the _cap run failed", append(fields, zap.Error(runErr))...)
+		g.log.Warn("cap: the run failed", append(fields, zap.Error(runErr))...)
 		e.fail(http.StatusServiceUnavailable, "unavailable", "")
 		return
 	}
@@ -327,7 +371,11 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 		g.log.Info("cap: answered", fields...)
 		e.finish(answer{OK: true, Output: json.RawMessage(f[3].Raw)})
 	default:
-		g.log.Info("cap: no _cap rule answered", fields...)
-		e.fail(http.StatusNotFound, "no_capability", "no rule in the tenant's _cap stack answered "+name)
+		g.log.Info("cap: no rule answered", fields...)
+		where := "the tenant's _cap stack"
+		if implTo != "" {
+			where = implTo + " (the declaring stack's entry)"
+		}
+		e.fail(http.StatusNotFound, "no_capability", "no rule in "+where+" answered "+name)
 	}
 }

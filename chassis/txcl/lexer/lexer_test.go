@@ -154,6 +154,30 @@ func TestRegex(t *testing.T) {
 	}
 }
 
+// Consecutive escaped slashes stay inside the literal: `\/\/` is two
+// slashes of the pattern, not one and then the literal's end.
+func TestRegexConsecutiveEscapedSlashes(t *testing.T) {
+	l := lexer.New(`WHEN .u =~ /^https?:\/\/[^\s\/]+\/\/\/x$/ && .v !~ /a\/\//`)
+	for _, tt := range []struct {
+		ty  token.TokenType
+		lit string
+	}{
+		{token.WHEN, "WHEN"},
+		{token.BRANCH, ".u"},
+		{token.MATCH, "=~"},
+		{token.REGEX, `^https?://[^\s/]+///x$`},
+		{token.LAND, "&&"},
+		{token.BRANCH, ".v"},
+		{token.NO_MATCH, "!~"},
+		{token.REGEX, `a//`},
+		{token.EOF, ""},
+	} {
+		tok := l.NextToken()
+		test.Equals(t, tt.ty, tok.Type)
+		test.Equals(t, tt.lit, tok.Literal)
+	}
+}
+
 func TestEndBranch(t *testing.T) {
 	input := `.t`
 	l := lexer.New(input)

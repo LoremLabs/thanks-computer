@@ -1434,6 +1434,54 @@ func (c *Client) ListHostnames(ctx context.Context, history bool) ([]Hostname, e
 	return out.Hostnames, nil
 }
 
+// CapInput is one input a capability takes.
+type CapInput struct {
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// Cap is one capability of the tenant's catalogue: what an active stack
+// declares under CAPS/ (chassis/capdecl). Err is set, and the declaration's
+// fields are empty, when the active row does not parse.
+type Cap struct {
+	Name        string              `json:"name"`
+	Stack       string              `json:"stack"`
+	Entry       int                 `json:"entry"`
+	Stage       string              `json:"stage"`
+	Description string              `json:"description,omitempty"`
+	Input       map[string]CapInput `json:"input,omitempty"`
+	Timeout     int                 `json:"timeout,omitempty"`
+	Err         string              `json:"err,omitempty"`
+}
+
+type listCapsResponse struct {
+	Caps []Cap `json:"caps"`
+}
+
+// ListCaps returns the target tenant's capability catalogue, by name.
+func (c *Client) ListCaps(ctx context.Context) ([]Cap, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.scopedURL("/caps"), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out listCapsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode list caps: %w", err)
+	}
+	return out.Caps, nil
+}
+
 // AddHostname claims a hostname for the target tenant against a
 // specific stack. Server canonicalizes the hostname (lowercase, port-
 // stripped, trailing-dot-stripped) so the returned row may differ

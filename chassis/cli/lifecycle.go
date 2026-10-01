@@ -397,15 +397,18 @@ from %s. Use --keep-files to drop only the lockfile entry.
 			return 1
 		}
 	}
+	// The name is read before Remove: e points into the slice Remove shifts,
+	// so after it e names whichever entry moved into its place.
+	name := e.Name
 	lf.Remove(stack)
 	if err := lockfile.Write(root, lf); err != nil {
 		fmt.Fprintf(stderr, "package remove: %v\n", err)
 		return 1
 	}
 	if *keepFiles {
-		fmt.Fprintf(stdout, "removed %s from the lockfile (OPS/%s/ kept)\n", e.Name, stack)
+		fmt.Fprintf(stdout, "removed %s from the lockfile (OPS/%s/ kept)\n", name, stack)
 	} else {
-		fmt.Fprintf(stdout, "removed %s and deleted OPS/%s/\n", e.Name, stack)
+		fmt.Fprintf(stdout, "removed %s and deleted OPS/%s/\n", name, stack)
 	}
 	return 0
 }

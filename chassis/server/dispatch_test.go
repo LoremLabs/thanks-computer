@@ -698,3 +698,43 @@ func TestDetectTenantBodyCap(t *testing.T) {
 		t.Errorf("cap body w/o tenant = %q, want {} (resolver miss)", body)
 	}
 }
+
+// TestDetectTenantBodyCapDeclared: when the inlet stamped the stack that
+// declares the capability and the scope its declaration names, the route is
+// into that stack at that scope; an impl that is not a scope of the stack it
+// names is not believed and the call goes to _cap/0.
+func TestDetectTenantBodyCapDeclared(t *testing.T) {
+	resolver := &stubResolver{hit: false}
+	body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"cap","cap":{"tenant":"acme","name":"card.note","impl":{"stack":"loop","to":"loop/7000"}}}}`))
+	for path, want := range map[string]string{
+		"_txc.route.to": "loop/7000", "_txc.route.tenant": "acme", "_txc.route.stack": "loop", "_txc.route.ingress": "cap",
+	} {
+		if got := gjson.Get(body, path).String(); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	if !gjson.Get(body, "_txc.route.hostname_verified").Bool() {
+		t.Errorf("a capability route is verified by its grant: %s", body)
+	}
+	if gjson.Get(body, "_txc.tenant").Exists() || gjson.Get(body, "_txc.goto").Exists() {
+		t.Errorf("detect must stay decide-only (no _txc.tenant/_txc.goto)")
+	}
+	// A nested stack's entry.
+	body = detectTenantBody(resolver, []byte(`{"_txc":{"src":"cap","cap":{"tenant":"acme","impl":{"stack":"core/tools","to":"core/tools/2007"}}}}`))
+	if got := gjson.GetMany(body, "_txc.route.stack", "_txc.route.to"); got[0].String() != "core/tools" || got[1].String() != "core/tools/2007" {
+		t.Errorf("nested stack: %s", body)
+	}
+	for name, impl := range map[string]string{
+		"another stack's scope": `{"stack":"loop","to":"billing/7000"}`,
+		"a prefix, not a stack": `{"stack":"loop","to":"loopy/7000"}`,
+		"no scope":              `{"stack":"loop","to":"loop/"}`,
+		"not a scope":           `{"stack":"loop","to":"loop/run"}`,
+		"no stack":              `{"to":"loop/7000"}`,
+		"no entry":              `{"stack":"loop"}`,
+	} {
+		body := detectTenantBody(resolver, []byte(`{"_txc":{"src":"cap","cap":{"tenant":"acme","impl":`+impl+`}}}`))
+		if got := gjson.GetMany(body, "_txc.route.stack", "_txc.route.to"); got[0].String() != "_cap" || got[1].String() != "_cap/0" {
+			t.Errorf("%s: routed to %s %s, want _cap _cap/0", name, got[0], got[1])
+		}
+	}
+}

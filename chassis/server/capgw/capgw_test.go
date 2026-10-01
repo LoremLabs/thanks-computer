@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/authn"
+	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/server/grantgw"
 )
 
@@ -193,6 +194,82 @@ func TestHandleRunOutcomes(t *testing.T) {
 	var a answer
 	if err := json.Unmarshal([]byte(`{"ok":false,"error":{"code":"x","status":422}}`), &a); err != nil || a.OK || a.Error.Code != "x" || a.Error.Status != 422 {
 		t.Errorf("answer shape: %+v %v", a, err)
+	}
+}
+
+// A declared capability is routed to the stack that declares it, at the
+// scope the declaration names; an undeclared one is left to `_cap`; a
+// declaration that cannot be read is refused before any headers go out.
+func TestHandleRoutesByDeclaration(t *testing.T) {
+	f := newFake(t)
+	f.verdict = allowed()
+	decls := map[string]*capdecl.Decl{
+		"card.note": {Entry: 7000},
+		"slow.one":  {Entry: 7100, Timeout: 20},
+		"long.one":  {Entry: 7200, Timeout: 3600000},
+	}
+	var asked []string
+	f.g.lookup = func(_ context.Context, tenant, name string) (string, *capdecl.Decl, error) {
+		asked = append(asked, tenant+"/"+name)
+		if name == "broken.one" {
+			return "", nil, errors.New("capability declaration: entry is required")
+		}
+		d, ok := decls[name]
+		if !ok {
+			return "", nil, capdecl.ErrNotDeclared
+		}
+		return "loop", d, nil
+	}
+	f.answer = func(env string) (string, error) {
+		out, _ := sjson.SetRaw(env, "_cap.output", `{"ok":true}`)
+		return out, nil
+	}
+
+	// Declared: the implementing stack and its entry ride the envelope.
+	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusOK || !gjson.Get(w.Body.String(), "ok").Bool() {
+		t.Fatalf("declared: %d %s", w.Code, w.Body.String())
+	}
+	if got := gjson.GetMany(f.seen[0], "_txc.cap.impl.stack", "_txc.cap.impl.to", "_txc.cap.name"); got[0].String() != "loop" || got[1].String() != "loop/7000" || got[2].String() != "card.note" {
+		t.Errorf("impl keys = %v", got)
+	}
+	if len(asked) != 1 || asked[0] != "acme/card.note" {
+		t.Errorf("lookup asked %v, want the verdict's tenant and the name", asked)
+	}
+
+	// Undeclared: no impl keys; detect-tenant routes it to `_cap`.
+	if w := f.post(t, "legacy.thing", "rg1.tok", `{}`); w.Code != http.StatusOK || !gjson.Get(w.Body.String(), "ok").Bool() {
+		t.Fatalf("undeclared: %d %s", w.Code, w.Body.String())
+	}
+	if gjson.Get(f.seen[1], "_txc.cap.impl").Exists() {
+		t.Errorf("an undeclared capability must carry no impl: %s", gjson.Get(f.seen[1], "_txc.cap").Raw)
+	}
+
+	// The declaration could not be read: 503 with its own status, and the
+	// capability's run never starts.
+	ran := len(f.seen)
+	if w := f.post(t, "broken.one", "rg1.tok", `{}`); w.Code != http.StatusServiceUnavailable || code(w) != "unavailable" {
+		t.Errorf("unreadable declaration: %d %s", w.Code, w.Body.String())
+	}
+	if len(f.seen) != ran {
+		t.Error("an unreadable declaration must not run anything")
+	}
+
+	// A declared timeout shortens the wait; one past the ceiling does not
+	// lengthen it.
+	f.answer = func(string) (string, error) { time.Sleep(80 * time.Millisecond); return "", context.DeadlineExceeded }
+	if w := f.post(t, "slow.one", "rg1.tok", `{}`); w.Code != http.StatusOK || code(w) != "timeout" || status(w) != http.StatusGatewayTimeout {
+		t.Errorf("declared timeout: %d %s", w.Code, w.Body.String())
+	}
+	f.g.maxWait = 20 * time.Millisecond
+	if w := f.post(t, "long.one", "rg1.tok", `{}`); code(w) != "timeout" {
+		t.Errorf("the ceiling still applies: %d %s", w.Code, w.Body.String())
+	}
+
+	// No rule answered at the declared entry: the message names it.
+	f.g.maxWait = time.Second
+	f.answer = nil
+	if w := f.post(t, "card.note", "rg1.tok", `{}`); code(w) != "no_capability" || !strings.Contains(gjson.Get(w.Body.String(), "error.message").String(), "loop/7000") {
+		t.Errorf("no answer at the entry: %s", w.Body.String())
 	}
 }
 

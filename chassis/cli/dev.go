@@ -24,6 +24,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
@@ -656,7 +657,7 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
 		}
 		files = append(files, packs...)
-		// SOURCES/, OUTLETS/ and SANDBOXES/ are code and ride the same draft
+		// SOURCES/, OUTLETS/, SANDBOXES/ and CAPS/ are code and ride the same draft
 		// as they do on `txco apply` (apply.go); leaving them out here made
 		// dev drop a stack's source declarations on every upload.
 		srcPacks, serr := collectSourcePacks(filepath.Join(dir, "OPS", stack))
@@ -674,6 +675,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect SANDBOXES/: %w", stack, sberr)
 		}
 		files = append(files, sandboxFiles...)
+		capFiles, cperr := collectCapFiles(filepath.Join(dir, "OPS", stack))
+		if cperr != nil {
+			return fmt.Errorf("%s: collect CAPS/: %w", stack, cperr)
+		}
+		files = append(files, capFiles...)
 		dsFiles, dsUploads, derr := collectDatasetFiles(filepath.Join(dir, "OPS", stack))
 		if derr != nil {
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
@@ -1013,6 +1019,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			return fmt.Errorf("%s: collect SANDBOXES/: %w", stack, sberr)
 		}
 		files = append(files, sandboxFiles...)
+		capFiles, cperr := collectCapFiles(stackDir)
+		if cperr != nil {
+			return fmt.Errorf("%s: collect CAPS/: %w", stack, cperr)
+		}
+		files = append(files, capFiles...)
 		dsFiles, dsUploads, derr := collectDatasetFiles(stackDir)
 		if derr != nil {
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
@@ -1069,7 +1080,7 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
 	}
 	// Asset half: stat-only walk of the same trees the collectors read.
-	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, storeseed.DirSources, outlet.Dir, sandbox.Dir, dataset.Dir} {
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, storeseed.DirSources, outlet.Dir, sandbox.Dir, capdecl.Dir, dataset.Dir} {
 		treeDir := filepath.Join(stackDir, top)
 		info, err := os.Stat(treeDir)
 		if err != nil || !info.IsDir() {

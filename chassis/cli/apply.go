@@ -473,6 +473,14 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		}
 		return 1
 	}
+	// Capability check — every CAPS/ declaration of every stack parses and
+	// its entry names a scope of the stack. Errors too.
+	if cerrs := checkCapDecls(ops, dir); len(cerrs) > 0 {
+		for _, m := range cerrs {
+			fmt.Fprintf(stderr, "%s: capability error at %s\n", cmd, m)
+		}
+		return 1
+	}
 
 	// Apply-time lint for unconditional loop shapes (self-loops and
 	// 2-stack ping-pongs). Warnings only — design-time complement to the
@@ -649,6 +657,14 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, sandboxFiles...)
+		// CAPS/ declarations likewise: one small YAML per capability the
+		// stack answers (chassis/capdecl).
+		capFiles, cperr := collectCapFiles(filepath.Join(dir, "OPS", stack))
+		if cperr != nil {
+			fmt.Fprintf(stderr, "%s: %s: collect CAPS/: %v\n", cmd, stack, cperr)
+			return 1
+		}
+		files = append(files, capFiles...)
 		// Datasets are CODE (the manifest names queries the rules call; a query
 		// and schema change deploy atomically), so they join the code manifest
 		// here — unlike store-seed packs, which are data (`txco data apply`).

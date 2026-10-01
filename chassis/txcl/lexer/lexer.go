@@ -383,8 +383,10 @@ func (l *Lexer) readRegex() string {
 	position := l.position + 1
 	for l.ch != 0 {
 		l.readChar()
-		// check for escapes
-		if l.ch == '\\' && l.peekChar() == '/' {
+		// check for escapes — a loop, not an if: an escaped slash may be
+		// followed at once by another (`\/\/`, as in a URL), and stepping
+		// past only the first left the second to end the literal.
+		for l.ch == '\\' && l.peekChar() == '/' {
 			l.readChar()
 			l.readChar()
 		}

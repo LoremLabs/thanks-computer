@@ -520,6 +520,10 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/computes/{alg}/{digest}", c.handlePutCompute).Methods(http.MethodPut)
 	tenantR.HandleFunc("/computes/{alg}/{digest}", c.handleHeadCompute).Methods(http.MethodHead)
 
+	// The tenant's capability catalogue: what its active stacks declare
+	// under CAPS/ (chassis/capdecl), by name. Read-only; `txco caps list`.
+	tenantR.HandleFunc("/caps", c.handleListCaps).Methods(http.MethodGet)
+
 	// Hostname → tenant routing. Each row binds `Host: foo.local` to
 	// a (tenant, stack) for the data-plane router; the ingress DB
 	// resolver reads them from the dbcache mirror on every HTTP

@@ -187,7 +187,8 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.scheduled.tenant", "_txc.llm.tenant", "_txc.llm.hostname_verified",
 		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant",
 		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant", "_txc.state.tenant",
-		"_txc.grant.tenant", "_txc.cap.tenant")
+		"_txc.grant.tenant", "_txc.cap.tenant",
+		"_txc.cap.impl.stack", "_txc.cap.impl.to")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
@@ -197,6 +198,7 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	stateTenant := fields[16]
 	grantTenant := fields[17]
 	capTenant := fields[18]
+	capImplStack, capImplTo := fields[19], fields[20]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -315,18 +317,28 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	// run grant — a run on a node asking this chassis to do something —
 	// stamping the tenant in `_txc.cap.tenant` (trusted: resolved from the
 	// run grant's own row after its token verified and the call was
-	// allowed, never from the request). Propose a route into that tenant's
-	// `_cap/0` — the same sanctioned _sys→tenant pin as grant. The stack
-	// reads the call off `@cap.*` and answers at `_cap.output`. A tenant
-	// with no `_cap` stack answers nothing, and the inlet says so.
+	// allowed, never from the request). The inlet also stamps who answers:
+	// the active stack that DECLARES the capability (CAPS/<name>.yaml,
+	// chassis/capdecl) in `_txc.cap.impl.stack`, and the scope its
+	// declaration names in `_txc.cap.impl.to` — it has the declarations,
+	// this op has no store. Propose a route into that stack at that scope —
+	// the same sanctioned _sys→tenant pin as grant. A capability no stack
+	// declares goes to the tenant's `_cap/0`, the router a tenant wrote
+	// before declarations existed. The stack reads the call off `@cap.*` and
+	// answers at `_cap.output`; when nothing answers, the inlet says so.
 	if src.String() == "cap" {
 		if ct := capTenant.String(); ct != "" {
+			stack, to := "_cap", "_cap/0"
+			if is, it := capImplStack.String(), capImplTo.String(); is != "" &&
+				strings.HasPrefix(it, is+"/") && processor.StagePartsRE.MatchString(it) {
+				stack, to = is, it
+			}
 			b := jsonx.NewObject()
 			b.Set("_txc.route.tenant", ct)
-			b.Set("_txc.route.stack", "_cap")
+			b.Set("_txc.route.stack", stack)
 			b.Set("_txc.route.ingress", "cap")
 			b.Set("_txc.route.hostname_verified", true)
-			b.Set("_txc.route.to", "_cap/0")
+			b.Set("_txc.route.to", to)
 			return b.String()
 		}
 	}
@@ -1944,6 +1956,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			}))
 	}
 
+	// The capability catalogue (txco://caps/list): what the tenant's active
+	// stacks declare under CAPS/ (chassis/capdecl), by name. One source for
+	// the op and for the capability inlet below, which routes a call by it.
+	// Registered unconditionally: a chassis with no declarations answers an
+	// empty catalogue. See chassis/server/caps.go.
+	capDecls := &capDeclSource{dbc: dbc, fcas: fcas}
+	pu.Handle([]byte("txco://caps/list"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return capsList(ctx, capsDeps{decls: capDecls}, in)
+		}))
+
 	// IMAP mailbox store ops (txco://imap/{account,append}): provisioning
 	// for the `imap` personality — an argon2id account with its INBOX, and
 	// a message RECORD materialized into a mailbox (CAS by sha + index row;
@@ -2419,10 +2442,11 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 
 	// Capability inlet (POST /v1/cap/{name} on the web head): a run this
 	// chassis dispatched to a node calls back with its run grant; the grant
-	// gateway decides it and the tenant's `_cap` stack runs it. Only where
-	// there is a gateway to decide (an identity store).
+	// gateway decides it and the stack that declares the capability runs it
+	// (the tenant's `_cap` stack when none does). Only where there is a
+	// gateway to decide (an identity store).
 	if grantGateway != nil {
-		webCtrl.SetCapGateway(capgw.New(ctx, pu, grantGateway).Handle)
+		webCtrl.SetCapGateway(capgw.New(ctx, pu, grantGateway, capDecls).Handle)
 	}
 
 	// The serving half of txco://drive/sign. Mounted only when this node can

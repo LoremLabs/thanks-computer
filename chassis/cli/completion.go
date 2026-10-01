@@ -275,6 +275,9 @@ var cliCommandTree = []node{
 		{Name: "set", Desc: "Change stack settings (web=true|false; --match for bulk)", Flags: []string{"force", "match", "json"}},
 	}},
 	{Name: "versions", Desc: "List stack versions"},
+	{Name: "caps", Desc: "The tenant's capability catalogue (CAPS/ declarations)", Children: []node{
+		{Name: "list", Desc: "List declared capabilities with the stack and scope that answer each", Flags: []string{"json"}},
+	}},
 	{Name: "edit", Desc: "Edit a rule and apply on save"},
 	{Name: "dev", Desc: "Run the dev loop (apps + chassis + hot reload)"},
 	{Name: "demo", Desc: "Start the txcl learning environment"},
