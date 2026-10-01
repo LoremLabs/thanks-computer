@@ -6,8 +6,9 @@
 // as JSON; the grant gateway decides it (chassis/server/grantgw.Invoke) and,
 // when it is allowed, the stack that DECLARES the capability runs it as an
 // ordinary pipeline run (`@src == "cap"`, the call at `@cap.*`), entered at
-// the scope its declaration names (CAPS/<name>.yaml, chassis/capdecl), and
-// answers at the top-level `_cap.output` — or `_cap.error {code, message}`.
+// the stack's start — or at the scope its declaration names (CAPS/<name>.yaml,
+// chassis/capdecl) — and answers at the top-level `_cap.output` — or
+// `_cap.error {code, message}`.
 // A name no active stack declares still runs the tenant's `_cap` stack from
 // its first scope: the router a tenant wrote before declarations existed.
 //
@@ -268,8 +269,8 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Who answers: the active stack that declares the name, entered at the
-	// scope its declaration names. The route is the inlet's to stamp —
+	// Who answers: the active stack that declares the name, entered at its
+	// start or at the scope its declaration names. The route is the inlet's to stamp —
 	// detect-tenant has no declarations to read — and a declared timeout can
 	// only shorten the wait. A name nobody declares goes to `_cap`.
 	wait := g.maxWait

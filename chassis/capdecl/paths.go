@@ -1,9 +1,9 @@
 // Package capdecl is the declaration of what a stack can do for a run: a
-// named capability, the scope of the stack that answers it, and the input
-// it takes. A program a run grant covers calls a capability by name
-// (`cap://<name>`, chassis/server/capgw); the run's `_grant` stack decides
-// the call; the stack that DECLARES the name runs it, from the scope the
-// declaration names.
+// named capability, what a caller reads about it, and the input it takes.
+// A program a run grant covers calls a capability by name (`cap://<name>`,
+// chassis/server/capgw); the run's `_grant` stack decides the call; the
+// stack that DECLARES the name runs it, from its start (or from the scope
+// the declaration names).
 //
 // A stack declares a capability as one small YAML file under the reserved
 // CAPS/ subtree, beside SANDBOXES/ and OUTLETS/:

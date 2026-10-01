@@ -74,7 +74,8 @@ func TestDeepValidateCaps(t *testing.T) {
 		"CAPS/ai.chat.yaml":   "description: Ask the model.\nentry: 7000\ninput:\n  messages:\n    required: true\n",
 		"CAPS/card.note.yaml": "entry: 7000\n",
 		"CAPS/unknown.yaml":   "entry: 7000\noutput: {}\n",
-		"CAPS/noentry.yaml":   "description: nothing answers\n",
+		"CAPS/negative.yaml":  "entry: -7\n",
+		"CAPS/start.yaml":     "description: enters at the stack's start\n",
 		"CAPS/noscope.yaml":   "entry: 7100\n",
 		"CAPS/mail.send.yaml": "entry: 7000\n",
 		"100/plain.txcl":      `EXEC "txco://copy" WITH from = "a", to = "b"`,
@@ -88,7 +89,7 @@ func TestDeepValidateCaps(t *testing.T) {
 	issues := c.deepValidateCaps(ctx, "tnt_default", "stk_loop", 1)
 	want := map[string]string{
 		"CAPS/unknown.yaml":   "field output not found",
-		"CAPS/noentry.yaml":   "entry is required",
+		"CAPS/negative.yaml":  "want a scope of this stack",
 		"CAPS/noscope.yaml":   "entry 7100 names no scope of this stack",
 		"CAPS/mail.send.yaml": `already declared by the active stack "other"`,
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -33,17 +34,24 @@ type InputField struct {
 }
 
 // Decl is one CAPS/<name>.yaml: who answers a capability and what it takes.
-// Only what the chassis reads is declared here; a key it does not read is a
-// deploy error, not a promise.
+// The file's existence is the declaration — the stack that holds it answers
+// the capability — and every key is optional. Only what the chassis reads
+// is declared here; a key it does not read is a deploy error, not a promise.
 //
-//	description: Send a message by email.   # optional; what a caller reads
-//	entry: 7000                             # the scope of THIS stack that answers
-//	input:                                  # optional; what the call carries
+//	description: Send a message by email.   # what a caller reads
+//	input:                                  # what the call carries
 //	  to:
 //	    description: the recipient's address
 //	    required: true
 //	  subject: {}
-//	timeout: 60000                          # optional, ms; shortens the wait
+//	timeout: 60000                          # ms; shortens the wait
+//	entry: 7000                             # see below
+//
+// A call ENTERS THE STACK AT ITS START, `<stack>/0`, like every other
+// inlet's run (`_cron/0`, `_mail/0`): the stack's scopes run in order and
+// their WHENs pick the call up (`@src == "cap"`, `@cap.name`). `entry` is
+// for a stack that does other work too and wants a capability's run to
+// begin further in: it names the scope of THIS stack the run starts from.
 //
 // Parsed strictly: an unknown key is a deploy error, not a silent ignore.
 type Decl struct {
@@ -68,14 +76,16 @@ func ParseDecl(data []byte) (*Decl, error) {
 	var d Decl
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(&d); err != nil {
+	// An empty file (or one of comments only) declares the capability with
+	// every default: the decoder reports it as EOF.
+	if err := dec.Decode(&d); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("capability declaration: %w", err)
 	}
 	if len(d.Description) > MaxDescription {
 		return nil, fmt.Errorf("capability declaration: description is longer than %d characters", MaxDescription)
 	}
-	if d.Entry <= 0 {
-		return nil, fmt.Errorf("capability declaration: entry is required: the scope of this stack that answers the call, such as 7000")
+	if d.Entry < 0 {
+		return nil, fmt.Errorf("capability declaration: entry is %d, want a scope of this stack (omit it to enter at the stack's start)", d.Entry)
 	}
 	if len(d.Input) > MaxInputs {
 		return nil, fmt.Errorf("capability declaration: input names %d fields, at most %d", len(d.Input), MaxInputs)
@@ -95,7 +105,8 @@ func ParseDecl(data []byte) (*Decl, error) {
 }
 
 // Stage is where a call enters: "<stack>/<entry>", the shape a stage jump
-// takes (processor.StagePartsRE).
+// takes (processor.StagePartsRE) — "<stack>/0", the stack's start, when no
+// entry is declared.
 func (d *Decl) Stage(stack string) string { return stack + "/" + strconv.Itoa(d.Entry) }
 
 // Params is the sorted list of the inputs the capability names.
@@ -114,8 +125,15 @@ func (d *Decl) TimeoutDuration() time.Duration {
 }
 
 // CheckEntry reports whether the declaration's entry names a scope the
-// stack has. scopes is the set of scope numbers of the declaring stack.
+// stack has. scopes is the set of scope numbers of the declaring stack. No
+// entry is the stack's start, which any stack with a scope has.
 func CheckEntry(d *Decl, scopes map[int]bool) error {
+	if d.Entry == 0 {
+		if len(scopes) == 0 {
+			return fmt.Errorf("capability declaration: this stack has no scope to answer the call")
+		}
+		return nil
+	}
 	if !scopes[d.Entry] {
 		return fmt.Errorf("capability declaration: entry %d names no scope of this stack", d.Entry)
 	}

@@ -36,10 +36,22 @@ func TestParseDecl(t *testing.T) {
 		t.Fatalf("Params of no input = %v", got)
 	}
 
+	// Every key is optional: the file's existence is the declaration, and a
+	// call enters the declaring stack at its start.
+	for name, body := range map[string]string{
+		"empty":            "",
+		"comments only":    "# local.shell: a shell on the pony's machine\n",
+		"description only": "description: Run a command.\n",
+		"explicit start":   "entry: 0\n",
+	} {
+		d, err := ParseDecl([]byte(body))
+		if err != nil || d.Entry != 0 || d.Stage("pony-shell") != "pony-shell/0" {
+			t.Errorf("%s: %+v %v, want entry 0 and stage pony-shell/0", name, d, err)
+		}
+	}
+
 	bad := map[string]string{
 		"unknown key":        "entry: 7000\noutput: {}\n",
-		"missing entry":      "description: nothing\n",
-		"zero entry":         "entry: 0\n",
 		"negative entry":     "entry: -1\n",
 		"entry not a number": "entry: seven\n",
 		"entry a stage":      "entry: loop/7000\n",
@@ -110,5 +122,13 @@ func TestCheckEntry(t *testing.T) {
 	}
 	if err := CheckEntry(d, nil); err == nil {
 		t.Fatal("no scopes at all: expected an error")
+	}
+	// No entry is the stack's start: any stack with a scope has one.
+	start := &Decl{}
+	if err := CheckEntry(start, map[int]bool{2008: true}); err != nil {
+		t.Fatalf("no entry, a stack with scopes: %v", err)
+	}
+	if err := CheckEntry(start, nil); err == nil || !strings.Contains(err.Error(), "no scope to answer") {
+		t.Fatalf("no entry, a stack with no scopes: %v", err)
 	}
 }

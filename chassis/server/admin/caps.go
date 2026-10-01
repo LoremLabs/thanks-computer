@@ -2,8 +2,8 @@ package admin
 
 // Apply-time gate for CAPS/ declarations (chassis/capdecl), and the read
 // of a tenant's catalogue. A declaration that doesn't parse — an unknown
-// key, no entry, a bad input name — fails the deploy; so does an entry that
-// names no scope of the version, and a name another ACTIVE stack of the
+// key, a bad input name — fails the deploy; so does an entry that names no
+// scope of the version (or a stack with no scope at all), and a name another ACTIVE stack of the
 // tenant already declares: one stack answers a capability, so the inlet's
 // lookup by name has one answer. Nothing runs: whether a run may CALL a
 // capability is decided when the call is made (chassis/server/grantgw).
@@ -119,7 +119,7 @@ func (c *Controller) deepValidateCaps(ctx context.Context, tenantID, stackID str
 	return issues
 }
 
-const capIssuesHint = `capabilities are validated before activation: every CAPS/<name>.yaml parses — an entry (a scope of this stack), an optional description, input and timeout, nothing else — and no other active stack of the tenant declares the same name`
+const capIssuesHint = `capabilities are validated before activation: every CAPS/<name>.yaml parses — an optional description, input, timeout and entry (a scope of this stack; omitted, a call enters at the stack's start), nothing else — and no other active stack of the tenant declares the same name`
 
 // capRecord is one capability of a tenant's catalogue.
 type capRecord struct {

@@ -39,17 +39,18 @@ own row. It is read-only, except `@grant.res`.
 | fact | holds |
 |---|---|
 | `@grant.phase` | `request` |
-| `@grant.kind`, `@grant.name`, `@grant.verb` | What was asked for: `secret`, its name, `release` |
+| `@grant.kind`, `@grant.name`, `@grant.verb` | What was asked for: `secret`, its name, `release` — or, for a [capability](../capabilities.md) call, `capability`, its name, `invoke` |
 | `@grant.sandbox`, `@grant.env` | The sandbox being opened, and the variable this secret fills |
 | `@grant.principal.id`, `.kind` | Whom the work acts for |
 | `@grant.run`, `@grant.generation` | The run, and which minting of it |
 | `@grant.grant`, `@grant.depth` | The run grant's id, and how many times it was narrowed |
 | `@grant.stack`, `@grant.workspace` | The stack that minted it, and the workspace it was minted for |
 | `@grant.node.class` | `reviewed` or `unreviewed` |
-| `@grant.via` | Who opened the sandbox: `exec` (the rule that started the command) or `launcher` (`txco sandbox`, the program itself) |
+| `@grant.via` | Who opened the sandbox: `exec` (the rule that started the command) or `launcher` (`txco sandbox`, the program itself). `http` for a capability call. |
+| `@grant.input` | A capability call's input, as the caller sent it: data for a rule to decide on. Absent for a secret. |
 | `@grant.secret.pull` | The secret's pull policy |
 | `@grant.secret.version`, `.scope` | Its version, and `tenant` or `stack` |
-| `@grant.checks.exists` | Whether there is such a secret |
+| `@grant.checks.exists` | Whether there is such a secret. Always `true` for a capability: whether anything answers it is found when it runs. |
 | `@grant.checks.allowlist`, `.standing`, `.pull`, `.budget` | Each check of the proposal, `true` or `false` |
 | `@grant.budget.calls`, `.spent` | The run's budget, and what it has spent |
 | `@grant.proposed.allow` | The chassis's answer |
@@ -76,7 +77,7 @@ WHEN @src == "grant"
 | nothing | Decided by the proposal |
 | `@grant.res.allow = true` | Allowed |
 | `@grant.res.allow = false` | Refused |
-| `@grant.res.hold = true` | Refused, as `held`. Storing a held request and releasing it later is not built yet. |
+| `@grant.res.hold = true` | Refused, as `held`. A capability's caller is told so distinctly (`409 held`, `txco_cap_held` on the node). The chassis stores nothing: a rule that holds records what a person will need, and your stack runs the call later if they approve. |
 | `@grant.res.reason = "…"` | Unchanged. The reason is kept in the log. |
 
 - **`allow` is a boolean.** `"true"` or `1` is a rule that meant to decide

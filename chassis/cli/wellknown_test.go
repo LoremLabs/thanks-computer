@@ -35,6 +35,20 @@ func TestParseSigningKeys(t *testing.T) {
 		}
 	})
 
+	t.Run("an entry may name the namespaces its key signs for", func(t *testing.T) {
+		doc := `{"keys":[{"name":"txco","pubkey":"` + testSigningPubkey + `","namespaces":["txco"]},{"name":"any","pubkey":"` + testSigningPubkey + `"}]}`
+		keys, err := parseSigningKeys([]byte(doc), "registry.thanks.computer")
+		if err != nil || len(keys) != 2 {
+			t.Fatalf("parseSigningKeys: %v %+v", err, keys)
+		}
+		if len(keys[0].Namespaces) != 1 || keys[0].Namespaces[0] != "txco" {
+			t.Errorf("namespaces = %v, want [txco]", keys[0].Namespaces)
+		}
+		if len(keys[1].Namespaces) != 0 {
+			t.Errorf("an entry with none is unscoped: %v", keys[1].Namespaces)
+		}
+	})
+
 	t.Run("malformed entry skipped, good one kept", func(t *testing.T) {
 		doc := `{"keys":[{"name":"bad","pubkey":"not-a-key"},{"name":"txco","pubkey":"` + testSigningPubkey + `"}]}`
 		keys, err := parseSigningKeys([]byte(doc), "r.example")

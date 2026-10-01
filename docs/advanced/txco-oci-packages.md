@@ -251,6 +251,8 @@ txco package publish --to oci://ghcr.io/you/sales:3.0.0 --sign ./packages/sales
 #     keys:
 #       - name: acme
 #         pubkey: "ssh-ed25519 AAAA…"          # the line key generate printed
+#         registry: ghcr.io                    # optional: only on this registry host
+#         namespaces: [you]                    # optional: only for ghcr.io/you/…
 txco install sales@3.0.0 --as sales --require-signature
 # → verified: signed by SHA256:…
 txco package inspect sales@3.0.0 --provenance   # show the signature without installing
@@ -269,8 +271,18 @@ How it works:
   prints a warning; `--require-signature` fails closed (nothing is written to `OPS/`) unless
   the package is signed by a key in `trust:` (or passed via `--key`). A verified install
   records the signer key id in the lockfile (`signedBy:`).
-- **No key is trusted by default** — the default registry/namespace is a convenience, not a
-  trust boundary. Trust is whatever you list in `trust:`.
+- **Trust is a list of keys, each as narrow as you make it.** A key in `trust:` may be scoped
+  to a `registry` host and, within it, to `namespaces` (`[acme]` covers `<host>/acme/<name>`
+  and nothing else on that host). A publisher's key should vouch for that publisher's
+  packages, not for every package on a registry it shares. Unscoped, a key is trusted for
+  any repository it signs.
+- **A registry may publish its own keys** at `/.well-known/txco-signing-keys.json`
+  (`{"keys": [{"name", "pubkey", "namespaces"?}]}`). `txco` fetches them when it verifies a
+  package from that host and trusts each for that host only — and only for the namespaces
+  its entry names, when it names any. That is what lets a package from the default registry
+  verify with no local config. It is trust in whoever serves the registry: set
+  `TXCO_NO_KEY_DISCOVERY=1` to trust nothing but your own `trust:` and `--key`.
+- **The default registry and namespace are a convenience, not a trust boundary.**
 
 > The signature format is txco-native (ed25519), **not** cosign-compatible — it's verified by
 > `txco`, not by `cosign verify`. Trust keys are ed25519 public keys (an `ssh-ed25519` line,

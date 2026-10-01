@@ -66,7 +66,7 @@ type registryConfig struct {
 }
 
 // trustConfig is the txco.yaml `trust:` block — public keys trusted to sign
-// packages, optionally scoped to a registry host.
+// packages, optionally scoped to a registry host and to namespaces of it.
 type trustConfig struct {
 	Keys []trustKey `yaml:"keys" json:"keys,omitempty"`
 }
@@ -75,6 +75,9 @@ type trustKey struct {
 	Name     string `yaml:"name" json:"name,omitempty"`
 	Pubkey   string `yaml:"pubkey" json:"pubkey,omitempty"`     // ssh-ed25519 line, .pub path, or base64 raw
 	Registry string `yaml:"registry" json:"registry,omitempty"` // optional host scope
+	// Namespaces optionally narrows the key to repositories under these
+	// prefixes of the registry (e.g. ["onepony"]); empty = every namespace.
+	Namespaces []string `yaml:"namespaces" json:"namespaces,omitempty"`
 }
 
 type appConfig struct {

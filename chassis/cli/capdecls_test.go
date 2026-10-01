@@ -38,6 +38,8 @@ func TestCheckCapDecls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// No entry: the call enters the stack at its start.
+	writeFile(t, filepath.Join(root, "OPS/other/CAPS/local.shell.yaml"), "description: Run a command.\n")
 	if msgs := checkCapDecls(ops, root); len(msgs) != 0 {
 		t.Fatalf("clean: %v", msgs)
 	}

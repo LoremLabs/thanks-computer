@@ -90,6 +90,7 @@ The CLI verbs map onto that flow:
 | `txco draft <stack>` | Upload a draft *without* activating (stage for review); `--activate` flips it too |
 | `txco activate <stack>` | Flip the active-version pointer (defaults to newest draft). Activating an older version = rollback |
 | `txco versions <stack>` | List a stack's versions, active one marked |
+| `txco caps list [--json]` | The tenant's capability catalogue: what its active stacks declare under `CAPS/`, and where a call enters ([capabilities](./capabilities.md#the-catalogue)) |
 | `txco diff [dir]` | Compare local `OPS/` against the running chassis |
 | `txco lint [dir]` | Validate the `OPS/` tree **offline** (no chassis): name collisions, mis-placed files, txcl parse, unconditional-loop warnings; `--list` prints the op graph; exit 1 on errors (CI-friendly) |
 | `txco status [dir]` | Per-stack drift summary; exit 1 on divergence (CI-friendly) |

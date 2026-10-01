@@ -5,8 +5,8 @@ package cli
 // capability the stack answers (chassis/capdecl). Declarations are CODE —
 // they deploy with the scopes that answer the call, inline in the draft
 // like SANDBOXES/ — and every one is parsed here, before the server does
-// the same on validate and activate: an unknown key, a missing entry, a bad
-// input name, or an entry that names no scope of the stack fails the apply.
+// the same on validate and activate: an unknown key, a bad input name, or
+// an entry that names no scope of the stack fails the apply.
 // Whether another stack of the tenant already declares the name is the
 // server's check: only it knows what is active.
 

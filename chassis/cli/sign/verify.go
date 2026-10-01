@@ -4,15 +4,41 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 )
 
 // TrustedKey is a public key the consumer trusts, optionally scoped to a
-// registry host. KeyID is the ssh fingerprint used for matching.
+// registry host and, within it, to namespaces. KeyID is the ssh fingerprint
+// used for matching.
 type TrustedKey struct {
 	Name     string
 	Pub      ed25519.PublicKey
 	KeyID    string
 	Registry string // optional host scope; empty = trusted on any registry
+	// Namespaces optionally narrows the key to repositories under these
+	// path prefixes of the registry ("onepony" covers host/onepony/<name>):
+	// a publisher's key vouches for that publisher's packages, not for every
+	// package on a registry it shares. Empty = every namespace.
+	Namespaces []string
+}
+
+// coversRepository reports whether the key's namespace scope admits
+// repository ("host/ns/name"). An unscoped key admits every repository.
+func (t TrustedKey) coversRepository(repository string) bool {
+	if len(t.Namespaces) == 0 {
+		return true
+	}
+	_, path, ok := strings.Cut(repository, "/")
+	if !ok {
+		return false
+	}
+	for _, ns := range t.Namespaces {
+		ns = strings.Trim(strings.TrimSpace(ns), "/")
+		if ns != "" && strings.HasPrefix(path, ns+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Verdict is the result of checking a package's signature. A malformed, absent,
@@ -58,6 +84,7 @@ func VerifyArtifact(manifestBytes, layerBytes []byte, ann map[string]string, exp
 	if p.Repository != expectRepository {
 		return Verdict{Signed: true, KeyID: keyID, SignedAt: p.SignedAt, Reason: "signature is for a different repository (transplanted?)"}
 	}
+	outOfScope := ""
 	for _, t := range trusted {
 		if t.KeyID != keyID {
 			continue
@@ -65,7 +92,15 @@ func VerifyArtifact(manifestBytes, layerBytes []byte, ann map[string]string, exp
 		if t.Registry != "" && t.Registry != registryHost {
 			continue
 		}
+		if !t.coversRepository(expectRepository) {
+			outOfScope = t.Name
+			continue
+		}
 		return Verdict{Signed: true, Trusted: true, KeyID: keyID, Name: t.Name, SignedAt: p.SignedAt}
+	}
+	if outOfScope != "" {
+		return Verdict{Signed: true, KeyID: keyID, SignedAt: p.SignedAt,
+			Reason: "signed by key " + outOfScope + " (" + keyID + "), which is not trusted for this namespace"}
 	}
 	return Verdict{Signed: true, KeyID: keyID, SignedAt: p.SignedAt, Reason: "signed by untrusted key " + keyID}
 }

@@ -25,7 +25,7 @@ func capsStub(t *testing.T, body string) *httptest.Server {
 
 const capsStubBody = `{"count":3,"caps":[` +
 	`{"name":"broken","stack":"loop","entry":0,"stage":"","err":"capability declaration: entry is required"},` +
-	`{"name":"local.web.fetch","stack":"pony-web","entry":2007,"stage":"pony-web/2007","description":"Fetch a page.\nSecond line.","input":{"url":{"required":true}}},` +
+	`{"name":"local.web.fetch","stack":"pony-web","entry":0,"stage":"pony-web/0","description":"Fetch a page.\nSecond line.","input":{"url":{"required":true}}},` +
 	`{"name":"mail.send","stack":"loop","entry":7000,"stage":"loop/7000","description":"Send a message.","input":{"to":{"required":true},"subject":{},"message":{"required":true}},"timeout":60000}]}`
 
 func TestRunCapsListTable(t *testing.T) {
@@ -42,8 +42,8 @@ func TestRunCapsListTable(t *testing.T) {
 	}
 	for i, want := range [][]string{
 		{"broken", "loop", "BROKEN: capability declaration: entry is required"},
-		{"local.web.fetch", "pony-web", "2007", "url*", "Fetch a page."},
-		{"mail.send", "loop", "7000", "60000ms", "message*,subject,to*", "Send a message."},
+		{"local.web.fetch", "pony-web/0", "url*", "Fetch a page."},
+		{"mail.send", "loop/7000", "60000ms", "message*,subject,to*", "Send a message."},
 	} {
 		for _, w := range want {
 			if !strings.Contains(lines[i+1], w) {
@@ -81,7 +81,7 @@ func TestRunCapsListJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not a JSON array: %v\n%s", err, out.String())
 	}
-	if len(got) != 3 || got[1].Name != "local.web.fetch" || got[1].Stage != "pony-web/2007" || !got[1].Input["url"].Required {
+	if len(got) != 3 || got[1].Name != "local.web.fetch" || got[1].Stage != "pony-web/0" || !got[1].Input["url"].Required {
 		t.Errorf("got %+v", got)
 	}
 

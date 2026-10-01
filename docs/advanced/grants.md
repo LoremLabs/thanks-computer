@@ -32,6 +32,7 @@ chassis, and sandboxes say what it holds._
 | Start a command inside a sandbox | [Opening a sandbox for a command](#opening-a-sandbox-for-a-command) |
 | Let a program open one itself | [`txco sandbox`](#txco-sandbox) |
 | Decide which requests are allowed | [What decides a request](#what-decides-a-request) |
+| Let dispatched work ask this chassis to do something | [Capabilities](./capabilities.md) |
 | Turn it on | [Turning it on](#turning-it-on) |
 
 ## Who ends up holding what
@@ -162,8 +163,10 @@ env:
 | | |
 |---|---|
 | **The name** | The file's stem: `[a-z][a-z0-9_-]*`, at most 64. It appears in `allow`, in `WITH sandbox`, on the command line. |
-| **`env`** | Required. Each entry sets one variable to one secret. A variable is `[A-Za-z_][A-Za-z0-9_]*`; a reference is `secret:<NAME>`. One secret may fill several variables. A name starting `TXCO_` is the chassis's own. At most 32. |
+| **`env`** | Each entry sets one variable to one secret. A variable is `[A-Za-z_][A-Za-z0-9_]*`; a reference is `secret:<NAME>`. One secret may fill several variables. A name starting `TXCO_` is the chassis's own. At most 32. |
+| **`capabilities`** | A list of [capability](./capabilities.md) names a run whose grant names this sandbox may call on this chassis: `crm.lookup`, `mail.send`. Nothing is handed over for one; each call is decided when it is made. At most 32. |
 | **`description`** | Optional, for whoever reads the file. |
+| **`env` or `capabilities`** | At least one. A sandbox may set variables, name capabilities, or both. |
 | **Anything else** | A deploy error. Only what the chassis enforces is declared. |
 
 - **It deploys with the stack.** `txco apply` uploads it, `txco lint` and
@@ -183,8 +186,8 @@ env:
   (`@grant.sandbox`, `@grant.env`) beside the secret's name, so a rule may
   allow a secret through one sandbox and refuse it through another.
 
-`files:`, `network:` and `capabilities:` are not declared yet: a sandbox
-holds only what the chassis enforces.
+`files:` and `network:` are not declared yet: a sandbox holds only what the
+chassis enforces.
 
 ## Standing grants
 
@@ -339,21 +342,20 @@ WHEN ._delegate.id != ""
 says which of its sandboxes the chassis opens before the command starts.
 The command starts with every variable they set, or does not start.
 
-Where the command runs on the chassis's own machine (the local provider),
-it also gets what it needs to open sandboxes itself at run time:
+The command also gets what it needs to present itself at run time:
 
-| variable | holds |
-|---|---|
-| `TXCO_GRANT_SOCK` | Where `txco sandbox` reaches the chassis. Set where the `grant` personality is on. |
-| `TXCO_RUN_GRANT` | The grant's token. `txco sandbox` presents it. |
-| `TXCO_RUN` | The run's name |
-| `TXCO_BIN` | The `txco` binary, for `"$TXCO_BIN" sandbox …` |
+| variable | holds | on |
+|---|---|---|
+| `TXCO_RUN_GRANT` | The grant's token. `txco sandbox` presents it, and so does a command that dispatches a run to a [node](./capabilities.md#the-node-and-its-parent). | Every provider |
+| `TXCO_RUN` | The run's name | Every provider |
+| `TXCO_GRANT_SOCK` | Where `txco sandbox` reaches the chassis. Set where the `grant` personality is on. | The chassis's own machine (the local provider) |
+| `TXCO_BIN` | The `txco` binary, for `"$TXCO_BIN" sandbox …` | The chassis's own machine |
 
 - **The values travel in the exec.** Opening happens here, in the chassis,
   so the push form works on any provider — the fleet's included — as
   `secrets.env.*` does. A provider whose commands run on another machine
-  gets the sandboxes' variables and none of the four above, which it could
-  not use there.
+  gets the sandboxes' variables, the run's name and the token; the socket
+  and the binary it could not use there.
 - **The token is made here and goes nowhere else.** It is signed when the
   command starts, put in the command's environment, and removed — with
   every value a sandbox set — from the command's output and from every

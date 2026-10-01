@@ -12,6 +12,7 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/memory"
+	"strings"
 )
 
 func TestDigestToSigTag(t *testing.T) {
@@ -102,6 +103,51 @@ func TestVerifyRegistryScopedKey(t *testing.T) {
 		[]TrustedKey{{Pub: s.Pub, KeyID: s.KeyID, Registry: "registry.thanks.computer"}})
 	if !v.Trusted {
 		t.Fatalf("matching-host key should be trusted: %+v", v)
+	}
+}
+
+// A key scoped to a namespace vouches for that namespace's repositories and
+// no others on the same registry.
+func TestVerifyNamespaceScopedKey(t *testing.T) {
+	s := newTestSigner(t)
+	const host, digest = "registry.thanks.computer", "sha256:aa"
+	key := func(ns ...string) []TrustedKey {
+		return []TrustedKey{{Name: "onepony", Pub: s.Pub, KeyID: s.KeyID, Registry: host, Namespaces: ns}}
+	}
+	verify := func(repo string, trusted []TrustedKey) Verdict {
+		man, layer, ann := fetchSig(t, signInto(t, digest, repo, "", s), digest)
+		return VerifyArtifact(man, layer, ann, digest, repo, host, trusted)
+	}
+	for _, c := range []struct {
+		repo string
+		ns   []string
+		want bool
+	}{
+		{host + "/onepony/pony-agent", []string{"onepony"}, true},
+		{host + "/onepony/tools/pony-web", []string{"onepony"}, true},       // nested under the namespace
+		{host + "/onepony/pony-agent", []string{"txco", "onepony"}, true},   // any of several
+		{host + "/onepony/pony-agent", []string{" /onepony/ "}, true},       // slashes and space are trimmed
+		{host + "/onepony/tools/pony-web", []string{"onepony/tools"}, true}, // a deeper prefix
+		{host + "/txco/hello-world", []string{"onepony"}, false},            // another namespace
+		{host + "/oneponyx/pony-agent", []string{"onepony"}, false},         // a prefix of a segment is not the namespace
+		{host + "/onepony", []string{"onepony"}, false},                     // the namespace itself is not a repository in it
+		{host + "/onepony/pony-agent", []string{""}, false},                 // an empty entry admits nothing
+		{host + "/onepony/pony-agent", nil, true},                           // unscoped: every namespace
+		{host + "/txco/hello-world", nil, true},
+	} {
+		v := verify(c.repo, key(c.ns...))
+		if !v.Signed || v.Trusted != c.want {
+			t.Errorf("%s with namespaces %q: trusted=%v, want %v (%s)", c.repo, c.ns, v.Trusted, c.want, v.Reason)
+		}
+		if !c.want && !strings.Contains(v.Reason, "not trusted for this namespace") {
+			t.Errorf("%s: the reason should say the key is out of scope: %q", c.repo, v.Reason)
+		}
+	}
+	// A second, unscoped entry for the same key still admits the repository:
+	// the scope narrows an entry, it does not ban the key.
+	both := append(key("onepony"), TrustedKey{Name: "registry", Pub: s.Pub, KeyID: s.KeyID, Registry: host})
+	if v := verify(host+"/txco/hello-world", both); !v.Trusted || v.Name != "registry" {
+		t.Errorf("an unscoped entry for the same key should match: %+v", v)
 	}
 }
 

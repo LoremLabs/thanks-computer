@@ -15,10 +15,11 @@ import (
 // txco://caps/list — the tenant's capability catalogue, for a rule.
 //
 // A stack declares each capability it answers as CAPS/<name>.yaml
-// (chassis/capdecl): the scope that answers it, a description, the input it
-// takes. This op lists what the tenant's ACTIVE stacks declare, by name, so
-// a stack that offers capabilities to a model — a tool list — reads the
-// catalogue instead of carrying a copy of it:
+// (chassis/capdecl): a description, the input it takes, and optionally the
+// scope a call enters at (the stack's start otherwise). This op lists what
+// the tenant's ACTIVE stacks declare, by name, so a stack that offers
+// capabilities to a model — a tool list — reads the catalogue instead of
+// carrying a copy of it:
 //
 //	EXEC "txco://caps/list" WITH into = "_caps", prefix = "local."
 //
@@ -26,8 +27,9 @@ import (
 //	                         input: {<field>: {description, required}},
 //	                         params: [<field>, …], timeout}]}
 //
-// `prefix` narrows by name (optional). `stage` is "<stack>/<entry>", the
-// shape a stage jump takes, so a stack on the same chassis can run a
+// `prefix` narrows by name (optional). `stage` is "<stack>/<entry>" —
+// "<stack>/0", the stack's start, when none is declared — the shape a stage
+// jump takes, so a stack on the same chassis can run a
 // capability by `@goto` and one on another chassis can call it by
 // `cap://<name>`. The catalogue says what exists, not what a run may call:
 // that is the run grant's allowlist and the `_grant` stack's decision.

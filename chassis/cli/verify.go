@@ -10,6 +10,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/sign"
 	"github.com/loremlabs/thanks-computer/chassis/cli/source"
+	"strings"
 )
 
 // workspaceTrust returns the workspace's trusted signing keys, or an empty
@@ -29,13 +30,16 @@ func workspaceTrust(dir string) trustConfig {
 func loadTrustedKeys(root string, keyFlags []string, stderr io.Writer) ([]sign.TrustedKey, error) {
 	seen := map[string]bool{}
 	var out []sign.TrustedKey
-	add := func(name, registry string, pub ed25519.PublicKey) {
+	// One entry per (key, scope): the same key may be listed more than once
+	// with different scopes, and each stands.
+	add := func(name, registry string, namespaces []string, pub ed25519.PublicKey) {
 		id := sign.KeyIDForPub(pub)
-		if seen[id] {
+		scope := id + "|" + registry + "|" + strings.Join(namespaces, ",")
+		if seen[scope] {
 			return
 		}
-		seen[id] = true
-		out = append(out, sign.TrustedKey{Name: name, Pub: pub, KeyID: id, Registry: registry})
+		seen[scope] = true
+		out = append(out, sign.TrustedKey{Name: name, Pub: pub, KeyID: id, Registry: registry, Namespaces: namespaces})
 	}
 	for _, k := range workspaceTrust(root).Keys {
 		pub, err := sign.ParseTrustedKey(k.Pubkey)
@@ -43,14 +47,14 @@ func loadTrustedKeys(root string, keyFlags []string, stderr io.Writer) ([]sign.T
 			fmt.Fprintf(stderr, "warning: skipping trusted key %q: %v\n", k.Name, err)
 			continue
 		}
-		add(k.Name, k.Registry, pub)
+		add(k.Name, k.Registry, k.Namespaces, pub)
 	}
 	for _, f := range keyFlags {
 		pub, err := sign.ParseTrustedKey(f)
 		if err != nil {
 			return nil, fmt.Errorf("--key %q: %w", f, err)
 		}
-		add("", "", pub)
+		add("", "", nil, pub)
 	}
 	return out, nil
 }

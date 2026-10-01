@@ -36,6 +36,10 @@ type signingKeysDoc struct {
 type signingKeyEntry struct {
 	Name   string `json:"name"`   // display label, e.g. "txco"
 	Pubkey string `json:"pubkey"` // an ssh-ed25519 authorized_keys line
+	// Namespaces optionally says which namespaces of this registry the key
+	// signs for (e.g. ["txco"]); absent = every namespace. A registry that
+	// hosts more than one publisher lists each publisher's key with its own.
+	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 // fetchRegistrySigningKeys fetches the keys a registry publishes at its
@@ -95,10 +99,11 @@ func parseSigningKeys(data []byte, registryHost string) ([]sign.TrustedKey, erro
 			continue
 		}
 		out = append(out, sign.TrustedKey{
-			Name:     e.Name,
-			Pub:      pub,
-			KeyID:    sign.KeyIDForPub(pub),
-			Registry: registryHost,
+			Name:       e.Name,
+			Pub:        pub,
+			KeyID:      sign.KeyIDForPub(pub),
+			Registry:   registryHost,
+			Namespaces: e.Namespaces,
 		})
 	}
 	return out, nil

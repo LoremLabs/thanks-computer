@@ -319,8 +319,9 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	// run grant's own row after its token verified and the call was
 	// allowed, never from the request). The inlet also stamps who answers:
 	// the active stack that DECLARES the capability (CAPS/<name>.yaml,
-	// chassis/capdecl) in `_txc.cap.impl.stack`, and the scope its
-	// declaration names in `_txc.cap.impl.to` — it has the declarations,
+	// chassis/capdecl) in `_txc.cap.impl.stack`, and where its run begins —
+	// the stack's start, `<stack>/0`, or the scope its declaration names —
+	// in `_txc.cap.impl.to`: it has the declarations,
 	// this op has no store. Propose a route into that stack at that scope —
 	// the same sanctioned _sys→tenant pin as grant. A capability no stack
 	// declares goes to the tenant's `_cap/0`, the router a tenant wrote
