@@ -236,8 +236,12 @@ On `registry.thanks.computer`:
   `oci://registry.thanks.computer/acme/<name>:<tag>` and nothing outside `acme/`. A name may
   be a path (`acme/tools/web`); the tenant is always its first segment.
 - **It takes the `package:*:push` capability** on that tenant. A tenant's owner has it
-  (`package:*:*`; an owner enrolled before it existed picks it up at the next `txco login`).
-  Invite a teammate with `package:*:push` to let them publish.
+  (`package:*:*`). An owner enrolled before the capability existed does not get it by
+  signing in again — `txco login` on an enrolled profile only signs back in. Re-run the
+  enrollment with the profile's own key, which re-grants the owner set:
+  `txco cloud enroll --profile <name> --ssh-key <that profile's key file>`, then check with
+  `txco auth memberships --profile <name>`. Invite a teammate with `package:*:push` to let
+  them publish.
 - **The profile is chosen for you**: the one whose tenant is the namespace you are
   publishing to, else your active profile. `--profile <name>` (or `TXCO_PROFILE`) says
   otherwise.
