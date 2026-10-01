@@ -184,13 +184,24 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 	}
 	ms := time.Since(start).Milliseconds()
 
-	ok := resp.StatusCode == http.StatusOK && gjson.ValidBytes(answer) && gjson.GetBytes(answer, "ok").Bool()
+	// An allowed call is a 200 whose headers went out before the run ended
+	// (the parent keeps the connection fed with spaces; JSON's own
+	// whitespace). What the run came to is in the body, and a failure there
+	// carries the status it would have had at error.status.
+	status := resp.StatusCode
+	valid := gjson.ValidBytes(answer)
+	if status == http.StatusOK && valid && !gjson.GetBytes(answer, "ok").Bool() {
+		if st := gjson.GetBytes(answer, "error.status").Int(); st >= 400 && st <= 599 {
+			status = int(st)
+		}
+	}
+	ok := status == http.StatusOK && valid && gjson.GetBytes(answer, "ok").Bool()
 	if !ok {
-		code := "txco_cap_" + errorClass(resp.StatusCode)
+		code := "txco_cap_" + errorClass(status)
 		message := ""
-		if gjson.ValidBytes(answer) {
+		if valid {
 			if c := strings.TrimSpace(gjson.GetBytes(answer, "error.code").String()); c != "" {
-				code = codeFor(resp.StatusCode, c)
+				code = codeFor(status, c)
 			}
 			message = gjson.GetBytes(answer, "error.message").String()
 		}
@@ -198,8 +209,8 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 			message = message[:1000]
 		}
 		pu.Logger.Info("cap: refused or failed",
-			zap.String("capability", name), zap.Int("status", resp.StatusCode), zap.String("code", code), zap.Int64("ms", ms))
-		return capFailure(into, name, code, scrubToken(message, token), resp.StatusCode, rid), nil
+			zap.String("capability", name), zap.Int("status", status), zap.String("code", code), zap.Int64("ms", ms))
+		return capFailure(into, name, code, scrubToken(message, token), status, rid), nil
 	}
 	output := gjson.GetBytes(answer, "output")
 	out := "{}"

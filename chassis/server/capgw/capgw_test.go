@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -151,8 +152,9 @@ func TestHandleRunOutcomes(t *testing.T) {
 	f := newFake(t)
 	f.verdict = allowed()
 
-	// No rule answered.
-	if w := f.post(t, "card.note", "rg1.tok", ``); w.Code != http.StatusNotFound || code(w) != "no_capability" {
+	// No rule answered: the headers were 200 (sent before the run), the
+	// body says what happened and the status it would have carried.
+	if w := f.post(t, "card.note", "rg1.tok", ``); w.Code != http.StatusOK || code(w) != "no_capability" || status(w) != http.StatusNotFound {
 		t.Errorf("no answer: %d %s", w.Code, w.Body.String())
 	}
 	// An empty body is an empty input.
@@ -165,13 +167,13 @@ func TestHandleRunOutcomes(t *testing.T) {
 		out, _ = sjson.Set(out, "_cap.error.message", "card c9 is not on this board")
 		return out, nil
 	}
-	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusUnprocessableEntity || code(w) != "no_such_card" ||
+	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusOK || code(w) != "no_such_card" || status(w) != http.StatusUnprocessableEntity ||
 		gjson.Get(w.Body.String(), "error.message").String() != "card c9 is not on this board" {
 		t.Errorf("stack error: %d %s", w.Code, w.Body.String())
 	}
 	// The run failed.
 	f.answer = func(string) (string, error) { return "", errors.New("pipeline error: boom") }
-	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusServiceUnavailable || code(w) != "unavailable" {
+	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusOK || code(w) != "unavailable" || status(w) != http.StatusServiceUnavailable {
 		t.Errorf("run failed: %d %s", w.Code, w.Body.String())
 	}
 	// Admission refused the tenant.
@@ -179,17 +181,83 @@ func TestHandleRunOutcomes(t *testing.T) {
 		out, _ := sjson.Set(env, "_txc.admission.denied", true)
 		return out, nil
 	}
-	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusServiceUnavailable {
+	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusOK || status(w) != http.StatusServiceUnavailable {
 		t.Errorf("admission: %d %s", w.Code, w.Body.String())
 	}
 	// The run took too long.
 	f.g.maxWait = 20 * time.Millisecond
 	f.answer = func(string) (string, error) { time.Sleep(60 * time.Millisecond); return "", context.DeadlineExceeded }
-	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusGatewayTimeout || code(w) != "timeout" {
+	if w := f.post(t, "card.note", "rg1.tok", `{}`); w.Code != http.StatusOK || code(w) != "timeout" || status(w) != http.StatusGatewayTimeout {
 		t.Errorf("timeout: %d %s", w.Code, w.Body.String())
 	}
 	var a answer
-	if err := json.Unmarshal([]byte(`{"ok":false,"error":{"code":"x"}}`), &a); err != nil || a.OK || a.Error.Code != "x" {
+	if err := json.Unmarshal([]byte(`{"ok":false,"error":{"code":"x","status":422}}`), &a); err != nil || a.OK || a.Error.Code != "x" || a.Error.Status != 422 {
 		t.Errorf("answer shape: %+v %v", a, err)
+	}
+}
+
+// status reads the status a 200 body carries for its failure.
+func status(w *httptest.ResponseRecorder) int {
+	return int(gjson.Get(w.Body.String(), "error.status").Int())
+}
+
+// The headers of an allowed call reach the client before the run ends, and
+// the connection is fed while it runs: a proxy with a header timeout and an
+// idle limit sees both satisfied. Over a real listener, since a recorder
+// cannot say when headers were flushed.
+func TestHandleSendsHeadersEarly(t *testing.T) {
+	f := newFake(t)
+	f.verdict = allowed()
+	f.g.maxWait = 5 * time.Second
+	started := make(chan struct{})
+	release := make(chan struct{})
+	f.answer = func(env string) (string, error) {
+		close(started)
+		<-release
+		out, _ := sjson.SetRaw(env, "_cap.output", `{"seq":7}`)
+		return out, nil
+	}
+	r := mux.NewRouter()
+	r.HandleFunc("/v1/cap/{name}", f.g.Handle).Methods(http.MethodPost)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/cap/card.note", strings.NewReader(`{"input":{"text":"hi"}}`))
+	req.Header.Set(Header, "rg1.tok")
+	resp, err := http.DefaultClient.Do(req) // returns once the headers are in
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	<-started
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("headers: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	// The body is not there yet: the run has not ended.
+	select {
+	case <-release:
+		t.Fatal("released early")
+	default:
+	}
+	close(release)
+	body, _ := io.ReadAll(resp.Body)
+	if !gjson.ValidBytes(body) || !gjson.GetBytes(body, "ok").Bool() || gjson.GetBytes(body, "output.seq").Int() != 7 {
+		t.Fatalf("body: %s", body)
+	}
+}
+
+// The feeding: a space a tick, until the body; then nothing more.
+func TestEarlyFeedsThenFinishes(t *testing.T) {
+	w := httptest.NewRecorder()
+	e := startEarly(w)
+	e.mu.Lock()
+	_, _ = io.WriteString(e.w, " ") // what a tick does
+	e.mu.Unlock()
+	e.fail(http.StatusGatewayTimeout, "timeout", "")
+	e.fail(http.StatusNotFound, "no_capability", "again") // a second finish is ignored
+	body := w.Body.String()
+	if !strings.HasPrefix(body, " ") || !gjson.Valid(body) || gjson.Get(body, "error.code").String() != "timeout" ||
+		gjson.Get(body, "error.status").Int() != 504 || strings.Count(body, "error") != 1 {
+		t.Fatalf("body: %q", body)
 	}
 }

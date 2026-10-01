@@ -200,3 +200,39 @@ func TestExecCapNameOverride(t *testing.T) {
 		t.Errorf("bad WITH name: %v %s", err, payload.Raw)
 	}
 }
+
+// The parent answers an allowed call with its headers first (200) and the
+// outcome in the body: leading whitespace from the keepalive, and a failure
+// carrying the status it would have had. The node reads that status.
+func TestExecCapInBandStatus(t *testing.T) {
+	p, srv := newParent(t)
+	defer srv.Close()
+	pu := &Unit{Logger: zap.NewNop(), Conf: config.Config{ParentURL: srv.URL, OpPayloadMax: 1 << 20}}
+	ctx := WithRunGrant(context.Background(), "rg1.tok")
+	run := func(name, meta string) string {
+		t.Helper()
+		payload, err := pu.ExecCap(ctx, capOp(name, meta))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return payload.Raw
+	}
+
+	p.status = http.StatusOK
+	p.answer = "   \n  " + `{"ok":false,"error":{"code":"timeout","status":504}}`
+	if out := run("ai.chat", `{"into":"think"}`); gjson.Get(out, "cap.error.code").String() != "txco_cap_timeout" || gjson.Get(out, "cap.error.status").Int() != 504 {
+		t.Errorf("in-band timeout: %s", out)
+	}
+	p.answer = "  " + `{"ok":false,"error":{"code":"no_such_card","message":"c9","status":422}}`
+	if out := run("card.note", `{"into":"noted"}`); gjson.Get(out, "cap.error.code").String() != "no_such_card" || gjson.Get(out, "cap.error.status").Int() != 422 {
+		t.Errorf("in-band stack error: %s", out)
+	}
+	p.answer = "  " + `{"ok":false,"error":{"code":"no_capability","status":404}}`
+	if out := run("card.note", `{"into":"noted"}`); gjson.Get(out, "cap.error.code").String() != "txco_cap_unknown" {
+		t.Errorf("in-band unknown: %s", out)
+	}
+	p.answer = " \n" + `{"ok":true,"output":{"seq":7}}`
+	if out := run("card.note", `{"into":"noted"}`); gjson.Get(out, "noted.seq").Int() != 7 || gjson.Get(out, "cap.status").Int() != 200 {
+		t.Errorf("in-band ok: %s", out)
+	}
+}

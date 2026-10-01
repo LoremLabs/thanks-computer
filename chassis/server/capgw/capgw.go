@@ -12,18 +12,30 @@
 // policy (`_grant`) and the work (`_cap`). The chassis does not know what a
 // capability does.
 //
-// Answers, always JSON:
+// Answers, always JSON. The decision is answered with its status:
 //
-//	200 {"ok":true,"output":…}
 //	401 {"ok":false,"error":{"code":"unauthorized"}}   no token, or not a live grant's
 //	403 {"ok":false,"error":{"code":"denied"}}         refused: allowlist, standing grant, budget, a rule
 //	409 {"ok":false,"error":{"code":"held"}}           a rule held it for a person
-//	404 {"ok":false,"error":{"code":"no_capability"}}  no `_cap` rule answered
-//	422 {"ok":false,"error":{"code":…,"message":…}}    the stack's own error
-//	503 {"ok":false,"error":{"code":"unavailable"}}    the chassis could not decide or run
+//	404 {"ok":false,"error":{"code":"no_capability"}}  not a capability name
+//	503 {"ok":false,"error":{"code":"unavailable"}}    the chassis could not decide
+//
+// An ALLOWED call answers 200 at once — headers sent and flushed before the
+// `_cap` run starts — and the body when the run ends. A model call can take
+// a minute; a proxy on the way (the fleet's edge allows 20 s for response
+// headers) must see headers, and then bytes: until the body, the inlet
+// writes one space every keepalive interval. So what the run came to is in
+// the body, with the status it would otherwise have carried:
+//
+//	200 {"ok":true,"output":…}
+//	200 {"ok":false,"error":{"code":"no_capability","status":404}}        no `_cap` rule answered
+//	200 {"ok":false,"error":{"code":…,"message":…,"status":422}}         the stack's own error
+//	200 {"ok":false,"error":{"code":"timeout","status":504}}             the run passed its ceiling
+//	200 {"ok":false,"error":{"code":"unavailable","status":503}}         the run failed, or the tenant could not be routed
 //
 // A refusal says only that it was refused: the trace of the `_grant` run
-// has the reason.
+// has the reason. A client reads `error.status` as the status (the node's
+// cap:// does); the leading whitespace is JSON's own.
 package capgw
 
 import (
@@ -33,6 +45,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -58,6 +71,9 @@ const (
 	CallerRIDHeader = "Txco-Caller-Rid"
 
 	defaultMaxBody = 4 << 20
+	// keepalive is how often a space goes to the client while the `_cap`
+	// run is still running; well under any proxy's idle limit.
+	keepalive = 10 * time.Second
 )
 
 // Gateway is the inlet.
@@ -103,6 +119,9 @@ type answer struct {
 type answerError struct {
 	Code    string `json:"code"`
 	Message string `json:"message,omitempty"`
+	// Status is the HTTP status this failure would have carried, when the
+	// headers (200) went out before the run ended.
+	Status int `json:"status,omitempty"`
 }
 
 func write(w http.ResponseWriter, status int, a answer) {
@@ -114,6 +133,70 @@ func write(w http.ResponseWriter, status int, a answer) {
 
 func fail(w http.ResponseWriter, status int, code, message string) {
 	write(w, status, answer{Error: &answerError{Code: code, Message: message}})
+}
+
+// early is a 200 whose headers went out before the body was known: it
+// keeps the client's connection fed with a space every keepalive interval
+// until the body is written. finish writes the body exactly once and stops
+// the feeding; a failure carries the status it would have had.
+type early struct {
+	w    http.ResponseWriter
+	mu   sync.Mutex
+	done chan struct{}
+	ok   bool
+}
+
+func startEarly(w http.ResponseWriter) *early {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	e := &early{w: w, done: make(chan struct{})}
+	e.flush()
+	go e.feed()
+	return e
+}
+
+// flush reaches the listener through any middleware wrapper (the web
+// head's wraps the writer and exposes Unwrap for exactly this): a type
+// assertion on the wrapper would find no Flusher and the headers would
+// wait for the body.
+func (e *early) flush() {
+	_ = http.NewResponseController(e.w).Flush()
+}
+
+func (e *early) feed() {
+	t := time.NewTicker(keepalive)
+	defer t.Stop()
+	for {
+		select {
+		case <-e.done:
+			return
+		case <-t.C:
+			e.mu.Lock()
+			if !e.ok {
+				_, _ = io.WriteString(e.w, " ")
+				e.flush()
+			}
+			e.mu.Unlock()
+		}
+	}
+}
+
+func (e *early) finish(a answer) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.ok {
+		return
+	}
+	e.ok = true
+	close(e.done)
+	_ = json.NewEncoder(e.w).Encode(a)
+	e.flush()
+}
+
+func (e *early) fail(status int, code, message string) {
+	e.finish(answer{Error: &answerError{Code: code, Message: message, Status: status}})
 }
 
 // Handle serves POST /v1/cap/{name}. Registered ahead of the web catch-all:
@@ -192,6 +275,10 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	pb.SetRaw("_txc.cap.input", string(input))
 	pb.Set("_ts", start.UTC().Format(time.RFC3339))
 
+	// Allowed: the headers go out now (200, flushed), and the body when the
+	// run ends. From here every failure is in the body, with its status.
+	e := startEarly(w)
+
 	// The `_cap` run: a context of its own, off the inlet's, with the
 	// caller's rid; it ends when the caller goes away and at the ceiling.
 	rctx, cancel := context.WithTimeout(g.ctx, g.maxWait)
@@ -210,21 +297,21 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case timedOut:
 		g.log.Warn("cap: the _cap run timed out", fields...)
-		fail(w, http.StatusGatewayTimeout, "timeout", "")
+		e.fail(http.StatusGatewayTimeout, "timeout", "")
 		return
 	case runErr != nil:
 		g.log.Warn("cap: the _cap run failed", append(fields, zap.Error(runErr))...)
-		fail(w, http.StatusServiceUnavailable, "unavailable", "")
+		e.fail(http.StatusServiceUnavailable, "unavailable", "")
 		return
 	}
 	f := gjson.GetMany(final, "_txc.route.unavailable", "_txc.admission.denied", "_cap.error", "_cap.output")
 	switch {
 	case f[0].Bool():
 		g.log.Warn("cap: the tenant could not be routed", fields...)
-		fail(w, http.StatusServiceUnavailable, "unavailable", "")
+		e.fail(http.StatusServiceUnavailable, "unavailable", "")
 	case f[1].Bool():
 		g.log.Info("cap: the tenant was refused admission", fields...)
-		fail(w, http.StatusServiceUnavailable, "unavailable", "")
+		e.fail(http.StatusServiceUnavailable, "unavailable", "")
 	case f[2].Exists() && f[2].Type != gjson.Null:
 		code := strings.TrimSpace(f[2].Get("code").String())
 		if code == "" {
@@ -235,12 +322,12 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 			msg = msg[:1000]
 		}
 		g.log.Info("cap: the stack answered an error", append(fields, zap.String("code", code))...)
-		fail(w, http.StatusUnprocessableEntity, code, msg)
+		e.fail(http.StatusUnprocessableEntity, code, msg)
 	case f[3].Exists():
 		g.log.Info("cap: answered", fields...)
-		write(w, http.StatusOK, answer{OK: true, Output: json.RawMessage(f[3].Raw)})
+		e.finish(answer{OK: true, Output: json.RawMessage(f[3].Raw)})
 	default:
 		g.log.Info("cap: no _cap rule answered", fields...)
-		fail(w, http.StatusNotFound, "no_capability", "no rule in the tenant's _cap stack answered "+name)
+		e.fail(http.StatusNotFound, "no_capability", "no rule in the tenant's _cap stack answered "+name)
 	}
 }
