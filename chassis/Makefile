@@ -1,6 +1,6 @@
 .PHONY: all lint test build clean install
 
-VERSION = "0.2.32-rc1"
+VERSION = "0.2.32-rc2"
 WORKSPACE ?= $(shell pwd)
 BUILD_TIMESTAMP = $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 GIT_HASH ?= $(shell git rev-parse HEAD)
