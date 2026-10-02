@@ -2300,16 +2300,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		}))
 
 	// `txco://schedule`: enqueue (or cancel/reschedule) a future event into the
-	// scheduled_events store. Registered only when the scheduled personality
-	// opened a store (--db-scheduled-dsn). The closure passes the PINNED tenant
-	// (processor.TenantScope) — a scheduled event must fire for the tenant that
-	// enqueued it, never a mutable `_txc.tenant`. See chassis/server/schedule.go.
-	if scheduledStore != nil {
-		pu.Handle([]byte("txco://schedule"), event.OpsHandlerFunc(
-			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
-				return scheduleOp(ctx, scheduledStore, in)
-			}))
-	}
+	// scheduled_events store. Registered on every node: with no store open
+	// (no scheduled personality and no shared --scheduled-store) it answers
+	// `_schedule.error` txco_schedule_disabled rather than "op not found" or
+	// nothing, so a rule can see that nothing was armed. The closure passes
+	// the PINNED tenant (processor.TenantScope) — a scheduled event must fire
+	// for the tenant that enqueued it, never a mutable `_txc.tenant`. See
+	// chassis/server/schedule.go.
+	pu.Handle([]byte("txco://schedule"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return scheduleOp(ctx, scheduledStore, in)
+		}))
 
 	// WebSocket sessions (txco://websocket/{accept,send,reply,close}): the
 	// stack's side of a connection the `websocket` personality owns after the

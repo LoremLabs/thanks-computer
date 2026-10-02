@@ -53,6 +53,14 @@ can't double-send — and a claim left stranded by a crash is retried after
 `--scheduled-stale-after`. A response timeout is treated as fired (at-most-once
 bias — the work likely ran). Outcomes are visible in the logs and trace only.
 
+**Which nodes write, which fire.** A node with the `scheduled` personality
+opens the store and polls it. A node without it (an admin-only control
+plane, where `txco inspect` runs a tenant's rules) opens the store only when
+`--scheduled-store` names a shared backend: it enqueues, and the polling
+nodes fire. With the bundled `sqlite` store and no `scheduled` personality
+there is nothing to write to, and `txco://schedule` answers `_schedule.error`
+beginning `txco_schedule_disabled`.
+
 ## Flags
 
 | Flag | Default | Meaning |

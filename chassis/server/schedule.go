@@ -35,14 +35,23 @@ import (
 //   cancel          — when true, delete the pending event for idempotency_key.
 //
 // Output (under the `_schedule` private key, dropped from the web projection):
-// {id, scheduled_at} on enqueue, {cancelled:bool} on cancel, {error} on failure.
+// {id, scheduled_at} on enqueue, {cancelled:bool} on cancel, {error} on failure
+// (txco_schedule_disabled… when this node has no store to write to).
 
 func scheduleErr(msg string) event.Payload {
 	raw, _ := sjson.Set(`{}`, "_schedule.error", msg)
 	return event.Payload{Raw: raw, Type: event.JSON}
 }
 
+// errScheduleDisabled is what txco://schedule answers on a node with no
+// scheduled store: one that neither polls (no `scheduled` personality) nor
+// shares a store with nodes that do.
+const errScheduleDisabled = "txco_schedule_disabled: this node has no scheduled store (add `scheduled` to --personalities, or point --scheduled-store at the fleet's shared store)"
+
 func scheduleOp(ctx context.Context, store *scheduled.Store, in []byte) (event.Payload, error) {
+	if store == nil {
+		return scheduleErr(errScheduleDisabled), errors.New(errScheduleDisabled)
+	}
 	tenant := processor.TenantScope(ctx)
 	if tenant == "" {
 		e := "schedule: no tenant in request scope"

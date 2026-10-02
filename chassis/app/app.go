@@ -356,24 +356,44 @@ func Run(bi BuildInfo) int {
 	}
 
 	// scheduled_events DB — the durable queue the `scheduled` personality
-	// polls + claims and that txco://schedule writes to. Opened only when the
-	// scheduled personality is active (a node not participating in scheduling
-	// has nothing to enqueue or fire). A postgres:// --db-scheduled-dsn makes
-	// it the shared fleet store so every node claims against one table; the
-	// in-tree default is a local SQLite file (single-node-correct). The
-	// dialect seam + pgx driver are reused from the auth path.
+	// polls + claims and that txco://schedule writes to. Two reasons to open
+	// it, and they are separate (openScheduledStore):
+	//
+	//   - this node POLLS: the scheduled personality is active. A failure to
+	//     open is fatal, as before.
+	//   - this node only ENQUEUES: no scheduled personality, but the store is
+	//     a shared one (--scheduled-store other than the bundled sqlite), so a
+	//     row written here is fired by the nodes that do poll. This is the
+	//     admin plane: `txco inspect` runs a tenant's rules there, and a rule's
+	//     txco://schedule must reach the fleet's table. A failure to open is
+	//     logged and the op answers txco_schedule_disabled; a control plane
+	//     does not refuse to boot over it.
+	//
+	// The bundled sqlite store is a file local to this node: without the
+	// poller nothing would ever read it, so it stays closed and
+	// txco://schedule says so instead of writing rows nobody fires.
 	var scheduledStore *scheduled.Store
-	if strings.Contains(conf.Personalities, "scheduled") {
+	switch open, polls := openScheduledStore(conf.Personalities, conf.ScheduledStore); {
+	case open:
 		st, serr := scheduled.Open(conf.ScheduledStore, scheduled.Config{DBPath: conf.ScheduledDBPath})
-		if serr != nil {
+		switch {
+		case serr == nil:
+			defer st.Close()
+			scheduledStore = st
+			if !polls {
+				logger.Info("scheduled store open for enqueue only — this node does not poll it",
+					zap.String("store", conf.ScheduledStore), zap.String("personalities", conf.Personalities))
+			}
+		case polls:
 			logger.Fatal("scheduled store open failed",
 				zap.String("store", conf.ScheduledStore), zap.String("err", serr.Error()))
+		default:
+			logger.Error("scheduled store open failed — txco://schedule is disabled on this node",
+				zap.String("store", conf.ScheduledStore), zap.String("err", serr.Error()))
 		}
-		defer st.Close()
-		scheduledStore = st
-	} else {
-		logger.Info("skipping scheduled store open — scheduled personality not active",
-			zap.String("personalities", conf.Personalities))
+	default:
+		logger.Info("skipping scheduled store open — scheduled personality not active and the store is node-local",
+			zap.String("store", conf.ScheduledStore), zap.String("personalities", conf.Personalities))
 	}
 
 	// Source-watcher store: the tenant_sources table lives IN the shared
@@ -1288,4 +1308,16 @@ func driveSinkTransactional(ctx context.Context, conf config.Config, st *chdrive
 	}
 	_ = rows.Close()
 	return true
+}
+
+// openScheduledStore decides whether this node opens the scheduled_events
+// store, and whether it is the poller's. A node with the scheduled
+// personality opens whatever is configured and polls it. A node without it
+// opens a SHARED store only, to enqueue (txco://schedule, the drive sink):
+// the bundled sqlite file is local, and rows in it would never fire.
+func openScheduledStore(personalities, store string) (open, polls bool) {
+	if strings.Contains(personalities, "scheduled") {
+		return true, true
+	}
+	return store != "" && store != "sqlite", false
 }
