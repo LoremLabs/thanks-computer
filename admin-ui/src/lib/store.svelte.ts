@@ -891,7 +891,10 @@ function createStore() {
             return
         }
         state.selectedId = h.op
-        state.selectedStack = h.stack
+        // An op hash names its stack too (for the pin below), but the
+        // view is the op's detail: selectedStack stays empty, as
+        // selectOp leaves it — App renders StackView whenever it's set.
+        state.selectedStack = h.op ? '' : h.stack
         state.showVersionsList = h.page === 'versions' ? h.stack : ''
         state.showTraces = ''
         state.showSecrets = ''

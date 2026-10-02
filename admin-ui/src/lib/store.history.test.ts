@@ -94,6 +94,17 @@ describe('Back restores the previous view (reader side)', () => {
         expect(store.state.showVersionsList).toBe('')
     })
 
+    it('an #ops hash (deep link, or Back to it) opens the op, not its stack', () => {
+        store.showTraces('r1')
+
+        window.location.hash = 'ops/_inspect/200/card'
+        store.syncFromHash()
+
+        expect(store.state.selectedId).toBe('_inspect/200/card')
+        expect(store.state.selectedStack).toBe('')
+        expect(store.state.showTraces).toBe('')
+    })
+
     it('traces → Back → stack view', () => {
         store.selectStack('foo')
         store.showTraces()
