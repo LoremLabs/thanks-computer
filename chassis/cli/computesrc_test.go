@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -175,5 +176,106 @@ func TestOlderChassisFallsBack(t *testing.T) {
 	}
 	if chassisKeepsComputeSource(context.Background(), c, []computeapi.Built{{Digest: hex64('c')}}, &errb, "apply") {
 		t.Fatal("no source built, yet rows would be sent")
+	}
+}
+
+// sourceChassis answers a push (computes, blob plane, draft → files →
+// validate → activate) and records what the draft carried and which blob
+// calls arrived.
+type sourceChassis struct {
+	mu        sync.Mutex
+	files     []client.StackFile
+	blobCalls int
+}
+
+func (s *sourceChassis) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case strings.Contains(r.URL.Path, "/computes/"):
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	case strings.HasSuffix(r.URL.Path, "/blobs/missing"):
+		s.blobCalls++
+		var req struct{ Hashes []string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewEncoder(w).Encode(map[string][]string{"missing": req.Hashes})
+	case strings.Contains(r.URL.Path, "/blobs/sha256/"):
+		s.blobCalls++
+		_, _ = io.Copy(io.Discard, r.Body)
+	case strings.HasSuffix(r.URL.Path, "/draft"):
+		_, _ = w.Write([]byte(`{"version_number":3}`))
+	case strings.HasSuffix(r.URL.Path, "/files"):
+		var req struct{ Files []client.StackFile }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		s.files = req.Files
+		_, _ = w.Write([]byte(`{"manifest_hash":"abc"}`))
+	case strings.HasSuffix(r.URL.Path, "/validate"):
+		_, _ = w.Write([]byte(`{"ok":true,"checked":1}`))
+	case strings.HasSuffix(r.URL.Path, "/activate"):
+		_, _ = w.Write([]byte(`{"version_number":3,"prior_version_number":2}`))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *sourceChassis) sourceRows() int {
+	n := 0
+	for _, f := range s.files {
+		if computesrc.IsPath(f.Path) {
+			n++
+		}
+	}
+	return n
+}
+
+// By default a push records the compute's source; --no-source sends no
+// COMPUTES/ row and touches the blob plane not at all.
+func TestPushNoSource(t *testing.T) {
+	if _, err := exec.LookPath("javy"); err != nil {
+		t.Skip("javy not on PATH")
+	}
+	t.Setenv("TXCO_HOME", t.TempDir())
+	root := t.TempDir()
+	for p, body := range map[string]string{
+		"OPS/api/100/hello.txcl": `EXEC "op://hello"`,
+		"OPS/api/100/hello.js":   `import { op } from "@txco/op"; export default op(({ input }) => input);`,
+	} {
+		full := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		args      []string
+		rows      int
+		blobCalls bool
+	}{
+		{nil, 1, true},
+		{[]string{"--no-source"}, 0, false},
+	} {
+		fake := &sourceChassis{}
+		srv := httptest.NewServer(fake)
+		var out, errb bytes.Buffer
+		args := append([]string{"api", root, "--addr", srv.URL}, tc.args...)
+		if code := runPush(args, &out, &errb); code != 0 {
+			srv.Close()
+			t.Fatalf("%v: exit=%d stderr=%q", tc.args, code, errb.String())
+		}
+		srv.Close()
+		if got := fake.sourceRows(); got != tc.rows {
+			t.Errorf("%v: COMPUTES/ rows = %d, want %d (files %+v)", tc.args, got, tc.rows, fake.files)
+		}
+		if (fake.blobCalls > 0) != tc.blobCalls {
+			t.Errorf("%v: blob calls = %d", tc.args, fake.blobCalls)
+		}
 	}
 }

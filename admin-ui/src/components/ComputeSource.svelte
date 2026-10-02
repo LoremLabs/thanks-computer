@@ -88,7 +88,6 @@
         <div class="max-w-prose rounded border border-neutral-200 bg-white p-3 text-sm text-neutral-700">
             <p class="mb-2 font-medium text-neutral-900">No source is stored for this compute.</p>
             <ul class="list-disc space-y-1 pl-5 text-xs text-neutral-600">
-                <li>It was applied before the chassis kept compute source. Run <code class="font-mono">txco apply</code> again to store it.</li>
                 <li>It came from a prebuilt <code class="font-mono">.wasm</code> (a package), which has no source.</li>
                 <li>The stack <span class="font-mono">{stack}</span> doesn't use this compute.</li>
             </ul>

@@ -52,6 +52,10 @@ type applyOpts struct {
 	// short-circuits (the default bulk-list skip, the per-stack GetStack no-op,
 	// and --changed). Use to force a redeploy / fleet reload.
 	force bool
+	// noSource leaves compute sources out: no COMPUTES/ rows and no bundle
+	// uploads, so the admin can't show what a compute:// op does. The new
+	// version drops any source rows the previous one carried.
+	noSource bool
 }
 
 // spin animates a braille spinner on a TTY while fn runs, then clears the line.
@@ -214,6 +218,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.StringArrayVar(&opts.skip, "skip", nil, "skip any stack whose name contains this substring (repeatable); e.g. --skip publications")
 	fs.BoolVar(&opts.changed, "changed", false, "zero-network fast mode: trust the local .txco/<stack>.state.json digest and skip stacks unchanged since the last apply from this workspace (no bulk list, no per-stack probe). Reflects local record, not server drift; a stack never applied here counts as changed.")
 	fs.BoolVar(&opts.force, "force", false, "re-version every stack even if unchanged (bypass all skip short-circuits); forces a redeploy / fleet reload")
+	fs.BoolVar(&opts.noSource, "no-source", false, "don't store compute sources (each op://NAME .js/.ts) for the admin to show; the new version carries none")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response (method, URL, status, error body) to stderr. Equivalent to TXCO_VERBOSE=1, which works for ANY txco command.")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -300,6 +305,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opts.jsonOut, "json", false, "emit machine-readable JSON (the deploy result object)")
 	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
 	fs.IntVar(&opts.retries, "retries", 3, "retry a transient failure (gateway 5xx, `database is locked`) this many times with backoff before giving up")
+	fs.BoolVar(&opts.noSource, "no-source", false, "don't store compute sources (each op://NAME .js/.ts) for the admin to show; the new version carries none")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response to stderr (TXCO_VERBOSE=1)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -572,7 +578,7 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	// Each stack also records its computes' source (COMPUTES/<digest>.json,
 	// bytes in the file store) so the admin can show it — when the chassis
 	// is new enough to accept those rows.
-	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, cmd)
+	keepSource := !opts.noSource && chassisKeepsComputeSource(ctx, c, builtComputes, stderr, cmd)
 
 	// Group ops by stack, then for each stack: create a draft (cloning
 	// the active version), upload the file set, validate, and activate.

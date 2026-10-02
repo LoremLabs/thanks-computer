@@ -45,6 +45,8 @@ What the tooling handles for you:
   each new stack version. A prebuilt `.wasm` from a package has no source
   to show. The first `apply` after upgrading the chassis makes one new
   version of each stack that has nano-ops, to record their source.
+  `txco apply --no-source` (or `push`) leaves source out; the new version
+  then carries none.
 
 ## Important restrictions when choosing nano-ops
 
