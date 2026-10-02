@@ -176,6 +176,39 @@ export async function getVersion(
     )
 }
 
+// A compute op's authored source: the entry file plus the local files it
+// imports, paths relative to the entry's directory. `version` is the newest
+// version of the stack that records it.
+export interface ComputeSourceFile {
+    path: string
+    content: string
+}
+export interface ComputeSource {
+    digest: string
+    stack: string
+    version: number
+    entry: string
+    files: ComputeSourceFile[]
+}
+
+// The compute ref an EXEC names: `compute://sha256/<64 hex>`.
+export const COMPUTE_REF = /compute:\/\/sha256\/([0-9a-f]{64})/
+
+// GET /stacks/{name}/computes/sha256/{digest} — the source `txco apply`
+// stored for a compute the stack uses. null (404) when the stack has none:
+// applied before the chassis kept source, a prebuilt .wasm, or a compute
+// the stack doesn't use.
+export async function getComputeSource(
+    tenant: string,
+    stack: string,
+    digest: string
+): Promise<ComputeSource | null> {
+    if (!tenant || !stack || !digest) return null
+    return getJSON<ComputeSource>(
+        `/v1/tenants/${encodeURIComponent(tenant)}/stacks/${encodeURIComponent(stack)}/computes/sha256/${encodeURIComponent(digest)}`
+    )
+}
+
 // GET /stacks/{name}/diff?v1=N&v2=M — per-file change list between two
 // versions (added / changed / removed). Returns only hashes; file
 // content is fetched separately via getVersion when the UI wants to

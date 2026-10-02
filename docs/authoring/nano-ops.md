@@ -38,6 +38,13 @@ What the tooling handles for you:
 - **Sandboxing.** No filesystem, network, or ambient environment;
   memory and wall-clock capped per call
   ([runtime reference](../advanced/serve.md)).
+- **Showing the source.** `apply` also keeps each nano-op's source: the
+  entry file and the local files it imports, not the SDK. In the admin,
+  click a `compute://sha256/…` in an op or a trace to read it. The source
+  is stored once by hash, so an unchanged nano-op adds only a small row to
+  each new stack version. A prebuilt `.wasm` from a package has no source
+  to show. The first `apply` after upgrading the chassis makes one new
+  version of each stack that has nano-ops, to record their source.
 
 ## Important restrictions when choosing nano-ops
 

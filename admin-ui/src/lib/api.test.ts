@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
+    getComputeSource,
     listSecrets,
     createSecret,
     rotateSecret,
@@ -127,5 +128,24 @@ describe('revokeSecret', () => {
     it('maps 404 to SecretNotFoundError', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(404, { error: 'secret_not_found' })))
         await expect(revokeSecret('acme', 'GONE')).rejects.toBeInstanceOf(SecretNotFoundError)
+    })
+})
+
+describe('getComputeSource', () => {
+    const digest = 'a'.repeat(64)
+
+    it('reads through the stack, encoding a nested stack name', async () => {
+        const body = { digest, stack: 'node-demo/_websocket', version: 3, entry: 'close.js', files: [] }
+        const f = vi.fn().mockResolvedValue(jsonResponse(200, body))
+        vi.stubGlobal('fetch', f)
+        expect(await getComputeSource('acme', 'node-demo/_websocket', digest)).toEqual(body)
+        expect(f.mock.calls[0][0]).toBe(
+            `/v1/tenants/acme/stacks/node-demo%2F_websocket/computes/sha256/${digest}`
+        )
+    })
+
+    it('returns null when the stack has no source for it (404)', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(404, { error: 'no_source' })))
+        expect(await getComputeSource('acme', 'site', digest)).toBeNull()
     })
 })

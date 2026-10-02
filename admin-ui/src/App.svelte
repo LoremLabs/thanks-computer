@@ -6,6 +6,7 @@
     import { groupOps } from './lib/tree'
     import Ago from './components/Ago.svelte'
     import Button from './components/Button.svelte'
+    import ComputeSource from './components/ComputeSource.svelte'
     import Login from './components/Login.svelte'
     import OpDetail from './components/OpDetail.svelte'
     import StackNav from './components/StackNav.svelte'
@@ -110,6 +111,7 @@
             !store.state.showTraces &&
             !store.state.showSecrets &&
             !store.state.showInspect &&
+            !store.state.showCompute &&
             !store.state.showVersionsList &&
             !store.state.selectedStack &&
             !store.state.selectedId &&
@@ -425,6 +427,13 @@
                 />
             {:else if store.state.showInspect}
                 <InspectView />
+            {:else if store.state.showCompute}
+                {@const cs = store.state.showCompute}
+                <ComputeSource
+                    stack={cs.stack}
+                    digest={cs.digest}
+                    onBack={() => (history.length > 1 ? history.back() : store.selectStack(cs.stack))}
+                />
             {:else if store.state.showTraces === '__list__'}
                 <TracesList onSelectTrace={(rid) => store.showTraces(rid)} />
             {:else if store.state.showTraces}

@@ -61,7 +61,8 @@ interface Selection {
     // 'demo' = render the txcl walkthrough — only present when the
     // chassis runs in demo mode (see state.demoMode + probeDemoMode).
     // Otherwise '' (op-or-stack view).
-    page: 'versions' | 'login' | 'traces' | 'secrets' | 'inspect' | 'demo' | ''
+    // 'compute' = the source of one compute op (`#compute/<stack>/<digest>`).
+    page: 'versions' | 'login' | 'traces' | 'secrets' | 'inspect' | 'demo' | 'compute' | ''
     // Captured from `#login?t=<token>` and consumed once by
     // syncFromHash → tryExchange. Not part of the persistent URL.
     loginToken?: string
@@ -69,6 +70,9 @@ interface Selection {
     traceRid?: string
     // Captured from `#secrets/<name>` — empty when on the list view.
     secretName?: string
+    // Captured from `#compute/<stack>/<digest>`.
+    computeStack?: string
+    computeDigest?: string
 }
 
 function cacheKey(stack: string, n: number): string {
@@ -284,6 +288,12 @@ function createStore() {
         // its state" panel. Mirrors showDemo: boolean, no inner
         // detail routes; the panel owns its form state locally.
         showInspect: initial.page === 'inspect',
+        // The compute-source view (`#compute/<stack>/<digest>`): which
+        // stack's COMPUTES/<digest>.json row to read the source through.
+        // null when not on that view.
+        showCompute: (initial.page === 'compute' && initial.computeStack && initial.computeDigest
+            ? { stack: initial.computeStack, digest: initial.computeDigest }
+            : null) as { stack: string; digest: string } | null,
         // Live-trace cache: keyed by rid, holding the full ClosedTrace
         // shape received over /traces/stream. Populated by TracesList
         // as events arrive; consumed by TraceDetail to avoid an
@@ -544,6 +554,7 @@ function createStore() {
         state.selectedId = ''
         state.selectedStack = ''
         state.showVersionsList = ''
+        state.showCompute = null
         state.stacks = []
         state.visibleStacks = []
         state.versionsByStack = {}
@@ -640,6 +651,16 @@ function createStore() {
         if (state.showInspect) {
             return { op: '', stack: '', version: null, page: 'inspect' }
         }
+        if (state.showCompute) {
+            return {
+                op: '',
+                stack: '',
+                version: null,
+                page: 'compute',
+                computeStack: state.showCompute.stack,
+                computeDigest: state.showCompute.digest,
+            }
+        }
         // Stack name to use for version-pinning: either the explicit
         // selectedStack (stack/versions view) or the op's parent
         // stack (op-detail view). The URL form is decided separately
@@ -688,6 +709,7 @@ function createStore() {
         state.showTraces = ''
         state.showSecrets = ''
         state.showInspect = false
+        state.showCompute = null
         writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
@@ -702,6 +724,7 @@ function createStore() {
         state.showTraces = ''
         state.showSecrets = ''
         state.showInspect = false
+        state.showCompute = null
         writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
@@ -715,6 +738,7 @@ function createStore() {
         state.showTraces = ''
         state.showSecrets = ''
         state.showInspect = false
+        state.showCompute = null
         // Lazy-fetch history.
         if (!state.versionsByStack[stack]) refreshVersions(stack)
         writeHash(currentSelection(), opts?.history ?? 'push')
@@ -730,6 +754,7 @@ function createStore() {
         state.showVersionsList = ''
         state.showSecrets = ''
         state.showInspect = false
+        state.showCompute = null
         state.showTraces = rid && rid !== '' ? rid : '__list__'
         writeHash(currentSelection(), opts?.history ?? 'push')
     }
@@ -744,6 +769,7 @@ function createStore() {
         state.showVersionsList = ''
         state.showTraces = ''
         state.showInspect = false
+        state.showCompute = null
         state.showSecrets = name && name !== '' ? name : '__list__'
         if (!state.secretsLoaded) refreshSecrets()
         writeHash(currentSelection(), opts?.history ?? 'push')
@@ -759,6 +785,22 @@ function createStore() {
         state.showTraces = ''
         state.showSecrets = ''
         state.showInspect = true
+        state.showCompute = null
+        writeHash(currentSelection(), opts?.history ?? 'push')
+    }
+
+    // Open the source of one compute op — the target of a clicked
+    // `compute://sha256/<digest>`. The stack names whose COMPUTES/ row to
+    // read it through (the server serves source only that way).
+    function showCompute(stack: string, digest: string, opts?: HistoryOpts) {
+        if (!stack || !digest) return
+        state.selectedId = ''
+        state.selectedStack = ''
+        state.showVersionsList = ''
+        state.showTraces = ''
+        state.showSecrets = ''
+        state.showInspect = false
+        state.showCompute = { stack, digest }
         writeHash(currentSelection(), opts?.history ?? 'push')
     }
 
@@ -851,6 +893,7 @@ function createStore() {
             state.showSecrets = ''
             state.showDemo = false
             state.showInspect = false
+            state.showCompute = null
             state.showTraces = h.traceRid && h.traceRid !== '' ? h.traceRid : '__list__'
             return
         }
@@ -862,6 +905,7 @@ function createStore() {
             state.showTraces = ''
             state.showDemo = false
             state.showInspect = false
+            state.showCompute = null
             state.showSecrets =
                 h.secretName && h.secretName !== '' ? h.secretName : '__list__'
             if (!state.secretsLoaded) refreshSecrets()
@@ -878,6 +922,7 @@ function createStore() {
             state.showSecrets = ''
             state.showDemo = false
             state.showInspect = true
+            state.showCompute = null
             return
         }
         if (h.page === 'demo') {
@@ -888,6 +933,20 @@ function createStore() {
             state.showSecrets = ''
             state.showDemo = true
             state.showInspect = false
+            state.showCompute = null
+            return
+        }
+        // Compute-source route — reached from a clicked compute ref; no
+        // stack selection of its own (the sidebar stays on ops).
+        if (h.page === 'compute' && h.computeStack && h.computeDigest) {
+            state.selectedId = ''
+            state.selectedStack = ''
+            state.showVersionsList = ''
+            state.showTraces = ''
+            state.showSecrets = ''
+            state.showDemo = false
+            state.showInspect = false
+            state.showCompute = { stack: h.computeStack, digest: h.computeDigest }
             return
         }
         state.selectedId = h.op
@@ -900,6 +959,7 @@ function createStore() {
         state.showSecrets = ''
         state.showDemo = false
         state.showInspect = false
+        state.showCompute = null
         if (h.stack && typeof h.version === 'number') {
             // The hash carries an explicit version pin; honor it.
             // Fire-and-forget: setStackVersion fetches + rebuilds ops
@@ -1446,6 +1506,7 @@ function createStore() {
         setTenant,
         showSecrets,
         showInspect,
+        showCompute,
         showTraces,
         showVersions,
         signOut,
@@ -1612,6 +1673,7 @@ function persistStacksCollapsed(map: Record<string, boolean>) {
 //   #stack/<name>/versions              → versions-list page
 //   #ops/<stack>/<scope>/<name>         → op detail, active version
 //   #ops/<stack>/v<N>/<scope>/<name>    → op detail, version N
+//   #compute/<stack>/<digest>           → a compute op's source
 //   #traces                             → live trace list
 //   #traces/<rid>                       → per-trace detail
 function readHash(): Selection {
@@ -1661,6 +1723,12 @@ function readHash(): Selection {
     // but the App ladder's `page === 'demo'` branch shows an empty state.
     if (h === '#demo' || h === '#demo/') {
         return { op: '', stack: '', version: null, page: 'demo' }
+    }
+
+    // Compute source: the stack may contain '/', the digest never does.
+    const cm = h.match(/^#compute\/(.+)\/([0-9a-f]{64})$/)
+    if (cm) {
+        return { op: '', stack: '', version: null, page: 'compute', computeStack: cm[1], computeDigest: cm[2] }
     }
 
     // Op detail with optional version override.
@@ -1719,6 +1787,8 @@ function writeHash(sel: Selection, mode: 'push' | 'replace' = 'replace') {
         next = '#inspect'
     } else if (sel.page === 'demo') {
         next = '#demo'
+    } else if (sel.page === 'compute' && sel.computeStack && sel.computeDigest) {
+        next = `#compute/${sel.computeStack}/${sel.computeDigest}`
     } else if (sel.page === 'versions' && sel.stack) {
         next = `#stack/${sel.stack}/versions`
     } else if (sel.op) {

@@ -159,6 +159,7 @@
                                     errors={errorsFor(txclPath)}
                                     onSave={saveTxcl}
                                     onReload={reload}
+                                    onComputeRef={(digest) => store.showCompute(op.stack, digest)}
                                 />
                             {/await}
                         {:else if isDraft}

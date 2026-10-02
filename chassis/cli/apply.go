@@ -569,6 +569,10 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
 		return 1
 	}
+	// Each stack also records its computes' source (COMPUTES/<digest>.json,
+	// bytes in the file store) so the admin can show it — when the chassis
+	// is new enough to accept those rows.
+	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, cmd)
 
 	// Group ops by stack, then for each stack: create a draft (cloning
 	// the active version), upload the file set, validate, and activate.
@@ -676,6 +680,14 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			return 1
 		}
 		files = append(files, dsFiles...)
+		// COMPUTES/ rows are CODE too, derived from the colocated sources:
+		// fingerprint-only, their bundles made resident just before the draft.
+		var srcUploads []casUpload
+		if keepSource {
+			var srcFiles []client.StackFile
+			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
+			files = append(files, srcFiles...)
+		}
 		localHash := localManifestHash(files)
 
 		// Fast-skip an unchanged stack with no per-stack round-trip. --force skips
@@ -777,6 +789,13 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		if len(dsUploads) > 0 {
 			if err := ensureDatasetBlobs(ctx, c, dsUploads, progress, stderr); err != nil {
 				fmt.Fprintf(stderr, "%s: %s: %v\n", cmd, stack, err)
+				failures = append(failures, stack)
+				continue
+			}
+		}
+		if len(srcUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, srcUploads, nil, progress, stderr); err != nil {
+				fmt.Fprintf(stderr, "%s: %s: compute source: %v\n", cmd, stack, err)
 				failures = append(failures, stack)
 				continue
 			}

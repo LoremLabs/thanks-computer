@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -157,20 +158,27 @@ func ensureDatasetBlobs(ctx context.Context, c *client.Client, uploads []casUplo
 }
 
 // ensureBlobsResident makes every upload's bytes resident in the chassis CAS
-// before the draft that references them is sent: HEAD per hash, then an
-// optional precheck and a streamed PUT for the misses. Mirrors uploadComputes
-// — activation verifies presence and refuses the version when a blob is
+// before the draft that references them is sent: one batch probe for which
+// hashes are missing (a HEAD per hash on an older chassis), then an optional
+// precheck and a streamed PUT for the misses. Mirrors uploadComputes —
+// activation verifies presence and refuses the version when a blob is
 // missing, so failing here aborts the stack's deploy rather than leaving a
-// doomed draft. Shared by DATASETS/ artifacts and BLOBS/ seed files.
+// doomed draft. Shared by DATASETS/ artifacts, BLOBS/ seed files and
+// COMPUTES/ sources.
 func ensureBlobsResident(ctx context.Context, c *client.Client, uploads []casUpload, precheck func(casUpload) error, progress, stderr io.Writer) error {
-	for _, u := range uploads {
-		ok, err := c.HasBlob(ctx, u.Hash)
-		if err != nil {
-			return fmt.Errorf("%s: blob probe: %w", u.Path, err)
-		}
-		if ok {
+	if len(uploads) == 0 {
+		return nil
+	}
+	missing, err := missingUploads(ctx, c, uploads)
+	if err != nil {
+		return err
+	}
+	put := map[string]bool{}
+	for _, u := range missing {
+		if put[u.Hash] {
 			continue
 		}
+		put[u.Hash] = true
 		if precheck != nil {
 			if err := precheck(u); err != nil {
 				return fmt.Errorf("%s: %w", u.Path, err)
@@ -189,4 +197,40 @@ func ensureBlobsResident(ctx context.Context, c *client.Client, uploads []casUpl
 		}
 	}
 	return nil
+}
+
+// missingUploads returns the uploads whose bytes the chassis CAS lacks.
+func missingUploads(ctx context.Context, c *client.Client, uploads []casUpload) ([]casUpload, error) {
+	hashes := make([]string, 0, len(uploads))
+	for _, u := range uploads {
+		hashes = append(hashes, u.Hash)
+	}
+	miss, err := c.MissingBlobs(ctx, hashes)
+	if err == nil {
+		want := make(map[string]bool, len(miss))
+		for _, h := range miss {
+			want[h] = true
+		}
+		var out []casUpload
+		for _, u := range uploads {
+			if want[u.Hash] {
+				out = append(out, u)
+			}
+		}
+		return out, nil
+	}
+	if !errors.Is(err, client.ErrNoMissingBlobs) {
+		return nil, fmt.Errorf("blob probe: %w", err)
+	}
+	var out []casUpload
+	for _, u := range uploads {
+		ok, herr := c.HasBlob(ctx, u.Hash)
+		if herr != nil {
+			return nil, fmt.Errorf("%s: blob probe: %w", u.Path, herr)
+		}
+		if !ok {
+			out = append(out, u)
+		}
+	}
+	return out, nil
 }

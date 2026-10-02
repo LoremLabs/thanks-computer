@@ -6,6 +6,7 @@
     import { BaseHashMismatchError, type ValidateError } from '../lib/api'
     import { txcl } from '../lib/txcl/codemirror'
     import { txclTheme, txclHighlighting } from '../lib/txcl/theme'
+    import { computeRefs } from '../lib/computeRefs'
     import CopyButton from './CopyButton.svelte'
 
     interface Props {
@@ -23,9 +24,12 @@
         onSave?: (content: string) => Promise<void>
         // Called when the user clicks "Reload" on the stale banner.
         onReload?: () => void | Promise<void>
+        // When set, each `compute://sha256/<digest>` is a link that calls
+        // this with its digest (Cmd/Ctrl-click while editing).
+        onComputeRef?: (digest: string) => void
     }
 
-    let { value, readonly, errors = [], onSave, onReload }: Props = $props()
+    let { value, readonly, errors = [], onSave, onReload, onComputeRef }: Props = $props()
 
     let editing = $state(false)
     let saving = $state(false)
@@ -96,6 +100,7 @@
             editableComp.of(EditorView.editable.of(false)),
             readOnlyComp.of(EditorState.readOnly.of(true)),
             gutterComp.of([]),
+            onComputeRef ? computeRefs((d) => onComputeRef?.(d)) : [],
         ]
     }
 

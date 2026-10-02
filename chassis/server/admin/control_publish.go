@@ -32,6 +32,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
+	"github.com/loremlabs/thanks-computer/chassis/computesrc"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
@@ -109,7 +110,7 @@ func (c *Controller) readStackFilesForArtifact(
 		// them lazily (and never inline them into the in-memory runtime DB).
 		// Rule/fixture files stay inline. Single-node deployments never call
 		// this (gated on FeedSink != nop), so the file/disk CAS is fine there.
-		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) {
+		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) || computesrc.IsPath(path) {
 			if hash == "" {
 				hash = sha256Hex(content)
 			}

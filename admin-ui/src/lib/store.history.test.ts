@@ -24,6 +24,7 @@ beforeEach(() => {
     store.state.showTraces = ''
     store.state.showSecrets = ''
     store.state.showInspect = false
+    store.state.showCompute = null
     store.state.showDemo = false
 })
 
@@ -49,6 +50,14 @@ describe('navigation pushes history entries', () => {
         store.selectStack('foo')
         expect(history.length).toBe(before)
         expect(window.location.hash).toBe('#stack/foo')
+    })
+
+    it('showCompute pushes #compute/<stack>/<digest>', () => {
+        const digest = 'c'.repeat(64)
+        const before = history.length
+        store.showCompute('_inspect', digest)
+        expect(window.location.hash).toBe(`#compute/_inspect/${digest}`)
+        expect(history.length).toBe(before + 1)
     })
 
     it('traces / secrets / inspect / versions push too', () => {
@@ -103,6 +112,19 @@ describe('Back restores the previous view (reader side)', () => {
         expect(store.state.selectedId).toBe('_inspect/200/card')
         expect(store.state.selectedStack).toBe('')
         expect(store.state.showTraces).toBe('')
+    })
+
+    it('#compute/<stack>/<digest> opens the compute view, nested stacks included', () => {
+        const digest = 'b'.repeat(64)
+        window.location.hash = `compute/node-demo/_websocket/${digest}`
+        store.syncFromHash()
+
+        expect(store.state.showCompute).toEqual({ stack: 'node-demo/_websocket', digest })
+        expect(store.state.selectedId).toBe('')
+        expect(store.state.selectedStack).toBe('')
+
+        store.selectOp(op)
+        expect(store.state.showCompute).toBeNull()
     })
 
     it('traces → Back → stack view', () => {

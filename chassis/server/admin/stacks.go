@@ -30,6 +30,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
+	"github.com/loremlabs/thanks-computer/chassis/computesrc"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
@@ -436,7 +437,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS":
+		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS", computesrc.Dir:
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -539,6 +540,17 @@ func validateStackFilePath(p string) error {
 		if capdecl.Name(p) == "" {
 			return fmt.Errorf("capability declarations must be a single <name>%s file directly under %s/, name lowercase words joined by dots, such as crm.lookup (got %q)",
 				capdecl.DeclExt, capdecl.Dir, p)
+		}
+		return nil
+	}
+
+	// COMPUTES/<digest>.json records the source of the compute whose wasm
+	// digest it names (chassis/computesrc), written by `txco apply`. Always a
+	// fingerprint-only row — the bundle lives in the filecas — and read back
+	// only through the admin's compute-source endpoint, never materialised.
+	if computesrc.IsPath(p) {
+		if computesrc.DigestFromPath(p) == "" {
+			return fmt.Errorf("compute source rows must be %s/<sha256 hex>.json (got %q)", computesrc.Dir, p)
 		}
 		return nil
 	}
@@ -1454,8 +1466,9 @@ func (m contentMode) wantsBytes(path string) bool {
 	case contentOps:
 		// BLOBS/ rows are arbitrary-size artifacts like dataset artifacts —
 		// never resolved for the ops view (that would be one CAS GET per
-		// seeded blob on every stack listing).
-		return !strings.HasPrefix(path, "FILES/") && !storeseed.IsBlobPath(path)
+		// seeded blob on every stack listing). COMPUTES/ source bundles
+		// likewise: the admin reads one on demand (handleGetComputeSource).
+		return !strings.HasPrefix(path, "FILES/") && !storeseed.IsBlobPath(path) && !computesrc.IsPath(path)
 	default:
 		return false
 	}
@@ -1486,8 +1499,9 @@ func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, mode
 			// response — they can run to gigabytes. They travel as fingerprint
 			// rows (Encoding "cas"); `txco pull` streams their bytes through
 			// the blob GET endpoint instead. Manifests (small yaml) resolve
-			// normally below.
-			if (dataset.IsArtifactPath(f.Path) || storeseed.IsBlobPath(f.Path)) &&
+			// normally below. COMPUTES/ rows too: derived, read through the
+			// compute-source endpoint, and skipped by `txco pull`.
+			if (dataset.IsArtifactPath(f.Path) || storeseed.IsBlobPath(f.Path) || computesrc.IsPath(f.Path)) &&
 				content == "" && f.ContentHash != "" && f.ContentHash != emptyHash {
 				f.Encoding = "cas"
 				out = append(out, f)
@@ -1742,10 +1756,20 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			!dataset.IsDatasetPath(f.Path) &&
 			!outlet.IsOutletPath(f.Path) &&
 			!sandbox.IsSandboxPath(f.Path) &&
-			!capdecl.IsCapPath(f.Path) {
+			!capdecl.IsCapPath(f.Path) &&
+			!computesrc.IsPath(f.Path) {
 			writeJSONError(w, http.StatusBadRequest, "encoding_not_allowed",
 				map[string]any{"index": i, "path": f.Path, "encoding": f.Encoding,
 					"hint": "base64/cas encodings are for FILES/, VECTORS/, KV/ and DATASETS/ assets; op files are plain UTF-8 strings"})
+			return
+		}
+		// A COMPUTES/ row is only ever a fingerprint: the source bundle
+		// lives once in the filecas, and every version that uses the compute
+		// carries just its hash.
+		if computesrc.IsPath(f.Path) && f.Encoding != "cas" {
+			writeJSONError(w, http.StatusBadRequest, "cas_required",
+				map[string]any{"index": i, "path": f.Path,
+					"hint": "COMPUTES/ rows carry content_hash only (encoding \"cas\"); stream the bundle to PUT /blobs/sha256/{hash} first"})
 			return
 		}
 		// A fingerprint-only row (Encoding "cas"): the bytes were streamed to
@@ -2221,6 +2245,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 		if capdecl.IsCapPath(rf.path) {
 			continue // capability declaration → read by the capability inlet at run time, not an ops row
+		}
+		if computesrc.IsPath(rf.path) {
+			continue // compute source → read by the admin's compute-source view, not an ops row
 		}
 		pf, ok := parseStackPath(rf.path)
 		if !ok {
@@ -3110,6 +3137,13 @@ func (c *Controller) handlePatchDraftFile(w http.ResponseWriter, r *http.Request
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_json", map[string]any{"err": err.Error()})
+		return
+	}
+	// PATCH stores content inline; a COMPUTES/ row is fingerprint-only and
+	// arrives through the files PUT.
+	if computesrc.IsPath(req.Path) {
+		writeJSONError(w, http.StatusBadRequest, "cas_required",
+			map[string]any{"path": req.Path, "hint": "COMPUTES/ rows are written by `txco apply` as fingerprint-only rows"})
 		return
 	}
 

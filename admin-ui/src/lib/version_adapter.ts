@@ -73,6 +73,9 @@ export function versionToOps(version: VersionDetail | null | undefined, stackNam
             }
             continue
         }
+        // Compute-source rows (COMPUTES/<digest>.json) aren't ops; the
+        // compute view reads one on demand.
+        if (f.path.startsWith('COMPUTES/')) continue
         if (!warnedUnknownPath) {
             warnedUnknownPath = true
             console.warn(

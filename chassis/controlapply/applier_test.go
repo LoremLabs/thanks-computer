@@ -493,3 +493,43 @@ func TestDNSSettingsUpsertLandsOnNode(t *testing.T) {
 		t.Fatalf("cursor=%d want 3", h.cursor(t))
 	}
 }
+
+// A COMPUTES/ row arrives fingerprint-only and lands on the node as one: empty
+// content, the bundle's hash intact (not re-hashed from the empty content),
+// and no ops row.
+func TestComputeSourceRowKeepsItsHash(t *testing.T) {
+	h := newHarness(t)
+	digest := "3cee8f8dc76d5e1c04156da5ec03fe2dc8f347f2b742386e19e02d55235683d2"
+	bundleHash := "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809"
+	art := StackActivatedArtifact{
+		TenantID: "tnt_a", Stack: "web", Version: 1,
+		Files: []StackArtifactFile{
+			{Path: "100/hello.txcl", Content: `EXEC "https://example.test/x"`},
+			{Path: "COMPUTES/" + digest + ".json", ContentHash: bundleHash},
+		},
+	}
+	data, _ := json.Marshal(art)
+	if err := h.astore.Put(context.Background(), "stacks/tnt_a/web/1", data, []byte(`{}`)); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	h.putEvent(t, "e1.json", controlevent.Event{
+		EventID: "evt-src-1",
+		Type:    controlevent.TypeStackActivated, TenantID: "tnt_a", StackID: "web",
+		Version: 1, ArtifactRef: "stacks/tnt_a/web/1",
+		Checksum: "sha256:" + sha256Hex(data), ControlVersion: 5,
+	})
+	h.c.pollOnce(context.Background())
+
+	var content, hash string
+	if err := h.db.QueryRow(`SELECT content, content_hash FROM stack_files WHERE path = ?`, "COMPUTES/"+digest+".json").Scan(&content, &hash); err != nil {
+		t.Fatalf("row not applied: %v", err)
+	}
+	if content != "" || hash != bundleHash {
+		t.Fatalf("node row content=%q hash=%q, want empty content and %s", content, hash, bundleHash)
+	}
+	var n int
+	_ = h.db.QueryRow(`SELECT COUNT(*) FROM ops WHERE tenant_id='tnt_a' AND stack='web'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("ops rows = %d, want only the rule", n)
+	}
+}

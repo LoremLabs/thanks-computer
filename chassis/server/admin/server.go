@@ -374,6 +374,8 @@ func (c *Controller) Start() {
 	blobR.HandleFunc("/sha256/{hash}", c.handleHeadBlob).Methods(http.MethodHead)
 	blobR.HandleFunc("/sha256/{hash}", c.handleGetBlob).Methods(http.MethodGet)
 	blobR.HandleFunc("/sha256/{hash}", c.handlePutBlob).Methods(http.MethodPut)
+	// Batch have/want probe: which of these hashes the CAS lacks.
+	blobR.HandleFunc("/missing", c.handleMissingBlobs).Methods(http.MethodPost)
 
 	// Everything else goes through the auth middleware.
 	protected := r.PathPrefix("/").Subrouter()
@@ -501,6 +503,8 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/stacks/{name:.+}/draft", c.handleCreateDraft).Methods(http.MethodPost)
 	tenantR.HandleFunc("/stacks/{name:.+}/activate", c.handleActivateStack).Methods(http.MethodPost)
 	tenantR.HandleFunc("/stacks/{name:.+}/diff", c.handleDiffVersions).Methods(http.MethodGet)
+	// A compute's source, through the stack's own COMPUTES/<digest>.json row.
+	tenantR.HandleFunc("/stacks/{name:.+}/computes/sha256/{digest:[0-9a-f]{64}}", c.handleGetComputeSource).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}/versions", c.handleListVersions).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}/files", c.handlePutDraftFiles).Methods(http.MethodPut)
 	tenantR.HandleFunc("/stacks/{name:.+}/versions/{n:[0-9]+}/files", c.handlePatchDraftFile).Methods(http.MethodPatch)

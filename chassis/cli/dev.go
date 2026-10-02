@@ -639,6 +639,7 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 	if err := uploadComputes(ctx, c, builtComputes, stdout, stderr); err != nil {
 		return err
 	}
+	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, "dev")
 	stacks := groupOpsByStack(out)
 	totalFiles := 0
 	skipped := 0
@@ -685,6 +686,12 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
 		}
 		files = append(files, dsFiles...)
+		var srcUploads []casUpload
+		if keepSource {
+			var srcFiles []client.StackFile
+			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
+			files = append(files, srcFiles...)
+		}
 		localHash := localManifestHash(files)
 
 		// Fast paths against the chassis's current active version:
@@ -743,6 +750,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		if len(blobUploads) > 0 {
 			if err := ensureBlobsResident(ctx, c, blobUploads, nil, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: %w", stack, err)
+			}
+		}
+		if len(srcUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, srcUploads, nil, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: compute source: %w", stack, err)
 			}
 		}
 		versionNumber, err := c.CreateDraft(ctx, stack, "active")
@@ -974,6 +986,7 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 	if err := uploadComputes(ctx, c, builtComputes, stdout, stderr); err != nil {
 		return err
 	}
+	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, "dev")
 	stacks := groupOpsByStack(out)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -1029,6 +1042,12 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
 		}
 		files = append(files, dsFiles...)
+		var srcUploads []casUpload
+		if keepSource {
+			var srcFiles []client.StackFile
+			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
+			files = append(files, srcFiles...)
+		}
 		if len(dsUploads) > 0 {
 			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: %w", stack, err)
@@ -1037,6 +1056,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 		if len(blobUploads) > 0 {
 			if err := ensureBlobsResident(ctx, c, blobUploads, nil, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: %w", stack, err)
+			}
+		}
+		if len(srcUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, srcUploads, nil, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: compute source: %w", stack, err)
 			}
 		}
 		if n, ok := state.drafts[stack]; ok {

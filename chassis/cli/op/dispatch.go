@@ -32,6 +32,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/compute/javyplugin"
 	_ "github.com/loremlabs/thanks-computer/chassis/compute/wazero" // run locally on the real engine
+	"github.com/loremlabs/thanks-computer/chassis/computesrc"
 )
 
 // Dispatch routes `txco op <subcommand> …`.
@@ -219,6 +220,14 @@ type Built struct {
 	Ref     string // "compute://sha256/<digest>"
 	OutPath string
 	Entry   string // author's entry file (for cleaning error locations)
+
+	// Source is the authored source the module was built from (entry plus
+	// local imports, no SDK); nil for a prebuilt wasm. SourceHash is its
+	// encoded bundle's sha256 and SourceFile a local copy of those bytes —
+	// apply uploads it to the file store and records COMPUTES/<digest>.json.
+	Source     *computesrc.Bundle
+	SourceHash string
+	SourceFile string
 }
 
 // BuildFile compiles a single colocated compute source (e.g.
@@ -235,7 +244,7 @@ func BuildFile(entryPath, workspaceRoot string) (Built, error) {
 		return Built{}, fmt.Errorf("unsupported compute source %q (use .js or .ts)", filepath.Base(entryPath))
 	}
 
-	bundled, _, berr := bundle(entryPath)
+	bundled, sourceMap, berr := bundle(entryPath)
 	if berr != nil {
 		return Built{}, fmt.Errorf("bundle %s:\n%s", filepath.Base(entryPath), berr)
 	}
@@ -296,10 +305,22 @@ func BuildFile(entryPath, workspaceRoot string) (Built, error) {
 	sum := sha256.Sum256(wasm)
 	digest := hex.EncodeToString(sum[:])
 	ref := compute.Ref{Alg: "sha256", Digest: digest}
-	return Built{
+	b := Built{
 		Wasm: wasm, Alg: "sha256", Digest: digest, Engine: "wazero",
 		Ref: ref.String(), OutPath: wasmPath, Entry: entryPath,
-	}, nil
+	}
+	// The source is for reading in the admin, not for running: a failure to
+	// collect it costs that view, never the build.
+	src, serr := sourceBundle(entryPath, sourceMap)
+	if serr == nil {
+		b.SourceHash, b.SourceFile, serr = writeSource(cacheDir, src)
+	}
+	if serr != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s: source not kept for the admin: %v\n", filepath.Base(entryPath), serr)
+	} else {
+		b.Source = src
+	}
+	return b, nil
 }
 
 // CleanJSError tidies javy/QuickJS error text: it strips toolchain wrapper

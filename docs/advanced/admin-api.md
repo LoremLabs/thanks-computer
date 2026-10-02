@@ -126,6 +126,8 @@ Tenant-scoped, under `/v1/tenants/{tenant}`:
 | `POST /stacks/{name}/activate` | Atomic pointer flip to a version |
 | `GET /stacks/{name}/versions` · `/diff` | History / compare |
 | `PUT·HEAD /computes/{alg}/{digest}` | Upload / probe content-addressed wasm |
+| `GET /stacks/{name}/computes/sha256/{digest}` | A nano-op's source, read through the stack's own `COMPUTES/<digest>.json` row; 404 when the stack keeps none |
+| `HEAD·GET·PUT /blobs/sha256/{hash}` · `POST /blobs/missing` | Probe / read / upload content-addressed bytes; which of up to 1000 hashes are missing |
 | `GET·POST /hostnames` · `DELETE /hostnames/{h}` | Hostname bindings ([ingress.md](../routing.md)) |
 | `POST /hostnames/{h}/attach` · `/challenges` | Bind to a stack / start ownership verification |
 | `GET·POST /auth/members` · `DELETE /auth/members/{actor}` | Tenant membership |

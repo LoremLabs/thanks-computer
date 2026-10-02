@@ -57,6 +57,22 @@ func txcoOpPlugin() esbuild.Plugin {
 	}
 }
 
+// entryStubFile is the name esbuild gives the generated entry stub (stdin),
+// which the sourcemap lists beside the author's files.
+const entryStubFile = "entry.js"
+
+// entryStub is the generated entry: it imports the author's handler (base is
+// the entry's file name) and runs it. Top-level await is deliberate: javy
+// surfaces an unhandled async rejection as a silent exit-0, but a rejecting
+// top-level await propagates as a guest error (nonzero exit). So a
+// throwing/rejecting handler HALTS rather than silently emitting {}.
+func entryStub(base string) string {
+	return fmt.Sprintf(`import handler from %q;
+import { __run } from "@txco/op/runtime";
+await __run(handler);
+`, "./"+base)
+}
+
 // bundle compiles an author's compute entry (.js/.ts) into a single
 // self-contained script ready for javy. It injects an entry stub that imports
 // the author's `export default op(...)` plus the SDK runtime, resolves
@@ -68,20 +84,13 @@ func bundle(entryPath string) (js []byte, sourceMap []byte, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// Top-level await is deliberate: javy surfaces an unhandled async rejection
-	// as a silent exit-0, but a rejecting top-level await propagates as a guest
-	// error (nonzero exit). So a throwing/rejecting handler HALTS rather than
-	// silently emitting {}.
-	stub := fmt.Sprintf(`import handler from %q;
-import { __run } from "@txco/op/runtime";
-await __run(handler);
-`, "./"+filepath.Base(abs))
+	stub := entryStub(filepath.Base(abs))
 
 	result := esbuild.Build(esbuild.BuildOptions{
 		Stdin: &esbuild.StdinOptions{
 			Contents:   stub,
 			ResolveDir: filepath.Dir(abs),
-			Sourcefile: "entry.js",
+			Sourcefile: entryStubFile,
 			Loader:     esbuild.LoaderJS,
 		},
 		Bundle:   true,

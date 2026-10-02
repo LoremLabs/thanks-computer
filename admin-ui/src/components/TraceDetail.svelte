@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { getTrace, traceRawUrl, type TraceResponse, type TraceStep } from '../lib/api'
+    import { COMPUTE_REF, getTrace, traceRawUrl, type TraceResponse, type TraceStep } from '../lib/api'
     import { store } from '../lib/store.svelte'
     import Ago from './Ago.svelte'
     import CopyButton from './CopyButton.svelte'
@@ -123,6 +123,15 @@
         const stack = stripScope(s.stack ?? '')
         if (!stack || !s.name || !tenantStacks.has(stack)) return ''
         return `#ops/${stack}/${s.scope ?? 0}/${s.name}`
+    }
+
+    // A compute step's operation (`compute://sha256/<digest>`) links to its
+    // source, read through the step's own stack — tenant stacks only.
+    function stepComputeHref(s: TraceStep): string {
+        const m = COMPUTE_REF.exec(s.operation ?? '')
+        const stack = stripScope(s.stack ?? '')
+        if (!m || !stack || !tenantStacks.has(stack)) return ''
+        return `#compute/${stack}/${m[1]}`
     }
 
     // Per-stack tone: stable color picked by hashing the stack name so
@@ -322,6 +331,7 @@
                             {@const curStack = stripScope(s.stack ?? '')}
                             {@const stackChanged = i > 0 && prevStack !== curStack}
                             {@const opHref = stepOpHref(s)}
+                            {@const computeHref = stepComputeHref(s)}
                             <tr class="cursor-pointer border-l-4 hover:bg-neutral-50 {tone.border} {stackChanged ? 'border-t-2 border-t-neutral-300' : ''}"
                                 onclick={() => toggleStep(key)}>
                                 <td class="px-3 py-2 align-top font-mono text-xs text-neutral-700">
@@ -338,7 +348,12 @@
                                     {/if}
                                 </td>
                                 <td class="px-3 py-2 align-top font-mono text-xs text-neutral-800" title={s.operation ?? ''}>
-                                    {s.operation ?? '—'}
+                                    {#if computeHref}<a
+                                        href={computeHref}
+                                        class="underline-offset-2 hover:text-neutral-900 hover:underline"
+                                        title="open this compute's source"
+                                        onclick={(e) => e.stopPropagation()}
+                                    >{s.operation}</a>{:else}{s.operation ?? '—'}{/if}
                                 </td>
                                 <td class="px-3 py-2 align-top">
                                     <span class="rounded px-1.5 py-0.5 text-[10px] font-medium {transportBadgeClass(s.transport)}">
