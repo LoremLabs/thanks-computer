@@ -326,6 +326,7 @@ The path argument is a string literal (or any value that evaluates to a string),
 | Function    | Signature               | Notes                                                                        |
 | ----------- | ----------------------- | ---------------------------------------------------------------------------- |
 | `&uuid()`   | () → string             | UUID v7 (time-ordered, lexicographically sortable)                           |
+| `&hxid()` / `&hxid(prefix)` | ([string]) → string | The chassis's own id format (run grants, tenants, request ids): time-ordered, base58, about 22 characters. With a prefix (a lowercase letter, then up to 15 lowercase letters or digits) the id is `prefix_…`, e.g. `&hxid("run")` → `run_CfdK2BW9oXLJGGF1uqXgi` |
 | `&now()`    | () → number             | unix seconds                                                                 |
 | `&now(fmt)` | string → string\|number | formats: `"unix"` (default), `"millis"`, `"nanos"`, `"rfc3339"`, `"iso8601"` |
 | `&tz(zone, "hour"\|"minute", h [, m])` | string, string, int[, int] → number | the UTC **hour** or **minute** of local wall-clock `h:m` (minute `m` defaults 0) in IANA `zone` today (DST-aware) — bridges UTC `@cron.hour`/`@cron.minute` to a local time, incl. fractional offsets like `+05:30` |

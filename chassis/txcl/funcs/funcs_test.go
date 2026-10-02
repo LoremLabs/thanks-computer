@@ -29,7 +29,7 @@ func TestRegistryHas(t *testing.T) {
 	// registry is small enough that exhaustive coverage would be
 	// noise; this catches "init dropped a registration" regressions.
 	want := []string{
-		"uuid", "now", "tz", "tz_offsets",
+		"uuid", "hxid", "now", "tz", "tz_offsets",
 		"b64encode", "b64decode", "urlencode", "urldecode", "json", "to_json",
 		"get", "set", "has",
 		"object", "array",
@@ -113,6 +113,44 @@ func TestTz_Errors(t *testing.T) {
 		if v, err := Call("tz", args); err == nil {
 			t.Errorf("&tz(%v) expected error, got %v", args, v)
 		}
+	}
+}
+
+// --- &hxid -------------------------------------------------------
+
+var hxidPattern = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{16,22}$`)
+
+func TestHxid_ShapeAndOrder(t *testing.T) {
+	a, err := Call("hxid", nil)
+	if err != nil {
+		t.Fatalf("hxid: %v", err)
+	}
+	b, _ := Call("hxid", nil)
+	as, bs := a.(string), b.(string)
+	if !hxidPattern.MatchString(as) {
+		t.Errorf("hxid: %q is not a base58 id", as)
+	}
+	if len(as) != len(bs) || !(as < bs) {
+		t.Errorf("hxid: want two ids of one length in creation order, got %q then %q", as, bs)
+	}
+}
+
+func TestHxid_Prefix(t *testing.T) {
+	v, err := Call("hxid", []any{"run"})
+	if err != nil {
+		t.Fatalf("hxid(run): %v", err)
+	}
+	s := v.(string)
+	if !strings.HasPrefix(s, "run_") || !hxidPattern.MatchString(strings.TrimPrefix(s, "run_")) {
+		t.Errorf("hxid(run): got %q", s)
+	}
+	for _, bad := range []any{"", "Run", "run_", "9x", "a-b", "abcdefghijklmnopq", 7} {
+		if _, err := Call("hxid", []any{bad}); err == nil {
+			t.Errorf("hxid(%v): want an error", bad)
+		}
+	}
+	if _, err := Call("hxid", []any{"a", "b"}); err == nil {
+		t.Error("hxid(a, b): want an error")
 	}
 }
 

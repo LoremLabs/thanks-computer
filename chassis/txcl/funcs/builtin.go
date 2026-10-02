@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/txcguard"
+
+	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
 
 // PR 3 shipped the pilots (&uuid, &now) end-to-end so the parser →
@@ -34,6 +37,7 @@ import (
 func init() {
 	// pilots (shipped in PR 3, kept here for the full registry view)
 	register("uuid", uuidFn)
+	register("hxid", hxidFn)
 	register("now", nowFn)
 	register("tz", tzFn)
 	register("tz_offsets", tzOffsetsFn)
@@ -89,6 +93,29 @@ func uuidFn(args []any) (any, error) {
 	}
 	return id.String(), nil
 }
+
+// hxidFn returns an id in the chassis's own format (chassis/hxid): the one
+// run grants, tenants and request ids use — 16 bytes, time-ordered,
+// base58, so about 22 characters where a UUID is 36, and it sorts by
+// creation time as text. With one argument, a short lowercase prefix,
+// the id is `<prefix>_<id>` (the `rgr_…`, `tnt_…` convention), so an id
+// says what it names.
+func hxidFn(args []any) (any, error) {
+	switch len(args) {
+	case 0:
+		return hxid.New().String(), nil
+	case 1:
+		prefix, ok := args[0].(string)
+		if !ok || !hxidPrefix.MatchString(prefix) {
+			return nil, fmt.Errorf("&hxid: the prefix must be 1-16 characters, a lowercase letter then lowercase letters or digits")
+		}
+		return prefix + "_" + hxid.New().String(), nil
+	default:
+		return nil, fmt.Errorf("&hxid: expected 0 or 1 arguments, got %d", len(args))
+	}
+}
+
+var hxidPrefix = regexp.MustCompile(`^[a-z][a-z0-9]{0,15}$`)
 
 // nowFn returns the current wall-clock time. See the format selector
 // switch for the supported representations.
