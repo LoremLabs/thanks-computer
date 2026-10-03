@@ -379,6 +379,9 @@ Flags:
 // computes), client-side parse, loop-lint, apply the target's mock policy,
 // then per stack create a draft, upload, validate, and activate.
 func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string, stdout, stderr io.Writer) int {
+	// Every stack in the tree, before `push` or --skip narrows the set: a
+	// nested stack's directory is never part of the stack around it.
+	allStacks := stackNames(ops)
 	if onlyStack != "" {
 		filtered := make([]bundle.Op, 0, len(ops))
 		for _, op := range ops {
@@ -694,6 +697,15 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
 			files = append(files, srcFiles...)
 		}
+		// STACKDIR/ is CODE too: the stack's own directory, packed when one
+		// of its ops names $TXCO_STACK_DIR (chassis/stackdir). Fingerprint-
+		// only; the bundle is made resident just before the draft.
+		treeFiles, treeUploads, terr := stackTreeRows(dir, stack, stacks[stack], allStacks)
+		if terr != nil {
+			fmt.Fprintf(stderr, "%s: %s: stack tree: %v\n", cmd, stack, terr)
+			return 1
+		}
+		files = append(files, treeFiles...)
 		localHash := localManifestHash(files)
 
 		// Fast-skip an unchanged stack with no per-stack round-trip. --force skips
@@ -802,6 +814,13 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		if len(srcUploads) > 0 {
 			if err := ensureBlobsResident(ctx, c, srcUploads, nil, progress, stderr); err != nil {
 				fmt.Fprintf(stderr, "%s: %s: compute source: %v\n", cmd, stack, err)
+				failures = append(failures, stack)
+				continue
+			}
+		}
+		if len(treeUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, treeUploads, nil, progress, stderr); err != nil {
+				fmt.Fprintf(stderr, "%s: %s: stack tree: %v\n", cmd, stack, err)
 				failures = append(failures, stack)
 				continue
 			}

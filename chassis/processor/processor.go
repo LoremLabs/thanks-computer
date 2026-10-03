@@ -149,6 +149,12 @@ type Unit struct {
 	// --workspace-allow-local).
 	Workspaces *workspace.Manager
 
+	// TreeBundles reads a stack tree's bundle by its sha256 (chassis/stackdir)
+	// for a workspace exec that asks for it with `cwd = "$TXCO_STACK_DIR"`:
+	// the chassis file store. nil-safe: such an exec fails in-band with
+	// stack_dir_unavailable.
+	TreeBundles TreeBundleSource
+
 	// Grants hands a run grant to a command: `workspace://<name>/exec WITH
 	// grant = <id>`. nil-safe: the op fails in-band when unset (this node
 	// opened no identity store).

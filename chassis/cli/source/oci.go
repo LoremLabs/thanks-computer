@@ -274,8 +274,20 @@ func excludedPackageDir(name string) bool {
 	return name == ".git" || name == ".txco"
 }
 
+// PackageFileMode is the only mode a package file has: 0755 when its source
+// is executable by anyone, else 0644. Packing records it and every install
+// path restores it, so a program shipped in a stack (run from
+// $TXCO_STACK_DIR) stays runnable; no other bit (setuid, group write) travels.
+func PackageFileMode(m fs.FileMode) fs.FileMode {
+	if m&0o111 != 0 {
+		return 0o755
+	}
+	return 0o644
+}
+
 // tarGzDir builds a gzip(tar) of the regular files under dir, with
-// slash-separated relative paths and no synthetic top directory. `.git` and
+// slash-separated relative paths and no synthetic top directory. Each file's
+// mode is PackageFileMode of its source. `.git` and
 // `.txco` are skipped wherever they appear, so neither the author's VCS history
 // nor the build cache rides along — and the rule holds whether we're packing
 // the author's own tree (the common path) or a prebuild staging copy.
@@ -304,9 +316,13 @@ func tarGzDir(dir string) ([]byte, error) {
 		if err != nil {
 			return err
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
 		if err := tw.WriteHeader(&tar.Header{
 			Name:     filepath.ToSlash(rel),
-			Mode:     0o644,
+			Mode:     int64(PackageFileMode(info.Mode())),
 			Size:     int64(len(body)),
 			Typeflag: tar.TypeReg,
 		}); err != nil {

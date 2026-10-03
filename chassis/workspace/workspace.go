@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/stackdir"
 )
 
 // Spec identifies a workspace: the (tenant, stack, name) triple is its
@@ -96,6 +98,28 @@ type ExecRequest struct {
 	TTY  bool
 	Cols uint16
 	Rows uint16
+
+	// Tree, when set, is the stack version's own directory (chassis/stackdir),
+	// asked for with `WITH cwd = "$TXCO_STACK_DIR"`. The Manager has the
+	// computer place it before the command starts, sets TXCO_STACK_DIR to
+	// its path and starts the command there, with Cwd (clean, relative) below
+	// it. Providers never see it set.
+	Tree *Tree
+}
+
+// Tree is a stack version's directory as one bundle (chassis/stackdir): its
+// digest, and how to read the bundle when the computer does not hold it yet.
+type Tree struct {
+	Digest string
+	Open   func(ctx context.Context) ([]byte, error)
+}
+
+// TreeHolder is the optional capability behind ExecRequest.Tree, implemented
+// by a woken Computer: make the tree present on this computer, read-only, and
+// return its path there. Idempotent per digest and safe to call concurrently.
+// A provider without it answers CodeStackDirUnavailable.
+type TreeHolder interface {
+	PlaceTree(ctx context.Context, t Tree) (string, error)
 }
 
 // DefaultCols and DefaultRows are the TTY geometry when the request leaves
@@ -385,6 +409,11 @@ var ErrNotAllowed = errors.New("workspace: provider not enabled on this chassis"
 // error might be transient, and recreating on a transient error would
 // silently replace a pony's files with an empty environment.
 const CodeNotFound = "not_found"
+
+// CodeStackDirUnavailable is the Error code for an exec that asked for its
+// stack tree and cannot have it: the provider cannot place one, the stack
+// version carries none, or its bundle could not be read.
+const CodeStackDirUnavailable = "stack_dir_unavailable"
 
 // IsNotFound reports whether err says the workspace is gone.
 func IsNotFound(err error) bool {
@@ -797,6 +826,11 @@ func (m *Manager) execOnce(ctx context.Context, spec Spec, req ExecRequest) (Exe
 		return ExecResult{Exit: -1}, e.h, "", err
 	}
 	runID := m.runIDFor(e, comp)
+	req, err = m.placeTree(ctx, comp, req)
+	if err != nil {
+		m.remember(identityKey(spec), e)
+		return ExecResult{Exit: -1}, e.h, "", err
+	}
 	var res ExecResult
 	if req.TTY {
 		// A terminal is a session, not a call: start one and drive it to
@@ -825,6 +859,37 @@ func (m *Manager) execOnce(ctx context.Context, spec Spec, req ExecRequest) (Exe
 		_ = m.store.Touch(ctx, ID(spec.Tenant, spec.Stack, spec.Name), now, runID, StatusRunning)
 	}
 	return res, e.h, runID, err
+}
+
+// placeTree resolves req.Tree on comp: the computer places the tree, the
+// command starts in it (or below it, by Cwd), and TXCO_STACK_DIR names it —
+// set last, so the chassis's own variable wins over WITH env. A computer
+// without TreeHolder answers CodeStackDirUnavailable.
+func (m *Manager) placeTree(ctx context.Context, comp Computer, req ExecRequest) (ExecRequest, error) {
+	if req.Tree == nil {
+		return req, nil
+	}
+	th, ok := comp.(TreeHolder)
+	if !ok {
+		return req, &Error{Code: CodeStackDirUnavailable, Message: "provider " + m.prov.Name() + " cannot place a stack tree"}
+	}
+	dir, err := th.PlaceTree(ctx, *req.Tree)
+	if err != nil {
+		var we *Error
+		if errors.As(err, &we) {
+			return req, err
+		}
+		return req, &Error{Code: CodeStackDirUnavailable, Message: err.Error()}
+	}
+	env := make(map[string]string, len(req.Env)+1)
+	for k, v := range req.Env {
+		env[k] = v
+	}
+	env[stackdir.Env] = dir
+	req.Env = env
+	req.Cwd = path.Join(dir, req.Cwd)
+	req.Tree = nil
+	return req, nil
 }
 
 // Start opens a live session in the workspace spec names — lookup/create,
@@ -858,6 +923,11 @@ func (m *Manager) startOnce(ctx context.Context, spec Spec, req ExecRequest) (Ex
 		return nil, e.h, "", &Error{Code: "unsupported", Message: "provider " + m.prov.Name() + " has no session capability"}
 	}
 	runID := m.runIDFor(e, comp)
+	req, err = m.placeTree(ctx, comp, req)
+	if err != nil {
+		m.remember(identityKey(spec), e)
+		return nil, e.h, "", err
+	}
 	sess, err := st.Start(ctx, req, m.lim)
 	now := m.now()
 	e.runID, e.lastUsed = runID, now

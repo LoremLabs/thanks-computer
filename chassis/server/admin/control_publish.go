@@ -39,6 +39,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/sandbox"
+	"github.com/loremlabs/thanks-computer/chassis/stackdir"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 )
@@ -110,7 +111,7 @@ func (c *Controller) readStackFilesForArtifact(
 		// them lazily (and never inline them into the in-memory runtime DB).
 		// Rule/fixture files stay inline. Single-node deployments never call
 		// this (gated on FeedSink != nop), so the file/disk CAS is fine there.
-		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) || computesrc.IsPath(path) {
+		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) || computesrc.IsPath(path) || stackdir.IsPath(path) {
 			if hash == "" {
 				hash = sha256Hex(content)
 			}

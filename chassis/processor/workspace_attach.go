@@ -70,6 +70,13 @@ func (pu *Unit) execWorkspaceAttach(ctx context.Context, op operation.Operation,
 		return workspaceFailure(into, prov, "", "bad_request", err.Error(), 0), nil
 	}
 	req.StdoutTo = nil
+	if req.Tree != nil {
+		t, code, msg := pu.stackTree(ctx, tenant, op.Stack)
+		if code != "" {
+			return workspaceFailure(into, prov, "", code, msg, 0), nil
+		}
+		req.Tree = t
+	}
 
 	dur, err := attachDuration(op, pu.Conf.WorkspaceAttachMaxDuration)
 	if err != nil {

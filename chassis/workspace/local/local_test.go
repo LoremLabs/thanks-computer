@@ -101,28 +101,47 @@ func TestOutputTruncation(t *testing.T) {
 	}
 }
 
-func TestCwdGuard(t *testing.T) {
+func TestCwd(t *testing.T) {
 	_, c, h := newComputer(t)
 	if err := os.MkdirAll(filepath.Join(h.Ref, "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	res := run(t, c, workspace.ExecRequest{Command: "pwd", Cwd: "sub"})
-	if strings.TrimSpace(string(res.Stdout)) != filepath.Join(h.Ref, "sub") {
-		t.Errorf("cwd = %q, want %q", res.Stdout, filepath.Join(h.Ref, "sub"))
+	pwd := func(cwd string) string {
+		res := run(t, c, workspace.ExecRequest{Command: "pwd -P", Cwd: cwd})
+		return strings.TrimSpace(string(res.Stdout))
 	}
-	for _, bad := range []string{"..", "../..", "sub/../..", "/etc", "missing"} {
+	real := func(p string) string {
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	// Relative: beneath the workspace.
+	if got := pwd("sub"); got != real(filepath.Join(h.Ref, "sub")) {
+		t.Errorf("cwd sub = %q", got)
+	}
+	// Absolute: a path on this machine, as given (resolution, not access).
+	tmp := t.TempDir()
+	if got := pwd(tmp); got != real(tmp) {
+		t.Errorf("cwd %s = %q", tmp, got)
+	}
+	// A symlink is followed like any directory: it reaches nothing an
+	// absolute cwd could not.
+	if err := os.Symlink(tmp, filepath.Join(h.Ref, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if got := pwd("out"); got != real(tmp) {
+		t.Errorf("cwd out = %q, want %q", got, real(tmp))
+	}
+	// A relative path still cannot climb out of the workspace, and a
+	// directory must exist.
+	for _, bad := range []string{"..", "../..", "sub/../..", "missing", filepath.Join(tmp, "missing")} {
 		_, err := c.Exec(context.Background(), workspace.ExecRequest{Command: "pwd", Cwd: bad}, workspace.Limits{})
 		var we *workspace.Error
 		if !errors.As(err, &we) || we.Code != "bad_request" {
 			t.Errorf("cwd %q: err = %v, want bad_request", bad, err)
 		}
-	}
-	// A symlink that points outside is caught after resolution.
-	if err := os.Symlink(os.TempDir(), filepath.Join(h.Ref, "out")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.Exec(context.Background(), workspace.ExecRequest{Command: "pwd", Cwd: "out"}, workspace.Limits{}); err == nil {
-		t.Error("symlink escape accepted")
 	}
 }
 

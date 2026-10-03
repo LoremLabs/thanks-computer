@@ -448,3 +448,19 @@ func TestProviderNameSanitizesEveryComponent(t *testing.T) {
 		t.Errorf("ProviderName = %q, which is not a DNS label", d)
 	}
 }
+
+// A provider that cannot place a stack tree answers stack_dir_unavailable,
+// and the command never runs.
+func TestManagerTreeWithoutTheCapability(t *testing.T) {
+	f := &fakeProvider{}
+	m := NewManager(f, Limits{}, nil)
+	spec := Spec{Tenant: "acme", Stack: "agents", Name: "tools"}
+	res, _, _, err := m.Exec(context.Background(), spec, ExecRequest{Command: "never", Tree: &Tree{Digest: "x"}})
+	var we *Error
+	if !errors.As(err, &we) || we.Code != CodeStackDirUnavailable {
+		t.Fatalf("err = %v, want %s", err, CodeStackDirUnavailable)
+	}
+	if string(res.Stdout) == "never" {
+		t.Fatal("the command ran without its tree")
+	}
+}

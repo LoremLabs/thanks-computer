@@ -1703,6 +1703,11 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 				// restarts and shared across nodes; nil falls back to a
 				// per-process cache (tests, non-server contexts).
 				pu.Workspaces = workspace.NewManager(wsProv, workspace.Limits{MaxOutputBytes: int64(conf.WorkspaceMaxOutputBytes)}, workspaceStore)
+				// An exec that asks for its stack tree (`cwd =
+				// "$TXCO_STACK_DIR"`) reads the bundle from the file store.
+				if fcas != nil {
+					pu.TreeBundles = fcas
+				}
 				// The connect verb's name table: the built-ins plus the
 				// operator's --workspace-services. Config checked the
 				// syntax; a redefined built-in or a duplicate is still a

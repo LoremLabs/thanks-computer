@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -261,6 +262,9 @@ func extractTar(tr *tar.Reader, stripTopDir bool, subpath, destDir string) (int,
 			}
 			if closeErr != nil {
 				return written, fmt.Errorf("close %s: %w", out, closeErr)
+			}
+			if err := os.Chmod(out, PackageFileMode(fs.FileMode(hdr.Mode))); err != nil {
+				return written, fmt.Errorf("chmod %s: %w", out, err)
 			}
 			totalBytes += n
 			if totalBytes > maxTotalBytes {

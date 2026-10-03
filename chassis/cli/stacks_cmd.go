@@ -20,6 +20,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 	"github.com/loremlabs/thanks-computer/chassis/computesrc"
+	"github.com/loremlabs/thanks-computer/chassis/stackdir"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/include"
 )
 
@@ -207,9 +208,10 @@ Flags:
 		return 1
 	}
 	for _, f := range vd.Files {
-		// COMPUTES/ rows are derived: apply regenerates them from each
-		// colocated NAME.js/.ts, so a pull leaves them out of the workspace.
-		if computesrc.IsPath(f.Path) {
+		// COMPUTES/ and STACKDIR/ rows are derived: apply regenerates them
+		// from each colocated NAME.js/.ts and from the stack's own files, so
+		// a pull leaves them out of the workspace.
+		if computesrc.IsPath(f.Path) || stackdir.IsPath(f.Path) {
 			continue
 		}
 		full := filepath.Join(stackDir, filepath.FromSlash(f.Path))

@@ -95,6 +95,9 @@ func (d *dirSource) Fetch(_ context.Context, destDir string) (int, error) {
 		if closeErr != nil {
 			return fmt.Errorf("close %s: %w", out, closeErr)
 		}
+		if err := os.Chmod(out, PackageFileMode(info.Mode())); err != nil {
+			return fmt.Errorf("chmod %s: %w", out, err)
+		}
 		totalBytes += n
 		if totalBytes > maxTotalBytes {
 			return fmt.Errorf("source tree exceeds %d-byte total limit", maxTotalBytes)

@@ -798,7 +798,7 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `prompt`, `system`, `messages`, `model`, `provider`, `schema`, `intent`, `limits.*` | ai://chat | The chat request — see [ai](../../ai.md) |
 | `workspace` | workspace:// | Pick the workspace from data (`WITH workspace = ._in.slug`); replaces the ref's name — see [workspaces](../../workspaces.md) |
 | `command` / `args` | workspace:// | The command: a shell line, or an argv array (no shell). One or the other |
-| `stdin`, `cwd`, `env` | workspace:// | Bytes fed to the process; working directory (relative, inside the workspace); extra environment (an object) |
+| `stdin`, `cwd`, `env` | workspace:// | Bytes fed to the process; where the command starts (beneath the workspace, `$TXCO_STACK_DIR/…` for the stack's own files, or an absolute path; see [Where a command starts](../../workspaces.md#where-a-command-starts-cwd)); extra environment (an object) |
 | `stream = true` | workspace:// | Send the command's stdout to the client as it is produced, instead of returning it in the envelope ([workspaces](../../workspaces.md#streaming-output)) |
 | `secrets.env.<NAME>.secret` / `.format` | workspace:// | A stored secret materialized into the command's environment; its value is scrubbed from stdout/stderr afterwards |
 | `checkpoint = true`, `comment` | workspace:// | Snapshot the workspace after an exec that exits 0 (`comment` labels it; also the `checkpoint` verb's label) |

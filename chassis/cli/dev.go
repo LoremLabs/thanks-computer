@@ -421,24 +421,46 @@ Flags:
 			// FILES/ asset trees are excluded by default (see Options.IncludeFiles);
 			// txco.yaml `dev.watch.ignore` + --watch-ignore add more.
 			// Files the ops pull in with &include: editing one re-applies like
-			// editing the .txcl. Re-read from every walk, so a newly added
-			// include is watched from the next save on.
-			var included atomic.Pointer[map[string]bool]
+			// editing the .txcl. So does any file of a stack whose ops name
+			// $TXCO_STACK_DIR: its whole directory ships as the stack tree.
+			// Re-read from every walk, so a newly added include or tree is
+			// watched from the next save on.
+			type watched struct {
+				files map[string]bool
+				trees []string // stack directories, with a trailing separator
+			}
+			var included atomic.Pointer[watched]
 			noteIncludes := func(ops []bundle.Op) {
-				m := map[string]bool{}
+				w := watched{files: map[string]bool{}}
 				for _, op := range ops {
 					for _, p := range op.Includes {
-						m[filepath.Join(dir, filepath.FromSlash(p))] = true
+						w.files[filepath.Join(dir, filepath.FromSlash(p))] = true
 					}
 				}
-				included.Store(&m)
+				for stack, sops := range groupOpsByStack(ops) {
+					if usesStackDir(sops) {
+						w.trees = append(w.trees, filepath.Join(dir, "OPS", filepath.FromSlash(stack))+string(filepath.Separator))
+					}
+				}
+				included.Store(&w)
 			}
 			noteIncludes(ops)
 			watchOpts := devpkg.Options{
 				Debounce:     500 * time.Millisecond,
 				Ignore:       append(append([]string{}, cfg.Dev.Watch.Ignore...), (*watchIgnore)...),
 				IncludeFiles: cfg.Dev.Watch.IncludeFiles,
-				Included:     func(p string) bool { return (*included.Load())[p] },
+				Included: func(p string) bool {
+					w := included.Load()
+					if w.files[p] {
+						return true
+					}
+					for _, t := range w.trees {
+						if strings.HasPrefix(p, t) && !strings.HasPrefix(filepath.Base(p), ".") {
+							return true
+						}
+					}
+					return false
+				},
 			}
 			filesNote := "FILES/ excluded"
 			if watchOpts.IncludeFiles {
@@ -447,7 +469,7 @@ Flags:
 			if len(watchOpts.Ignore) > 0 {
 				filesNote += "; ignoring " + strings.Join(watchOpts.Ignore, ", ")
 			}
-			fmt.Fprintf(stdout, "[watch] watching %s (.txcl/.json/&include files → draft; colocated .js → rebuild + activate; %s)\n", opsDir, filesNote)
+			fmt.Fprintf(stdout, "[watch] watching %s (.txcl/.json/&include and stack-tree files → draft; colocated .js → rebuild + activate; %s)\n", opsDir, filesNote)
 			state := newDevWatchState()
 			// .txcl/.json → sticky draft (no auto-activation; activate to publish).
 			go func() {
@@ -641,6 +663,7 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 	}
 	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, "dev")
 	stacks := groupOpsByStack(out)
+	allStacks := stackNames(out)
 	totalFiles := 0
 	skipped := 0
 	for _, stack := range sortedKeys(stacks) {
@@ -692,6 +715,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
 			files = append(files, srcFiles...)
 		}
+		treeFiles, treeUploads, terr := stackTreeRows(dir, stack, stacks[stack], allStacks)
+		if terr != nil {
+			return fmt.Errorf("%s: stack tree: %w", stack, terr)
+		}
+		files = append(files, treeFiles...)
 		localHash := localManifestHash(files)
 
 		// Fast paths against the chassis's current active version:
@@ -755,6 +783,11 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		if len(srcUploads) > 0 {
 			if err := ensureBlobsResident(ctx, c, srcUploads, nil, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: compute source: %w", stack, err)
+			}
+		}
+		if len(treeUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, treeUploads, nil, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: stack tree: %w", stack, err)
 			}
 		}
 		versionNumber, err := c.CreateDraft(ctx, stack, "active")
@@ -988,6 +1021,7 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 	}
 	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, "dev")
 	stacks := groupOpsByStack(out)
+	allStacks := stackNames(out)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	for _, stack := range sortedKeys(stacks) {
@@ -1048,6 +1082,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
 			files = append(files, srcFiles...)
 		}
+		treeFiles, treeUploads, terr := stackTreeRows(dir, stack, stacks[stack], allStacks)
+		if terr != nil {
+			return fmt.Errorf("%s: stack tree: %w", stack, terr)
+		}
+		files = append(files, treeFiles...)
 		if len(dsUploads) > 0 {
 			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: %w", stack, err)
@@ -1061,6 +1100,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 		if len(srcUploads) > 0 {
 			if err := ensureBlobsResident(ctx, c, srcUploads, nil, stdout, stderr); err != nil {
 				return fmt.Errorf("%s: compute source: %w", stack, err)
+			}
+		}
+		if len(treeUploads) > 0 {
+			if err := ensureBlobsResident(ctx, c, treeUploads, nil, stdout, stderr); err != nil {
+				return fmt.Errorf("%s: stack tree: %w", stack, err)
 			}
 		}
 		if n, ok := state.drafts[stack]; ok {
@@ -1133,6 +1177,38 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
 				return rerr
 			}
 			fmt.Fprintf(h, "f\x00%s\x00%d\x00%d\n", filepath.ToSlash(rel), fi.Size(), fi.ModTime().UnixNano())
+			return nil
+		})
+		if walkErr != nil {
+			return "", walkErr
+		}
+	}
+	// Tree half: a stack whose ops name $TXCO_STACK_DIR ships its own files
+	// (stackTreeRows), so any of them changing is a change. Stat-only again;
+	// a nested stack's edits re-push this one too, which costs one no-op.
+	if usesStackDir(ops) {
+		walkErr := filepath.WalkDir(stackDir, func(p string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			if p != stackDir && strings.HasPrefix(d.Name(), ".") {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() || !d.Type().IsRegular() {
+				return nil
+			}
+			fi, ferr := d.Info()
+			if ferr != nil {
+				return ferr
+			}
+			rel, rerr := filepath.Rel(stackDir, p)
+			if rerr != nil {
+				return rerr
+			}
+			fmt.Fprintf(h, "t\x00%s\x00%d\x00%d\x00%v\n", filepath.ToSlash(rel), fi.Size(), fi.ModTime().UnixNano(), fi.Mode()&0o111 != 0)
 			return nil
 		})
 		if walkErr != nil {

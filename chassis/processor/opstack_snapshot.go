@@ -7,6 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
+	"go.uber.org/zap"
+
+	"github.com/loremlabs/thanks-computer/chassis/stackdir"
+
 	_ "github.com/mattn/go-sqlite3" // sqlite driver for the in-memory snapshot DB
 )
 
@@ -20,9 +24,22 @@ import (
 // the single `tenants` row, because lookupOpsExact resolves the tenant via
 // `(SELECT tenant_id FROM tenants WHERE slug=?)` against the same DB
 // (tenantPredicate). No other tenant's rules ever enter the doc.
+//
+// StackTrees is the digest of each stack tree (chassis/stackdir) the tenant's
+// active versions carried, so a resumed exec with `cwd = "$TXCO_STACK_DIR"`
+// gets the tree it suspended with. The bundles are immutable and content-
+// addressed, so the digest is the whole freeze. Omitted when there are none,
+// which keeps every doc without trees byte-identical to before.
 type opstackSnapshot struct {
-	Ops     []opSnapRow     `json:"ops"`
-	Tenants []tenantSnapRow `json:"tenants"`
+	Ops        []opSnapRow        `json:"ops"`
+	Tenants    []tenantSnapRow    `json:"tenants"`
+	StackTrees []stackTreeSnapRow `json:"stack_trees,omitempty"`
+}
+
+type stackTreeSnapRow struct {
+	TenantID *string `json:"tenant_id,omitempty"`
+	Stack    string  `json:"stack"`
+	Digest   string  `json:"digest"`
 }
 
 type opSnapRow struct {
@@ -101,6 +118,15 @@ func (pu *Unit) snapshotOpstack(ctx context.Context, tenant string) ([]byte, str
 		if err := tRows.Err(); err != nil {
 			return nil, "", 0, err
 		}
+		// Best-effort: a run must still be able to suspend on a mirror that
+		// cannot answer this. Without a digest the resumed exec that asks
+		// for its tree fails in-band (stack_dir_unavailable), never runs a
+		// wrong one.
+		trees, err := snapshotStackTrees(ctx, db, tenant)
+		if err != nil && pu.Logger != nil {
+			pu.Logger.Warn("opstack snapshot: stack trees not captured", zap.Error(err))
+		}
+		snap.StackTrees = trees
 	}
 
 	data, err := json.Marshal(&snap)
@@ -111,9 +137,39 @@ func (pu *Unit) snapshotOpstack(ctx context.Context, tenant string) ([]byte, str
 	return data, hex.EncodeToString(sum[:]), len(snap.Ops), nil
 }
 
+// snapshotStackTrees reads the digest of every stack tree the tenant's active
+// versions carry, from the same pinned DB the ops came from. It reads only the
+// columns stackTree's query joins on, so buildSnapshotDB can recreate them.
+func snapshotStackTrees(ctx context.Context, db *sql.DB, tenant string) ([]stackTreeSnapRow, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT s.tenant_id, s.name, sf.content_hash
+		  FROM stack_files sf
+		  JOIN stacks  s ON s.active_version = sf.version_id
+		  JOIN tenants t ON t.tenant_id = s.tenant_id
+		 WHERE t.slug = ? AND sf.path LIKE 'STACKDIR/%'
+		 ORDER BY s.name, sf.path`, tenant)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []stackTreeSnapRow
+	for rows.Next() {
+		var tid sql.NullString
+		var r stackTreeSnapRow
+		if err := rows.Scan(&tid, &r.Stack, &r.Digest); err != nil {
+			return nil, err
+		}
+		r.TenantID = nullStr(tid)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // buildSnapshotDB rebuilds an in-memory SQLite holding exactly the frozen
 // opstack. The schema mirrors only the columns the resume-path queries
-// touch (lookupOpsExact, buildOpstack, tenantExists). MaxOpenConns(1) is
+// touch (lookupOpsExact, buildOpstack, tenantExists, stackTree). The stack
+// trees go in as one active version per stack holding one STACKDIR/ row, so
+// stackTree runs its unchanged query here too. MaxOpenConns(1) is
 // mandatory: go-sqlite3 gives each pooled connection its own private
 // `:memory:` DB, so without pinning a second connection would see an
 // empty schema (same rationale as dbcache.New).
@@ -129,7 +185,9 @@ func buildSnapshotDB(data []byte) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(
 		`CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INTEGER, name TEXT, txcl TEXT, mock_req TEXT, mock_res TEXT);
-		 CREATE TABLE tenants (tenant_id TEXT, slug TEXT, revoked_at TEXT);`); err != nil {
+		 CREATE TABLE tenants (tenant_id TEXT, slug TEXT, revoked_at TEXT);
+		 CREATE TABLE stacks (tenant_id TEXT, name TEXT, active_version INTEGER);
+		 CREATE TABLE stack_files (version_id INTEGER, path TEXT, content_hash TEXT);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -145,6 +203,24 @@ func buildSnapshotDB(data []byte) (*sql.DB, error) {
 		if _, err := db.Exec(
 			`INSERT INTO tenants (tenant_id, slug, revoked_at) VALUES (?,?,?)`,
 			r.TenantID, r.Slug, r.RevokedAt); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	for i, r := range snap.StackTrees {
+		if !stackdir.ValidDigest(r.Digest) {
+			continue // a malformed row is no tree, never a wrong one
+		}
+		v := i + 1
+		if _, err := db.Exec(
+			`INSERT INTO stacks (tenant_id, name, active_version) VALUES (?,?,?)`,
+			r.TenantID, r.Stack, v); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if _, err := db.Exec(
+			`INSERT INTO stack_files (version_id, path, content_hash) VALUES (?,?,?)`,
+			v, stackdir.Path(r.Digest), r.Digest); err != nil {
 			db.Close()
 			return nil, err
 		}

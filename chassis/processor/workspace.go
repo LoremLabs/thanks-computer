@@ -164,6 +164,13 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		if err := applyWorkspaceSecrets(refs, op.Secrets, &req); err != nil {
 			return workspaceFailure(into, prov, "", "bad_request", err.Error(), 0), nil
 		}
+		if req.Tree != nil {
+			t, code, msg := pu.stackTree(ctx, tenant, op.Stack)
+			if code != "" {
+				return workspaceFailure(into, prov, "", code, msg, 0), nil
+			}
+			req.Tree = t
+		}
 		if grant.Exists() {
 			env, vals, code, msg := pu.handGrant(ctx, tenant, op.Stack, spec, grant, sandboxes)
 			if code != "" {
@@ -304,8 +311,9 @@ func workspaceRequest(op operation.Operation) (workspace.ExecRequest, error) {
 }
 
 // workspaceBaseRequest parses the transport-neutral exec fields:
-// `command` (a shell line) or `args` (an argv array), `stdin`, `cwd`,
-// `env` (an object of strings).
+// `command` (a shell line) or `args` (an argv array), `stdin`, `cwd`
+// (workspaceCwd; a cwd in the stack tree marks req.Tree), `env` (an object of
+// strings).
 func workspaceBaseRequest(op operation.Operation) (workspace.ExecRequest, error) {
 	var req workspace.ExecRequest
 	if v := gjson.Get(op.Meta, "command"); v.Exists() {
@@ -336,7 +344,16 @@ func workspaceBaseRequest(op operation.Operation) (workspace.ExecRequest, error)
 		}
 	}
 	if v := gjson.Get(op.Meta, "cwd"); v.Exists() {
-		req.Cwd = v.String()
+		cwd, inTree, err := workspaceCwd(v.String())
+		if err != nil {
+			return req, err
+		}
+		req.Cwd = cwd
+		if inTree {
+			// A mark: the processor fills it from the run's snapshot
+			// (stackTree) before dispatch.
+			req.Tree = &workspace.Tree{}
+		}
 	}
 	if v := gjson.Get(op.Meta, "env"); v.Exists() {
 		if !v.IsObject() {

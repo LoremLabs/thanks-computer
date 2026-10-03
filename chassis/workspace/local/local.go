@@ -2,8 +2,9 @@
 // directory under --workspace-local-root, and exec runs the command as the
 // chassis's own uid with that directory as HOME and cwd.
 //
-// There is NO isolation beyond a scrubbed environment and a cwd guard —
-// the command can read anything the chassis uid can. That is why the
+// There is NO isolation beyond a scrubbed environment — the command can read
+// anything the chassis uid can, and `cwd` may name any directory on the
+// machine. That is why the
 // chassis refuses this provider unless --workspace-allow-local is set
 // explicitly, never implied by --env, and logs a WARN pair at boot.
 //
@@ -71,13 +72,14 @@ func (p *Provider) ReachesGrants() bool { return true }
 
 // dirFor maps a spec to its directory and refuses anything that would
 // leave root. Tenant and stack are chassis-validated slugs upstream; the
-// checks here are belt-and-braces.
+// checks here are belt-and-braces. No segment may start with ".", so no
+// workspace can land on the root's own .stacks/ (tree.go).
 func (p *Provider) dirFor(spec workspace.Spec) (string, error) {
 	if spec.Tenant == "" || spec.Stack == "" {
 		return "", &workspace.Error{Code: "bad_request", Message: "workspace needs a tenant and a stack"}
 	}
 	for _, seg := range []string{spec.Tenant, spec.Stack} {
-		if seg == "." || seg == ".." || strings.ContainsAny(seg, `/\`) {
+		if strings.HasPrefix(seg, ".") || strings.ContainsAny(seg, `/\`) {
 			return "", &workspace.Error{Code: "bad_request", Message: fmt.Sprintf("bad path segment %q", seg)}
 		}
 	}
@@ -114,7 +116,7 @@ func (p *Provider) Wake(_ context.Context, h workspace.Handle) (workspace.Comput
 		// Gone: the Manager recreates rather than wedging on a dead ref.
 		return nil, &workspace.Error{Code: workspace.CodeNotFound, Message: "workspace directory missing: " + h.Ref}
 	}
-	return &computer{dir: h.Ref}, nil
+	return &computer{dir: h.Ref, trees: filepath.Join(p.root, treesDir)}, nil
 }
 
 // Sleep is a no-op: nothing to park.
@@ -156,7 +158,8 @@ func within(root, p string) bool {
 
 // computer runs commands in one workspace directory.
 type computer struct {
-	dir string
+	dir   string
+	trees string // where stack trees are placed, shared by every workspace (tree.go)
 }
 
 // basePath is the only PATH a command sees unless the request sets its own.
@@ -180,28 +183,27 @@ func argvFor(req workspace.ExecRequest) ([]string, error) {
 	}
 }
 
-// resolveCwd joins a relative cwd onto the workspace and proves the
-// result — after symlink resolution — is still inside it.
+// resolveCwd turns a request's cwd into the directory the command starts in.
+// The processor has already resolved $HOME and $TXCO_STACK_DIR and cleaned
+// the path (processor/workspace_cwd.go): an absolute path is a path on this
+// machine, used as given; a relative one is beneath the workspace, and is
+// checked again here so it cannot climb out by "..". Neither is an access
+// check — the command runs as the chassis's own uid and could cd anywhere —
+// so a symlink is followed like any other directory. The directory must
+// exist.
 func resolveCwd(root, cwd string) (string, error) {
-	if filepath.IsAbs(cwd) {
-		return "", &workspace.Error{Code: "bad_request", Message: "cwd must be relative to the workspace"}
+	target := filepath.Clean(cwd)
+	if !filepath.IsAbs(cwd) {
+		target = filepath.Clean(filepath.Join(root, cwd))
+		if !within(root, target) {
+			return "", &workspace.Error{Code: "bad_request", Message: "cwd escapes the workspace"}
+		}
 	}
-	target := filepath.Clean(filepath.Join(root, cwd))
-	if !within(root, target) {
-		return "", &workspace.Error{Code: "bad_request", Message: "cwd escapes the workspace"}
-	}
-	real, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return "", &workspace.Error{Code: "bad_request", Message: "cwd: " + err.Error()}
-	}
-	if !within(root, real) {
-		return "", &workspace.Error{Code: "bad_request", Message: "cwd escapes the workspace (symlink)"}
-	}
-	st, err := os.Stat(real)
+	st, err := os.Stat(target)
 	if err != nil || !st.IsDir() {
-		return "", &workspace.Error{Code: "bad_request", Message: "cwd is not a directory"}
+		return "", &workspace.Error{Code: "bad_request", Message: "cwd is not a directory: " + cwd}
 	}
-	return real, nil
+	return target, nil
 }
 
 // envFor is the scrubbed environment: a fixed PATH, HOME at the workspace,

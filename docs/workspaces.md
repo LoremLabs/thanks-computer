@@ -76,7 +76,7 @@ reports `code = "unsupported"`.
 | `command` | A shell line, run by the workspace's `/bin/sh -c` |
 | `args` | An argv (array of strings), no shell — use for untrusted arguments. `command` and `args` are mutually exclusive |
 | `stdin` | Bytes fed to the process (a string; a JSON value is fed as its text) |
-| `cwd` | Working directory, relative to the workspace and inside it |
+| `cwd` | Where the command starts: beneath the workspace (a relative path, or `$HOME/…`), in the stack's own files (`$TXCO_STACK_DIR/…`), or an absolute path on the computer. See [Where a command starts](#where-a-command-starts-cwd) |
 | `env` | An object of extra environment variables |
 | `into` | Where the result lands (default `_workspace`) |
 | `timeout` | Wall clock for the whole exec — create/wake, the command, output capture; the command is killed when it expires. Default `--workspace-default-timeout` (5m), capped by `--op-timeout-max` (10m). A **synchronous HTTP request** is also bounded by whatever fronts the chassis — the hosted edge allows 20 s for response headers — so anything longer must use `WITH mode = "continuable"` (202 + poll); when the client gives up, the request is cancelled and the command is killed |
@@ -93,7 +93,9 @@ workspace), `TMPDIR` (inside it), plus your `env` and any `secrets.env.*`
 
 A script longer than a line belongs in its own file beside the op,
 pulled in with [`&include`](./advanced/txcl/txcl.md#including-files--include):
-fixed argv, the script as data, no escaping.
+fixed argv, the script as data, no escaping. A program (several files, a
+module beside it, or anything you would rather run than paste) belongs in
+the stack and runs by path from [`$TXCO_STACK_DIR`](#the-stacks-own-files-txco_stack_dir).
 
 ```txcl
 WITH args  = ["python3", "-c", &include("server.py")]   # small: in argv
@@ -110,6 +112,74 @@ it — even if the command prints its environment. Values shorter than 8
 bytes are not scrubbed (scrubbing "1234" would shred unrelated output);
 real tokens are far longer. A `format`-templated value still contains the
 raw secret, so scrubbing the raw value covers it.
+
+## Where a command starts: `cwd`
+
+`cwd` is either a path on the computer or a path beneath one of two roots
+the chassis resolves:
+
+| `cwd` | Starts in |
+|---|---|
+| omitted, `"foo"`, `"$HOME"`, `"$HOME/foo"` | the workspace, or a directory in it |
+| `"$TXCO_STACK_DIR"`, `"$TXCO_STACK_DIR/foo"` | the stack's own files, read-only ([below](#the-stacks-own-files-txco_stack_dir)) |
+| `"/foo"` | an absolute path on the computer |
+
+`..` is refused only where it would climb out of its root: `"$HOME/a/../b"`
+is fine, `"$HOME/../etc"` is not, and an absolute path is cleaned
+(`"/tmp/x/../y"` is `/tmp/y`). The directory must exist.
+
+The two roots are tokens the chassis resolves, and only in `cwd`: txcl does
+no `$` expansion, and `args` and `env` are passed exactly as given, which is
+what keeps `args` safe for untrusted values. In `command` the shell expands
+`$HOME` and `$TXCO_STACK_DIR` like any other variable.
+
+`cwd` resolves; it does not authorize. An absolute `cwd` reaches nothing a
+`cd` in the command could not, and what a command may touch is the
+computer's business: on the [`local` provider](#providers) that is anything
+the chassis's own user can.
+
+### The stack's own files: `$TXCO_STACK_DIR`
+
+A program longer than a script lives beside the op that runs it, and runs
+by path:
+
+```txcl
+# OPS/game/2400_MOVE/move.txcl, with OPS/game/2100_SETUP/race.py in the stack
+WHEN ._race.ok == true
+  WITH cwd  = "$TXCO_STACK_DIR",
+       args = ["python3", "2100_SETUP/race.py"],
+       env  = &object("MODE", "move"),
+       into = "_move"
+  EXEC "workspace://browser/exec"
+```
+
+- **What is in it.** When one of a stack's ops names `$TXCO_STACK_DIR`,
+  `txco apply` packs the stack's directory, `OPS/<stack>/`, keeping its
+  layout. It leaves out dotfiles, the directories the chassis already takes
+  by kind (`FILES/`, `CAPS/`, `OUTLETS/`, `SANDBOXES/`, `DATASETS/`,
+  `SOURCES/` and the data packs) and any nested stack, which has its own. A
+  stack that never names it carries no tree. The caps are 1 MiB a file and
+  32 MiB and 10,000 files a tree; apply refuses a tree over them and names
+  its largest files.
+- **Its version is the op's.** The tree is stored with the stack version, by
+  content hash, and an unchanged tree costs a new version nothing. A run
+  uses the tree of the version it started with, and a run resumed from a
+  continuation uses the tree it suspended with: an apply, a rollback or a
+  failed apply never changes the files under a running op.
+- **Read-only.** Files are `0444`, or `0555` when the source was executable,
+  and directories `0555`. A program can be run directly
+  (`"$TXCO_STACK_DIR/bin/tool"`) but cannot write into itself: write state
+  to `$HOME`, which is still the workspace.
+- **Only when asked.** The tree is placed, and `TXCO_STACK_DIR` set, only for
+  an exec whose `cwd` names it. To run a program from the tree but start in
+  the workspace, change directory in the command:
+  `command = "cd \"$HOME\" && exec \"$TXCO_STACK_DIR/bin/tool\""`.
+- **Where it lands.** The local provider places each tree once per chassis,
+  under `<--workspace-local-root>/.stacks/<digest>/`. Like Go's module
+  cache it is read-only, so remove it by hand only after `chmod -R u+w`. A
+  provider that cannot place a tree answers
+  `workspace.error {code: "stack_dir_unavailable"}`, as does a stack version
+  without one (applied by an older `txco`).
 
 ## `exec` — the result
 

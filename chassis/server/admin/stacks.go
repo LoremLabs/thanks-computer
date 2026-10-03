@@ -38,6 +38,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/opname"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/sandbox"
+	"github.com/loremlabs/thanks-computer/chassis/stackdir"
 	"github.com/loremlabs/thanks-computer/chassis/storeseed"
 	"github.com/loremlabs/thanks-computer/chassis/tenants"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
@@ -437,7 +438,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS", computesrc.Dir:
+		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS", computesrc.Dir, stackdir.Dir:
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -551,6 +552,18 @@ func validateStackFilePath(p string) error {
 	if computesrc.IsPath(p) {
 		if computesrc.DigestFromPath(p) == "" {
 			return fmt.Errorf("compute source rows must be %s/<sha256 hex>.json (got %q)", computesrc.Dir, p)
+		}
+		return nil
+	}
+
+	// STACKDIR/<digest>.tar is the stack's own directory, packed by `txco
+	// apply` when one of its ops names $TXCO_STACK_DIR (chassis/stackdir).
+	// Always a fingerprint-only row — the bundle lives in the filecas — read
+	// at run time by a workspace exec that asks for the tree, never
+	// materialised into ops.
+	if stackdir.IsPath(p) {
+		if stackdir.DigestFromPath(p) == "" {
+			return fmt.Errorf("stack tree rows must be %s/<sha256 hex>%s (got %q)", stackdir.Dir, stackdir.Ext, p)
 		}
 		return nil
 	}
@@ -1468,7 +1481,7 @@ func (m contentMode) wantsBytes(path string) bool {
 		// never resolved for the ops view (that would be one CAS GET per
 		// seeded blob on every stack listing). COMPUTES/ source bundles
 		// likewise: the admin reads one on demand (handleGetComputeSource).
-		return !strings.HasPrefix(path, "FILES/") && !storeseed.IsBlobPath(path) && !computesrc.IsPath(path)
+		return !strings.HasPrefix(path, "FILES/") && !storeseed.IsBlobPath(path) && !computesrc.IsPath(path) && !stackdir.IsPath(path)
 	default:
 		return false
 	}
@@ -1501,7 +1514,7 @@ func (c *Controller) loadVersionFiles(ctx context.Context, versionID int64, mode
 			// the blob GET endpoint instead. Manifests (small yaml) resolve
 			// normally below. COMPUTES/ rows too: derived, read through the
 			// compute-source endpoint, and skipped by `txco pull`.
-			if (dataset.IsArtifactPath(f.Path) || storeseed.IsBlobPath(f.Path) || computesrc.IsPath(f.Path)) &&
+			if (dataset.IsArtifactPath(f.Path) || storeseed.IsBlobPath(f.Path) || computesrc.IsPath(f.Path) || stackdir.IsPath(f.Path)) &&
 				content == "" && f.ContentHash != "" && f.ContentHash != emptyHash {
 				f.Encoding = "cas"
 				out = append(out, f)
@@ -1731,6 +1744,7 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 	// committed via PUT never contains a path those endpoints would
 	// later reject.
 	seen := map[string]bool{}
+	trees := 0 // STACKDIR/ rows in this upload: at most one
 	for i := range req.Files {
 		f := &req.Files[i]
 		if err := validateStackFilePath(f.Path); err != nil {
@@ -1757,7 +1771,8 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			!outlet.IsOutletPath(f.Path) &&
 			!sandbox.IsSandboxPath(f.Path) &&
 			!capdecl.IsCapPath(f.Path) &&
-			!computesrc.IsPath(f.Path) {
+			!computesrc.IsPath(f.Path) &&
+			!stackdir.IsPath(f.Path) {
 			writeJSONError(w, http.StatusBadRequest, "encoding_not_allowed",
 				map[string]any{"index": i, "path": f.Path, "encoding": f.Encoding,
 					"hint": "base64/cas encodings are for FILES/, VECTORS/, KV/ and DATASETS/ assets; op files are plain UTF-8 strings"})
@@ -1771,6 +1786,27 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 				map[string]any{"index": i, "path": f.Path,
 					"hint": "COMPUTES/ rows carry content_hash only (encoding \"cas\"); stream the bundle to PUT /blobs/sha256/{hash} first"})
 			return
+		}
+		// A STACKDIR/ row is a fingerprint too, and its path names its own
+		// hash. One per version: a run reads THE tree of its stack.
+		if stackdir.IsPath(f.Path) {
+			if f.Encoding != "cas" {
+				writeJSONError(w, http.StatusBadRequest, "cas_required",
+					map[string]any{"index": i, "path": f.Path,
+						"hint": "STACKDIR/ rows carry content_hash only (encoding \"cas\"); stream the bundle to PUT /blobs/sha256/{hash} first"})
+				return
+			}
+			if stackdir.DigestFromPath(f.Path) != f.ContentHash {
+				writeJSONError(w, http.StatusBadRequest, "hash_mismatch",
+					map[string]any{"index": i, "path": f.Path, "hash": f.ContentHash,
+						"hint": "a STACKDIR/ row's path names the sha256 of its bundle"})
+				return
+			}
+			if trees++; trees > 1 {
+				writeJSONError(w, http.StatusBadRequest, "duplicate_stack_tree",
+					map[string]any{"index": i, "path": f.Path, "hint": "a version carries at most one STACKDIR/ row"})
+				return
+			}
 		}
 		// A fingerprint-only row (Encoding "cas"): the bytes were streamed to
 		// the CAS via the blob endpoint and only the hash rides the draft.
@@ -2248,6 +2284,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 		if computesrc.IsPath(rf.path) {
 			continue // compute source → read by the admin's compute-source view, not an ops row
+		}
+		if stackdir.IsPath(rf.path) {
+			continue // stack tree → read by a workspace exec that asks for it, not an ops row
 		}
 		pf, ok := parseStackPath(rf.path)
 		if !ok {
@@ -3139,11 +3178,11 @@ func (c *Controller) handlePatchDraftFile(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusBadRequest, "invalid_json", map[string]any{"err": err.Error()})
 		return
 	}
-	// PATCH stores content inline; a COMPUTES/ row is fingerprint-only and
-	// arrives through the files PUT.
-	if computesrc.IsPath(req.Path) {
+	// PATCH stores content inline; COMPUTES/ and STACKDIR/ rows are
+	// fingerprint-only and arrive through the files PUT.
+	if computesrc.IsPath(req.Path) || stackdir.IsPath(req.Path) {
 		writeJSONError(w, http.StatusBadRequest, "cas_required",
-			map[string]any{"path": req.Path, "hint": "COMPUTES/ rows are written by `txco apply` as fingerprint-only rows"})
+			map[string]any{"path": req.Path, "hint": "COMPUTES/ and STACKDIR/ rows are written by `txco apply` as fingerprint-only rows"})
 		return
 	}
 

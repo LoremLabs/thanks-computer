@@ -164,7 +164,16 @@ func copyTree(src, dst string) (int, error) {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(out, b, 0o644); err != nil {
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := source.PackageFileMode(info.Mode())
+		if err := os.WriteFile(out, b, mode); err != nil {
+			return err
+		}
+		// WriteFile keeps an existing file's mode; a re-install must not.
+		if err := os.Chmod(out, mode); err != nil {
 			return err
 		}
 		n++
