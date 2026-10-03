@@ -80,8 +80,8 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/search/blevestore" // registers the bundled "bleve" search backend
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/server/admin"
-	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
 	"github.com/loremlabs/thanks-computer/chassis/server/capgw"
+	continuationui "github.com/loremlabs/thanks-computer/chassis/server/continuation/ui"
 	"github.com/loremlabs/thanks-computer/chassis/server/grantgw"
 	"github.com/loremlabs/thanks-computer/chassis/server/grantsock"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"

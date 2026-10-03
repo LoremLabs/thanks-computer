@@ -243,7 +243,7 @@ func TestDNSRecordUpsertLandsOnNode(t *testing.T) {
 	rows := RowsArtifact{DB: "runtime", Table: "dns_records", Op: "upsert",
 		Rows: []map[string]any{{
 			"id": "dnr_1", "zone_id": "dnz_1", "name": "www", "type": "A",
-			"rdata": "192.0.2.10",
+			"rdata":      "192.0.2.10",
 			"created_at": "2026-06-04T00:00:00Z", "updated_at": "2026-06-04T00:00:00Z",
 		}}}
 	data, _ := json.Marshal(rows)
@@ -274,7 +274,7 @@ func TestDNSRecordUpsertLandsOnNode(t *testing.T) {
 	rev := RowsArtifact{DB: "runtime", Table: "dns_records", Op: "upsert",
 		Rows: []map[string]any{{
 			"id": "dnr_1", "zone_id": "dnz_1", "name": "www", "type": "A",
-			"rdata": "192.0.2.10",
+			"rdata":      "192.0.2.10",
 			"created_at": "2026-06-04T00:00:00Z", "updated_at": "2026-06-04T00:00:00Z",
 			"revoked_at": "2026-06-04T01:00:00Z",
 		}}}
