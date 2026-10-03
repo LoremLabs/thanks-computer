@@ -47,3 +47,16 @@ type RowsArtifact struct {
 	PK    []string         `json:"pk"`    // primary-key columns (delete)
 	Rows  []map[string]any `json:"rows"`
 }
+
+// RunAbortArtifact is the payload of a run.abort event: the run to end (RID),
+// or every live run of a stack (Stack; one of the two), in the tenant named
+// by its slug — the live-run registry keys on the slug the processor pins —
+// and who asked and why, for the run's trace.
+type RunAbortArtifact struct {
+	Tenant string `json:"tenant"`
+	RID    string `json:"rid,omitempty"`
+	Stack  string `json:"stack,omitempty"`
+	By     string `json:"by"`
+	Reason string `json:"reason,omitempty"`
+	At     string `json:"at"`
+}

@@ -354,6 +354,30 @@ func (c *Controller) applyOne(ctx context.Context, ev controlevent.Event, cursor
 		if err := c.advanceCursorAndMark(ctx, ev); err != nil {
 			return err
 		}
+	case controlevent.TypeRunAbort:
+		// A run to end, if this node holds it: the registry is this
+		// process's, so the event is applied here and not stored. A miss
+		// is the normal outcome on every node but one.
+		var art controlevent.RunAbortArtifact
+		if err := json.Unmarshal(data, &art); err != nil {
+			return fmt.Errorf("decode run.abort artifact: %w", err)
+		}
+		n := 0
+		switch {
+		case art.RID != "":
+			if c.pu.Live.Abort(art.Tenant, art.RID, art.By, art.Reason) {
+				n = 1
+			}
+		case art.Stack != "":
+			n = c.pu.Live.AbortStack(art.Tenant, art.Stack, art.By, art.Reason)
+		}
+		c.pu.Logger.Info("control-event: run.abort applied",
+			zap.String("tenant", art.Tenant), zap.String("rid", art.RID), zap.String("stack", art.Stack),
+			zap.String("by", art.By), zap.Int("aborted", n),
+			zap.Uint64("control_version", ev.ControlVersion))
+		if err := c.advanceCursorAndMark(ctx, ev); err != nil {
+			return err
+		}
 	default:
 		var art RowsArtifact
 		if err := json.Unmarshal(data, &art); err != nil {

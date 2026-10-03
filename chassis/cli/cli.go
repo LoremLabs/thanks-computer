@@ -114,6 +114,13 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		// The tenant's capability catalogue: what its active stacks declare
 		// under CAPS/. See chassis/cli/caps.go.
 		return jsonErrWrap(rest, stdout, stderr, runCaps), true
+	case "runs":
+		// The tenant's runs in flight on the chassis. See chassis/cli/runs.go.
+		return jsonErrWrap(rest, stdout, stderr, runRuns), true
+	case "abort":
+		// End a run in flight, or every run of a stack, without ending the
+		// chassis. See chassis/cli/runs.go.
+		return jsonErrWrap(rest, stdout, stderr, runAbort), true
 	case "edit":
 		return runEdit(rest, stdout, stderr), true
 	case "dev":
@@ -350,6 +357,8 @@ func printUsage(w io.Writer) {
 			{"status [<dir>]", muted("Per-stack version drift between local and chassis (exit 1 on divergence)")},
 			{"versions <stack>", muted("List versions for a stack with active marker")},
 			{"caps list", muted("List the capabilities the tenant's active stacks declare (CAPS/), with the stack and scope that answer each")},
+			{"runs", muted("List the tenant's runs in flight on the chassis")},
+			{"abort <rid> | --stack <name>", muted("End a run in flight, or every run of a stack, without ending the chassis")},
 		}},
 		{"Packages & ops", []row{
 			{"op <command>", muted("Author + build sandboxed op:// nano-ops (init/build/run/test)")},

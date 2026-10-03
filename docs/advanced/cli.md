@@ -91,6 +91,8 @@ The CLI verbs map onto that flow:
 | `txco activate <stack>` | Flip the active-version pointer (defaults to newest draft). Activating an older version = rollback |
 | `txco versions <stack>` | List a stack's versions, active one marked |
 | `txco caps list [--json]` | The tenant's capability catalogue: what its active stacks declare under `CAPS/`, and where a call enters ([capabilities](./capabilities.md#the-catalogue)) |
+| `txco runs [--stack S] [--json]` | The tenant's runs in flight on the chassis: rid, inlet, the stack it entered, the scope it is in now, its age ([aborting a run](../abort.md)) |
+| `txco abort <rid>` · `txco abort --stack <name>` | End a run in flight — or every run of a stack — without ending the chassis: ops in flight are cancelled, nothing later runs, the trace says `aborted` and by whom. `--reason` for the trace; confirmation on a non-local chassis ([aborting a run](../abort.md)) |
 | `txco diff [dir]` | Compare local `OPS/` against the running chassis |
 | `txco lint [dir]` | Validate the `OPS/` tree **offline** (no chassis): name collisions, mis-placed files, txcl parse, unconditional-loop warnings; `--list` prints the op graph; exit 1 on errors (CI-friendly) |
 | `txco status [dir]` | Per-stack drift summary; exit 1 on divergence (CI-friendly) |

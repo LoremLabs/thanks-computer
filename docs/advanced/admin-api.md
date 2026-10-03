@@ -136,6 +136,8 @@ Tenant-scoped, under `/v1/tenants/{tenant}`:
 | `GET /kv/{namespace}` | Keys an op accumulated in the KV store (`kv:*:read`) |
 | `GET /notebooks/{namespace}` · `/notebooks/{namespace}/{name}` | Notebooks in a namespace / a notebook's entries — `?after&since&until&tail&type&limit`, `?format=ndjson` streams (`notebook:*:read`, [notebooks.md](./notebooks.md)) |
 | `POST /registry/token` | A short-lived package-registry token for the tenant's own namespace (`package:<name>:push` · `:pull`); 404 unless configured — [below](#registry-tokens) |
+| `GET /runs` | The tenant's runs in flight in this process (`run:*:read`): `{runs: [{rid, tenant, src, entry, stack, stage, started, age_ms, aborted_by}]}` ([abort.md](../abort.md)) |
+| `POST /runs/{rid}/abort` · `POST /stacks/{name}/abort` | End a run, or every live run of a stack (`run:*:abort`); body `{reason}`. Answers `{aborted, rid|stack, published}`; a rid not in flight is `404 run_not_live` on one chassis and `202` with `published: true` on a fleet, where every node applies the `run.abort` control event and the one that holds the run ends it |
 
 Also present: `POST /v1/cli` (the admin UI's command bridge),
 `POST /v1/fleet/resync`, `GET·PUT /v1/dns/config`, and the delegated-zone

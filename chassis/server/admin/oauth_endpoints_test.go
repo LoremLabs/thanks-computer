@@ -212,13 +212,14 @@ func TestOAuthEnrollFirstWithSlug(t *testing.T) {
 		t.Fatalf("actor_id = %v", body["actor_id"])
 	}
 	caps, _ := body["capabilities"].([]any)
-	if len(caps) != 8 {
-		t.Fatalf("capabilities = %v, want 8 owner caps", body["capabilities"])
+	if len(caps) != 9 {
+		t.Fatalf("capabilities = %v, want 9 owner caps", body["capabilities"])
 	}
 	// A tenant owner must be able to manage their own tenant's secrets, read
 	// their own tenant's KV (e.g. list a namespace via the admin API), use
-	// the inspect inlet, and publish packages under the tenant's name.
-	hasSecret, hasKV, hasInspect, hasPackage := false, false, false, false
+	// the inspect inlet, publish packages under the tenant's name, and list
+	// and abort the tenant's own runs.
+	hasSecret, hasKV, hasInspect, hasPackage, hasRun := false, false, false, false, false
 	for _, cp := range caps {
 		switch s, _ := cp.(string); s {
 		case "secret:*:*":
@@ -229,10 +230,15 @@ func TestOAuthEnrollFirstWithSlug(t *testing.T) {
 			hasInspect = true
 		case "package:*:*":
 			hasPackage = true
+		case "run:*:*":
+			hasRun = true
 		}
 	}
 	if !hasPackage {
 		t.Fatalf("owner caps missing package:*:*: %v", body["capabilities"])
+	}
+	if !hasRun {
+		t.Fatalf("owner caps missing run:*:*: %v", body["capabilities"])
 	}
 	if !hasSecret {
 		t.Fatalf("owner caps missing secret:*:*: %v", body["capabilities"])

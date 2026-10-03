@@ -278,6 +278,8 @@ var cliCommandTree = []node{
 	{Name: "caps", Desc: "The tenant's capability catalogue (CAPS/ declarations)", Children: []node{
 		{Name: "list", Desc: "List declared capabilities with the stack and scope that answer each", Flags: []string{"json"}},
 	}},
+	{Name: "runs", Desc: "List the tenant's runs in flight on the chassis", Flags: []string{"stack", "json"}},
+	{Name: "abort", Desc: "End a run in flight (by rid, or every run of --stack) without ending the chassis", Flags: []string{"stack", "reason", "json", "yes"}},
 	{Name: "edit", Desc: "Edit a rule and apply on save"},
 	{Name: "dev", Desc: "Run the dev loop (apps + chassis + hot reload)"},
 	{Name: "demo", Desc: "Start the txcl learning environment"},

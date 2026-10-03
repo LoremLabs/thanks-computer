@@ -52,6 +52,7 @@ const (
 	loopStopMax     = "max"     // MAX passes ran
 	loopStopFuel    = "fuel"    // request fuel ceiling crossed
 	loopStopTimeout = "timeout" // op ctx done (WITH timeout / --loop-timeout / request deadline)
+	loopStopAborted = "aborted" // op ctx done because the run was aborted (LiveRuns.Abort)
 	loopStopHalted  = "halted"  // a sibling op at this stage emitted _txc.halt
 	loopStopError   = "error"   // a pass, a LOOP SET, or a WITH re-resolution failed
 )
@@ -166,6 +167,9 @@ func (pu *Unit) runLoop(ctx context.Context, op *operation.Operation, max int64,
 		case <-halt:
 			return loopStopHalted
 		default:
+			if _, aborted := AbortCause(lctx); aborted {
+				return loopStopAborted
+			}
 			return loopStopTimeout
 		}
 	}
@@ -314,8 +318,11 @@ passes:
 	}
 
 	status := "ok"
-	if stop == loopStopError {
+	switch stop {
+	case loopStopError:
 		status = "error"
+	case loopStopAborted:
+		status = "aborted"
 	}
 	pu.Logger.Debug("loop",
 		zap.String("stack", op.Stack), zap.Int("scope", op.Scope), zap.String("name", op.Name),

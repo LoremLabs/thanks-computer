@@ -1265,7 +1265,7 @@ func statusColor(s string) tcell.Color {
 	switch s {
 	case "ok":
 		return tcell.ColorGreen
-	case "error", "timeout":
+	case "error", "timeout", "aborted", "cancelled":
 		return tcell.ColorRed
 	case "pending", "in-flight":
 		return tcell.ColorYellow
@@ -1277,7 +1277,7 @@ func statusColorName(s string) string {
 	switch s {
 	case "ok":
 		return "green"
-	case "error", "timeout":
+	case "error", "timeout", "aborted", "cancelled":
 		return "red"
 	case "pending", "in-flight":
 		return "yellow"

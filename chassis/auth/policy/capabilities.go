@@ -92,6 +92,13 @@ var KnownCapabilities = map[string]bool{
 	"package:*:pull": true,
 	"package:*:push": true,
 	"package:*:*":    true,
+
+	// Runs in flight on the chassis. `read` lists the tenant's live runs
+	// (GET /v1/tenants/{t}/runs); `abort` ends one, or every run of a stack
+	// (POST .../runs/{rid}/abort, .../stacks/{name}/abort).
+	"run:*:read":  true,
+	"run:*:abort": true,
+	"run:*:*":     true,
 }
 
 // ErrUnknownCapability is returned by ValidateCapabilities and

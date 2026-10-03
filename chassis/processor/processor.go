@@ -122,6 +122,12 @@ type Unit struct {
 	// resume — so shutdown can let it finish before cancelling. Nil-safe.
 	Work *Tracker
 
+	// Live is the registry of the runs in flight in this process, by rid,
+	// so one can be named and aborted (the admin plane's run endpoints,
+	// txco://run/abort). The server registers each request goroutine's
+	// run; the pin sites here keep the entry current. Nil-safe.
+	Live *LiveRuns
+
 	// MCPSessions caches server-minted `Mcp-Session-Id` values per
 	// (tenant, endpoint) so hot MCP paths skip the init lifecycle
 	// (3 HTTPS round-trips → 1). Nil-safe — when unset, ExecMCPHTTP
@@ -283,6 +289,9 @@ func WithTenant(ctx context.Context, slug string) context.Context {
 	// Record the resolved tenant for usage attribution from immutable
 	// pipeline state (see TenantObserver). No-op when no observer is attached.
 	tenantObserverFromContext(ctx).observe(slug)
+	// And for the live-run registry, which answers "whose run is this" to an
+	// abort by the same pinned fact. No-op when the run is not registered.
+	liveRunFromContext(ctx).setTenant(slug)
 	return context.WithValue(ctx, ctxKeyTenant, slug)
 }
 
@@ -460,6 +469,7 @@ func (pu *Unit) maybeRetenant(ctx context.Context, resp string) context.Context 
 	// out-of-band readers as the tenant pin.
 	route := gjson.GetMany(resp, "_txc.stack", "_txc.ingress", "_txc.hostname_verified")
 	tenantObserverFromContext(ctx).observeRoute(route[0].String(), route[1].String(), route[2].Bool())
+	liveRunFromContext(ctx).setEntry(route[0].String())
 	return WithTenant(ctx, target)
 }
 
@@ -548,6 +558,7 @@ func New(conf config.Config, logger *zap.Logger, reg registry.Registry, mc *metr
 		CallbackBaseURL: conf.ContinuationCallbackBaseURL,
 		Secrets:         secretsResolver,
 		Work:            NewTracker(),
+		Live:            NewLiveRuns(),
 	}
 
 	return pu
@@ -925,6 +936,12 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	}
 
 	ctx, span6 := pu.Mc.Tracer.Start(ctx, `run`)
+	// Where the run is now, for the live-run registry (`txco runs` shows it;
+	// an abort by stack matches on it). Every op of a scope shares its
+	// stack and scope.
+	if len(ops) > 0 {
+		liveRunFromContext(ctx).setStage(ops[0].Stack, ops[0].Stack+"/"+strconv.Itoa(ops[0].Scope))
+	}
 	for _, op := range ops {
 		wg.Add(1)
 		inflight[op.OpID] = op
@@ -1186,15 +1203,26 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				status, verb = "timeout", "deadline exceeded"
 			}
+			// An abort (LiveRuns.Abort) is a cancel somebody asked for: the
+			// same stop, recorded as its own status with who asked, and a
+			// client still waiting gets told so — 503 with the code, where a
+			// disconnected one would hear nothing. Either answer carries the
+			// pinned tenant: the trace and the usage line read it from the
+			// final payload, and an answer without it files the run under
+			// no tenant at all.
+			response := event.Payload{Raw: `{"err":"canceled"}`, Type: event.ErrorStr}
+			if ab, ok := AbortCause(ctx); ok {
+				status, verb = "aborted", ab.Error()
+				response.Raw = abortPayload(ab)
+			}
+			if tenant := tenantScope(ctx); tenant != "" {
+				response.Raw, _ = sjson.Set(response.Raw, "_txc.tenant", tenant)
+			}
 			reason := verb
 			if labels := inflightLabels(); len(labels) > 0 {
 				reason = verb + " while running " + strings.Join(labels, ", ")
 			}
 			flushInflight(status, reason)
-			response := event.Payload{
-				Raw:  `{"err":"canceled"}`,
-				Type: event.ErrorStr,
-			}
 			resCh <- response
 			return errors.New(reason)
 		}
@@ -2080,6 +2108,19 @@ func (pu *Unit) callbackURLFor(opc string) string {
 func failPayload(msg string) []byte {
 	b, _ := json.Marshal(map[string]any{"error": map[string]string{"message": msg}})
 	return b
+}
+
+// abortPayload is what an aborted run answers its client with: the error
+// with its code, and the web status a response writer renders it at (the
+// continuation responses set theirs the same way). Transport-neutral
+// otherwise; the inlet that has no status to render ignores it.
+func abortPayload(ab *AbortError) string {
+	b, _ := json.Marshal(map[string]any{
+		"err":   "aborted",
+		"error": map[string]string{"code": "txco_run_aborted", "message": ab.Error()},
+		"_txc":  map[string]any{"web": map[string]any{"res": map[string]any{"status": 503}}},
+	})
+	return string(b)
 }
 
 // suspendBarrierScope is the barrier path: persist ALL durable records

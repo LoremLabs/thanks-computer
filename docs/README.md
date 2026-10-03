@@ -53,6 +53,8 @@ Read in order, or jump to what you need:
     are data.
 14. **[Visibility](./visibility.md)** — see exactly what a flow did, after the
     fact.
+    **[Aborting a run](./abort.md)** — and ending one that is still going,
+    without ending the chassis.
 15. **[Telemetry](./telemetry.md)** — emit your application's metrics from
     a stack; the chassis ships them to the backend you configure.
 16. **[Schemas](./schemas.md)** — optionally write down the shape a

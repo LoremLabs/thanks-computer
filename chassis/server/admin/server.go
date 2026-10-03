@@ -502,6 +502,9 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/stacks", c.handleListStacks).Methods(http.MethodGet)
 	tenantR.HandleFunc("/stacks/{name:.+}/draft", c.handleCreateDraft).Methods(http.MethodPost)
 	tenantR.HandleFunc("/stacks/{name:.+}/activate", c.handleActivateStack).Methods(http.MethodPost)
+	// End every run of the stack in flight in this process (`txco abort
+	// --stack`). See chassis/server/admin/runs.go.
+	tenantR.HandleFunc("/stacks/{name:.+}/abort", c.handleAbortStack).Methods(http.MethodPost)
 	tenantR.HandleFunc("/stacks/{name:.+}/diff", c.handleDiffVersions).Methods(http.MethodGet)
 	// A compute's source, through the stack's own COMPUTES/<digest>.json row.
 	tenantR.HandleFunc("/stacks/{name:.+}/computes/sha256/{digest:[0-9a-f]{64}}", c.handleGetComputeSource).Methods(http.MethodGet)
@@ -536,6 +539,11 @@ func (c *Controller) Start() {
 	// The tenant's capability catalogue: what its active stacks declare
 	// under CAPS/ (chassis/capdecl), by name. Read-only; `txco caps list`.
 	tenantR.HandleFunc("/caps", c.handleListCaps).Methods(http.MethodGet)
+
+	// The runs in flight in this process, and the abort of one (`txco
+	// runs`, `txco abort <rid>`). See chassis/server/admin/runs.go.
+	tenantR.HandleFunc("/runs", c.handleListRuns).Methods(http.MethodGet)
+	tenantR.HandleFunc("/runs/{rid}/abort", c.handleAbortRun).Methods(http.MethodPost)
 
 	// The package registry's token service: a short-lived bearer token for
 	// the tenant's own namespace (`txco package publish`). 404 unless

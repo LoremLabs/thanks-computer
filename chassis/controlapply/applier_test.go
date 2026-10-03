@@ -533,3 +533,50 @@ func TestComputeSourceRowKeepsItsHash(t *testing.T) {
 		t.Fatalf("ops rows = %d, want only the rule", n)
 	}
 }
+
+// A run.abort event ends the run on the node that holds it and is a no-op
+// that still advances the cursor on one that does not.
+func TestRunAbortEndsTheRunHere(t *testing.T) {
+	h := newHarness(t)
+	h.c.pu.Live = processor.NewLiveRuns()
+	ctxA, doneA := h.c.pu.Live.Register(context.Background(), "rid-a", "http")
+	defer doneA()
+	processor.WithTenant(ctxA, "acme")
+	ctxB, doneB := h.c.pu.Live.Register(context.Background(), "rid-b", "http")
+	defer doneB()
+	processor.WithTenant(ctxB, "acme")
+	processor.SetLiveRunEntry(ctxB, "worker")
+
+	put := func(name, eventID string, cv uint64, art controlevent.RunAbortArtifact) {
+		data, _ := json.Marshal(art)
+		key := "runs/abort/" + eventID
+		if err := h.astore.Put(context.Background(), key, data, []byte(`{}`)); err != nil {
+			t.Fatalf("put artifact: %v", err)
+		}
+		h.putEvent(t, name, controlevent.Event{
+			EventID: eventID, Type: controlevent.TypeRunAbort, TenantID: "tnt_a",
+			ArtifactRef: key, Checksum: "sha256:" + sha256Hex(data), ControlVersion: cv,
+		})
+	}
+	// A rid this node does not hold: nothing ends, the cursor moves.
+	put("e1.json", "evt-abort-1", 5, controlevent.RunAbortArtifact{Tenant: "acme", RID: "rid-elsewhere", By: "matt"})
+	h.c.pollOnce(context.Background())
+	if h.cursor(t) != 5 || ctxA.Err() != nil || ctxB.Err() != nil {
+		t.Fatalf("a miss must be a no-op that advances: cursor=%d a=%v b=%v", h.cursor(t), ctxA.Err(), ctxB.Err())
+	}
+	// A rid this node holds.
+	put("e2.json", "evt-abort-2", 6, controlevent.RunAbortArtifact{Tenant: "acme", RID: "rid-a", By: "matt", Reason: "closed the tab"})
+	h.c.pollOnce(context.Background())
+	if ctxA.Err() == nil {
+		t.Fatal("rid-a not aborted by the event")
+	}
+	if ab, ok := processor.AbortCause(ctxA); !ok || ab.By != "matt" || ab.Reason != "closed the tab" {
+		t.Fatalf("cause = %+v, %v", ab, ok)
+	}
+	// By stack.
+	put("e3.json", "evt-abort-3", 7, controlevent.RunAbortArtifact{Tenant: "acme", Stack: "worker", By: "deploy"})
+	h.c.pollOnce(context.Background())
+	if ctxB.Err() == nil || h.cursor(t) != 7 {
+		t.Fatalf("stack abort: b=%v cursor=%d", ctxB.Err(), h.cursor(t))
+	}
+}

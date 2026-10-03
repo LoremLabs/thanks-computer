@@ -956,6 +956,12 @@ func respond(envelope *event.Envelope, p event.Payload) {
 // usage needs the payload (capture=false, the production default with
 // both off) we skip it entirely and hand the inlet's ResCh straight to
 // the processor — zero overhead, the original behavior.
+// abortAnswerWait bounds the delivery of an aborted run's answer to the
+// inlet that is still waiting for it: an abort cancels the run, not the
+// request, so the relay that would stop at a cancelled context delivers
+// anyway — for this long, in case the client left in the meantime.
+const abortAnswerWait = 2 * time.Second
+
 func runPipeline(
 	ctx context.Context,
 	pu *processor.Unit,
@@ -979,33 +985,60 @@ func runPipeline(
 		// capture the head (or the lone JSON payload) as finalPayload for
 		// usage sizing + the resolved _txc.tenant. Raw chunk bytes are not
 		// captured (streamed-body sizing is out of scope for v0 usage).
+		relay := func(p event.Payload) {
+			if p.Type != event.StreamChunk {
+				// Read fuel BEFORE strip so the meter survives the
+				// cleanup, then strip the chassis-internal budget
+				// fields so the client never sees them. finalPayload
+				// captures the post-strip bytes so BytesOut on the
+				// usage line reflects what the inlet actually wrote.
+				fuelUsed = processor.FuelUsedFromEnvelope(p.Raw)
+				p.Raw = processor.StripBudgetFromOutbound(p.Raw)
+				finalPayload = []byte(p.Raw)
+			}
+			if envelope.ResCh == nil {
+				// ResultCh inlet: the bus loop answers once, after the
+				// run, with the captured payload (see respond/DispatchResult).
+				return
+			}
+			// An abort cancels the run, not the request: its client is
+			// still waiting, so the processor's answer (503, the code) is
+			// delivered with a bound, where a client that went away or a
+			// deadline leaves nobody to deliver to.
+			if _, aborted := processor.AbortCause(ctx); aborted {
+				select {
+				case envelope.ResCh <- p:
+				case <-time.After(abortAnswerWait):
+				}
+				return
+			}
+			select {
+			case envelope.ResCh <- p:
+			case <-ctx.Done():
+				// Nobody is waiting; the answer still counts (it names
+				// the tenant the trace is filed under) if it is taken now.
+				select {
+				case envelope.ResCh <- p:
+				default:
+				}
+			}
+		}
 		for {
 			select {
 			case p, ok := <-teeCh:
 				if !ok {
 					return
 				}
-				if p.Type != event.StreamChunk {
-					// Read fuel BEFORE strip so the meter survives the
-					// cleanup, then strip the chassis-internal budget
-					// fields so the client never sees them. finalPayload
-					// captures the post-strip bytes so BytesOut on the
-					// usage line reflects what the inlet actually wrote.
-					fuelUsed = processor.FuelUsedFromEnvelope(p.Raw)
-					p.Raw = processor.StripBudgetFromOutbound(p.Raw)
-					finalPayload = []byte(p.Raw)
-				}
-				if envelope.ResCh == nil {
-					// ResultCh inlet: the bus loop answers once, after the
-					// run, with the captured payload (see respond/DispatchResult).
-					continue
-				}
-				select {
-				case envelope.ResCh <- p:
-				case <-ctx.Done():
-					return
-				}
+				relay(p)
 			case <-ctx.Done():
+				// The run's context ended. The processor sends its answer
+				// on the way out and Run closes the channel right after:
+				// relay until then, so the final payload (the tenant, the
+				// size) is captured for the trace and the usage line, and
+				// an aborted run's client gets its answer.
+				for p := range teeCh {
+					relay(p)
+				}
 				return
 			}
 		}
@@ -1069,6 +1102,11 @@ func runWithTrace(
 		// "canceled while running test-stack/50 mcp+https://…"), so this
 		// one line answers "why is it an error?" at the top of the trace.
 		reason = err.Error()
+		// A run somebody aborted is recorded as that, not as an error of
+		// the stack's: the reason already names who asked.
+		if _, aborted := processor.AbortCause(ctx); aborted {
+			status = "aborted"
+		}
 	}
 	// Surface the per-request usage primitives (fuel, response size, resolved
 	// tenant) into the trace via the shared request.usage event so the admin
@@ -1968,6 +2006,14 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			return capsList(ctx, capsDeps{decls: capDecls}, in)
 		}))
 
+	// txco://run/abort: end a run in flight on this chassis — the calling
+	// tenant's own — from a rule, so a stack can build its own stop with
+	// its bookkeeping first. See chassis/server/runabort.go.
+	pu.Handle([]byte("txco://run/abort"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return runAbort(ctx, pu.Live, in)
+		}))
+
 	// IMAP mailbox store ops (txco://imap/{account,append}): provisioning
 	// for the `imap` personality — an argon2id account with its INBOX, and
 	// a message RECORD materialized into a mailbox (CAS by sha + index row;
@@ -2797,6 +2843,18 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 					// unrouted request. --ingress-miss-action=reject is the
 					// hard opt-out: bare 404 without the boot pipeline.
 					raw, stage := dispatchEnvelope(envelope.Payload.Raw, conf.IngressMissAction)
+					// The envelope's rid is the run's name everywhere — the
+					// trace, the usage line, the live-run registry, `@rid` in
+					// a rule. Most inlets stamp it on the payload and the
+					// context themselves; for one that minted it in
+					// PackageJSON alone (inspect), stamp it here, so a run is
+					// nameable whichever door it came in by.
+					if !gjson.Get(raw, "_txc.rid").Exists() {
+						raw, _ = sjson.Set(raw, "_txc.rid", envelope.Rid)
+					}
+					if v, _ := envelope.Ctx.Value(config.CtxKeyRid).(string); v == "" {
+						envelope.Ctx = context.WithValue(envelope.Ctx, config.CtxKeyRid, envelope.Rid)
+					}
 					envelope.Payload.Raw = raw
 
 					if stage == stageNoRoute {
@@ -2827,6 +2885,12 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 						lease := admission.NewLease()
 						defer lease.Release()
 						reqCtx := admission.WithLease(envelope.Ctx, lease)
+						// The live-run registry: this run, by rid, for as long
+						// as this goroutine runs it, on a context an abort
+						// (`txco abort`, txco://run/abort) can cancel. The
+						// processor's pin sites keep the entry current.
+						reqCtx, endLive := pu.Live.Register(reqCtx, envelope.Rid, envelope.Src)
+						defer endLive()
 						// Usage attribution reads the tenant from immutable
 						// pipeline state, not the mutable response envelope: an
 						// author-controlled stack can rewrite `_txc.tenant`, so
@@ -2856,16 +2920,27 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 							tenant, _ := tenantObs.Tenant()
 							stack, _ := tenantObs.Stack()
 							ingressKey, verified := tenantObs.Route()
-							select {
-							case envelope.ResultCh <- event.DispatchResult{
+							result := event.DispatchResult{
 								Payload:          event.Payload{Raw: string(finalPayload), Type: event.JSON},
 								Tenant:           tenant,
 								Stack:            stack,
 								Ingress:          ingressKey,
 								HostnameVerified: verified,
 								Err:              runErr,
-							}:
-							case <-reqCtx.Done():
+							}
+							// An aborted run's context is done, but its inlet
+							// is still waiting to hear how it ended (so a
+							// durable outbox marks it, rather than retries it).
+							if _, aborted := processor.AbortCause(reqCtx); aborted {
+								select {
+								case envelope.ResultCh <- result:
+								case <-time.After(abortAnswerWait):
+								}
+							} else {
+								select {
+								case envelope.ResultCh <- result:
+								case <-reqCtx.Done():
+								}
 							}
 						}
 

@@ -3,9 +3,12 @@ package processor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
+	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/authn"
@@ -96,6 +99,7 @@ func (pu *Unit) runScopeContinuable(
 	// Buffered 1 so the goroutine never blocks if we've moved on
 	// (promotion path drains later).
 	workCtx, fuelStart, workCancel := pu.detachedOpContext(ctx, raw, timeout)
+	liveRunFromContext(workCtx).setStage(op.Stack, op.Stack+"/"+strconv.Itoa(op.Scope))
 	done := make(chan continuableResult, 1)
 	aStart := time.Now()
 	go func() {
@@ -142,6 +146,19 @@ func (pu *Unit) runScopeContinuable(
 			<-done
 			op.Secrets.Zero()
 		}()
+		// Unless the run was aborted: then the client IS listening, and is
+		// told as the scope loop's cancel branch would tell it.
+		if ab, ok := AbortCause(ctx); ok {
+			raw := abortPayload(ab)
+			if t := tenantScope(ctx); t != "" {
+				raw, _ = sjson.Set(raw, "_txc.tenant", t)
+			}
+			select {
+			case resCh <- event.Payload{Raw: raw, Type: event.ErrorStr}:
+			case <-time.After(2 * time.Second):
+			}
+			return errors.New(ab.Error() + " while running " + stage + " " + op.Resonator.Exec)
+		}
 		return ctx.Err()
 	}
 }
@@ -174,12 +191,18 @@ func (pu *Unit) detachedOpContext(ctx context.Context, raw string, timeout time.
 	if a, ok := authn.AuthenticatedFrom(ctx); ok {
 		dctx = authn.WithAuthenticated(dctx, a)
 	}
-	if rid, ok := ctx.Value(config.CtxKeyRid).(string); ok && rid != "" {
+	rid, _ := ctx.Value(config.CtxKeyRid).(string)
+	if rid != "" {
 		dctx = context.WithValue(dctx, config.CtxKeyRid, rid)
 	}
 	dctx, fuelStart, _ := loadBudget(dctx, raw, pu.Conf)
 	dctx, cancel := context.WithTimeout(dctx, timeout)
-	return dctx, fuelStart, cancel
+	// The detached work stays reachable by the run's rid: an abort of the
+	// run (`txco abort`, txco://run/abort) cancels this context too, after
+	// the request has answered its client and left the registry. Released
+	// with the work's cancel, which every path calls when the op is done.
+	dctx, release := pu.Live.Attach(dctx, rid, sourceScope(ctx))
+	return dctx, fuelStart, func() { cancel(); release() }
 }
 
 // continuableResult is the inner channel payload — keeps the select

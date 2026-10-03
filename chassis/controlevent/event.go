@@ -76,6 +76,14 @@ const (
 	// (RowsArtifact, op=upsert — the consumer's INSERT OR REPLACE flips it
 	// inactive, mirroring dns.zone revocation). No version row travels.
 	TypeSecretRevoked = "secret.revoked"
+	// TypeRunAbort carries a RunAbortArtifact: end a run in flight — one, by
+	// rid, or every run of a stack — wherever it is. The admin plane cannot
+	// know which node holds a run (nodes do not report their live runs), so
+	// every node applies the event to its own live-run registry; on all but
+	// one it ends nothing, which is the expected outcome, not an error. Not
+	// a row: nothing is stored, and a node that first sees the event after
+	// the run ended has nothing to do.
+	TypeRunAbort = "run.abort"
 )
 
 var knownTypes = map[string]bool{
@@ -87,6 +95,7 @@ var knownTypes = map[string]bool{
 	TypeDNSZoneUpserted: true, TypeDNSRecordUpserted: true,
 	TypeDNSSettingsUpserted: true, TypeCronSettingsUpserted: true,
 	TypeSecretChanged: true, TypeSecretRevoked: true,
+	TypeRunAbort: true,
 }
 
 // Event is the control-plane event contract.
