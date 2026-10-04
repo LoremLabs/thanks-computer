@@ -25,7 +25,7 @@ func TestHashAndVerify(t *testing.T) {
 	if h2 == h {
 		t.Error("salts must differ")
 	}
-	for _, bad := range []string{"", "plain", "$argon2i$v=19$m=1,t=1,p=1$YQ$YQ", "$argon2id$v=19$m=0,t=3,p=1$YQ$YQ", "$argon2id$v=19$m=16384,t=3,p=1$!!$YQ"} {
+	for _, bad := range []string{"", "plain", "$argon2i$v=19$m=1,t=1,p=1$YQ$YQ", "$argon2id$v=19$m=0,t=3,p=1$YQ$YQ", "$argon2id$v=19$m=16384,t=3,p=1$!!$YQ", "$argon2id$v=19$m=16384,t=3,p=257$YQ$YQ"} {
 		if _, err := VerifyPassword(bad, "x"); err != ErrBadHash {
 			t.Errorf("VerifyPassword(%q) err = %v, want ErrBadHash", bad, err)
 		}

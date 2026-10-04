@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,9 @@ func VerifyPassword(phc, password string) (bool, error) {
 		case "t":
 			tm = uint32(n)
 		case "p":
+			if n > math.MaxUint8 {
+				return false, ErrBadHash
+			}
 			thr = uint8(n)
 		default:
 			return false, ErrBadHash

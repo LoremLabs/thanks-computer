@@ -90,7 +90,7 @@ const server = http.createServer((req, res) => {
       res.end("ok\n");
       return;
     }
-    const handler = routes[req.url];
+    const handler = Object.hasOwn(routes, req.url) ? routes[req.url] : undefined;
     if (!handler) {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("not found\n");
