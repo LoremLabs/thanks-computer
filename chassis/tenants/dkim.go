@@ -79,3 +79,69 @@ func DKIMSignerForDomain(ctx context.Context, db *sql.DB, domain string, d regis
 	}
 	return sdid, selector, privPEM, true, nil
 }
+
+// DKIMPublicKeyForTenant returns the public half of the DKIM key the chassis
+// holds for `domain` (base64 PKIX DER, the DNS `p=` value) and its selector
+// — but only when the domain is tenant `slug`'s OWN signing domain: an exact
+// chassis-minted host of that tenant with a per-host key, or a delegated
+// zone of that tenant whose origin is the domain. Those are exactly the d=
+// values DKIMSignerForDomain signs that tenant's mail as. ok=false when the
+// tenant has no key for the domain; another tenant's domain is never ok.
+//
+// Used by the LMTP head to verify a message's signature against the key
+// this chassis signed with — no DNS, no network (the head's own-DKIM fact).
+func DKIMPublicKeyForTenant(ctx context.Context, db *sql.DB, slug, domain string, d registry.Dialect) (selector, pubB64 string, ok bool, err error) {
+	canon, cok := CanonicalizeHost(domain)
+	if !cok || slug == "" || db == nil {
+		return "", "", false, nil
+	}
+	d = orSQLite(d)
+	var privPEM string
+	err = db.QueryRowContext(ctx,
+		d.Rebind(`SELECT h.dkim_selector, h.dkim_public_b64, h.dkim_private_pem
+		   FROM tenant_hostnames h
+		   JOIN tenants t ON t.tenant_id = h.tenant_id
+		  WHERE h.hostname = ? AND t.slug = ?
+		    AND h.revoked_at IS NULL AND t.revoked_at IS NULL
+		    AND h.dkim_private_pem != ''
+		  LIMIT 1`), canon, slug).Scan(&selector, &pubB64, &privPEM)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = db.QueryRowContext(ctx,
+			d.Rebind(`SELECT z.dkim_selector, z.dkim_public_b64, z.dkim_private_pem
+			   FROM dns_zones z
+			   JOIN tenants t ON t.tenant_id = z.tenant_id
+			  WHERE z.origin = ? AND t.slug = ?
+			    AND z.revoked_at IS NULL AND z.verified_at IS NOT NULL AND t.revoked_at IS NULL
+			    AND z.dkim_private_pem != ''
+			  LIMIT 1`), canon, slug).Scan(&selector, &pubB64, &privPEM)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if pubB64 == "" {
+		// An older row with no stored public half: it is the private key's.
+		if pubB64, err = dkimPublicFromPrivate(privPEM); err != nil {
+			return "", "", false, err
+		}
+	}
+	return selector, pubB64, true, nil
+}
+
+func dkimPublicFromPrivate(privPEM string) (string, error) {
+	block, _ := pem.Decode([]byte(privPEM))
+	if block == nil {
+		return "", errors.New("no PEM block in DKIM private key")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(der), nil
+}

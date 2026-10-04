@@ -12,6 +12,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -366,6 +367,17 @@ func (s *lmtpSession) dispatchGroup(
 	}
 	if meta.dmarc != "" {
 		lb.Set("_txc.mail.auth.dmarc", meta.dmarc)
+	}
+	// The chassis's own word on its own signature (owndkim.go): did THIS
+	// tenant's chassis send this message, as which of its domains? Only a
+	// message that carries a signature is looked at.
+	ownResult, ownDomain := ownDKIMNone, ""
+	if firstHeader(msgJSON, "dkim-signature") != "" && s.ctrl.pu.Dbc != nil {
+		ownResult, ownDomain = ownDKIM(s.ctrl.ctx, s.ctrl.pu.Dbc.Snapshot(), registry.SQLite, key.tenant, body)
+	}
+	lb.Set("_txc.mail.auth.own.dkim", ownResult)
+	if ownDomain != "" {
+		lb.Set("_txc.mail.auth.own.d", ownDomain)
 	}
 
 	// Connection metadata.

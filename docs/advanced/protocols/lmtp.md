@@ -345,7 +345,24 @@ WHEN @lmtp.msg.headers.authentication-results.0 !=~ /spf=pass/
   SET @lmtp.res.msg  = "SPF failed"
 ```
 
-The chassis does **not** verify SPF/DKIM/DMARC itself — that's Postfix's job (via `opendkim`, `opendmarc`, `policyd-spf`, etc.). If Postfix didn't stamp the header, rules should treat the message as unauthenticated.
+The chassis does **not** verify a sender's SPF/DKIM/DMARC itself — that's Postfix's job (via `opendkim`, `opendmarc`, `policyd-spf`, etc.). If Postfix didn't stamp the header, rules should treat the message as unauthenticated. There is one exception, below: the chassis's own signature.
+
+### Mail from your own tenant: `@mail.auth.own`
+
+Every message `txco://sendmail` sends is DKIM-signed with a key the chassis holds for the sending tenant (a structured host's own key, or a delegated zone's — see [sendmail](./sendmail.md)). When such a message comes back to the **same tenant** — one address of yours writing another — the edge often has nothing to say about it: a spam filter skips mail from its own network, so there is no `Authentication-Results`. The chassis that signed the message can check the signature against the key it signed with. It does, on every delivery that carries a `DKIM-Signature`, with no DNS lookup and no network:
+
+| fact | value |
+|---|---|
+| `@mail.auth.own.dkim` | `pass` — a signature by one of **this tenant's own** signing domains verifies. `fail` — a signature names one of this tenant's domains and does not verify (altered in transit, forged, or a selector the tenant has no key for). `none` — no signature by a domain of this tenant's (always set). |
+| `@mail.auth.own.d` | the signing domain, on a `pass` only |
+
+```txcl
+# A message this tenant's own chassis sent, as its mail host, unaltered.
+WHEN @mail.auth.own.dkim == "pass" && @mail.auth.own.d == "core-abc123.stacks.example.com"
+  EMIT ._in.from_us = true
+```
+
+What `pass` proves: this tenant's chassis sent these signed headers (From, To, Subject, Message-ID, Date among them) and this body as that domain, and they have not changed since. What it does not prove: who inside the tenant asked for the send — compare the visible From with what you expect, as you would for any DKIM pass — or anything about a message signed by someone else's domain; that is still the edge's verdict (`@mail.auth.dkim`). Another tenant's key can never produce a `pass` here: the key is looked up for the delivery's tenant alone. At most eight signatures per message are examined.
 
 ## Verification
 
