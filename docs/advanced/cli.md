@@ -87,6 +87,7 @@ txco ui dev                                 # open the dev admin UI
 | `--state`, `--scheduled`, `--source` | The state dispatcher, the durable-timer poller, the remote-mailbox poller |
 | `--grant` | The socket `txco sandbox` reaches the chassis on ([grants](./grants.md)) |
 | `--allow-local-workspace` | `workspace://` on the local provider: commands run as **your** user, unsandboxed ([workspaces](../workspaces.md)) |
+| `--workspace-local-exec "<prefix>"` | With `--allow-local-workspace`: hand every workspace command to this program instead of running it here, so dev drives another machine — `"sprite exec -s dev-{name} --"`, `"docker exec -i pony-{name}"`. The machine is yours to make and remove ([workspaces](../workspaces.md#providers)) |
 
 And to shape the loop itself: `--chassis-addr` / `--web-addr` move the chassis off `:8081` / `:8080` (to run a second
 one beside yours), `--no-chassis` uses one already running, `--watch=false` and `--apply=false` turn off the reload and

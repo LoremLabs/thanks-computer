@@ -470,6 +470,12 @@ txco dev --allow-local-workspace --grant
 ```
 
 - **The ops need nothing.** `grant/*` and `delegate/*` work on every node.
+- **A command that runs elsewhere gets the token, not the socket.** With
+  `txco dev --workspace-local-exec` the local provider hands its commands to
+  another machine ([workspaces](../workspaces.md#providers)). A command there
+  cannot reach this machine's socket, so `exec WITH grant` gives it the run's
+  name and the token (`TXCO_RUN_GRANT`) and nothing else, as on a fleet
+  provider; `txco sandbox` is not available to it.
 - **Listed and unable to listen is fatal at boot.** A node that was meant to
   answer and silently does not is worse than one that will not start.
 

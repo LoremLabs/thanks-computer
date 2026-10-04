@@ -8,6 +8,9 @@
 // chassis refuses this provider unless --workspace-allow-local is set
 // explicitly, never implied by --env, and logs a WARN pair at boot.
 //
+// With TXCO_WORKSPACE_LOCAL_EXEC set, a command is not run here at all: it is
+// handed to that prefix program, which runs it on another machine (via.go).
+//
 //	import _ "github.com/loremlabs/thanks-computer/chassis/workspace/local"
 package local
 
@@ -29,18 +32,25 @@ import (
 
 func init() {
 	workspace.Register("local", func(cfg workspace.Config) (workspace.Provider, error) {
-		return New(cfg.LocalRoot)
+		// The prefix is this provider's own setting, read from the
+		// environment as a provider's settings are (via.go).
+		return NewVia(cfg.LocalRoot, os.Getenv(EnvExec))
 	})
 }
 
-// Provider keeps every workspace under root.
+// Provider keeps every workspace under root. via, when set, is the command
+// prefix every command is handed to instead of being run here (via.go).
 type Provider struct {
 	root string
+	via  []string
 }
 
 // New creates (if needed) and resolves the root directory. Symlinks in the
 // root are resolved once here so the cwd guard compares real paths.
-func New(root string) (*Provider, error) {
+func New(root string) (*Provider, error) { return NewVia(root, "") }
+
+// NewVia is New with a command prefix (see EnvExec); "" runs commands here.
+func NewVia(root, prefix string) (*Provider, error) {
 	if root == "" {
 		return nil, errors.New("workspace/local: empty root")
 	}
@@ -55,7 +65,7 @@ func New(root string) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("workspace/local: root: %w", err)
 	}
-	return &Provider{root: real}, nil
+	return &Provider{root: real, via: parseVia(prefix)}, nil
 }
 
 // Root is the resolved root directory.
@@ -63,12 +73,18 @@ func (p *Provider) Root() string { return p.root }
 
 func (p *Provider) Name() string { return "local" }
 func (p *Provider) Capabilities() []string {
+	if len(p.via) > 0 {
+		// Through a prefix only a command to completion is carried out.
+		return []string{"exec", "grant"}
+	}
 	return []string{"exec", "session", "tty", "connect", "grant"}
 }
 
 // ReachesGrants: a local workspace's commands run on this machine, as this
-// user, so they reach the chassis's grant socket and its mounted files.
-func (p *Provider) ReachesGrants() bool { return true }
+// user, so they reach the chassis's grant socket and its mounted files —
+// unless a prefix hands them to another machine, which gets the token and
+// the run's name and not the socket.
+func (p *Provider) ReachesGrants() bool { return len(p.via) == 0 }
 
 // dirFor maps a spec to its directory and refuses anything that would
 // leave root. Tenant and stack are chassis-validated slugs upstream; the
@@ -116,7 +132,21 @@ func (p *Provider) Wake(_ context.Context, h workspace.Handle) (workspace.Comput
 		// Gone: the Manager recreates rather than wedging on a dead ref.
 		return nil, &workspace.Error{Code: workspace.CodeNotFound, Message: "workspace directory missing: " + h.Ref}
 	}
-	return &computer{dir: h.Ref, trees: filepath.Join(p.root, treesDir)}, nil
+	c := &computer{dir: h.Ref, trees: filepath.Join(p.root, treesDir)}
+	if len(p.via) > 0 {
+		// <root>/<tenant>/<stack>/<name…>: the handle's own path says whose
+		// machine the prefix should name.
+		rel, err := filepath.Rel(p.root, filepath.Clean(h.Ref))
+		if err != nil {
+			return nil, &workspace.Error{Code: "bad_request", Message: "handle: " + err.Error()}
+		}
+		parts := strings.SplitN(filepath.ToSlash(rel), "/", 3)
+		if len(parts) < 3 {
+			return nil, &workspace.Error{Code: "bad_request", Message: "handle is not a workspace directory: " + h.Ref}
+		}
+		c.via = viaWords(p.via, parts[0], parts[1], parts[2])
+	}
+	return c, nil
 }
 
 // Sleep is a no-op: nothing to park.
@@ -156,10 +186,12 @@ func within(root, p string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-// computer runs commands in one workspace directory.
+// computer runs commands in one workspace directory — or, with via set,
+// hands them to the prefix program (via.go).
 type computer struct {
 	dir   string
-	trees string // where stack trees are placed, shared by every workspace (tree.go)
+	trees string   // where stack trees are placed, shared by every workspace (tree.go)
+	via   []string // the command prefix for this workspace, placeholders filled; nil = run here
 }
 
 // basePath is the only PATH a command sees unless the request sets its own.
@@ -225,14 +257,30 @@ func envFor(dir, tmp string, extra map[string]string) []string {
 // process group is killed (Setpgid) and ErrTimeout is returned with
 // Exit = -1. A non-zero exit is NOT an error — it is data in the result.
 func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim workspace.Limits) (workspace.ExecResult, error) {
-	argv, cwd, tmp, err := c.prepare(req)
-	if err != nil {
-		return workspace.ExecResult{Exit: -1}, err
+	var (
+		argv []string
+		cwd  string
+		env  []string
+	)
+	if len(c.via) > 0 {
+		// The prefix program runs here, as the operator's own; the command
+		// and its variables are inside its argv (via.go).
+		var err error
+		if argv, err = c.viaArgv(req); err != nil {
+			return workspace.ExecResult{Exit: -1}, err
+		}
+		cwd, env = c.dir, viaEnv()
+	} else {
+		a, d, tmp, err := c.prepare(req)
+		if err != nil {
+			return workspace.ExecResult{Exit: -1}, err
+		}
+		argv, cwd, env = a, d, envFor(c.dir, tmp, req.Env)
 	}
 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = cwd
-	cmd.Env = envFor(c.dir, tmp, req.Env)
+	cmd.Env = env
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
@@ -323,6 +371,9 @@ const dialTimeout = 5 * time.Second
 // and the same reason the provider is opt-in). Nothing listening is
 // reported as "unavailable", distinct from a provider fault.
 func (c *computer) DialService(ctx context.Context, svc workspace.Service) (net.Conn, error) {
+	if len(c.via) > 0 {
+		return nil, errVia("connect")
+	}
 	if svc.Port <= 0 {
 		return nil, &workspace.Error{Code: "bad_request", Message: "connect: no service port"}
 	}

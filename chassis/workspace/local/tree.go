@@ -27,6 +27,10 @@ const treesDir = ".stacks"
 // writing into its own program, not an access boundary: this provider has
 // none.
 func (c *computer) PlaceTree(ctx context.Context, t workspace.Tree) (string, error) {
+	if len(c.via) > 0 {
+		// The command runs on another machine; a tree placed here is not there.
+		return "", &workspace.Error{Code: workspace.CodeStackDirUnavailable, Message: "a stack tree is not available through " + EnvExec + ": the workspace's commands run on another machine"}
+	}
 	if !stackdir.ValidDigest(t.Digest) {
 		return "", &workspace.Error{Code: workspace.CodeStackDirUnavailable, Message: "malformed tree digest"}
 	}

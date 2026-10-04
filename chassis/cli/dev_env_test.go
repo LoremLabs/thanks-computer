@@ -219,3 +219,26 @@ func TestChassisEnvLocalWorkspace(t *testing.T) {
 		t.Errorf("with the flag, over a parent's false: %q", got)
 	}
 }
+
+func TestChassisEnvLocalExec(t *testing.T) {
+	ws := t.TempDir()
+	devDir := filepath.Join(ws, ".txco", "dev")
+	// With the provider on, the prefix is handed to it.
+	env, _ := chassisEnv(chassisOpts{Workspace: ws, AllowLocalWorkspace: true, LocalExec: "  sprite exec -s dev-{name} --  "},
+		devAddrs, devDir, "", noParentEnv)
+	if got := envOf(env)["TXCO_WORKSPACE_LOCAL_EXEC"]; got != "sprite exec -s dev-{name} --" {
+		t.Errorf("TXCO_WORKSPACE_LOCAL_EXEC = %q", got)
+	}
+	// No prefix, no variable; and a prefix alone never turns the provider on.
+	env, _ = chassisEnv(chassisOpts{Workspace: ws, AllowLocalWorkspace: true}, devAddrs, devDir, "", noParentEnv)
+	if v, set := envOf(env)["TXCO_WORKSPACE_LOCAL_EXEC"]; set {
+		t.Errorf("TXCO_WORKSPACE_LOCAL_EXEC = %q with no prefix given", v)
+	}
+	env, _ = chassisEnv(chassisOpts{Workspace: ws, LocalExec: "docker exec -i box"}, devAddrs, devDir, "", noParentEnv)
+	got := envOf(env)
+	for _, k := range []string{"TXCO_WORKSPACE_PROVIDER", "TXCO_WORKSPACE_ALLOW_LOCAL", "TXCO_WORKSPACE_LOCAL_EXEC"} {
+		if v, set := got[k]; set {
+			t.Errorf("%s = %q from a prefix alone", k, v)
+		}
+	}
+}

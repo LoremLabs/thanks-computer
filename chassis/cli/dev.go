@@ -98,6 +98,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	grantHead := fs.Bool("grant", false, "start the grant personality: the Unix socket `txco sandbox` reaches the chassis on, so a program a command runs can open a sandbox itself. Disabled by default; without it a command holds only what `WITH sandbox` opened for it. Needs --allow-local-workspace to hand a grant to a command.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
 	allowLocalWorkspace := fs.Bool("allow-local-workspace", false, "enable workspace:// ops backed by the local provider: commands run as YOUR uid, unsandboxed, under .txco/dev/workspaces/<tenant>/<stack>/<name>. Off by default and never implied by anything else; the chassis logs a WARN pair when it is on.")
+	workspaceLocalExec := fs.String("workspace-local-exec", "", "with --allow-local-workspace: hand every workspace command to this prefix program instead of running it here, so the local provider drives another machine, e.g. \"sprite exec -s dev-{name} --\" or \"docker exec -i pony-{name}\". Whitespace-separated words, no quoting; {tenant}, {stack} and {name} are replaced. The command's variables (a run grant's token among them) travel inside the command; the machine itself is yours to make and remove.")
 	sourceHead := fs.Bool("source", false, "start the source personality (the remote-mailbox poller: dials OUT to each SOURCES/-declared IMAP mailbox, reads past a durable cursor, and fires every new message into the source's _source stack). Disabled by default. Needs a mailbox password in the tenant secret store; egress is open in dev, so a source may point at loopback (e.g. this chassis's own --imap head).")
 	imapHead := fs.Bool("imap", false, "start the IMAP head with dev defaults: binds "+devIMAPListenAddr+" (plaintext + STARTTLS, LOGIN allowed over loopback) and "+devIMAPTLSAddr+" (IMAPS) with a self-signed certificate minted at boot, index at .txco/dev/imap.db — so a stack can provision an account with txco://imap/account, issue its password with txco://credential/create, and a mail client can open it (server <dev host>, port 1993, SSL on, trust the certificate). Disabled by default. Override TXCO_IMAP_LISTEN_ADDRS/IMAP_TLS_ADDRS/IMAP_DB_PATH.")
 	calendarHead := fs.Bool("calendar", false, "start the calendar personality (CalDAV + ICS feeds) on the web head with dev defaults: served under http://<dev host>:<web port>/dav/ with Basic auth allowed over plaintext, index at .txco/dev/calendar.db — so a stack can provision an account with txco://calendar/account, issue its password with txco://credential/create, and a calendar app can open it (server <bound-host>, port = the web port, SSL off, path /dav/). Disabled by default. Override TXCO_CALENDAR_DB_PATH/CALENDAR_PATH_PREFIX.")
@@ -132,6 +133,13 @@ Flags:
 		// pflag only prints the error itself under ExitOnError; with
 		// ContinueOnError a typo'd flag would otherwise exit 2 in silence.
 		fmt.Fprintf(stderr, "dev: %v\n(chassis flags such as --imap-wire-debug are environment variables here: TXCO_IMAP_WIRE_DEBUG=true txco dev …; `txco dev --help` lists the dev flags)\n", err)
+		return 2
+	}
+
+	// A prefix without the provider would be a setting nothing reads; and the
+	// provider is never implied by anything but its own flag.
+	if strings.TrimSpace(*workspaceLocalExec) != "" && !*allowLocalWorkspace {
+		fmt.Fprintln(stderr, "dev: --workspace-local-exec needs --allow-local-workspace (it is the local provider's own setting)")
 		return 2
 	}
 
@@ -290,7 +298,7 @@ Flags:
 				IMAP: *imapHead, Calendar: *calendarHead, Contacts: *contactsHead, WebDAV: *webdavHead,
 				IPP: *ippHead, State: *stateHead, Grant: *grantHead,
 			},
-			AllowLocalWorkspace: *allowLocalWorkspace, Verbose: *verbose,
+			AllowLocalWorkspace: *allowLocalWorkspace, LocalExec: *workspaceLocalExec, Verbose: *verbose,
 			Stdout: stdout, Stderr: stderr, Started: &started, Out: &chassisProc,
 		})
 		if err != nil {
@@ -1251,8 +1259,11 @@ type chassisOpts struct {
 	// AllowLocalWorkspace turns on the local workspace provider, which runs
 	// commands as this uid with no isolation.
 	AllowLocalWorkspace bool
-	Verbose             bool
-	Stdout, Stderr      io.Writer
+	// LocalExec, with AllowLocalWorkspace, is the command prefix the local
+	// provider hands every command to (chassis/workspace/local, EnvExec).
+	LocalExec      string
+	Verbose        bool
+	Stdout, Stderr io.Writer
 	// Started collects every process spawned, for teardown; Out receives
 	// the chassis's own.
 	Started *[]*devpkg.Process
@@ -1506,6 +1517,11 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 		env = append(env, "TXCO_WORKSPACE_PROVIDER=local")
 		env = append(env, "TXCO_WORKSPACE_ALLOW_LOCAL=true")
 		env = append(env, "TXCO_WORKSPACE_LOCAL_ROOT="+filepath.Join(devDir, "workspaces"))
+		if strings.TrimSpace(o.LocalExec) != "" {
+			// The provider's own setting: its commands go to this prefix
+			// program, on another machine, instead of running here.
+			env = append(env, "TXCO_WORKSPACE_LOCAL_EXEC="+strings.TrimSpace(o.LocalExec))
+		}
 	}
 
 	// Dev-default toggles: enabled by default so devs get full

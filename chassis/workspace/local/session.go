@@ -34,6 +34,9 @@ import (
 //   - the ctx bounds the session, not a call: when it ends the group is
 //     KILLed and Wait reports ErrTimeout, as an exec's would.
 func (c *computer) Start(ctx context.Context, req workspace.ExecRequest, lim workspace.Limits) (workspace.ExecSession, error) {
+	if len(c.via) > 0 {
+		return nil, errVia("a session")
+	}
 	argv, cwd, tmp, err := c.prepare(req)
 	if err != nil {
 		return nil, err

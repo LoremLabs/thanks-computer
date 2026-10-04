@@ -470,6 +470,40 @@ txco dev --allow-local-workspace     # sets the three flags for this run;
                                      # workspaces land in .txco/dev/workspaces/
 ```
 
+**`local`, driving another machine.** Set `TXCO_WORKSPACE_LOCAL_EXEC` to a
+command prefix and the local provider hands every command to that program
+instead of running it on the chassis's machine:
+
+```
+txco dev --allow-local-workspace --workspace-local-exec "sprite exec -s dev-{name} --"
+txco dev --allow-local-workspace --workspace-local-exec "docker exec -i pony-{name}"
+```
+
+The prefix is whitespace-separated words with no quoting; `{tenant}`,
+`{stack}` and `{name}` are replaced in each (a `/` in a name becomes `-`).
+A command then runs as `<prefix…> /bin/sh -c <script>`, where the script is
+your command with its variables written in front as `export` lines. It is a
+way to give a chassis on a laptop a real Linux machine, not a provider of its
+own, and what it leaves out follows from that:
+
+- The workspace is still a directory on the chassis's machine (its record,
+  its lease). The other machine is yours to make and to remove; `Create` and
+  the reaper do not touch it.
+- Variables travel inside the command, because a process environment does
+  not cross to another machine. A run grant's token is among them, so it is
+  in the prefix program's argv on the chassis's machine. The command gets the
+  token and the run's name and not the grant socket, as on any provider
+  whose commands run elsewhere.
+- The prefix program runs with the chassis's own environment (it needs its
+  login and configuration); the command sees none of it unless the program
+  passes it on.
+- A `cwd` beneath the workspace is a `cd` relative to where the other machine
+  starts a command. `$TXCO_STACK_DIR`, `attach`, a TTY and `connect` answer
+  `unsupported` (the stack directory: `stack_dir_unavailable`) rather than
+  act on the wrong machine.
+- A timeout ends the prefix program. What it started on the other machine
+  may run on.
+
 Fleet providers (a machine per workspace, with network policy and
 checkpoints) register the same way from the overlay and are selected by
 name; the stack's txcl does not change.
@@ -479,6 +513,7 @@ name; the stack's txcl does not change.
 | `--workspace-provider` | _(unset)_ | `local`, or an overlay provider |
 | `--workspace-allow-local` | `false` | Required for `local`; see above |
 | `--workspace-local-root` | `./chassis/data/workspaces` | Root for `local` |
+| `TXCO_WORKSPACE_LOCAL_EXEC` (environment; `txco dev --workspace-local-exec`) | _(unset)_ | Command prefix `local` hands every command to; see above |
 | `--workspace-default-timeout` | `5m` | Per-exec default when `WITH timeout` is absent (sized for builds, tests, tool runs) |
 | `--workspace-max-output-bytes` | `1048576` | stdout/stderr capture cap, each |
 | `--workspace-reap` | `720h` | Idle window before a reaper destroys a workspace; read by a background service a deployment adds (the hosted service's `workspace-reaper`), not by open core |
