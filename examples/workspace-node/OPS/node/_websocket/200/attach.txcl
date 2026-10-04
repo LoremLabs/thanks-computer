@@ -7,8 +7,8 @@
 # (The workspace image must have tmux; the Sprites image does.)
 #
 # The shell is set up to talk to the node: the distribution is on PATH, and
-# the CLI uses the node-local profile setup enrolled, so `txco stacks`,
-# `txco trace <rid>` and `txco apply` reach the node's own chassis on its
+# the CLI uses the node-local profile setup enrolled, so `txco versions
+# <stack>`, `txco trace <rid>` and `txco apply` reach the node's own chassis on its
 # loopback. tmux keeps the environment it was first started with, so this is
 # fixed when the `main` session is created.
 #

@@ -70,7 +70,7 @@ Operations may set these in their response JSON which will effect the flow.
 | Field | Effect |
 |---|---|
 | `_txc.halt = true` | Terminate after this scope's merge; return the document |
-| `_txc.goto = "stack/0"` or `"200"` | Jump to a stage (bare number = current stack) |
+| `_txc.goto = "stack/0"` or `"200"` | Jump to a stage (bare number = current stack); `EXEC "goto://stack/0"` writes the same |
 | `_txc.ttl = N` | Lower (never raise) the remaining hop budget ([fuel](./fuel.md)) |
 | `_txc.web.res.status` | HTTP response status |
 | `_txc.web.res.headers.<name>` | Response headers (arrays) |

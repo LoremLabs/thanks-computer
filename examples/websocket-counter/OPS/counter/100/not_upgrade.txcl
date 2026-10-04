@@ -9,4 +9,5 @@ WHEN @web.req.url.path == "/ws" && @websocket.upgrade != true
        @web.res.headers.upgrade.0 = "websocket",
        @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
        @web.res.body = b64"Upgrade Required: open /ws as a WebSocket (see /index.html).
-"
+",
+       @halt = true

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,7 +40,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	pu.Logger.Debug("ExecHttp", zap.String("opname", opName), zap.String("input", string(in)))
 
 	// One scan of op.Meta for every WITH field this handler consults.
-	metaFields := gjson.GetMany(op.Meta, "url", "method", "body_encoding", "body_path", "into")
+	metaFields := gjson.GetMany(op.Meta, "url", "method", "body_encoding", "body_path", "into", "status_into")
 
 	// A `WITH url = "<resolved url>"` overrides the literal EXEC target. EXEC must be a
 	// string literal so the scheme dispatches here, but some calls need a URL built at
@@ -169,12 +170,25 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	}
 	defer resp.Body.Close()
 
-	// TODO: look at response status codes
-	body, _ := io.ReadAll(resp.Body)
-	pu.Logger.Debug("Http Resp", zap.String("opname", opName), zap.String("resp", string(body)))
+	// The answer is bounded by --op-payload-max, as every op payload is: read
+	// one byte past it so an answer that is too large is refused, not cut.
+	// A read that fails part way keeps what arrived, as it always has.
+	body, err := readOpAnswer(resp.Body, pu.Conf.OpPayloadMax)
+	if errors.Is(err, errOpAnswerTooLarge) {
+		pu.Logger.Warn("HttpExec answer refused", zap.String("opname", opName), zap.Int("status", resp.StatusCode), zap.Error(err))
+		meta, _ := sjson.Set(`{"error":["http-response-too-large"]}`, "errorMsg", err.Error())
+		return event.Payload{Raw: `{}`, Type: event.Null, Meta: meta}, err
+	} else if err != nil {
+		pu.Logger.Warn("HttpExec answer cut short", zap.String("opname", opName), zap.Int("status", resp.StatusCode), zap.Error(err))
+	}
+	pu.Logger.Debug("Http Resp", zap.String("opname", opName), zap.Int("status", resp.StatusCode), zap.String("resp", string(body)))
 
-	// var out []byte
-	// in := []byte(op.Input)
+	// A 4xx or 5xx answer still merges like any other: the status is not an
+	// error here. It is logged, and a rule that needs it asks for it with
+	// `WITH status_into` below.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		pu.Logger.Warn("HttpExec non-2xx answer", zap.String("opname", opName), zap.Int("status", resp.StatusCode))
+	}
 
 	// `WITH into="<path>"` nests the whole response under that key, so two
 	// ops can each call an API and the results merge cleanly
@@ -188,8 +202,42 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 		}
 	}
 
+	// `WITH status_into="<path>"` writes the answer's HTTP status code (an
+	// integer) at that path, so a rule can tell `._res_status >= 400` from a
+	// success. It is written into the answer, so it merges with it. An answer
+	// that is not a JSON object cannot merge at all (merging needs two
+	// objects), so then the status is the whole answer.
+	if statusPath := boundedInto(metaFields[5].String()); statusPath != "" {
+		base := out
+		if !gjson.Valid(base) || !gjson.Parse(base).IsObject() {
+			base = `{}`
+		}
+		if withStatus, serr := txcguard.BoundedSet(base, statusPath, resp.StatusCode); serr == nil {
+			out = withStatus
+		}
+	}
+
 	res := event.NewJSON(out)
 	return res.CreateJSONPayload()
+}
+
+// errOpAnswerTooLarge is an op answer over --op-payload-max.
+var errOpAnswerTooLarge = errors.New("the answer is over --op-payload-max")
+
+// readOpAnswer reads an op's answer, bounded by --op-payload-max (4 MiB when
+// unset). It reads one byte past the limit, so an answer that is too large is
+// refused (errOpAnswerTooLarge, no bytes) rather than silently cut. Any other
+// read error comes back with the bytes read before it.
+func readOpAnswer(r io.Reader, max int) ([]byte, error) {
+	limit := int64(max)
+	if limit <= 0 {
+		limit = 4 << 20
+	}
+	b, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%w (%d bytes)", errOpAnswerTooLarge, limit)
+	}
+	return b, err
 }
 
 // normalizeEnvelopePath turns a txcl-authored envelope path (e.g. a

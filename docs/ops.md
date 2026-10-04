@@ -82,6 +82,20 @@ bounds the call; `WITH secrets.headers.authorization.secret = "API_KEY"`
 splices a stored credential into the request without writing it in the
 rule.
 
+The other `WITH` keys an HTTP op reads:
+
+| Key | What it does |
+|---|---|
+| `url` | Replaces the `EXEC` URL with one built at run time, e.g. `WITH url = &concat("https://api.example.com/v1/items?id=", ._id)`. Must be `http://` or `https://`. |
+| `method` | `GET`, `HEAD` and `DELETE` send no body; `POST` (the default), `PUT` and `PATCH` send the envelope as JSON. |
+| `body_encoding` | `"urlencoded"` (or `"form"`) sends the body as `application/x-www-form-urlencoded` instead, with nested values in bracket notation (`items[0][price]=…`), the shape APIs such as Stripe require. |
+| `body_path` | With `body_encoding`, encodes only this part of the envelope, e.g. `"_form"`. |
+| `into` | Nests the whole answer under this key, so two calls can merge side by side: `{london:{…}, tokyo:{…}}`. |
+| `status_into` | Writes the answer's HTTP status code (a number) at this path, e.g. `"_res_status"`, so a later rule can test `._res_status >= 400`. A 4xx or 5xx answer merges like any other; without `status_into` the status is not in the envelope. An answer that is not a JSON object (a proxy's HTML error page) cannot merge, so then the status is all that comes back. |
+
+An answer larger than `--op-payload-max` (4 MiB by default) is refused with
+an error rather than cut short.
+
 ## Start small, grow without rewiring
 
 All three shapes speak the same JSON-merge contract. A step can begin

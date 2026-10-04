@@ -41,6 +41,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/logging"
 	"github.com/loremlabs/thanks-computer/chassis/metrics"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/opname"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/registry"
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
@@ -2955,13 +2956,16 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 	pu.Logger.Debug("Exec", zap.String("opname", opName))
 
 	// Charge fuel for the dispatch. Skip noop rules (no EXEC clause —
-	// they pay only the scope-enter floor). Errors are intentionally
+	// they pay only the scope-enter floor), except one that writes
+	// `@goto`: its jump is its dispatch, so it pays what `EXEC "goto://…"`
+	// and the unschemed stage jump pay, and the three spellings of a jump
+	// cost the same. Errors are intentionally
 	// ignored at this site: ops fire in parallel goroutines whose error
 	// returns are swallowed; the next Run entry catches the overshoot
 	// and emits a structured exhaustion error there. (A repeating op
 	// probes the ceiling between passes — fuelExceeded — so a loop
 	// stops at the overshoot instead of running to MAX.)
-	if opName != "" {
+	if opName != "" || writesGoto(op.Resonator) {
 		_ = addFuel(ctx, fuelCostExec, op.Stack+"/"+strconv.Itoa(op.Scope))
 	}
 
@@ -3080,7 +3084,21 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// `WITH into`. See chassis/outlet and processor/outlet.go.
 		payload, err = pu.ExecOutlet(ctx, op)
 		transport = "outlet"
-	case strings.HasPrefix(opName, "goto://"): // TODO
+	case strings.HasPrefix(opName, opname.GotoScheme):
+		// `EXEC "goto://<stack>/<scope>"` or `"goto://<scope>"` is the
+		// stage jump written as a scheme. It is `EMIT @goto` exactly: it
+		// writes the same `_txc.goto`, a bare scope is in the current
+		// stack, and the run's stack identity (`_txc.stack`) does not
+		// move. The parser refuses a bad target at apply time; this is the
+		// same check at dispatch.
+		if target, gerr := opname.GotoTarget(opName); gerr != nil {
+			err = gerr
+			payload = pu.MakeMockResponse(op, "bad-goto-target")
+			transport = "unsupported"
+		} else {
+			payload = stageJumpPayload(target)
+			transport = "goto"
+		}
 	case StagePartsRE.MatchString(opName):
 		// Unschemed `EXEC "<stack>/<scope>"` is a stage jump. We
 		// synthesize a JSON response that sets `_txc.goto` so the
@@ -3089,16 +3107,13 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// is the canonical "boot → service" pattern: a boot stack
 		// fires once, EXECs into the service's stack, and the chassis
 		// continues there.
-		payload = event.Payload{
-			Raw:  fmt.Sprintf(`{"_txc":{"goto":"%s"}}`, opName),
-			Type: event.JSON,
-		}
+		payload = stageJumpPayload(opName)
 		transport = "goto"
 	default:
 		// gRPC was removed in this revision. Any non-recognized scheme is a
 		// rule authoring error — fail loudly so it's spotted at first match
 		// rather than silently dispatched somewhere.
-		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", "outlet://<name>/<op>", "cap://<name>", or a stage like "stack/scope"`)
+		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", "outlet://<name>/<op>", "cap://<name>", or a stage like "goto://stack/scope" or "stack/scope"`)
 		payload = pu.MakeMockResponse(op, "unsupported-scheme")
 		transport = "unsupported"
 	}
@@ -3446,6 +3461,39 @@ func (pu *Unit) NodeForOp(ctx context.Context, op operation.Operation) (*registr
 	defer span.End()
 
 	return pu.Reg.NodeByFixed(op)
+}
+
+// stageJumpPayload is the response a stage jump synthesizes: `_txc.goto` set
+// to target, which the post-stage merge takes like any other op's goto. The
+// target is written as a JSON value, never spliced into JSON text: the goto
+// transport is trusted, so its output merges raw, and a quote in a target
+// must not be able to add fields beside `goto`.
+func stageJumpPayload(target string) event.Payload {
+	raw, _ := sjson.Set(`{}`, "_txc.goto", target)
+	return event.Payload{Raw: raw, Type: event.JSON}
+}
+
+// writesGoto reports whether a rule writes the stage jump itself: an EMIT, or
+// a SET after the SELECT, naming `@goto`. A SET before it does not count: it
+// decorates the op's input, and a rule with no EXEC answers `{}`, so it never
+// jumps. It reads the rule, not the run: a rule that writes `@goto` pays for
+// the jump whether or not the value it computes this time is empty, the way
+// an EXEC pays whatever it answers.
+func writesGoto(r *resonator.Resonator) bool {
+	if r == nil {
+		return false
+	}
+	for _, set := range []*resonator.Set{r.SetPost, r.Emit} {
+		if set == nil {
+			continue
+		}
+		for _, ov := range set.Overrides {
+			if txcguard.IsGotoPath(ov.Path) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // resolveGoto turns the raw `_txc.goto` value into a fully-qualified stage.

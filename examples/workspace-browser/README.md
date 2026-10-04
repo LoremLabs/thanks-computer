@@ -64,12 +64,13 @@ point:
   needs a window manager or the screen is black) and `fonts-liberation`; on
   other architectures, `chromium`. Because the version is data in
   `setup.txcl`, the workspace *evolves* — bump `REQ` and the next `/setup`
-  re-provisions, no new image; a bump also retires the running daemons so
-  they relaunch with new flags.
+  re-provisions, no new image; a bump also retires the running daemons, and
+  waits until they have exited, so they relaunch with new flags.
 - **Cold start** — packages are present but the browser is not running:
   launch Xvfb `:99`, openbox, Chrome (`--remote-debugging-port=9222`, a
-  persistent `--user-data-dir=$HOME/browser-profile`, `--no-sandbox`),
-  x11vnc on 5900, then the harness. A second or two.
+  persistent `--user-data-dir=$HOME/browser-profile`, its sandbox on, in a
+  `dbus-run-session` where dbus is installed), x11vnc on 5900, then the
+  harness. A second or two.
 - **Warm** — everything is up: a sub-second no-op (guarded by `pgrep` and a
   listener check on 5900).
 
@@ -114,6 +115,14 @@ live browser.
    pattern matches the shell running the kill itself.
 8. When the handshake stalls at "connecting to the display…", `/logs`
    (x11vnc's log above all) says why.
+9. *(Learned on `workspace-node`, 2026-09-30, and applied here.)* **A rule
+   that answers must also halt** (`@halt = true`). On a deployed
+   chassis a response body written by a scope that is not the last one is
+   streamed to the client, so a later rule can append a second body. `txco
+   dev` does not stream, which hides this locally.
+10. *(Same.)* **Test `exit != null` before `exit == 0`.** In a rule a missing value
+    compares equal to 0, so `WHEN ._setup.exit == 0` alone also fires on
+    routes that ran no setup.
 
 ## Restricting access
 
@@ -152,5 +161,6 @@ the harness, control handed back and forth from the pony's mail loop — which
 is the takeover plan's Phase 4.
 
 x11vnc runs `-nopw`: no VNC password, because 5900 is reachable solely through
-the `connect` binding the chassis authorized. `--no-sandbox` is the pragmatic
-choice for a single-tenant VM.
+the `connect` binding the chassis authorized. Chrome keeps its sandbox: a
+sprite allows unprivileged user namespaces, so `--no-sandbox` is not needed,
+and Chrome shows a warning bar under it.

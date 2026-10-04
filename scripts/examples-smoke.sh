@@ -105,10 +105,14 @@ teardown_dev() {
     # lingers past teardown — and since several examples hardcode the same
     # app ports (4100/9009/…), the NEXT example sees the port busy and
     # skips its checks. Killing them here keeps sequential runs isolated.
+    # Only LISTENers: `lsof -ti tcp:PORT` alone also names every client
+    # with a connection to the port (a browser tab, a curl), and those
+    # are not ours to kill.
     for p in "${ADMIN_PORT}" "${WEB_PORT}" ${DEV_APP_PORTS}; do
         local pid
-        pid="$(lsof -ti tcp:"${p}" 2>/dev/null || true)"
-        [[ -n "${pid}" ]] && kill -KILL "${pid}" 2>/dev/null
+        for pid in $(lsof -ti tcp:"${p}" -sTCP:LISTEN 2>/dev/null || true); do
+            kill -KILL "${pid}" 2>/dev/null
+        done
     done
     wait 2>/dev/null
     [[ -n "${DEV_WS}" ]] && rm -rf "${DEV_WS}"
@@ -152,12 +156,16 @@ port_busy() {
 }
 
 # app_ports <workspace> → distinct localhost ports the example's apps use
-# (parsed from txco.yaml), excluding the control-plane port 8081.
+# (parsed from txco.yaml). Comment lines are skipped: a usage note such as
+# `websocat ws://localhost:8080/ws` is not an app. The user's own dev
+# chassis ports (8080 web, 8081 admin) are never app ports, because
+# teardown_dev kills whatever listens on an app port.
 app_ports() {
     local ws="$1"
     [[ -f "${ws}/txco.yaml" ]] || return 0
-    grep -oE 'localhost:[0-9]+' "${ws}/txco.yaml" 2>/dev/null \
-        | cut -d: -f2 | sort -u | grep -v '^8081$' || true
+    grep -vE '^[[:space:]]*#' "${ws}/txco.yaml" 2>/dev/null \
+        | grep -oE 'localhost:[0-9]+' \
+        | cut -d: -f2 | sort -u | grep -vE '^(8080|8081)$' || true
 }
 
 # emit_probe <probe.json> — print the probe as tab-separated lines:

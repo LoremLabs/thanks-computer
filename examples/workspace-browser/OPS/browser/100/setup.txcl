@@ -16,7 +16,7 @@
 WHEN @src == "http" && @web.req.url.path == "/setup"
   EXEC "workspace://tools/exec"
     WITH command = "bash -s",
-         env     = &object("REQ", "5"),   # runtime version; bump to re-provision
+         env     = &object("REQ", "6"),   # runtime version; bump to re-provision
          timeout = "45s",
          into    = "_setup",
          stdin   = &include("setup.sh")

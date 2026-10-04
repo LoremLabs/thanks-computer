@@ -4,4 +4,5 @@ WHEN @web.req.url.path == "/"
   EMIT @web.res.status = 302,
        @web.res.headers.location.0 = "/index.html",
        @web.res.body = b64"see /index.html
-"
+",
+       @halt = true

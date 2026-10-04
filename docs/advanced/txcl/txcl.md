@@ -643,6 +643,19 @@ The convention is **transport-agnostic**: an HTTP op signals control flow by inc
 }
 ```
 
+A rule can write the same jump three ways, and they behave alike:
+
+```txcl
+EMIT @goto = "billing/100"        # the control field itself; the value may be computed (@goto = ._next)
+EXEC "goto://billing/100"         # the same jump as an EXEC target; "goto://300" is a scope in this stack
+EXEC "billing/100"                # the unschemed form, used for the boot → service handoff
+```
+
+`goto://` takes a literal target only, `<stack>/<scope>` or `<scope>`, and `txco apply` refuses any other. Like `@goto`, it moves the
+stage but not the run's stack identity (`_txc.stack`), so kv, read-file and dataset defaults in the target still resolve against the
+stack the run entered; `txco apply` warns on a cross-stack target. To move the identity too, re-pin with `txco://route`. All three
+cost the same [fuel](../fuel.md): one `EXEC` dispatch for the jump, plus the scope it enters.
+
 Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise. Each inlet stamps its own read-only facts there too (`@web.req.*`, `@lmtp.*`, `@imap.*`, `@dns.*`, `@websocket.*`); see [protocols](../protocols/README.md).
 
 **What you may write under `_txc`.** Only the response and control fields: `@web.res`, `@lmtp.res`, `@dns.res`, `@imap.res`, `@source.res`, `@calendar.res`, `@contacts.res`, `@tcp.res`, `@goto`, `@halt`, `@delete`, `@telemetry`, and `@llm.{reject,upstream,headers,context}` — plus `@ttl`, downward only. Everything else there is the chassis's: who the request is (`@tenant`, `@src`, `@imap.account`, …), what it may spend (`@fuel_used`, `@_seen`), and what a builtin verified (`@computed.*`). This holds however the write arrives:
@@ -772,9 +785,10 @@ To put an event into a lane, write a boot resonator that sets `_txc.goto`:
 
 ```txcl
 WHEN @web.req.headers.x-canary == "1"
-SET @goto = "website/canary/0"
-EXEC "txco://noop"
+EMIT @goto = "website/canary/0"
 ```
+
+(A `SET` before the `EXEC` would not do it: that `SET` decorates the op's input, and a jump is read from what the rule answers.)
 
 (`@` is the shorthand for `._txc.` — see [Shorthand](#shorthand). Hyphenated header keys work in branch paths without quoting.)
 

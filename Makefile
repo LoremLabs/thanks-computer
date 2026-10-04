@@ -1,6 +1,6 @@
 .PHONY: all lint test build clean install ui smoke version bump-version
 
-include .env
+-include .env
 export
 
 GIT_HASH = $(shell git rev-parse HEAD)

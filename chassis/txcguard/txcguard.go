@@ -211,6 +211,15 @@ func AuthorMayDelete(path string) bool {
 	return mayTouch(path, authorKeys, deleteKeys)
 }
 
+// IsGotoPath reports whether a rule's SET or EMIT path writes `_txc.goto`,
+// the stage jump. It takes the author's spelling (`@goto`, `._txc.goto`, an
+// escaped `@go\to`) and, like the write checks above, decides on the keys the
+// path resolves to, so no spelling of the jump goes unrecognized.
+func IsGotoPath(raw string) bool {
+	sub, reserved, ok := txcSubKeys(NormalizePath(raw))
+	return ok && reserved && len(sub) > 0 && sub[0] == "goto"
+}
+
 // SystemMayWrite reports whether path is in the EXTRA set a system-authored
 // rule may EMIT (`_txc.route.*`). It does not include the author-writable set;
 // callers check that separately. Unlike the author checks it is false outside

@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -341,7 +341,12 @@ func (pu *Unit) mcpPost(ctx context.Context, endpoint string, body []byte, sessi
 		return nil, "", 0, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	// Bounded by --op-payload-max like every op answer; a read that fails
+	// part way keeps what arrived, as it always has.
+	respBody, rerr := readOpAnswer(resp.Body, pu.Conf.OpPayloadMax)
+	if errors.Is(rerr, errOpAnswerTooLarge) {
+		return nil, "", resp.StatusCode, rerr
+	}
 	status := resp.StatusCode
 
 	sid := resp.Header.Get(mcpSessionHeader)

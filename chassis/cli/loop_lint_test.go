@@ -190,6 +190,45 @@ func TestLintIgnoresPathValuedGoto(t *testing.T) {
 	}
 }
 
+// TestLintSeesGotoScheme: `EXEC "goto://…"` is a stage jump to the loop lint,
+// in both its forms, so a typo'd jump back to the rule's own stage is caught.
+func TestLintSeesGotoScheme(t *testing.T) {
+	for _, txcl := range []string{`EXEC "goto://boot/0"`, `EXEC "goto://0"`} {
+		ops := []bundle.Op{{Stack: "boot", Scope: 0, Name: "loop", SourcePath: "/tmp/loop.txcl", Txcl: txcl}}
+		if got := lintStackLoops(ops); !containsSubstring(got, "unconditionally EXECs into its own stage") {
+			t.Errorf("%s: expected self-EXEC warning, got: %v", txcl, got)
+		}
+	}
+	ops := []bundle.Op{
+		{Stack: "a", Scope: 0, Name: "to-b", SourcePath: "/tmp/a.txcl", Txcl: `EXEC "goto://b/0"`},
+		{Stack: "b", Scope: 0, Name: "to-a", SourcePath: "/tmp/b.txcl", Txcl: `EMIT @goto = "a/0"`},
+	}
+	if got := lintStackLoops(ops); !containsSubstring(got, "unconditional 2-stack cycle") {
+		t.Errorf("expected a goto:// / @goto ping-pong, got: %v", got)
+	}
+}
+
+// TestLintFlagsCrossStackGotoScheme: goto:// is @goto, so a cross-stack target
+// gets the same warning, and a same-stack one (either form) stays silent.
+func TestLintFlagsCrossStackGotoScheme(t *testing.T) {
+	cross := []bundle.Op{{
+		Stack: "core", Scope: 630, Name: "dispatch", SourcePath: "/tmp/dispatch.txcl",
+		Txcl: `WHEN .x == true` + "\n" + `  EXEC "goto://kind-triage/2010"`,
+	}}
+	got := lintCrossStackGoto(cross)
+	if !containsSubstring(got, `EXECs "goto://kind-triage/2010" into stack "kind-triage"`) ||
+		!containsSubstring(got, "txco://route") {
+		t.Errorf("expected cross-stack goto:// warning naming the fix, got: %v", got)
+	}
+	same := []bundle.Op{
+		{Stack: "core", Scope: 680, Name: "loop", SourcePath: "/tmp/a.txcl", Txcl: `WHEN .x == true` + "\n" + `  EXEC "goto://core/580"`},
+		{Stack: "core", Scope: 690, Name: "bare", SourcePath: "/tmp/b.txcl", Txcl: `WHEN .y == true` + "\n" + `  EXEC "goto://580"`},
+	}
+	if got := lintCrossStackGoto(same); len(got) != 0 {
+		t.Errorf("same-stack goto:// must not warn, got: %v", got)
+	}
+}
+
 // --- LOOP clause lint ---
 
 func loopOp(txcl string) []bundle.Op {

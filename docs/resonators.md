@@ -102,7 +102,7 @@ order:
 | `SELECT`   | Project what the operation receives — only the selected branches |
 | `WITH`     | Per-call directives — `timeout`, `secrets.*`, `redact`, …       |
 | `PRIORITY` | Tie-breaker among matches at the same step                      |
-| `EXEC`     | Dispatch target — `op://`, `http(s)://`, `txco://`, `mcp+https://` |
+| `EXEC`     | Dispatch target — `op://`, `http(s)://`, `txco://`, `mcp+https://`, or a stage jump `goto://stack/scope` |
 | `EMIT`     | Overlay values onto the response, *after* dispatch              |
 
 A complete rule using the most common:

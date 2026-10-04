@@ -98,10 +98,13 @@ cleanup() {
     if [[ -n "${CAPTURE_PID}" ]]; then
         kill -KILL "-${CAPTURE_PID}" 2>/dev/null || kill -KILL "${CAPTURE_PID}" 2>/dev/null
     fi
-    # Belt + suspenders: stamp out anything bound to our test ports.
+    # Belt + suspenders: stamp out anything still listening on our test
+    # ports. Listeners only: `lsof -ti tcp:PORT` alone also names clients
+    # connected to the port, which are not ours to kill.
     for p in "${CHASSIS_PORT}" "${WEB_PORT}" "${CAPTURE_PORT}"; do
-        pid="$(lsof -ti tcp:"${p}" 2>/dev/null || true)"
-        [[ -n "${pid}" ]] && kill -KILL "${pid}" 2>/dev/null
+        for pid in $(lsof -ti tcp:"${p}" -sTCP:LISTEN 2>/dev/null || true); do
+            kill -KILL "${pid}" 2>/dev/null
+        done
     done
     wait 2>/dev/null
     rm -rf "${WORKSPACE}"
@@ -143,7 +146,7 @@ echo "logs:      ${LOG_DIR}"
 echo
 
 # ---------------------------------------------------------------
-# 1/7  Start capture endpoint (records inbound headers + body)
+# 1/6  Start capture endpoint (records inbound headers + body)
 # ---------------------------------------------------------------
 echo "==> [1/6] starting capture endpoint on :${CAPTURE_PORT}"
 python3 - "${CAPTURE_LOG}" "${CAPTURE_PORT}" >/dev/null 2>&1 <<'PY' &
@@ -168,7 +171,7 @@ kill -0 "${CAPTURE_PID}" 2>/dev/null || fail "capture endpoint didn't start"
 pass "capture endpoint up"
 
 # ---------------------------------------------------------------
-# 2/7  Workspace + chassis (basic-auth mode, sidesteps signed bootstrap)
+# 2/6  Workspace + chassis (basic-auth mode, sidesteps signed bootstrap)
 # ---------------------------------------------------------------
 echo "==> [2/6] starting chassis on :${CHASSIS_PORT} (basic-auth admin:secret)"
 cd "${WORKSPACE}"
@@ -180,11 +183,12 @@ targets:
     chassis: ${CHASSIS_URL}
 YAML
 
-# WEB_ADDR overrides the default :8080 so successive smoke runs (and
-# parallel ones) don't fight over the user's actual dev web port.
+# --web-addr moves the web inlet off the default :8080 so the smoke
+# doesn't fight over the user's own dev web port. It has to be the flag:
+# `txco dev` always sets TXCO_WEB_ADDR for the chassis it starts, from
+# --web-addr, so the variable in this environment would be ignored.
 TXCO_AUTH_MODE=basic TXCO_ADMIN_USER=admin TXCO_ADMIN_PASS=secret \
-    TXCO_WEB_ADDR=":${WEB_PORT}" \
-    "${TXCO}" dev --chassis-addr ":${CHASSIS_PORT}" >"${CHASSIS_LOG}" 2>&1 &
+    "${TXCO}" dev --chassis-addr ":${CHASSIS_PORT}" --web-addr ":${WEB_PORT}" >"${CHASSIS_LOG}" 2>&1 &
 CHASSIS_PID=$!
 
 for i in $(seq 1 30); do
@@ -195,7 +199,7 @@ curl -fsS "${CHASSIS_URL}/healthz" >/dev/null || fail "chassis didn't respond on
 pass "chassis up"
 
 # ---------------------------------------------------------------
-# 3/7  Auto-mint observed
+# 3/6  Auto-mint observed
 # ---------------------------------------------------------------
 echo "==> [3/6] verifying auto-mint logged on cold boot"
 if grep -q "minted new master key" "${CHASSIS_LOG}"; then
@@ -210,7 +214,7 @@ else
 fi
 
 # ---------------------------------------------------------------
-# 4/7  Tenant + secret CRUD
+# 4/6  Tenant + secret CRUD
 # ---------------------------------------------------------------
 echo "==> [4/6] tenant + secret CRUD via admin API"
 TENANT_RESP="$(curl_admin POST /v1/tenants "{\"slug\":\"${TENANT_SLUG}\",\"name\":\"Acme Smoke\"}")" \
@@ -227,7 +231,7 @@ echo "${CREATE_RESP}" | grep -q "\"name\":\"${SECRET_NAME}\"" \
 pass "secret stored (operator-supplied value)"
 
 # ---------------------------------------------------------------
-# 5/7  Reveal-never invariant (load-bearing)
+# 5/6  Reveal-never invariant (load-bearing)
 # ---------------------------------------------------------------
 echo "==> [5/6] reveal-never: cleartext must NOT appear in any read response"
 if echo "${CREATE_RESP}" | grep -q '"value"'; then
@@ -257,7 +261,7 @@ fi
 pass "show response: no value field, no cleartext bytes"
 
 # ---------------------------------------------------------------
-# 6/7  Immutable-name invariant
+# 6/6  Immutable-name invariant
 # ---------------------------------------------------------------
 echo "==> [6/6] immutable-name: PATCH with 'name' field must 400"
 PATCH_BODY="$(mktemp)"

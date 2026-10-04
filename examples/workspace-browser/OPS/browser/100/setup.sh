@@ -33,6 +33,12 @@ if [ "$(cat "$MARK" 2>/dev/null || echo 0)" != "$REQ" ]; then
   sudo mkdir -p "$(dirname "$MARK")"; printf '%s\n' "$REQ" | sudo tee "$MARK" >/dev/null
   # New runtime version: retire the old daemons so they relaunch with new flags.
   kill "$(cat /tmp/ws-harness.pid 2>/dev/null)" 2>/dev/null || true; pkill -x openbox 2>/dev/null || true; pkill -x x11vnc 2>/dev/null || true; pkill -x Xvfb 2>/dev/null || true; pkill -f "user-data-dir=$HOME/browser-profile" 2>/dev/null || true
+  # Wait for them to be gone. The launch below starts only what is not
+  # running, and a daemon that is still exiting would be counted as running.
+  for i in $(seq 1 50); do
+    kill -0 "$(cat /tmp/ws-harness.pid 2>/dev/null)" 2>/dev/null || pgrep -x Xvfb >/dev/null || pgrep -x x11vnc >/dev/null || pgrep -x openbox >/dev/null || pgrep -f "user-data-dir=$HOME/browser-profile" >/dev/null || break
+    sleep 0.2
+  done
   echo "PHASE provisioned"
 fi
 CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
@@ -43,7 +49,14 @@ export DISPLAY=:99
 if ! pgrep -x Xvfb >/dev/null; then sudo rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true; setsid Xvfb :99 -screen 0 1280x800x24 -nolisten tcp </dev/null >/tmp/ws-xvfb.log 2>&1 & fi
 for i in $(seq 1 25); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.2; done
 if ! pgrep -x openbox >/dev/null; then setsid openbox </dev/null >/tmp/ws-openbox.log 2>&1 & sleep 1; fi
-if ! pgrep -f "user-data-dir=$HOME/browser-profile" >/dev/null; then setsid "$CHROME" --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir="$HOME/browser-profile" --no-first-run --no-default-browser-check --remote-debugging-port=9222 --remote-allow-origins=* --window-position=0,0 --window-size=1280,800 about:blank </dev/null >/tmp/ws-chromium.log 2>&1 & fi
+# Chrome runs WITH its sandbox: the workspace allows unprivileged user
+# namespaces, so --no-sandbox is not needed (and Chrome shows a warning bar
+# under it). It gets a session bus of its own where dbus is installed, which
+# is what it looks for when it starts; without one it only fills its log with
+# "Failed to connect to the bus". --password-store=basic keeps it from asking
+# that bus for a keyring.
+BUS=""; command -v dbus-run-session >/dev/null 2>&1 && BUS="dbus-run-session --"
+if ! pgrep -f "user-data-dir=$HOME/browser-profile" >/dev/null; then setsid $BUS "$CHROME" --disable-gpu --disable-dev-shm-usage --password-store=basic --user-data-dir="$HOME/browser-profile" --no-first-run --no-default-browser-check --remote-debugging-port=9222 --remote-allow-origins=* --window-position=0,0 --window-size=1280,800 about:blank </dev/null >/tmp/ws-chromium.log 2>&1 & fi
 # x11vnc: NOT -localhost — the connect tunnel arrives from the sprite gateway,
 # not loopback. Allow loopback + the default gateway (the tunnel's source);
 # the port is reachable only through the authorized chassis tunnel anyway.

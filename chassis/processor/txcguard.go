@@ -75,7 +75,7 @@ func transportAuthorControlled(transport string) bool {
 	case "txco", "ai", "goto", "noop", "outlet":
 		return false
 	default:
-		// mock, http, https, compute, mcp+http, unsupported, "" (goto:// TODO)
+		// mock, http, https, compute, mcp+http, unsupported, ""
 		return true
 	}
 }

@@ -1374,6 +1374,12 @@ func TestParserLoopClause(t *testing.T) {
 			errmsgs: []string{`LOOP cannot repeat a stage jump (EXEC "boot/0"); loop the op that does the work instead`},
 		},
 		{
+			name:    "goto:// is a stage jump too",
+			input:   `EXEC "goto://boot/0" LOOP UNTIL ._p.next == ""`,
+			res:     &resonator.Resonator{Exec: "goto://boot/0", Loop: &resonator.Loop{Until: &nextEmpty}},
+			errmsgs: []string{`LOOP cannot repeat a stage jump (EXEC "goto://boot/0"); loop the op that does the work instead`},
+		},
+		{
 			name:    "route is a stage jump too",
 			input:   `EXEC "txco://route" LOOP UNTIL ._p.next == ""`,
 			res:     &resonator.Resonator{Exec: "txco://route", Loop: &resonator.Loop{Until: &nextEmpty}},
@@ -1431,4 +1437,28 @@ func orEmpty(errs []string) []string {
 		return []string{}
 	}
 	return errs
+}
+
+// TestParseGotoTarget: `EXEC "goto://…"` takes a stage or a scope in this
+// stack, and a bad target is a parse error in both modes, so `txco apply`
+// refuses it rather than the jump failing at dispatch.
+func TestParseGotoTarget(t *testing.T) {
+	for _, exec := range []string{"goto://billing/100", "goto://300", "goto://website/canary/0"} {
+		for _, strict := range []bool{false, true} {
+			p := parser.New(lexer.New(`EXEC "` + exec + `"`))
+			p.SetStrict(strict)
+			res := p.ParseEvent()
+			test.Equals(t, 0, len(p.Errors()))
+			test.Equals(t, exec, res.Exec)
+		}
+	}
+	for _, exec := range []string{"goto://", "goto://billing", "goto://billing/x", "goto://bad name/1"} {
+		for _, strict := range []bool{false, true} {
+			p := parser.New(lexer.New(`EXEC "` + exec + `"`))
+			p.SetStrict(strict)
+			p.ParseEvent()
+			test.Equals(t, 1, len(p.Errors()))
+			test.Assert(t, strings.Contains(p.Errors()[0], exec), "error should quote the EXEC, got %q", p.Errors()[0])
+		}
+	}
 }

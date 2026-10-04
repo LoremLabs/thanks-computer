@@ -18,7 +18,7 @@ from costly-but-legitimate work at a glance. Implementation:
 ## TTL — the hop counter
 
 `_txc.ttl` is a countdown, decremented once per stage entry (every
-scope advance, `@goto`, or stage-jump `EXEC`). It starts at
+scope advance, `@goto`, or stage-jump `EXEC`, `goto://` or unschemed). It starts at
 `--op-scope-ttl-max` (default `500`); `0` disables the guard.
 
 A rule may voluntarily *lower* its remaining budget —
@@ -36,6 +36,7 @@ the chassis-wide cap.
 | ---------------------------- | ----------- |
 | Entering a scope             | 10          |
 | `EXEC` dispatch              | 25          |
+| A jump written by a rule with no `EXEC` (`EMIT @goto`, or `SET @goto` after `SELECT`) | 25 (the jump is its dispatch, so it costs what `EXEC "goto://…"` does) |
 | `LOOP` pass                  | 25 (the EXEC cost, once per pass) |
 | Nano-op compute, per ms      | 10          |
 | `workspace://` wall clock, per started 100 ms | 1 (10 a second) |

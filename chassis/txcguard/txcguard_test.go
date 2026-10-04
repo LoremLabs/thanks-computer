@@ -336,3 +336,18 @@ func TestAuthorKeyCheckDoesNotAllocate(t *testing.T) {
 		t.Errorf("AuthorMayWrite on a plain author key allocates %v times per call, want 0", n)
 	}
 }
+
+// IsGotoPath recognizes the stage jump by the keys a path resolves to, so no
+// spelling of `_txc.goto` slips past the dispatch charge.
+func TestIsGotoPath(t *testing.T) {
+	for _, p := range []string{"@goto", "_txc.goto", "._txc.goto", `@go\to`, `_tx\c.goto`, ":_txc.goto"} {
+		if !IsGotoPath(p) {
+			t.Errorf("IsGotoPath(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{"", "goto", ".goto", "@gotox", "@halt", "@route.to", "_txc", "_txcgoto", "data.goto"} {
+		if IsGotoPath(p) {
+			t.Errorf("IsGotoPath(%q) = true, want false", p)
+		}
+	}
+}

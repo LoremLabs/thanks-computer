@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/opname"
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/ast"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/funcs"
@@ -133,7 +134,22 @@ func (p *Parser) ParseEvent() *resonator.Resonator {
 	}
 
 	p.checkLoop(r)
+	p.checkGoto(r)
 	return r
+}
+
+// checkGoto refuses an `EXEC "goto://…"` whose target is not a stage
+// (`goto://<stack>/<scope>`) or a scope in this stack (`goto://<scope>`), in
+// BOTH parse modes, for the reason checkLoop gives: no deployed rule used
+// goto:// before it had a meaning, so the error can only ever reach a rule at
+// apply time, which beats a jump that fails at dispatch.
+func (p *Parser) checkGoto(r *resonator.Resonator) {
+	if !strings.HasPrefix(r.Exec, opname.GotoScheme) {
+		return
+	}
+	if _, err := opname.GotoTarget(r.Exec); err != nil {
+		p.errors = append(p.errors, err.Error())
+	}
 }
 
 // checkLoop rejects LOOP shapes that can never make progress or that
@@ -150,7 +166,7 @@ func (p *Parser) checkLoop(r *resonator.Resonator) {
 		p.errors = append(p.errors, "LOOP needs an EXEC to repeat")
 	case exec == "txco://noop":
 		p.errors = append(p.errors, "LOOP cannot repeat txco://noop: it never changes the envelope, so UNTIL can never become true")
-	case strings.HasPrefix(exec, "txco://route"), strings.HasPrefix(exec, "goto://"),
+	case strings.HasPrefix(exec, "txco://route"), strings.HasPrefix(exec, opname.GotoScheme),
 		!strings.Contains(exec, "://") && stageJumpRE.MatchString(exec):
 		p.errors = append(p.errors, fmt.Sprintf("LOOP cannot repeat a stage jump (EXEC %q); loop the op that does the work instead", exec))
 	}

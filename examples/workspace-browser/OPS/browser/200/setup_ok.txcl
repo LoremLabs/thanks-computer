@@ -1,8 +1,12 @@
 # Hand the script's one JSON line back to the page verbatim. On the happy
 # path it is {"ready":true,...}; the guard/no-chromium branches also exit 0
 # with {"ready":false,"error":...}, so the page always gets a JSON verdict.
-WHEN ._setup.exit == 0
+# The `!= null` matters: a missing value compares equal to 0, so without it
+# this rule (and the other *_ok rules here) would answer every route that
+# ran no setup.
+WHEN ._setup.exit != null && ._setup.exit == 0
   EMIT @web.res.status = 200,
        @web.res.headers.content-type.0 = "application/json",
        @web.res.headers.cache-control.0 = "no-store",
-       @web.res.body = &b64encode(._setup.stdout)
+       @web.res.body = &b64encode(._setup.stdout),
+       @halt = true

@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
+	"github.com/loremlabs/thanks-computer/chassis/opname"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
@@ -103,9 +104,10 @@ func lintStackLoops(ops []bundle.Op) []string {
 			}
 		}
 
-		// EXEC "<stack>/<scope>" — unschemed stage jump.
+		// EXEC "<stack>/<scope>" (unschemed) or "goto://<stack>/<scope>" /
+		// "goto://<scope>" — a stage jump.
 		if r.Exec != "" {
-			if target, ok := parseStageJump(r.Exec); ok {
+			if target, ok := execStageJump(r.Exec, op.Stack); ok {
 				if target == self {
 					warnings = append(warnings, fmt.Sprintf(
 						"lint: %s (%s/%d/%s) unconditionally EXECs into its own stage",
@@ -171,14 +173,31 @@ func lintStackLoops(ops []bundle.Op) []string {
 // almost always behind a WHEN, so skipping them would skip every true positive.
 // Only literal targets are checked — a path-valued goto (`@goto = ._ret`) is the
 // subroutine-return idiom and its target is not knowable statically.
+// `EXEC "goto://<stack>/<scope>"` is `@goto` written as a scheme, so it is
+// checked the same way. The unschemed `EXEC "<stack>/<scope>"` is left alone,
+// as it always has been: its common use is the boot → service handoff.
 func lintCrossStackGoto(ops []bundle.Op) []string {
 	var warnings []string
 
 	for _, op := range ops {
 		r, perr := txcl.Resonator(op.Txcl)
-		if perr != nil || r == nil || r.Emit == nil {
+		if perr != nil || r == nil {
 			// Parse errors are reported by the upstream parse loop in
 			// apply.go; lint silently skips so we don't double-report.
+			continue
+		}
+		if strings.HasPrefix(r.Exec, opname.GotoScheme) {
+			if target, ok := execStageJump(r.Exec, op.Stack); ok && target.Stack != op.Stack {
+				warnings = append(warnings, fmt.Sprintf(
+					"lint: %s (%s/%d/%s) EXECs %q into stack %q — a cross-stack goto does "+
+						"not re-pin _txc.stack, so kv/read-file/dataset defaults inside %q still "+
+						"resolve against %q; use txco://route to re-pin, or make every "+
+						"stack-scoped read there explicit",
+					op.SourcePath, op.Stack, op.Scope, op.Name, r.Exec,
+					target.Stack, target.Stack, op.Stack))
+			}
+		}
+		if r.Emit == nil {
 			continue
 		}
 		for _, ov := range r.Emit.Overrides {
@@ -441,6 +460,21 @@ func parseStageJump(exec string) (stageRef, bool) {
 		return stageRef{}, false
 	}
 	return stageRef{Stack: m[1], Scope: scope}, true
+}
+
+// execStageJump reads an EXEC value as a stage jump: the unschemed
+// "<stack>/<scope>" form, or "goto://<stack>/<scope>" / "goto://<scope>",
+// where a bare scope is in currentStack as it is for `@goto`. A goto:// value
+// with a bad target is not a jump here; the parser has already refused it.
+func execStageJump(exec, currentStack string) (stageRef, bool) {
+	if strings.HasPrefix(exec, opname.GotoScheme) {
+		target, err := opname.GotoTarget(exec)
+		if err != nil {
+			return stageRef{}, false
+		}
+		return resolveStageRef(target, currentStack)
+	}
+	return parseStageJump(exec)
 }
 
 // canonCycleKey produces a stable identifier for an unordered (A, B) pair
