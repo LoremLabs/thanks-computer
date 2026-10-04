@@ -22,7 +22,6 @@
     const total = $derived(store.state.stacks.length)
     const shown = $derived(store.state.visibleStacks.length)
     const hidden = $derived(Math.max(0, total - shown))
-    const visible = $derived(new Set(store.state.visibleStacks))
 
     function pick(name: string) {
         onSelectStack(name) // pins + loads + selects (and closes mobile sidebar)
@@ -53,7 +52,7 @@
     <nav class="flex flex-col gap-0.5 px-2 py-2">
         {#if results.length === 0}
             <p class="px-1 py-2 text-sm italic text-neutral-400">
-                no matches “{query.trim()}”
+                no stack matches “{query.trim()}”
             </p>
         {:else}
             {#each results as s (s.name)}
@@ -71,5 +70,10 @@
         {/if}
     </nav>
 {:else}
+    {#if hidden > 0}
+        <p class="px-3 pt-1 text-xs text-neutral-400">
+            showing {shown} of {total} stacks · search to find the rest
+        </p>
+    {/if}
     <OpTree {ops} {selectedId} {selectedStack} {onSelectOp} {onSelectStack} />
 {/if}

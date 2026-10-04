@@ -45,6 +45,12 @@ describe('StackNav', () => {
         ).toBeInTheDocument()
     })
 
+    it('shows no hint when every stack is loaded', () => {
+        store.state.visibleStacks = store.state.stacks.map((s) => s.name)
+        render(StackNav, { props: props() })
+        expect(screen.queryByText(/search to find the rest/i)).toBeNull()
+    })
+
     it('search spans ALL stacks, surfacing one not in the loaded set', async () => {
         render(StackNav, { props: props() })
         await userEvent.type(screen.getByLabelText(/search stacks/i), 'wealth')
