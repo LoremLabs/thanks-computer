@@ -27,6 +27,7 @@ package proxytlv
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
@@ -84,16 +85,18 @@ func (h *Handler) Handle(cx *layer4.Connection, next layer4.Handler) error {
 			ce.Write(zap.String("remote", down.RemoteAddr().String()), zap.Bool("tls", cs != nil), zap.Int("bytes", len(header)))
 		}
 	}
-	// A fresh Connection rather than cx.Wrap: Wrap carries cx's prefetch
-	// buffer over and replays it FIRST, which would put client bytes ahead
-	// of the header. prefixConn reads from cx itself, so anything buffered
-	// there still arrives, in order, after the header. Context carries the
-	// vars and replacer along.
-	return next.Handle(&layer4.Connection{
-		Conn:    &prefixConn{Conn: cx, under: cx.Conn, prefix: header},
-		Context: cx.Context,
-		Logger:  cx.Logger,
-	})
+	// cx.Wrap keeps the vars and replacer, but would replay cx's prefetch
+	// buffer FIRST, putting client bytes ahead of the header. So the bytes
+	// still buffered move behind the header first: reading them off cx
+	// empties its buffer without touching the socket.
+	if pending := len(cx.MatchingBytes()); pending > 0 {
+		buffered := make([]byte, pending)
+		if _, err := io.ReadFull(cx, buffered); err != nil {
+			return fmt.Errorf("proxy_tlv: %w", err)
+		}
+		header = append(header, buffered...)
+	}
+	return next.Handle(cx.Wrap(&prefixConn{Conn: cx.Conn, under: cx.Conn, prefix: header}))
 }
 
 // Header formats the PROXY v2 header for one connection. cs nil means the
@@ -134,8 +137,8 @@ func Header(src, dst net.Addr, cs *tls.ConnectionState) ([]byte, error) {
 // prefixConn reads prefix before anything from the wrapped connection.
 // Writes pass straight through.
 type prefixConn struct {
-	net.Conn          // the layer4.Connection: buffered bytes, then the socket
-	under    net.Conn // what that Connection wraps (the *tls.Conn)
+	net.Conn          // the socket under cx (the *tls.Conn)
+	under    net.Conn // the same; CloseWrite reaches it here
 	mu       sync.Mutex
 	prefix   []byte
 }

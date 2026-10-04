@@ -171,6 +171,11 @@ func TestHandlePutsTheHeaderFirst(t *testing.T) {
 	if next.GetVar("marker") != "kept" {
 		t.Error("connection vars were not carried to the next handler")
 	}
+	// `proxy` expands its upstream address with it; nil panics on any
+	// address with a placeholder in it.
+	if next.Replacer() == nil {
+		t.Error("the replacer was not carried to the next handler")
+	}
 	r := bufio.NewReader(next)
 	h, err := proxyproto.Read(r)
 	if err != nil {

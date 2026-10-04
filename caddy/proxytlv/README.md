@@ -26,8 +26,8 @@ learns to emit them, delete this module.
 ## Use
 
 ```sh
-xcaddy build \
-  --with github.com/mholt/caddy-l4@b02a6fd06dafbaa1f950d099eb73e4ac77d70b06 \
+xcaddy build v2.11.4 \
+  --with github.com/mholt/caddy-l4@v0.1.2 \
   --with github.com/loremlabs/thanks-computer/caddy/proxytlv@<commit-or-tag>
 ```
 
@@ -66,9 +66,14 @@ the chassis that is the listener's `;proxy=CIDR|CIDR` list.
   directory's `go.mod` (Caddy, caddy-l4, go-proxyproto), never the chassis's
   dependency graph. It imports nothing from `chassis/`. Tags take the
   nested-module form, `caddy/proxytlv/v0.1.0`.
-- Pinned to the caddy-l4 commit and go-proxyproto version the edge already
-  builds (the last caddy-l4 on the Caddy 2.10 line), so adding it changes
-  no other module's version.
+- Built against Caddy v2.11.4 and caddy-l4 v0.1.2, the pair the edge
+  builds. xcaddy refuses a module that wants a newer Caddy than the one
+  it builds, so this `go.mod` moves only when the edge's Caddy does.
+  `golang.org/x/text` is raised past Caddy's own pick for an advisory in
+  `unicode/norm`, which hostname normalization reaches; nothing else is.
+- The handler hands `next` a `cx.Wrap` of the connection, never a
+  `layer4.Connection` built by hand: in caddy-l4 v0.1.x the vars and the
+  replacer live in unexported fields that only `Wrap` copies.
 - No client-certificate TLVs: the edge does not ask for client certs.
   `PP2_TYPE_SSL`'s verify field is therefore always non-zero.
 
