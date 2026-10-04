@@ -47,7 +47,7 @@ type devEnrollResponse struct {
 // handleDevEnroll exchanges a shared dev secret for a new actor + key
 // pair with admin:all capability. The effective secret comes from
 // Controller.devEnrollSecret, which is either an operator-supplied
-// --auth-dev-enroll-secret or a first-boot auto-generated 4-word
+// --auth-dev-enroll-secret or a first-boot auto-generated 8-word
 // string (see Controller.resolveDevEnrollSecret).
 //
 // When the secret is auto-generated, this handler enforces

@@ -29,6 +29,7 @@ Read in order, or jump to what you need:
    model. About 2 minutes.
 3. **[Tutorial: hello, world](./tutorial/hello-world.md)** — hands-on, end to
    end on the hosted service: sign in, pull a package, deploy, get a public URL.
+   Then **[an email auto-responder](./tutorial/auto-responder.md)**: the same, for mail.
 4. **[Operations](./ops.md)** — the unit of work: three shapes, one
    JSON-merge contract, any language.
 5. **[Resonators](./resonators.md)** — the trigger condition that gates each operation:
@@ -61,12 +62,14 @@ Read in order, or jump to what you need:
     stack reads and writes, for humans and machines.
 17. **[Packages](./packages.md)** — share a working department; install
     someone else's.
-18. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
+18. **[Routing](./routing.md)** — how an event finds its tenant and stack:
+    hostnames, bindings, and what happens when nothing matches.
+19. **[Domains](./advanced/protocols/dns.md)** — delegate a subdomain and the chassis
     runs its DNS: mail records, reputation keys, TLS, handled.
-19. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
+20. **[Tenants](./tenants.md)** — one chassis, many isolated worlds:
     stacks, domains, secrets, people, and usage, walled per tenant.
-20. **[Running a chassis](./running.md)** — `txco serve` and the
-    author–apply loop, on your own machine.
+21. **[Running a chassis](./running.md)** — self-hosting: `txco serve`,
+    enrolling your key, and deploying to it.
 
 Building stacks day to day? The **[authoring guides](./authoring/README.md)**
 cover the workspace layout, the `txco dev` loop, mocks, and nano-ops.

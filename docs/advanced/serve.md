@@ -6,15 +6,29 @@ disk, and the flags that matter in production._
 Every flag can also be set as an environment variable using the
 `TXCO_` prefix and underscores (`--ingress-config` ↔
 `TXCO_INGRESS_CONFIG`). `--env` (default `dev`) names the environment
-and is embedded in database filenames.
+and is embedded in database filenames. This page covers the flags that
+matter together; [every flag](./flags.md) lists all of them, generated
+from the code. Running several chassis as one: [fleet](./fleet.md).
 
 ## Personalities
 
 `--personalities` selects which heads the chassis boots. Default:
-`cron,tcp,web,admin`. Opt-in: `lmtp` (inbound mail — see
-[lmtp.md](./protocols/lmtp.md)) and `dns` (authoritative DNS for
-delegated zones, required for the built-in ACME TLS path — see
-[dns.md](./protocols/dns.md)).
+`cron,tcp,web,admin`. The rest are opt-in:
+
+| Personality | What it adds |
+|---|---|
+| `lmtp` | Inbound mail ([lmtp](./protocols/lmtp.md)) |
+| `mailmap` | A Postfix `tcp_table` responder that tells the edge mail server which domains are accepted, from the tenants' hostnames. Off until `--mailmap-listen-addrs` gives it an address; it is unauthenticated, so bind it only where that Postfix reaches it |
+| `dns` | Authoritative DNS for delegated zones; required for the built-in ACME TLS path ([dns](./protocols/dns.md)) |
+| `imap` | Mailboxes stacks fill, served to mail clients ([imap](./protocols/imap.md)) |
+| `websocket` | Sessions on the web head ([websocket](./protocols/websocket.md)) |
+| `calendar`, `contacts` | CalDAV and ICS feeds, CardDAV, on the web head ([calendar](./protocols/calendar.md), [contacts](./protocols/contacts.md)) |
+| `webdav` | The drive as a mountable folder, on the web head ([webdav](./protocols/webdav.md)) |
+| `ipp` | A stack as a printer ([ipp](./protocols/ipp.md)) |
+| `scheduled` | The poller that fires `txco://schedule` events ([scheduled](./protocols/scheduled.md)) |
+| `state` | The dispatcher that presents state transitions ([state](./protocols/state.md)) |
+| `source` | The poller that watches remote mailboxes ([source](./protocols/source.md)) |
+| `grant` | The socket `txco sandbox` reaches the chassis on ([grants](./grants.md)) |
 
 | Head  | Flag                 | Default | Notes                                                                  |
 | ----- | -------------------- | ------- | ---------------------------------------------------------------------- |
@@ -80,10 +94,33 @@ All state is local files — back **these** up.
 | `./chassis/data/secrets/txco-master.key` | Secret-store master key — back up separately; see the [secret-store runbook](./runbook-secret-store.md) |
 | `./chassis/data/continuations/`     | Suspended-run state (`--continuation-store=file`) |
 | `./chassis/data/artifacts/`         | Compute artifacts (wasm modules)                  |
+| `./chassis/data/filecas/`           | The content-addressed store: [blob](./blobs.md) bytes, dataset artifacts, retained mail |
 | `./data/trace/`                     | Trace output when `--trace-mode` ≠ `off`          |
 
+A personality's store exists once that personality runs (with its SQLite
+backend, the default):
+
+| Path | What | Personality |
+|---|---|---|
+| `./chassis/data/state.db` | [State](./protocols/state.md) records and their transition events | `state` |
+| `./chassis/data/scheduled.db` | [Scheduled](./protocols/scheduled.md) events not yet fired | `scheduled` |
+| `./chassis/data/imap.db` | [IMAP](./protocols/imap.md) accounts, mailboxes and message index | `imap` |
+| `./chassis/data/calendar.db` | [Calendars](./protocols/calendar.md) and their events | `calendar` |
+| `./chassis/data/contacts.db` | [Address books](./protocols/contacts.md) and their cards | `contacts` |
+| `./chassis/data/drive.db`, `./chassis/data/drive/` | The [drive](./drive.md)'s index and its bytes | `webdav` |
+| `./chassis/data/ipp.db` | [Printers](./protocols/ipp.md) and print jobs | `ipp` |
+| `./chassis/data/notebook.db` | [Notebooks](./notebooks.md) | any |
+| `./chassis/data/vector.db` | The [vector store](../vectors.md) | any |
+| `./chassis/data/search/` | The [search store](../search.md), one index directory per collection | any |
+| `./chassis/data/workspaces/` | Files of [workspaces](../workspaces.md) on the local provider | any |
+| `./acme/` | Issued TLS certificates and the ACME account (`--cert-storage-path`) | `web` with ACME |
+
+Disposable, rebuilt as needed: `./chassis/data/datasets/` (a cache of
+dataset artifacts in front of the content store) and the DB mirror below.
+
 Roots are configurable (`--db-root-dir`, `--kvstore-addrs`,
-`--secret-master-key`, `--trace-dir`, …).
+`--secret-master-key`, `--trace-dir`, and a `--<store>-db-path` or
+`--<store>-path` flag per store above).
 
 The request path never reads the runtime DB directly: it reads a SQLite
 *mirror* of it, rebuilt on every `txco apply` and swapped in atomically.
@@ -184,18 +221,30 @@ tenant could route a hostname it hasn't proven it owns.
 ## Admin auth
 
 `--auth-mode` is one of `basic`, `signed`, or `both` (default `both`);
-`--admin-user` / `--admin-pass` set the basic credentials. With no
-basic credentials and no enrolled signing keys, the chassis runs in
-open-dev mode (requests get an `admin:all` context, `source: "open"`)
-— local development only. Details and the enrolment flow:
-[admin-api.md](./admin-api.md).
+`--admin-user` / `--admin-pass` set the basic credentials. With `basic` or
+`both`, no basic credentials, and a dev `--env` (the default) or
+`--admin-allow-open`, the chassis runs in open-dev mode: a request with no
+credentials gets an `admin:all` context, `source: "open"` — local
+development only. Outside a dev `--env` the same setup fails closed. Details
+and the enrolment flow: [admin-api.md](./admin-api.md).
+
+The admin API's unauthenticated endpoints (dev enrolment, accepting an
+invitation, cloud OAuth enrolment) share one rate limit per client IP: 10 attempts a minute by
+default. `TXCO_THROTTLE_RATE` (attempts) and `TXCO_THROTTLE_WINDOW` (a
+duration such as `30s`) change it, and any value in `TXCO_THROTTLE_DISABLED`
+turns it off. These three are read from the environment only, not as flags.
 
 ## Observability
 
 - `--trace-mode` `off` (default) | `summary` | `full`; `--trace-dir`
   (default `./data/trace`); `--trace-async` (default `false`) moves
   trace writes off the request path — see [trace.md](./trace.md).
-- Prometheus metrics are exported under the `txco` namespace
-  (`--prom-namespace`).
+- The chassis's own metrics and spans (request counts and timings,
+  per-op durations) go out over OTLP to whatever the standard
+  `OTEL_EXPORTER_OTLP_ENDPOINT` names — see [telemetry](../telemetry.md).
+  (`--prom-namespace` and `--prom-period` are not read: there is no
+  Prometheus endpoint.)
+- One [usage record](./usage.md) per completed request, for metering
+  (`--usage-enabled`, default on).
 - `--log-ops` (default `disabled`) writes per-op logs to
   `--log-ops-dir`.

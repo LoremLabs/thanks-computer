@@ -16,7 +16,7 @@ The chassis records per-request artifacts (the inbound envelope, every op execut
 | `summary`       | Request header + timeline + per-step `meta.json` (timings, sizes, status). No payload bytes. |
 | `full`          | Everything, including handler in/out bodies per step.                                        |
 
-`--trace-dir` is the root (default `./data/trace`). `--trace-mode=full --trace-dir=/var/log/txco/traces` is a typical production setting when you actually want payloads. In `full` mode, bodies are capped per step by `--trace-body-cap-bytes` (default 65536).
+`--trace-dir` is the root (default `./data/trace`). `--trace-mode=full --trace-dir=/var/log/txco/traces` is a typical production setting when you actually want payloads. In `full` mode with `--trace-async`, bodies are capped per step by `--trace-body-cap-bytes` (default 65536); a synchronous sink writes them whole.
 
 `--trace-async=true` buffers writes through a worker goroutine so the request path never blocks on disk I/O. Recommended in production.
 

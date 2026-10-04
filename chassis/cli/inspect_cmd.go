@@ -155,7 +155,7 @@ matching inspector op answers with a structured card. trace answers "what just
 happened?" — inspect answers "what is the current state, and why?".
 
   txco inspect marketing user matt@example.com
-  txco inspect driplit reader matt@example.com --json
+  txco inspect library reader matt@example.com --json
   txco inspect crm company openai --arg window=30d
 
 Flags:

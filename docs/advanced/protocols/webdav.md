@@ -35,8 +35,9 @@ a reserved path prefix on every hostname it serves — `--drive-path-prefix`
 lives in its own SQLite file (`--drive-db-path`) and the bytes in a
 directory (`--drive-objects-file-dir`); the hosted build points both at
 shared backends (`--drive-store=postgres`, `--drive-objects=s3`) so every
-node serves one drive. For `txco dev` on plain HTTP add
-`--drive-insecure-auth`.
+node serves one drive. `txco dev --webdav` turns the head on with dev
+defaults, including Basic auth over plain HTTP (`--drive-insecure-auth`,
+which a production chassis leaves off).
 
 ## Provision
 

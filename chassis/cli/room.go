@@ -25,8 +25,9 @@ const defaultRoom = "general"
 //
 // A room is a durable shared context; a message sent to it becomes a normal
 // TxCo event (`@src == "room"`) that enters the same rule engine as web, mail,
-// and cron — there is no privileged "assistant path." v1 is one-shot send; the
-// live SSE feed + interactive REPL land in a later stage.
+// and cron — there is no privileged "assistant path." With a message it is a
+// one-shot send; with none, on a terminal, it opens the room's live feed and
+// reads messages from stdin (runRoomInteractive).
 func runRoom(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
 		printRoomUsage(stdout)
@@ -187,8 +188,8 @@ func isTerminal(f *os.File) bool {
 func printRoomUsage(w io.Writer) {
 	banner.PrintLogo(w)
 	fmt.Fprint(w, `
-Usage: thanks [--room <name>] <message>
-   or: txco room [--room <name>] <message>
+Usage: thanks [--room <name>] [<message>]
+   or: txco room [--room <name>] [<message>]
 
 Send a message into a room — a durable shared context. The message becomes a
 normal event (@src == "room") that your installed stacks can resonate on, with
@@ -196,13 +197,12 @@ the same tenant, capability, audit, and fuel checks as any other inlet.
 
   thanks --room support "why did ticket 184 fail?"   # one-shot send
   txco room --room dns "acme.com is not propagating"
+  thanks --room support                              # live feed; type to send, Ctrl-D to leave
 
 Flags:
   --room <name>     Room to post to (default: general)
   --tenant <slug>   Tenant (defaults to your profile's tenant)
   --profile <name>  Signing profile
   --addr <url>      Chassis admin endpoint (else your profile's chassis)
-
-The live feed + interactive REPL land in a later release.
 `)
 }

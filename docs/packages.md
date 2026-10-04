@@ -10,10 +10,17 @@ from a public GitHub repo (zero infrastructure) or any OCI registry
 (the same registries that already hold your container images).
 
 ```sh
-txco install ghcr.io/loremlabs/support-basic --as support
+txco install oci://ghcr.io/loremlabs/support-basic:0.1.0 --as support
 # review what landed in OPS/support/, wire your endpoints, then:
 txco apply
 ```
+
+A source names its scheme: `oci://host/name:tag`, `github:owner/repo@ref/subdir`
+or `dir:./path`. A bare name is a package on the default registry:
+`txco install hello-world` is `oci://registry.thanks.computer/txco/hello-world`,
+and `txco install acme/sales@v3` is `oci://registry.thanks.computer/acme/sales:v3`.
+A registry host written without `oci://` is read as a namespace on the default
+registry, so always spell the scheme for any other registry.
 
 Install **materializes and stops**: it writes plain, reviewable `.txcl`
 files into your workspace and never touches a running chassis. You read
@@ -45,7 +52,7 @@ support-basic
 
 ```sh
 txco package validate         # check the tree + manifest
-txco package publish --to ghcr.io/username/support-basic --sign
+txco package publish --to oci://ghcr.io/username/support-basic:0.1.0 --sign
 ```
 
 
@@ -54,8 +61,8 @@ txco package publish --to ghcr.io/username/support-basic --sign
 Others can then install your op stack with:
 
 ```sh
-txco package inspect ghcr.io/username/support-basic
-txco package install ghcr.io/username/support-basic --as support
+txco package inspect oci://ghcr.io/username/support-basic:0.1.0
+txco install oci://ghcr.io/username/support-basic:0.1.0 --as support
 ```
 
 And they can then modify it to meet their needs.

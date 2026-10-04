@@ -114,8 +114,10 @@ For zone `ai.example.com`:
   key is published at `txco._domainkey.ai.example.com` and the private
   key signs the tenant's [outbound mail](./sendmail.md)
   (longest-match: per-structured-host key, then zone key).
-- **DMARC**: `_dmarc.ai.example.com` is published as
-  `v=DMARC1; p=none` — monitor-only and **not yet configurable**.
+- **DMARC**: `_dmarc.ai.example.com` is published as `--dns-dmarc`,
+  by default `v=DMARC1; p=none` — monitor-only, with no report address.
+  The flag sets the policy for every delegated zone; empty publishes none.
+  It is published beside the SPF record, only when `--dns-mx-host` is set.
 - **Print front door**: with `--dns-ipp`, `ipp.ai.example.com` A/AAAA at
   the edge IPs — one name per zone (the printer rides the URL path, the
   tenant comes from the zone). `ipp` is therefore a reserved label: a
@@ -274,7 +276,8 @@ renews **wildcard certificates** (`ai.example.com` +
 lookups. Challenge writes arrive via RFC 2136 UPDATE, gated by TSIG
 (`--dns-update-tsig-key-name` / `--dns-update-tsig-secret`); they live
 in a transient challenge store, never in the zone tables. Certs persist
-under `--cert-storage-path` (default `./chassis/data/certs`). A front
+under `--cert-storage-path` (default `acme`, relative to the working
+directory), or in the backend `--cert-storage-dsn` names. A front
 proxy can instead ask `GET /_txco/tls-ask?domain=<sni>` to gate
 on-demand issuance against verified hostnames.
 

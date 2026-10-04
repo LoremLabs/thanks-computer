@@ -81,7 +81,8 @@ Bring the live BLOBS/ of every stack under <dir>/OPS/ into the tree: each
 seeded blob name's current content is streamed down (hash-verified) and
 written to OPS/<stack>/BLOBS/<name> when it differs from the local file.
 This is how you resolve a `+"`txco data apply`"+` refusal — pull, review the
-diff, apply. (VECTORS/ + KV/ materialisation: coming soon.)
+diff, apply. Only BLOBS/ come back this way; VECTORS/ and KV/ packs
+are not pulled.
 
 <dir> defaults to ".".
 

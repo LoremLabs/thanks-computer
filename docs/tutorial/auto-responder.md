@@ -11,7 +11,7 @@ command. No inbox to host, no DNS to configure.
 
 :::note
 **Cloud or local?** This tutorial uses the hosted service (free tier), where inbound mail
-"just works." To run it locally instead, `txco dev --personalities=cron,web,admin,lmtp`
+"just works." To run it locally instead, `txco dev --lmtp`
 boots a chassis with the mail head and you drive it with `swaks` over LMTP — see the
 [inbound-mailbox example](https://github.com/loremlabs/thanks-computer/tree/main/examples/inbound-support-mailbox)
 and [lmtp.md](../advanced/protocols/lmtp.md). The cloud path below is the simplest.

@@ -367,7 +367,7 @@ the binding is live; after it, binary frames are terminal bytes
 (client→stdin, process→client) and text frames are a typed control envelope
 (`{"type":"resize"|"signal"|"detach"}` in,
 `{"type":"attached"|"exit"|"expired"|"error"}` out). The design and the wire protocol are documented under the
-[websocket personality](./advanced/protocols/websocket.md#attached-transports-a-pty-on-a-session).
+[websocket personality](./advanced/protocols/websocket.md#attached-transports-a-pty-or-a-service-on-a-session).
 
 An attachment refuses `secrets.env.*` (an interactive user could echo the
 value back out), a `LOOP`, and `stream`; a second attach on an
@@ -481,7 +481,7 @@ name; the stack's txcl does not change.
 | `--workspace-local-root` | `./chassis/data/workspaces` | Root for `local` |
 | `--workspace-default-timeout` | `5m` | Per-exec default when `WITH timeout` is absent (sized for builds, tests, tool runs) |
 | `--workspace-max-output-bytes` | `1048576` | stdout/stderr capture cap, each |
-| `--workspace-reap` | `720h` | Idle window before the reaper destroys a workspace (fleet background service) |
+| `--workspace-reap` | `720h` | Idle window before a reaper destroys a workspace; read by a background service a deployment adds (the hosted service's `workspace-reaper`), not by open core |
 | `--workspace-attach-max-duration` | `8h` | Ceiling on one `attach` binding's life |
 | `--workspace-connect-max-duration` | `8h` | Ceiling on one `connect` binding's life |
 | `--workspace-services` | _(none)_ | Extra `connect` targets, `name=port` on the workspace's loopback, added to the built-in `browser=5900` |
@@ -519,12 +519,14 @@ that fails for any other reason is reported as-is and the workspace is
 left alone, because recreating on a transient error would quietly replace
 your files with an empty environment.
 
-**The reaper destroys.** Where the `workspace-reaper` background service
-runs, a workspace idle longer than `--workspace-reap` (30 days by default)
-is deleted at the provider and its row marked destroyed. Its files are
-gone — no snapshot is kept — and the next exec starts fresh. Operators can
-do the same by hand (`txco workspace ls --idle-days=30`,
-`txco workspace rm <tenant> <stack> <name>`) or take a `checkpoint` first.
+**A reaper destroys.** Open core does not delete idle workspaces; a
+deployment can add a background service that does. The hosted service runs
+one, `workspace-reaper`, which deletes a workspace idle longer than
+`--workspace-reap` (30 days by default) at the provider and marks its row
+destroyed. Its files are gone — no snapshot is kept — and the next exec
+starts fresh. The same build adds `txco workspace` for operators to list
+and remove workspaces by hand. Take a `checkpoint` first if the files
+matter. In open core, `--workspace-reap` is read only by such a service.
 
 ## Example
 

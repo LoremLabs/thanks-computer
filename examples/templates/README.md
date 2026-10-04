@@ -18,8 +18,8 @@ A template subdirectory is a **flat tree** of `<scope>/<name>.txcl` files (plus 
 
 Scope dirs can be bare integers (`100/`), zero-padded (`0100/`), or zero-padded with a descriptive suffix (`0100_TRIAGE/`). Multiple `*.txcl` files in the same scope dir are parallel rules at that stage — the chassis runs them concurrently and deep-merges their responses.
 
-There is no APPS/ directory in v2 — the chassis dispatches to existing HTTP endpoints rather than generating or deploying services.
+A template ships rules, not services: its `op://` references name HTTP endpoints you run, mapped to URLs in your workspace's `txco.yaml`. (If you develop those services in the same workspace, an `apps:` block there lets `txco dev` start them.)
 
 ## Available templates here
 
-- [`support-basic/`](./support-basic) — a 2-scope flow (classify → route) plus a `triage/` sub-stack override for high-priority cases.
+- [`support-basic/`](./support-basic) — a 3-scope flow: setup (audit + enrich) → triage (classify) → notify.

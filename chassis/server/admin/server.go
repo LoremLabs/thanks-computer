@@ -802,7 +802,7 @@ func (c *Controller) Stop() {
 //
 //	explicit secret set       → use as-is, autoGen=false (no burn).
 //	registry has any actor    → leave empty, no log.   (already bootstrapped)
-//	neither                   → generate a 4-word secret, autoGen=true,
+//	neither                   → generate an 8-word secret, autoGen=true,
 //	                            burn-after-use enforced by handleDevEnroll.
 //
 // Runs once at Start (after registry init, before handler mount); the

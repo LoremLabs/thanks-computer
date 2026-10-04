@@ -131,8 +131,9 @@ Result: `{uid, uidvalidity, sha256, size, noop, replaced, mailbox}`.
 Errors land as `<into>.error.{code, message}` with the run continuing:
 `txco_imap_disabled`, `txco_imap_no_account`, `txco_imap_no_mailbox`,
 `txco_imap_domain_not_owned`, `txco_imap_username_taken`,
-`txco_imap_invalid_arg`, `txco_imap_too_large`, `txco_imap_unsupported`
-(verbatim `from` / `from_sha` appends are not available yet).
+`txco_imap_invalid_arg`, `txco_imap_too_large`, `txco_imap_store`, and for a
+verbatim append (below) `txco_imap_no_message` when `from_sha` names nothing
+the tenant holds.
 
 The op charges [fuel](../fuel.md) per MiB of the rendered message like
 `blob/put`. Missing `Date:` and `Message-ID:` are synthesized

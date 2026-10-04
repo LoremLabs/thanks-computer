@@ -21,18 +21,21 @@ Requires Go (see `go.mod` for the version) and, for the embedded web UIs,
 Node + [pnpm](https://pnpm.io). From the repo root:
 
 ```sh
-make build          # builds the admin + continuation UIs, then the txco binary
+make build          # builds the admin, continuation and printer UIs, then the txco binary
 ./chassis/bin/txco --help
 ```
 
 `make build` runs the UI builds first (Vite writes the bundles into the
-`//go:embed` dirs) and then compiles `./cmd/txco`. A bare `go build ./cmd/txco`
-also works but ships placeholder web UIs.
+`//go:embed` dirs) and then compiles `./cmd/txco`. A bare
+`go build -tags sqlite_fts5 ./cmd/txco` also works but ships placeholder web UIs.
+Every build and test needs `-tags sqlite_fts5` (`txco://dataset` queries use
+SQLite's full-text extension); the Makefile passes it for you.
 
 ## Before opening a pull request
 
-- `cd chassis && go test ./...` is green.
-- `cd admin-ui && pnpm run check && pnpm test` is green (and likewise for
-  `continuation-ui` if you touched it).
+- `go test -tags sqlite_fts5 ./...` from the repo root is green (`make qtest`
+  runs the chassis packages with `-race`).
+- `cd admin-ui && pnpm run check && pnpm test` is green, and `pnpm run check`
+  in `continuation-ui` or `printer-ui` if you touched them.
 - Keep changes focused; match the style and structure of surrounding code.
 - Note any user-visible or config changes in the PR description.

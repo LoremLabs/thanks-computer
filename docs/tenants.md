@@ -52,7 +52,7 @@ you can see; `txco auth memberships` lists where you belong.
 ## Operating tenants
 
 Suspension is a clean kill switch: `txco admin tenant suspend acme
---deny-status 402 --deny-reason payment_required` makes the chassis
+--status 402 --reason payment_required` makes the chassis
 answer that tenant's traffic with your chosen denial — while still
 attributing the attempts to the tenant for the record. `resume` lifts
 it. Deleting is a soft revoke: routing and cron stop, history and audit
@@ -68,7 +68,7 @@ Everything, keyed at the database row:
 |---|---|
 | Stacks & rules | A stack name is unique *per tenant*; tenant A's rules never fire for tenant B's events |
 | Hostnames & [domains](./advanced/protocols/dns.md) | Hostname bindings, delegated DNS zones, and DKIM keys are tenant rows — one tenant's claim 409s another's |
-| [Secrets](./running.md) | Scoped `(tenant, stack, name)`; materialization can't cross the line |
+| [Secrets](./advanced/runbook-secret-store.md) | Scoped `(tenant, stack, name)`; materialization can't cross the line |
 | [Traces](./visibility.md) | Tenant-attributed; the admin API only serves them under `/v1/tenants/{slug}/…` |
 | [Cron](./advanced/protocols/cron.md) | Each tenant with a `_cron` stack gets its own tick envelope |
 | Usage & [fuel](./advanced/fuel.md) | Every request's spend is attributed to its tenant — the quota/billing dimension |

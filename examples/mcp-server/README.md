@@ -86,7 +86,7 @@ Prerequisites: `txco` on your PATH.
 
 ```sh
 # 1. Copy the workspace.
-cp -r examples/mcp-server-in-txcl ~/my-mcp-server
+cp -r examples/mcp-server ~/my-mcp-server
 cd ~/my-mcp-server
 
 # 2. Run the chassis.

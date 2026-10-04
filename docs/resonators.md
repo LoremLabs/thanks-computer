@@ -15,7 +15,7 @@ steps
 ```
 
 As [requests come into a stack](./routing.md), they start at the top of the stack, at `STEP 0`. The
-`txco chassis` first gathers all operations at that step, and then evaluates their 
+chassis first gathers all operations at that step, and then evaluates their 
 resonators to see if we should execute the operation. [If there is no step 0, txco
 automatically moves on to the next highest step.]
 

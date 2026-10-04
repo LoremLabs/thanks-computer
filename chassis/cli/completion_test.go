@@ -70,24 +70,28 @@ func TestCompletionTopLevelMatchesDispatchSwitch(t *testing.T) {
 // values).
 func collectDispatchCases(t *testing.T, file *ast.File) map[string]struct{} {
 	t.Helper()
+	return collectSwitchCases(t, file, "Dispatch")
+}
+
+// collectSwitchCases returns the literal string case arms of the switch
+// statements in function fnName's body (not those nested inside a case).
+func collectSwitchCases(t *testing.T, file *ast.File, fnName string) map[string]struct{} {
+	t.Helper()
 	out := map[string]struct{}{}
 
-	var dispatch *ast.FuncDecl
+	var fn *ast.FuncDecl
 	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-		if fn.Name != nil && fn.Name.Name == "Dispatch" {
-			dispatch = fn
+		d, ok := decl.(*ast.FuncDecl)
+		if ok && d.Recv == nil && d.Name != nil && d.Name.Name == fnName {
+			fn = d
 			break
 		}
 	}
-	if dispatch == nil {
-		t.Fatalf("Dispatch function not found in cli.go")
+	if fn == nil {
+		t.Fatalf("function %s not found", fnName)
 	}
 
-	ast.Inspect(dispatch.Body, func(n ast.Node) bool {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		sw, ok := n.(*ast.SwitchStmt)
 		if !ok {
 			return true
@@ -112,6 +116,101 @@ func collectDispatchCases(t *testing.T, file *ast.File) map[string]struct{} {
 		return false // don't walk deeper into nested switches
 	})
 	return out
+}
+
+// subcommandDispatchers names, for each command in cliCommandTree that has
+// subcommands, the function whose switch dispatches them. `plugin` is left
+// out: it dispatches with an if (`list`, or nothing), not a switch.
+var subcommandDispatchers = []struct{ path, file, fn string }{
+	{"auth", "auth/auth.go", "Dispatch"},
+	{"auth profile", "auth/profile_cmd.go", "runProfile"},
+	{"auth tenant", "auth/tenant_cmd.go", "runTenantCmd"},
+	{"auth tenant hostnames", "auth/tenant_cmd.go", "runTenantHostnames"},
+	{"auth tenant secrets", "auth/tenant_secrets_cmd.go", "runTenantSecrets"},
+	{"auth sessions", "auth/sessions.go", "runSessions"},
+	{"auth secrets", "auth/secrets_cmd.go", "runSecretsCmd"},
+	{"op", "op/dispatch.go", "Dispatch"},
+	{"package", "package_cmd.go", "runPackage"},
+	{"package key", "package_key.go", "runPackageKey"},
+	{"dns", "dns.go", "runDNS"},
+	{"dns zone", "dns.go", "runDNSZone"},
+	{"dns record", "dns.go", "runDNSRecord"},
+	{"dns config", "dns.go", "runDNSConfig"},
+	{"cron", "cron.go", "runCron"},
+	{"cron config", "cron.go", "runCronConfig"},
+	{"data", "data.go", "runData"},
+	{"snapshot", "snapshot.go", "runSnapshot"},
+	{"config", "config.go", "runConfig"},
+	{"mcp", "mcp.go", "runMcp"},
+	{"cloud", "cloud/cloud.go", "Dispatch"},
+	{"admin", "admin.go", "runAdmin"},
+	{"admin tenant", "admin.go", "runAdminTenant"},
+	{"kv", "auth/kv_cmd.go", "RunKV"},
+	{"notebook", "auth/notebook_cmd.go", "RunNotebook"},
+	{"source", "auth/sources_cmd.go", "RunSources"},
+	{"caps", "caps.go", "runCaps"},
+	{"stack", "stack_cmd.go", "runStack"},
+	{"update", "update_cmd.go", "runCLIUpdate"},
+}
+
+// treeNode finds the node at a space-separated path in cliCommandTree.
+func treeNode(path string) *node {
+	level := cliCommandTree
+	var found *node
+	for _, name := range strings.Fields(path) {
+		found = nil
+		for i := range level {
+			if level[i].Name == name {
+				found = &level[i]
+				break
+			}
+		}
+		if found == nil {
+			return nil
+		}
+		level = found.Children
+	}
+	return found
+}
+
+// TestCompletionSubcommandsMatchDispatchers holds every subcommand list in
+// the tree to its dispatcher's switch, both ways: a subcommand (or alias) the
+// code dispatches must complete, and the tree may offer nothing the code
+// does not dispatch. The top-level test above only covers Dispatch itself.
+func TestCompletionSubcommandsMatchDispatchers(t *testing.T) {
+	for _, d := range subcommandDispatchers {
+		n := treeNode(d.path)
+		if n == nil {
+			t.Errorf("%q: not in cliCommandTree", d.path)
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, d.file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", d.file, err)
+		}
+		code := collectSwitchCases(t, file, d.fn)
+		for _, help := range []string{"help", "-h", "--help"} {
+			delete(code, help)
+		}
+		tree := map[string]struct{}{}
+		for _, c := range n.Children {
+			tree[c.Name] = struct{}{}
+			for _, al := range c.Aliases {
+				tree[al] = struct{}{}
+			}
+		}
+		for name := range code {
+			if _, ok := tree[name]; !ok {
+				t.Errorf("txco %s %s: dispatched by %s (%s) but not in the completion tree", d.path, name, d.fn, d.file)
+			}
+		}
+		for name := range tree {
+			if _, ok := code[name]; !ok {
+				t.Errorf("txco %s %s: in the completion tree but %s (%s) does not dispatch it", d.path, name, d.fn, d.file)
+			}
+		}
+	}
 }
 
 // TestCompletionAllShellsEmit asserts each emitter produces non-empty

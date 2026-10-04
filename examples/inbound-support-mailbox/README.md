@@ -10,7 +10,7 @@ swaks → chassis LMTP → inbound-support/0   (accept per-recipient)
                             APPS/tickets logs the row
 ```
 
-Postfix isn't needed to exercise the example — `swaks` speaks LMTP directly to the chassis socket. Wire Postfix in front when you want real mail flowing in; see [`docs/lmtp.md`](../../docs/lmtp.md#postfix-recipe).
+Postfix isn't needed to exercise the example — `swaks` speaks LMTP directly to the chassis socket. Wire Postfix in front when you want real mail flowing in; see [`docs/lmtp.md`](../../docs/advanced/protocols/lmtp.md#postfix-recipe).
 
 ## Run it
 
@@ -98,7 +98,7 @@ There's no `_sys/` here — `txco dev` scaffolds it on first run.
 
 - **Add a category.** Drop a new single-rule file beside the others (e.g. `130/feature-request.txcl`) with `WHEN .ticket.category == "" && @lmtp.msg.subject =~ /…/ EMIT .ticket.category = "…"`. Pick a scope between the last arm (120) and the default (150) to set its priority. Hot-reload picks it up.
 - **Tempfail on an outage.** Have `200/post_ticket.txcl` return `_txc.lmtp.res.code = 451` on a downstream error so Postfix queues + retries (rather than the chassis's default-deny 550 bouncing the sender).
-- **Switch to Strategy A or B routing.** Uncomment the relevant block in `ingress.yaml` (see the inline comments) or set `--lmtp-default-hosts=chassis.example` on the chassis command line for Strategy A. See [`docs/lmtp.md`](../../docs/lmtp.md#resolution-order-per-rcpt-to) for the full routing model.
+- **Switch to Strategy A or B routing.** Uncomment the relevant block in `ingress.yaml` (see the inline comments) or set `--lmtp-default-hosts=chassis.example` on the chassis command line for Strategy A. See [`docs/lmtp.md`](../../docs/advanced/protocols/lmtp.md#resolution-order-per-rcpt-to) for the full routing model.
 - **Per-recipient mix.** Send a message to two recipients and accept one / reject the other. One `WHEN` per file, and `EMIT` (not `SET`) so the verdict persists — e.g. add `0/reject-bcc.txcl` next to `0/accept.txcl`:
 
   ```txcl
@@ -109,7 +109,7 @@ There's no `_sys/` here — `txco dev` scaffolds it on first run.
   ```
 
   Verify with `swaks --to support@your.tenant --to bcc-archive@your.tenant` — the wire log shows two distinct status lines.
-- **Front it with Postfix.** Follow [`docs/lmtp.md`](../../docs/lmtp.md#postfix-recipe). The chassis configuration above doesn't change; you just point `mailbox_transport` at the same socket.
+- **Front it with Postfix.** Follow [`docs/lmtp.md`](../../docs/advanced/protocols/lmtp.md#postfix-recipe). The chassis configuration above doesn't change; you just point `mailbox_transport` at the same socket.
 
 ## What this example does NOT show
 

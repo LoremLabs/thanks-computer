@@ -64,7 +64,7 @@ Variable substitutions are possible inside a `html/template`: `{{.Subject}}` is 
 
 :::note
 The `from` domain must be a **verified hostname of the sending tenant**
-([routing](../../routing.md#how-the-two-sources-compose)) — a rule can't send as a
+([routing](../../routing.md#hostname-dns-bindings)) — a rule can't send as a
 domain its tenant doesn't own. If a send fails with `from_not_verified`, add and
 verify the hostname first (`txco auth tenant hostnames add … && … verify`).
 :::

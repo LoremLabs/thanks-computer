@@ -11,19 +11,10 @@
 stack: support/default
 target: dev
 
-apps:
-  classify:
-    path: ./APPS/classify
-    start: npm run dev
-    health: http://localhost:4101/health
-  notify:
-    path: ./APPS/notify
-    start: npm run dev
-    health: http://localhost:4102/health
-  audit:
-    path: ./APPS/audit
-    start: npm run dev
-    health: http://localhost:4103/health
+# The template ships rules, not services: CLASSIFY, NOTIFY and AUDIT are
+# yours to run. If you develop them in this workspace, an `apps:` block
+# (name → path, start, health) lets `txco dev` start them beside the
+# chassis; otherwise point the URLs below at wherever they already run.
 
 # Default operation map — used when a target doesn't override.
 operations:

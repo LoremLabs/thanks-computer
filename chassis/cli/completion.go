@@ -42,21 +42,25 @@ type node struct {
 	Aliases  []string
 	Children []node
 	// Flags lists the flag names (without leading "--") this command
-	// accepts. Optional; when present, the bash/zsh emitters offer
-	// these on `--<TAB>`. When absent, the emitters fall back to a
-	// chassis-wide common-flag set (commonFlags).
+	// accepts. No emitter reads it yet: bash offers commonFlags on
+	// `--<TAB>` for every command, and zsh and fish offer no flags.
+	// Keep it accurate anyway, so wiring it in is an emitter change only.
 	Flags []string
 }
 
-// commonFlags is the fallback flag list when a command's own Flags is
-// empty. Sourced from the recurring set across apply/diff/status/dev
-// and the auth subcommands. Updating this is a one-line change that
-// improves every command's completion at once.
+// commonFlags is the flag list bash offers on `--<TAB>` for every command.
+// Sourced from the recurring set across apply/diff/status/dev and the auth
+// subcommands.
 var commonFlags = []string{
 	"--profile", "--url", "--tenant", "--stack",
 	"--addr", "--target", "--user", "--pass",
 	"--dry-run", "--verbose", "--help",
 }
+
+// targetFlagNames are the flags bindTargetFlags (targetflags.go) adds to every
+// command that talks to a chassis; the Flags list of a command that binds them
+// includes them.
+var targetFlagNames = []string{"target", "tenant", "profile", "addr", "url", "user", "pass", "yes"}
 
 // authChildren is the auth dispatcher's subtree. Mirrors the switch in
 // chassis/cli/auth/auth.go:17-63.
@@ -78,7 +82,7 @@ var authChildren = []node{
 		Children: []node{
 			{Name: "use", Desc: "Set the active profile"},
 			{Name: "show", Desc: "Show a profile's meta"},
-			{Name: "remove", Desc: "Delete a profile's meta + key"},
+			{Name: "remove", Desc: "Delete a profile's meta + key", Aliases: []string{"rm"}},
 		},
 	},
 	{Name: "tenants", Desc: "List tenants visible to the current actor"},
@@ -108,8 +112,9 @@ var authChildren = []node{
 					{Name: "generate", Desc: "Generate + store a random secret", Aliases: []string{"gen"}},
 					{Name: "rotate", Desc: "Rotate a secret's value"},
 					{Name: "list", Desc: "List secrets for this tenant", Aliases: []string{"ls"}},
-					{Name: "show", Desc: "Reveal a secret's value (audited)"},
+					{Name: "show", Desc: "Show one secret's metadata (values are never shown)"},
 					{Name: "describe", Desc: "Update a secret's description"},
+					{Name: "policy", Desc: "Whether work dispatched to a workspace may be handed it (--pull none|reviewed|any)"},
 					{Name: "revoke", Desc: "Revoke a secret", Aliases: []string{"rm"}},
 				},
 			},
@@ -121,8 +126,8 @@ var authChildren = []node{
 	{
 		Name: "sessions", Desc: "Browser session management",
 		Children: []node{
-			{Name: "list", Desc: "List active browser sessions"},
-			{Name: "revoke", Desc: "Revoke a browser session"},
+			{Name: "list", Desc: "List active browser sessions", Aliases: []string{"ls"}},
+			{Name: "revoke", Desc: "Revoke a browser session", Aliases: []string{"rm"}},
 		},
 	},
 	{
@@ -155,7 +160,7 @@ var packageChildren = []node{
 	{
 		Name: "key", Desc: "Package signing keys",
 		Children: []node{
-			{Name: "generate", Desc: "Generate a package signing key"},
+			{Name: "generate", Desc: "Generate a package signing key", Aliases: []string{"gen"}},
 		},
 	},
 }
@@ -166,23 +171,25 @@ var dnsChildren = []node{
 	{
 		Name: "zone", Desc: "DNS zone management",
 		Children: []node{
-			{Name: "create", Desc: "Create a delegated zone"},
-			{Name: "list", Desc: "List configured zones"},
-			{Name: "delete", Desc: "Delete a zone"},
+			{Name: "create", Desc: "Register a delegated zone (prints the NS delegation steps)"},
+			{Name: "verify", Desc: "Check the zone's NS delegate to this chassis, then activate it"},
+			{Name: "list", Desc: "List configured zones", Aliases: []string{"ls"}},
+			{Name: "set", Desc: "Change who answers a zone (--answer snapshot|stack, --fallback)"},
+			{Name: "delete", Desc: "Delete a zone", Aliases: []string{"rm", "revoke"}},
 		},
 	},
 	{
 		Name: "record", Desc: "DNS record overrides",
 		Children: []node{
-			{Name: "add", Desc: "Add a record override"},
-			{Name: "list", Desc: "List record overrides"},
-			{Name: "rm", Desc: "Remove a record override"},
+			{Name: "add", Desc: "Add a record override", Aliases: []string{"create"}},
+			{Name: "list", Desc: "List record overrides", Aliases: []string{"ls"}},
+			{Name: "rm", Desc: "Remove a record override", Aliases: []string{"delete", "revoke"}},
 		},
 	},
 	{
 		Name: "config", Desc: "DNS chassis config",
 		Children: []node{
-			{Name: "show", Desc: "Show DNS config"},
+			{Name: "show", Desc: "Show DNS config", Aliases: []string{"get"}},
 			{Name: "set", Desc: "Update DNS config"},
 		},
 	},
@@ -193,7 +200,7 @@ var cronChildren = []node{
 	{
 		Name: "config", Desc: "Per-tenant cron timezone",
 		Children: []node{
-			{Name: "show", Desc: "Show the cron timezone"},
+			{Name: "show", Desc: "Show the cron timezone", Aliases: []string{"get"}},
 			{Name: "set", Desc: "Set the cron timezone"},
 		},
 	},
@@ -201,12 +208,12 @@ var cronChildren = []node{
 
 // dataChildren mirrors chassis/cli/data.go (`txco data`).
 var dataChildren = []node{
-	{Name: "apply", Desc: "Deploy local VECTORS/+KV/ packs (code carried forward, then reconciled)"},
+	{Name: "apply", Desc: "Deploy local VECTORS/+KV/ packs (code carried forward, then reconciled)", Aliases: []string{"push"}},
 	{Name: "pull", Desc: "Materialise the live store into local packs"},
-	{Name: "ls", Desc: "List the tenant's vector collections"},
-	{Name: "show", Desc: "Show a collection's pin + item IDs"},
+	{Name: "ls", Desc: "List the tenant's vector collections", Aliases: []string{"list"}},
+	{Name: "show", Desc: "Show a collection's pin + item IDs", Aliases: []string{"describe"}},
 	{Name: "diff", Desc: "Compare a local pack to the live store"},
-	{Name: "rm", Desc: "Drop a whole collection (explicit teardown)"},
+	{Name: "rm", Desc: "Drop a whole collection (explicit teardown)", Aliases: []string{"drop", "delete"}},
 }
 
 // snapshotChildren mirrors chassis/cli/snapshot.go.
@@ -243,14 +250,16 @@ var cloudChildren = []node{
 
 // adminTenantChildren mirrors runAdminTenant in chassis/cli/admin.go.
 var adminTenantChildren = []node{
-	{Name: "suspend", Desc: "Deny a tenant's requests until resumed"},
+	{Name: "show", Desc: "A tenant's state: suspension and admission limits", Aliases: []string{"status", "get"}},
+	{Name: "suspend", Desc: "Deny a tenant's requests until resumed", Flags: []string{"status", "reason", "addr", "target", "user", "pass", "profile", "yes"}},
 	{Name: "resume", Desc: "Restore a suspended tenant"},
+	{Name: "limits", Desc: "Set a tenant's admission limits", Flags: []string{"rate", "burst", "concurrency", "addr", "target", "user", "pass", "profile", "yes"}},
 }
 
 // adminChildren mirrors the Dispatch switch in chassis/cli/admin.go:runAdmin.
 var adminChildren = []node{
 	{Name: "resync", Desc: "Re-emit a tenant's control-plane state to the fleet"},
-	{Name: "tenant", Desc: "Suspend/resume a tenant's request admission", Children: adminTenantChildren},
+	{Name: "tenant", Desc: "A tenant's admission: show, suspend/resume, limits", Children: adminTenantChildren},
 }
 
 // cliCommandTree is the authoritative root. Every non-hidden top-level
@@ -266,51 +275,56 @@ var cliCommandTree = []node{
 	{Name: "lint", Desc: "Validate the local OPS/ tree offline (collisions, txcl parse)", Flags: []string{"list", "json"}},
 	{Name: "status", Desc: "Show local workspace + chassis status"},
 	{Name: "pull", Desc: "Fetch a stack's rules from the chassis"},
-	{Name: "cat", Desc: "Print a deployed stack's file (manifest → CAS); debugging probe", Flags: []string{"json"}},
+	{Name: "cat", Desc: "Print a deployed stack's file (manifest → CAS); debugging probe", Flags: append([]string{"json"}, targetFlagNames...)},
 	{Name: "push", Desc: "Deploy one stack (create + activate; inverse of pull)"},
 	{Name: "draft", Desc: "Stage a draft version of a stack (no activate)"},
 	{Name: "activate", Desc: "Activate a draft version"},
 	{Name: "deactivate", Desc: "Retire a stack (activate an empty version; inverse of activate)"},
 	{Name: "stack", Desc: "Stack-level settings (e.g. set web=false)", Children: []node{
-		{Name: "set", Desc: "Change stack settings (web=true|false; --match for bulk)", Flags: []string{"force", "match", "json"}},
+		{Name: "set", Desc: "Change stack settings (web=true|false; --match for bulk)", Flags: append([]string{"force", "match", "json"}, targetFlagNames...)},
 	}},
 	{Name: "versions", Desc: "List stack versions"},
 	{Name: "caps", Desc: "The tenant's capability catalogue (CAPS/ declarations)", Children: []node{
-		{Name: "list", Desc: "List declared capabilities with the stack and scope that answer each", Flags: []string{"json"}},
+		{Name: "list", Desc: "List declared capabilities with the stack and scope that answer each", Aliases: []string{"ls"}, Flags: append([]string{"json"}, targetFlagNames...)},
 	}},
-	{Name: "runs", Desc: "List the tenant's runs in flight on the chassis", Flags: []string{"stack", "json"}},
-	{Name: "abort", Desc: "End a run in flight (by rid, or every run of --stack) without ending the chassis", Flags: []string{"stack", "reason", "json", "yes"}},
+	{Name: "runs", Desc: "List the tenant's runs in flight on the chassis", Flags: append([]string{"stack", "json"}, targetFlagNames...)},
+	{Name: "abort", Desc: "End a run in flight (by rid, or every run of --stack) without ending the chassis", Flags: append([]string{"stack", "reason", "json"}, targetFlagNames...)},
 	{Name: "edit", Desc: "Edit a rule and apply on save"},
-	{Name: "dev", Desc: "Run the dev loop (apps + chassis + hot reload)"},
+	{Name: "dev", Desc: "Run the dev loop (apps + chassis + hot reload)", Flags: []string{
+		"target", "workspace", "no-chassis", "chassis-addr", "web-addr",
+		"ui", "tcp", "dns", "lmtp", "imap", "calendar", "contacts", "webdav", "ipp",
+		"state", "scheduled", "source", "grant", "allow-local-workspace",
+		"watch", "watch-ignore", "apply", "force-opstacks", "verbose",
+	}},
 	{Name: "demo", Desc: "Start the txcl learning environment"},
 	{Name: "sandbox", Desc: "Start a program inside named sandboxes, opened with its run grant (inside a workspace)"},
 	{Name: "trace", Desc: "Inspect request traces"},
 	{Name: "snapshot", Desc: "Snapshot subcommands", Children: snapshotChildren},
 	{Name: "auth", Desc: "Auth + identity management", Children: authChildren},
 	{Name: "use", Desc: "Switch the active signing profile (alias for 'auth profile use')"},
-	{Name: "whoami", Desc: "Show the chassis's view of your identity (alias for 'auth whoami')", Flags: []string{"url", "profile", "name"}},
-	{Name: "ui", Desc: "Open the chassis admin UI, signed in (alias for 'auth login')", Flags: []string{"profile", "tenant", "url", "no-open", "label", "force-login"}},
+	{Name: "whoami", Desc: "Show the chassis's view of your identity (alias for 'auth whoami')", Flags: []string{"url", "addr", "target", "profile", "name"}},
+	{Name: "ui", Desc: "Open the chassis admin UI, signed in (alias for 'auth login')", Flags: []string{"profile", "tenant", "target", "url", "no-open", "label", "force-login"}},
 	{Name: "login", Desc: "Sign in to the thanks-computer cloud"},
 	{Name: "logout", Desc: "Sign out of the thanks-computer cloud"},
 	{Name: "cloud", Desc: "Cloud account subcommands (login/logout/whoami)", Children: cloudChildren},
 	{Name: "op", Desc: "Op subcommands (scaffold/build/run/test)", Children: opChildren},
-	{Name: "install", Desc: "Install a stack from a source"},
+	{Name: "install", Desc: "Install a stack from a source (oci://, github:, dir:, or a registry name)", Flags: []string{"as", "vendor-only", "dry-run", "force", "require-signature", "key"}},
 	{Name: "package", Desc: "Package subcommands (OCI distribution)", Children: packageChildren},
 	{Name: "packages", Desc: "Alias for 'package list'"},
 	{Name: "mcp", Desc: "MCP subcommands", Children: mcpChildren},
 	{Name: "config", Desc: "Config shortcuts (alias namespace for auth)", Children: configChildren},
 	{Name: "dns", Desc: "DNS zone + record management", Children: dnsChildren},
 	{Name: "kv", Desc: "Inspect the op-writable KV store", Children: []node{
-		{Name: "list", Desc: "List keys in a namespace (e.g. blog_subscribers)", Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
+		{Name: "list", Desc: "List keys in a namespace (e.g. blog_subscribers)", Aliases: []string{"ls"}, Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
 	}},
 	{Name: "notebook", Desc: "Read the append-only notebooks a stack writes", Children: []node{
-		{Name: "list", Desc: "List notebooks in a namespace", Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
+		{Name: "list", Desc: "List notebooks in a namespace", Aliases: []string{"ls"}, Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
 		{Name: "read", Desc: "Print entries oldest first (NDJSON)", Flags: []string{"tenant", "profile", "target", "url", "after", "since", "until", "type", "limit", "all"}},
 		{Name: "tail", Desc: "Print the newest N entries, oldest first", Flags: []string{"tenant", "profile", "target", "url", "n", "since", "until", "type"}},
 		{Name: "export", Desc: "Stream every selected entry as NDJSON", Flags: []string{"tenant", "profile", "target", "url", "after", "since", "until", "type", "limit"}},
 	}},
 	{Name: "source", Desc: "Inspect remote-source watchers (IMAP mailboxes)", Children: []node{
-		{Name: "status", Desc: "Show each declared source and its poll state", Flags: []string{"tenant", "profile", "target", "url"}},
+		{Name: "status", Desc: "Show each declared source and its poll state", Aliases: []string{"list", "ls"}, Flags: []string{"tenant", "profile", "target", "url"}},
 	}},
 	{Name: "data", Desc: "Deploy + inspect declarative store-seed packs (VECTORS/, KV/)", Children: dataChildren},
 	{Name: "cron", Desc: "Cron subcommands (timezone config)", Children: cronChildren},

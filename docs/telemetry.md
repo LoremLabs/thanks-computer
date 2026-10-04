@@ -44,8 +44,8 @@ Keep names low-cardinality and put the varying detail in `attrs` —
 Two tenant secrets are the whole configuration:
 
 ```sh
-txco secrets set TELEMETRY_ENDPOINT    # your OTLP/HTTP endpoint, e.g. https://ingest.example.com:4318
-txco secrets set TELEMETRY_HEADERS     # optional auth headers: "x-api-key=…" (k1=v1,k2=v2)
+txco auth tenant secrets set TELEMETRY_ENDPOINT   # prompts for your OTLP/HTTP endpoint, e.g. https://ingest.example.com:4318
+txco auth tenant secrets set TELEMETRY_HEADERS    # optional auth headers: "x-api-key=…" (k1=v1,k2=v2)
 ```
 
 Setting `TELEMETRY_ENDPOINT` turns export on; deleting it turns it off
