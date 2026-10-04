@@ -31,29 +31,29 @@ export function get<T = unknown>(obj: unknown, path: Path, dflt?: T): T | undefi
   return cur === undefined ? dflt : cur;
 }
 
-// Segments that would write through to a prototype instead of `obj`.
-const UNSAFE_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+function unsafeSegment(seg: string | number): Error {
+  return new Error(`envelope.set: unsafe path segment "${seg}"`);
+}
 
 /** Set a nested value by dot/array path, creating intermediate objects/arrays.
  *  Mutates and returns `obj`. Throws on a `__proto__`, `constructor` or
- *  `prototype` segment. */
+ *  `prototype` segment, which would write through to a prototype. */
 export function set<T extends object>(obj: T, path: Path, value: unknown): T {
   const segs = toSegments(path);
-  for (const seg of segs) {
-    if (typeof seg === "string" && UNSAFE_SEGMENTS.has(seg)) {
-      throw new Error(`envelope.set: unsafe path segment "${seg}"`);
-    }
-  }
   let cur: any = obj;
+  // The checks sit beside each write so code scanning sees the guard.
   for (let i = 0; i < segs.length - 1; i++) {
     const seg = segs[i];
+    if (seg === "__proto__" || seg === "constructor" || seg === "prototype") throw unsafeSegment(seg);
     const next = segs[i + 1];
     if (cur[seg] == null || typeof cur[seg] !== "object") {
       cur[seg] = typeof next === "number" ? [] : {};
     }
     cur = cur[seg];
   }
-  cur[segs[segs.length - 1] as any] = value;
+  const last = segs[segs.length - 1];
+  if (last === "__proto__" || last === "constructor" || last === "prototype") throw unsafeSegment(last);
+  cur[last as any] = value;
   return obj;
 }
 
