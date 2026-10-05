@@ -16,6 +16,10 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 )
 
+// messageParser is enmime with charset detection off for parts that declare
+// a charset (see ParseMessage).
+var messageParser = enmime.NewParser(enmime.DisableCharacterDetection(true))
+
 // ParseMessage takes RFC 5322 bytes and returns a JSON object describing the
 // message — the shared inbound-message shape used by BOTH the LMTP inlet
 // (under `_txc.lmtp.msg`) and the remote-source watcher (under
@@ -42,8 +46,16 @@ import (
 // entries in `env.Errors`. We surface those errors to the caller for logging
 // but do NOT fail — a partly-parsed envelope is more useful to rules than
 // nothing.
+//
+// A DECLARED CHARSET IS BELIEVED. enmime otherwise runs charset detection on
+// every text part of a hundred characters or more and, when the detector is
+// confident, uses its guess over what the message declared — and a UTF-8
+// text with a few curly quotes and a dash is confidently "windows-1252", so
+// correct mail arrived as mojibake ("I’m" → "Iâ€™m") depending on its
+// length and punctuation. Detection still runs for a part that declares no
+// charset at all.
 func ParseMessage(raw []byte) (jsonOut string, err error) {
-	env, err := enmime.ReadEnvelope(bytes.NewReader(raw))
+	env, err := messageParser.ReadEnvelope(bytes.NewReader(raw))
 	if err != nil {
 		return "", err
 	}

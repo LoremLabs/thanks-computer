@@ -448,3 +448,32 @@ func TestParseMessage_InlineFlag(t *testing.T) {
 		t.Errorf("inline-only message: attachments.0 = %s", first.Raw)
 	}
 }
+
+// A declared charset is believed. The parser's charset DETECTION ran on any
+// text part of a hundred characters or more and, when it was confident of
+// another charset, used that instead of the one the message declared: a
+// UTF-8 reply with a few curly quotes and a dash was read as windows-1252
+// and arrived as mojibake ("I’m" → "Iâ€™m"), while a shorter message
+// beside it arrived clean. Found on a pony's reply to a pony.
+func TestParseMessageBelievesTheDeclaredCharset(t *testing.T) {
+	const raw = "From: Garden Flat <garden-flat@core.example>\r\n" +
+		"To: researchpony@core.example\r\n" +
+		"Subject: Re: relay\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"Content-Transfer-Encoding: quoted-printable\r\n" +
+		"\r\n" +
+		"Hi =E2=80=94 I=E2=80=99m not working on anything right now, and I don=E2=80=99t need any=\r\n" +
+		" help at the moment. The last thing I did was answer this check-in.\r\n"
+	out, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := gjson.Get(out, "text").String()
+	if strings.Contains(text, "â€") {
+		t.Fatalf("declared utf-8 was re-read as another charset: %q", text)
+	}
+	if !strings.Contains(text, "Hi — I’m not working") || !strings.Contains(text, "I don’t need") {
+		t.Fatalf("text = %q", text)
+	}
+}
