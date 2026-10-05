@@ -126,8 +126,9 @@ func newAnswerLane(ctx context.Context, pu *processor.Unit, node string) *answer
 }
 
 // answer serves one query for a stack-answered zone, or returns nil when
-// the query is not the lane's to answer (not a stack zone, ANY, opcode/
-// question hygiene) so the caller falls through to the snapshot path.
+// the query is not the lane's to answer (not a stack zone, ANY, a zone
+// transfer, opcode/question hygiene) so the caller falls through to the
+// snapshot path.
 // stackSaw reports whether the stack itself handled THIS query (a sync
 // dispatch), so the caller can skip the observe tap — the stack sees each
 // query exactly once; cache hits and fallbacks are still tapped.
@@ -141,7 +142,7 @@ func (l *answerLane) answer(snap *ZoneSnapshot, w dns.ResponseWriter, req *dns.M
 	q := req.Question[0]
 	qname := strings.ToLower(dns.Fqdn(q.Name))
 	z := snap.zoneFor(qname)
-	if z == nil || !z.stackAnswered || q.Qtype == dns.TypeANY {
+	if z == nil || !z.stackAnswered || q.Qtype == dns.TypeANY || isZoneTransfer(q.Qtype) {
 		return nil, false
 	}
 

@@ -2,6 +2,7 @@ package dns
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -46,6 +47,18 @@ func TestBuildReply(t *testing.T) {
 	notify.Opcode = dns.OpcodeNotify
 	if m := buildReply(snap, notify, false); m.Rcode != dns.RcodeRefused {
 		t.Fatalf("opcode notify: rcode=%d", m.Rcode)
+	}
+
+	// Zone transfers are refused, not answered NODATA — over either
+	// transport.
+	for _, qt := range []uint16{dns.TypeAXFR, dns.TypeIXFR} {
+		for _, isUDP := range []bool{true, false} {
+			xfr := new(dns.Msg)
+			xfr.SetQuestion("ops.example.com.", qt)
+			if m := buildReply(snap, xfr, isUDP); m.Rcode != dns.RcodeRefused || m.Authoritative || len(m.Answer) != 0 || len(m.Ns) != 0 {
+				t.Fatalf("%s udp=%v: rcode=%d aa=%v ans=%d ns=%d", dns.TypeToString[qt], isUDP, m.Rcode, m.Authoritative, len(m.Answer), len(m.Ns))
+			}
+		}
 	}
 
 	// No snapshot yet → SERVFAIL (never panics).
@@ -131,5 +144,43 @@ func TestLiveServerRoundTrip(t *testing.T) {
 				t.Fatalf("foreign zone: rcode=%d aa=%v", resp2.Rcode, resp2.Authoritative)
 			}
 		})
+	}
+}
+
+// TestZoneTransferRefusedOnTheWire: what a secondary sees when it asks.
+// An AXFR client gets REFUSED on its first message rather than an empty
+// "transfer", and an IXFR (which may ride UDP) is refused too.
+func TestZoneTransferRefusedOnTheWire(t *testing.T) {
+	db := newTestDB(t)
+	seedZone(t, db, fixedTS)
+	snap := buildOrDie(t, db, SynthConfig{})
+
+	addr, stop := startServer(t, snap, "tcp")
+	defer stop()
+	axfr := new(dns.Msg)
+	axfr.SetAxfr("ops.example.com.")
+	ch, err := new(dns.Transfer).In(axfr, addr)
+	if err != nil {
+		t.Fatalf("transfer in: %v", err)
+	}
+	first, ok := <-ch
+	if !ok || first.Error == nil || !strings.Contains(first.Error.Error(), "rcode") {
+		t.Fatalf("AXFR: want a bad-rcode error, got %+v", first)
+	}
+	for range ch {
+	}
+
+	for _, network := range []string{"udp", "tcp"} {
+		uaddr, ustop := startServer(t, snap, network)
+		ixfr := new(dns.Msg)
+		ixfr.SetIxfr("ops.example.com.", fixedSerial-1, "ns1.ops.example.com.", "hostmaster.ops.example.com.")
+		resp, _, err := (&dns.Client{Net: network}).Exchange(ixfr, uaddr)
+		ustop()
+		if err != nil {
+			t.Fatalf("IXFR over %s: %v", network, err)
+		}
+		if resp.Rcode != dns.RcodeRefused || len(resp.Answer) != 0 {
+			t.Fatalf("IXFR over %s: rcode=%d ans=%d", network, resp.Rcode, len(resp.Answer))
+		}
 	}
 }

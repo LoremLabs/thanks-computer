@@ -274,6 +274,29 @@ func TestStackLaneInvalidAnswerFallsBack(t *testing.T) {
 	}
 }
 
+// TestStackLaneNeverSeesZoneTransfers: AXFR/IXFR in a stack-answered,
+// observing zone are refused at the head and reach neither `_dns` lane;
+// the stack's first and only run is the ordinary query after them.
+func TestStackLaneNeverSeesZoneTransfers(t *testing.T) {
+	bus := make(chan *event.Envelope, 8)
+	c, _ := newLaneController(t, bus, laneOpts{observe: true})
+	r := startResponder(t, bus, txtAnswer("x"))
+
+	for _, qt := range []uint16{dns.TypeAXFR, dns.TypeIXFR} {
+		w := ask(c, bus, "pat.example.com.", qt, false, false)
+		if w.written.Rcode != dns.RcodeRefused || w.written.Authoritative || len(w.written.Answer) != 0 {
+			t.Fatalf("%s: rcode=%d aa=%v ans=%d, want a bare REFUSED", dns.TypeToString[qt], w.written.Rcode, w.written.Authoritative, len(w.written.Answer))
+		}
+	}
+	if w := ask(c, bus, "a.pat.example.com.", dns.TypeTXT, true, false); len(w.written.Answer) != 1 {
+		t.Fatalf("control query was not stack-answered")
+	}
+	time.Sleep(150 * time.Millisecond) // a tapped transfer would land by now
+	if n := r.calls.Load(); n != 1 {
+		t.Fatalf("dispatches = %d (phases %v), want only the control query", n, r.seen())
+	}
+}
+
 // TestStackLaneLimiter: over the per-zone dispatch ceiling, queries fall
 // back without reaching the bus.
 func TestStackLaneLimiter(t *testing.T) {

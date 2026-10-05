@@ -130,7 +130,8 @@ For zone `ai.example.com`:
   from `tenant_hostnames` (reputation isolation per minted host).
 
 Anti-amplification response-rate-limiting and EDNS0/TCP-fallback are
-built in.
+built in. Zone transfers are not offered: an `AXFR` or `IXFR` request is
+answered `REFUSED`.
 
 ## Observing queries: the `_dns` stack
 
@@ -170,8 +171,8 @@ should be asking for — it's a stack, so it's rules.
 
 What you will *not* see: names outside any zone you own (the head refuses
 those and there is nobody to deliver to — which is also where scanner
-noise lives), queries the response-rate-limiter dropped, and RFC 2136
-updates. `_acme-challenge` lookups answered from the transient challenge
+noise lives), queries the response-rate-limiter dropped, zone-transfer
+requests (`AXFR`/`IXFR`, refused at the head), and RFC 2136 updates. `_acme-challenge` lookups answered from the transient challenge
 store **are** observed like any other query.
 
 The tap never touches the answer. `@dns.*` is read-only from a stack, and
@@ -254,7 +255,8 @@ cancelled — its late answer warms the cache for the next asker.
 | `--dns-stack-dispatch-per-sec` | `20` | per-zone ceiling on stack dispatches; `0` disables the limiter |
 
 What the stack never sees: names outside the zone (REFUSED), `ANY`
-(refused, anti-amplification), `_acme-challenge` lookups during
+(refused, anti-amplification), `AXFR`/`IXFR` (refused: no zone
+transfers), `_acme-challenge` lookups during
 certificate issuance, and RFC 2136 updates — those stay in the head so
 TLS never depends on tenant code. A stack-answered query is not
 re-delivered to the observe tap (the stack already saw it); cache hits

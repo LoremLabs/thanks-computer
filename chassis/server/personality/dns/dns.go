@@ -454,8 +454,8 @@ func (c *DNSController) makeHandler(isUDP bool) dns.HandlerFunc {
 
 // observe hands one answered query to the observe tap when (and only
 // when) the tap is on, the snapshot has any observing zone, the query is
-// a single QUERY question, and the name falls in a zone whose tenant has
-// an active `_dns` stack. Everything else returns without allocating —
+// a single QUERY question that is not a zone transfer, and the name falls
+// in a zone whose tenant has an active `_dns` stack. Everything else returns without allocating —
 // the default deployment (no `_dns` stack anywhere) pays one bool per
 // query.
 func (c *DNSController) observe(snap *ZoneSnapshot, w dns.ResponseWriter, req, m *dns.Msg, isUDP bool) {
@@ -466,6 +466,9 @@ func (c *DNSController) observe(snap *ZoneSnapshot, w dns.ResponseWriter, req, m
 		return
 	}
 	q := req.Question[0]
+	if isZoneTransfer(q.Qtype) {
+		return
+	}
 	z := snap.zoneFor(strings.ToLower(dns.Fqdn(q.Name)))
 	if z == nil || !z.observe {
 		return
@@ -501,6 +504,8 @@ func buildReply(snap *ZoneSnapshot, req *dns.Msg, isUDP bool) *dns.Msg {
 	case len(req.Question) != 1:
 		// Authoritative servers answer exactly one question.
 		m.Rcode = dns.RcodeRefused
+	case isZoneTransfer(req.Question[0].Qtype):
+		m.Rcode = dns.RcodeRefused
 	case snap == nil:
 		m.Rcode = dns.RcodeServerFailure
 	default:
@@ -514,6 +519,15 @@ func buildReply(snap *ZoneSnapshot, req *dns.Msg, isUDP bool) *dns.Msg {
 
 	applyUDPSizing(m, req, isUDP)
 	return m
+}
+
+// isZoneTransfer reports whether qtype asks for a whole zone (AXFR) or its
+// changes (IXFR). The head offers neither, and says so with REFUSED: what a
+// secondary expects from a primary that does not allow transfers, where an
+// authoritative NODATA would read as a broken one. Neither reaches a `_dns`
+// stack, through the answer lane or the observe tap.
+func isZoneTransfer(qtype uint16) bool {
+	return qtype == dns.TypeAXFR || qtype == dns.TypeIXFR
 }
 
 // applyUDPSizing negotiates EDNS0 buffer size and truncates over UDP (TCP

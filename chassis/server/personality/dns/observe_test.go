@@ -188,6 +188,11 @@ func TestObserveTapSkips(t *testing.T) {
 
 	ask(c, bus, "ops.example.com.", dns.TypeSOA, true, false) // served, tenant has no _dns
 	ask(c, bus, "example.org.", dns.TypeA, true, false)       // unserved → REFUSED
+	for _, qt := range []uint16{dns.TypeAXFR, dns.TypeIXFR} { // observing zone, but a transfer
+		if w := ask(c, bus, "pat.example.com.", qt, false, false); w.written.Rcode != dns.RcodeRefused {
+			t.Fatalf("%s: rcode = %d, want REFUSED", dns.TypeToString[qt], w.written.Rcode)
+		}
+	}
 	if env := recvEnvelope(t, bus, 150*time.Millisecond); env != nil {
 		t.Fatalf("unexpected envelope: %s", env.Payload.Raw)
 	}
