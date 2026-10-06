@@ -1,6 +1,6 @@
 # @txco/web-abi
 
-The conformance kit for the TxCo Web ABI: the contract a framework's build
+The conformance kit for the [Thanks, Computer](https://www.thanks.computer) (TxCo) Web ABI: the contract a framework's build
 produces so `txco` can deploy it.
 
 ```
@@ -27,13 +27,17 @@ the build has to answer.
 ## The manifest
 
 ```json
-{ "abi": 1, "server": { "entry": "server/index.mjs" }, "immutable": ["_app/immutable/"] }
+{
+  "abi": 1,
+  "server": { "entry": "server/index.mjs" },
+  "immutable": ["_app/immutable/"]
+}
 ```
 
-| Field          | Meaning |
-| -------------- | ------- |
-| `abi`          | `1` |
-| `server.entry` | The handler module, under `server/`. Leave it out for a static build. |
+| Field          | Meaning                                                                               |
+| -------------- | ------------------------------------------------------------------------------------- |
+| `abi`          | `1`                                                                                   |
+| `server.entry` | The handler module, under `server/`. Leave it out for a static build.                 |
 | `immutable`    | `public/` prefixes whose file names carry a content hash. They are cached for a year. |
 
 Keys starting with `x-` are free for producers. Any other key is an error.
@@ -42,10 +46,11 @@ Keys starting with `x-` are free for producers. Any other key is an error.
 
 ```js
 export default {
-  async fetch(request, ctx) {   // a Fetch Request; ctx = { client: { ip } }
-    return new Response("…")
-  }
-}
+  async fetch(request, ctx) {
+    // a Fetch Request; ctx = { client: { ip } }
+    return new Response("…");
+  },
+};
 ```
 
 - **Buffered both ways.** An answer is capped at about 3 MiB of body.
@@ -62,7 +67,11 @@ npx txco-web-abi serve <out> [--port 8787]      # public/ first, then server/
 ```
 
 ```js
-import { dispatch, envelopeToRequest, responseToDelta } from "@txco/web-abi/bridge";
+import {
+  dispatch,
+  envelopeToRequest,
+  responseToDelta,
+} from "@txco/web-abi/bridge";
 import { validateManifest } from "@txco/web-abi/manifest";
 ```
 
