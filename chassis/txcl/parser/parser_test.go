@@ -1161,6 +1161,24 @@ func TestParserWhenFunctionCall(t *testing.T) {
 			"error should require a regex literal, got %q", errs[0])
 	})
 
+	t.Run("regex comparison rejects a number or a bool", func(t *testing.T) {
+		for _, rhs := range []string{"5", "5.5", "true", "false"} {
+			for _, op := range []string{"=~", "!~"} {
+				_, errs := parse(`WHEN .h ` + op + ` ` + rhs)
+				test.Equals(t, 1, len(errs))
+				test.Assert(t, strings.Contains(errs[0], "regex literal"),
+					"%s %s: error should require a regex literal, got %q", op, rhs, errs[0])
+			}
+		}
+	})
+
+	t.Run("regex comparison still takes a regex or a string", func(t *testing.T) {
+		for _, rhs := range []string{`/^a/`, `"^a"`} {
+			_, errs := parse(`WHEN .h =~ ` + rhs)
+			test.Equals(t, []string{}, errs)
+		}
+	})
+
 	t.Run("unterminated call is a parse error", func(t *testing.T) {
 		_, errs := parse(`WHEN .h == &add(1,`)
 		test.Assert(t, len(errs) > 0, "expected parse error for unterminated call")

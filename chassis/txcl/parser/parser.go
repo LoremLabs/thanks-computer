@@ -1082,6 +1082,12 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 		p.wrongTypeParseError("bool, int, float, string, null, regex, or &function(...)")
 		return nil
 	}
+	// A regex comparison needs a pattern. A number or a bool here would
+	// reach evaluation as a non-string and could never match anything.
+	if (matchtype == "=~" || matchtype == "!~") && (p.curTokenIs(token.INT) || p.curTokenIs(token.FLOAT) || p.curTokenIs(token.TRUE) || p.curTokenIs(token.FALSE)) {
+		p.errors = append(p.errors, fmt.Sprintf("%s regex comparisons (=~, !~) take a regex literal, got %s", p.exprKeyword(), p.curToken.Literal))
+		return nil
+	}
 
 	var matchValue interface{}
 	switch p.curToken.Type {
@@ -1105,6 +1111,7 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 		MatchValue: matchValue,
 		MatchType:  matchtype,
 	}
+	leaf.CompileMatch()
 	return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
 }
 

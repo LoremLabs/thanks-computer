@@ -233,6 +233,25 @@ func TestWhenLegacyConditionsBackCompat(t *testing.T) {
 	}
 }
 
+// TestWhenRegexWithNonStringPatternIsFalse: a regex comparison whose
+// pattern isn't a string is no-match. It used to be an unchecked type
+// assertion, which panicked on the processor's goroutines and took the
+// chassis down.
+func TestWhenRegexWithNonStringPatternIsFalse(t *testing.T) {
+	env := `{"x":"5"}`
+	for _, mt := range []resonator.MatchType{"=~", "!~"} {
+		for _, mv := range []interface{}{int64(5), 5.0, true, nil} {
+			res := resonator.Resonator{When: &resonator.When{Expr: &resonator.WhenExpr{
+				Leaf:    resonator.Condition{Branch: &resonator.Branch{Path: ".x"}, MatchType: mt, MatchValue: mv},
+				HasLeaf: true,
+			}}}
+			if res.WhenMatches(env) {
+				t.Errorf("%s %v (%T): want no match", mt, mv, mv)
+			}
+		}
+	}
+}
+
 // TestWhenHyphenatedKey confirms a hyphenated branch path round-trips
 // through the parser into a working gjson lookup at evaluation time.
 func TestWhenHyphenatedKey(t *testing.T) {

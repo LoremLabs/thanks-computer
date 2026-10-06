@@ -3,6 +3,7 @@ package resonator
 import (
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/tidwall/gjson"
 
@@ -47,6 +48,54 @@ type Condition struct {
 	MatchCall *ast.FunctionCall `json:"matchCall,omitempty"`
 	Adds      *BranchValue      `json:"adds,omitempty"`   // for select, adding branches
 	Prunes    *BranchValue      `json:"prunes,omitempty"` // for select, removing branches
+
+	// re is a regex comparison's pattern, compiled once by CompileMatch
+	// when the parser builds the Condition. Nil for a hand-built or
+	// JSON-decoded Condition, which compiles through compiledPattern.
+	re *regexp.Regexp
+}
+
+// CompileMatch compiles a regex comparison's pattern once, so evaluating it
+// never compiles per request. The parser calls it on each Condition it
+// builds, before the tree is shared: never call it on a tree in use. An
+// invalid pattern stays uncompiled and evaluates to false, as it always has.
+func (c *Condition) CompileMatch() {
+	if c.MatchType != "=~" && c.MatchType != "!~" {
+		return
+	}
+	if s, ok := c.MatchValue.(string); ok {
+		if re, err := regexp.Compile(s); err == nil {
+			c.re = re
+		}
+	}
+}
+
+// patterns caches compiled patterns for Conditions that CompileMatch never
+// saw. Bounded: once full it stops adding, and a miss compiles as before.
+var patterns = struct {
+	sync.RWMutex
+	m map[string]*regexp.Regexp // nil value: the pattern doesn't compile
+}{m: map[string]*regexp.Regexp{}}
+
+const maxCachedPatterns = 4096
+
+func compiledPattern(pattern string) *regexp.Regexp {
+	patterns.RLock()
+	re, ok := patterns.m[pattern]
+	patterns.RUnlock()
+	if ok {
+		return re
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		re = nil
+	}
+	patterns.Lock()
+	if len(patterns.m) < maxCachedPatterns {
+		patterns.m[pattern] = re
+	}
+	patterns.Unlock()
+	return re
 }
 
 // WhenExpr is the boolean expression tree for a WHEN clause. Exactly
@@ -317,15 +366,21 @@ func evalLeaf(cond *Condition, input string) bool {
 	}
 
 	switch cond.MatchType {
-	case "=~":
-		re, err := regexp.Compile(cond.MatchValue.(string))
-		if err == nil {
-			return re.MatchString(val.String())
+	case "=~", "!~":
+		re := cond.re
+		if re == nil {
+			// A pattern that isn't a string (a hand-built Condition, or a
+			// rule parsed before the parser refused one) is no-match, never
+			// a panic: evaluation runs on the processor's goroutines, which
+			// don't recover.
+			pattern, ok := cond.MatchValue.(string)
+			if !ok {
+				return false
+			}
+			re = compiledPattern(pattern)
 		}
-	case "!~":
-		re, err := regexp.Compile(cond.MatchValue.(string))
-		if err == nil {
-			return !re.MatchString(val.String())
+		if re != nil {
+			return re.MatchString(val.String()) == (cond.MatchType == "=~")
 		}
 	default:
 		return compareTyped(val, cond.MatchType, cond.MatchValue)
