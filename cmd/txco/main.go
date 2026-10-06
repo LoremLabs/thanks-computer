@@ -21,7 +21,7 @@ import (
 // runtime (a release binary sitting in a Homebrew Cellar is brew-managed).
 // Any unstamped/dev build defaults to "source", which forbids self-update.
 var (
-	Version        = "0.2.43"
+	Version        = "0.2.44"
 	CommitId       = "dev"
 	BuildTimestamp = ""
 	InstallMethod  = "source"
