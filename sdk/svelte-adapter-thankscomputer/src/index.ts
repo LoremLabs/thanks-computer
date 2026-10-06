@@ -1,59 +1,68 @@
 import type { Adapter, Builder } from "@sveltejs/kit";
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
+import { renderOps } from "./ops.js";
+
+export { renderOps, knownRoutesRegex, catchAllScope } from "./ops.js";
+
 const NAME = "@txco/svelte-adapter-thankscomputer";
+const VERSION = "0.3.0";
 
 export interface AdapterOptions {
   /**
-   * The txco stack directory to write into — the one that holds `FILES/` and
-   * scope folders (e.g. `OPS/web`). The build lands in `<out>/FILES/`.
-   * Default: `OPS/web`.
+   * The Web ABI directory to write: `txco-web.json`, `public/` and `ops/`.
+   * Bind it to a stack in txco.yaml (`stacks: { web: { abi: <out> } }`).
+   * It is wiped and rewritten on every build, so it must lie outside OPS/.
+   * Default: `txco-web`.
    */
   out?: string;
   /**
    * SPA fallback page filename, or `false` to disable SPA mode (only the files
-   * you prerender will be served). Default: `index.html`.
+   * you prerender are served; other navigations get a plain 404).
+   * Default: `index.html`.
    */
   fallback?: string | false;
   /**
-   * Generate `<out>/<fallbackScope>/spa-fallback.txcl`, an op that serves the
-   * fallback shell for client-routed (extension-less) requests. Without it, a
-   * hard reload of `/some/route` 404s. Default: `true`.
+   * Write the navigation ops (spa-fallback, spa-404) that serve the fallback
+   * shell for client routes. Without them a hard reload of a client route
+   * 404s. Default: `true`.
    */
   fallbackOp?: boolean;
   /**
-   * txcl scope for the generated fallback op. Default: `900000`. The fallback is
-   * a catch-all that halts, so it must run LAST — after `txco://route` and any
-   * ops you add to this stack (APIs, redirects). A low scope would swallow
-   * extension-less requests (`/api/x`) before your own handlers see them. The
-   * default sits very high on purpose: it leaves the whole 1…899999 range free
-   * for your own ops, so you never have to squeeze handlers under the catch-all.
-   * (Empty scopes between your ops and this one cost nothing — the chassis
-   * floor-jumps to the next populated scope.)
+   * The scope for the generated navigation ops; the catch-all goes 900
+   * above it. Default: `900000`, the Web ABI producer band, after every op an
+   * author writes.
    */
   fallbackScope?: number;
   /**
-   * Run `txco apply` (in the current directory) after writing the build, to
-   * deploy in one step. Default: `false` — the adapter just prints the command.
+   * Run `txco apply` (in the current directory) after the build, to deploy in
+   * one step. Default: `false`.
    */
   apply?: boolean;
-  /** Precompress assets with gzip + brotli. Default: `false`. */
+  /**
+   * Deprecated and ignored: nothing serves precompressed copies (the edge
+   * compresses).
+   */
   precompress?: boolean;
 }
+
+// What a Web ABI directory may hold. Anything else in `out` means it isn't
+// one, and wiping it could destroy work.
+const ABI_ENTRIES = new Set(["txco-web.json", "public", "server", "ops", ".gitignore", ".DS_Store"]);
 
 /**
  * SvelteKit adapter for thanks.computer (txco).
  *
- * It emits a fully static build into a stack's `FILES/` directory — served by
- * the built-in `txco://static` op with ETags and conditional GET — and
- * generates a small SPA-fallback op so client routes resolve on a hard reload.
- * Deploy the result with `txco apply`.
+ * It writes a Web ABI build: the client and prerendered output as `public/`,
+ * the ops a SvelteKit SPA needs (a route-aware fallback and a catch-all) as
+ * `ops/`, and `txco-web.json`. Bind it to a stack in txco.yaml and deploy
+ * with `txco apply` / `txco push`; check it first with `txco web check`.
  */
 export default function adapter(options: AdapterOptions = {}): Adapter {
   const {
-    out = "OPS/web",
+    out = "txco-web",
     fallback = "index.html",
     fallbackOp = true,
     fallbackScope = 900000,
@@ -65,210 +74,99 @@ export default function adapter(options: AdapterOptions = {}): Adapter {
     name: NAME,
 
     async adapt(builder: Builder): Promise<void> {
-      // The one hard requirement: txco never serves a request whose path has a
-      // segment starting with "_" (a privacy convention — `FILES/_*` is readable
-      // by ops but not over HTTP). SvelteKit's default appDir is `_app`, so every
-      // hashed asset would silently 404. Fail loudly with the fix.
-      const appDir = builder.config.kit.appDir;
-      if (appDir.startsWith("_")) {
-        throw new Error(
-          `${NAME}: kit.appDir is "${appDir}", but thanks.computer never serves a ` +
-            `path whose segment begins with "_", so every hashed asset under ` +
-            `/${appDir}/ would 404. Set kit.appDir to a non-underscore name, e.g.\n\n` +
-            `  kit: {\n    appDir: 'app',\n    adapter: adapter({ /* ... */ })\n  }\n`,
-        );
-      }
-
-      const filesDir = join(out, "FILES");
-      builder.rimraf(filesDir);
-      builder.mkdirp(filesDir);
-
-      builder.log.minor(`Writing client + prerendered output to ${filesDir}/`);
-      // Client assets and prerendered pages share one tree; txco://static serves
-      // any path under FILES/, so there's no pages/assets split.
-      builder.writeClient(filesDir);
-      builder.writePrerendered(filesDir);
-
+      guardOut(out);
       if (precompress) {
-        builder.log.minor("Precompressing assets (gzip + brotli)");
-        await builder.compress(filesDir);
+        builder.log.warn(`${NAME}: precompress is deprecated and ignored — the edge compresses responses.`);
       }
 
-      let fallbackPath: string | null = null;
-      if (fallback) {
-        fallbackPath = join(filesDir, fallback);
+      builder.rimraf(out);
+      const pub = join(out, "public");
+      builder.mkdirp(pub);
+      builder.log.minor(`Writing client + prerendered output to ${pub}/`);
+      builder.writeClient(pub);
+      builder.writePrerendered(pub);
+      warnDotPaths(builder, pub);
+
+      let shell: string | null = null;
+      if (fallback && fallbackOp) {
+        const fallbackPath = join(pub, fallback);
         builder.log.minor(`Generating SPA fallback ${fallback}`);
         await builder.generateFallback(fallbackPath);
+        shell = readFileSync(fallbackPath, "utf8");
+      } else if (fallback) {
+        await builder.generateFallback(join(pub, fallback));
       }
 
-      if (fallbackOp) {
-        if (!fallbackPath) {
-          builder.log.warn(
-            `${NAME}: fallbackOp is on but fallback is disabled — skipping the SPA op. ` +
-              `Client routes will 404 on reload unless every route is prerendered.`,
-          );
-        } else {
-          writeFallbackOp(builder, out, fallbackScope, fallbackPath, fallback as string);
-        }
+      const ops = renderOps(builder.routes, {
+        scope: fallbackScope,
+        shell,
+        fallbackName: fallback || "",
+        producer: NAME,
+      });
+      for (const [rel, text] of Object.entries(ops)) {
+        const p = join(out, "ops", rel);
+        mkdirSync(dirname(p), { recursive: true });
+        writeFileSync(p, text);
       }
 
-      builder.log.success(`Built thanks.computer stack at ${out}/`);
+      const appDir = builder.config.kit.appDir;
+      const manifest = {
+        abi: 1,
+        immutable: [`${appDir}/immutable/`],
+        "x-producer": { name: NAME, version: VERSION },
+      };
+      writeFileSync(join(out, "txco-web.json"), JSON.stringify(manifest, null, 2) + "\n");
 
+      builder.log.success(`Built a Web ABI build at ${out}/ (${Object.keys(ops).length} ops)`);
       if (apply) {
         runApply(builder, out);
       } else {
-        builder.log.minor(`Next: deploy with \`txco apply\` (ships ${out}/ to your stack).`);
+        builder.log.minor(`Next: \`txco web check ${out}\`, then deploy with \`txco apply\` (bind ${out} to a stack in txco.yaml).`);
       }
     },
   };
 }
 
 /**
- * Write the SPA-fallback op. txco://static serves real files (assets, the
- * fallback page) at boot/50 and falls through for extension-less paths; this op
- * serves the shell for those so deep links / reloads render the app.
- *
- * The shell is embedded as a `b64"…"` typed-string literal — the lexer encodes
- * it at parse time (chassis/txcl/lexer/lexer.go:206-213), so the op file carries
- * READABLE HTML while the runtime still receives the canonical base64 body the
- * web inlet decodes. Escapes: only `\` and `"` need escaping; real newlines are
- * legal inside the literal. (Until 2026-08-31 this emitted the pre-encoded
- * base64 blob — functionally identical, but opaque to review and to diffs.)
- * It's regenerated on every build because the shell references content-hashed
- * asset URLs.
+ * Refuses an `out` that isn't a Web ABI directory: one inside OPS/ (where the
+ * walker would read it as a stack, and where 0.2 wrote its output), or an
+ * existing directory holding anything a build doesn't write. 0.3 wipes `out`
+ * on every build, so a 0.2 setting (`out: 'OPS/web'`) must never reach it.
  */
-function writeFallbackOp(
-  builder: Builder,
-  out: string,
-  scope: number,
-  fallbackPath: string,
-  fallbackName: string,
-): void {
-  const shell = readFileSync(fallbackPath).toString("utf8");
+function guardOut(out: string): void {
+  const abs = resolve(out);
+  if (abs.split(sep).includes("OPS")) {
+    throw new Error(
+      `${NAME}: out is "${out}", inside OPS/. Since 0.3 the adapter writes a Web ABI build ` +
+        `that it wipes on every build, so it must live outside OPS/ — e.g. out: 'txco-web' — ` +
+        `and be bound to the stack in txco.yaml:\n\n  stacks:\n    web:\n      abi: www/txco-web\n`,
+    );
+  }
+  if (!existsSync(abs)) return;
+  const stray = readdirSync(abs).filter((e) => !ABI_ENTRIES.has(e));
+  if (stray.length > 0) {
+    throw new Error(
+      `${NAME}: out "${out}" holds ${stray.slice(0, 3).join(", ")}${stray.length > 3 ? ", …" : ""}, ` +
+        `which isn't part of a Web ABI build. The adapter wipes out on every build, so point it ` +
+        `at a directory of its own.`,
+    );
+  }
+}
 
-  // Remove any stale generated fallback ops from previous builds (any scope), so
-  // exactly the intended files remain. A leftover at a lower scope would fire
-  // first and halt, silently defeating the current scope / route-aware behavior.
-  const generated = ["spa-fallback.txcl", "spa-404.txcl"];
-  if (existsSync(out)) {
-    for (const entry of readdirSync(out, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      for (const name of generated) {
-        const stale = join(out, entry.name, name);
-        if (existsSync(stale)) rmSync(stale);
-      }
+/** Dot paths in public/ never deploy (the installer skips them): say so. */
+function warnDotPaths(builder: Builder, pub: string): void {
+  const found: string[] = [];
+  const walk = (dir: string, rel: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.name.startsWith(".")) found.push(r);
+      else if (e.isDirectory()) walk(join(dir, e.name), r);
     }
+  };
+  walk(pub, "");
+  if (found.length > 0) {
+    builder.log.warn(`${NAME}: ${found.length} dot path(s) in the build never deploy: ${found.slice(0, 3).join(", ")}`);
   }
-
-  const opDir = join(out, String(scope));
-  builder.mkdirp(opDir);
-
-  // The WHENs fire only for navigations with no file extension. These ops live at
-  // a high (last-resort) scope so they run AFTER txco://route and any other ops in
-  // this stack — and halt — so they never swallow an extension-less request that
-  // an earlier-scope handler (e.g. an API) should answer.
-  const extGuard = "@web.req.url.path !~ /\\.[a-z0-9]+$/";
-  const known = knownRoutesRegex(builder.routes);
-
-  if (!known) {
-    // Fail open: no representable page routes (or a route uses a regex feature Go's
-    // RE2 lacks) → the legacy blanket-200 catch-all. Never worse than before, and
-    // never 404s a real route.
-    builder.log.warn(
-      `${NAME}: couldn't derive a route matcher from builder.routes — emitting the ` +
-        `legacy blanket-200 SPA fallback (unknown paths return 200, not 404).`,
-    );
-    const opPath = join(opDir, "spa-fallback.txcl");
-    writeFileSync(
-      opPath,
-      `# ${NAME} — SPA fallback (generated; do not edit by hand).
-#
-# Serves the SvelteKit shell for any extension-less path nothing else handled.
-# @web.res.body is ${fallbackName} as a b64"…" literal (encoded at parse time).
-# Regenerated on every \`vite build\` — it embeds content-hashed asset URLs.
-WHEN ${extGuard}
-${emitShell(200, shell)}`,
-    );
-    builder.log.minor(`Wrote SPA fallback op ${opPath} (blanket 200)`);
-    return;
-  }
-
-  // Route-aware: 200 for paths matching a known page route (the shell, so the
-  // client renders), 404 for extension-less paths that match no route at all.
-  // <known> is derived from SvelteKit's own route table, so it tracks route
-  // changes automatically. Two mutually-exclusive ops (one WHEN each, per the txcl
-  // convention) — the concrete + dynamic page routes share this same matcher.
-  const pageRoutes = builder.routes.filter(
-    (r) => r.page && r.page.methods.length > 0,
-  ).length;
-
-  writeFileSync(
-    join(opDir, "spa-fallback.txcl"),
-    `# ${NAME} — SPA fallback: known routes (generated; do not edit by hand).
-#
-# txco://static serves real files (assets, ${fallbackName}) at boot/50 and halts.
-# This op serves the SvelteKit shell (200) for client-rendered PAGE routes that no
-# static file or earlier op handled. The route set is derived from SvelteKit's own
-# route table (builder.routes[].pattern). Paired with spa-404.txcl, which 404s
-# extension-less paths matching no route.
-# @web.res.body is ${fallbackName} as a b64"…" literal. Regenerated on every build.
-WHEN ${extGuard} && @web.req.url.path =~ /${known}/
-${emitShell(200, shell)}`,
-  );
-
-  writeFileSync(
-    join(opDir, "spa-404.txcl"),
-    `# ${NAME} — SPA 404 (generated; do not edit by hand).
-#
-# An extension-less path matching NO known page route (and handled by no static
-# file or earlier op) is a genuine miss → HTTP 404. The shell is still served as
-# the body so the client renders its branded error page; only the status differs
-# from spa-fallback.txcl.
-WHEN ${extGuard} && @web.req.url.path !~ /${known}/
-${emitShell(404, shell)}`,
-  );
-
-  builder.log.minor(
-    `Wrote route-aware SPA fallback in ${opDir}/ (200 for ${pageRoutes} page routes, 404 otherwise)`,
-  );
-}
-
-/**
- * Build an anchored regex STRING matching exactly the SvelteKit PAGE routes,
- * derived from the framework's own route table (`builder.routes[].pattern`).
- * Returns null when there are no page routes, or when a route's pattern uses a
- * regex feature Go's RE2 engine (which txcl compiles with) can't represent — the
- * caller then falls back to the legacy blanket-200 op rather than risk 404-ing a
- * real route. Literal slashes are emitted escaped (`\\/`) for the txcl `/.../`
- * delimiter; the txcl lexer unescapes them to `/` before RE2 sees the pattern.
- */
-function knownRoutesRegex(routes: Builder["routes"]): string | null {
-  const parts: string[] = [];
-  for (const r of routes) {
-    // Renderable pages only (page.methods non-empty); skip +server.ts / api-only.
-    if (!r.page || r.page.methods.length === 0) continue;
-    let src = r.pattern.source; // e.g. "^\\/me\\/drips\\/([^/]+?)\\/?$"
-    // RE2 has no lookaround or backreferences; if a route needs them, bail.
-    if (/\(\?[=!<]/.test(src) || /\\[1-9]/.test(src)) return null;
-    src = src.replace(/^\^/, "").replace(/\$$/, ""); // strip anchors
-    src = src.replace(/\\?\//g, "\\/"); // normalize every literal slash for /.../
-    parts.push(`(?:${src})`);
-  }
-  return parts.length ? `^(?:${parts.join("|")})$` : null;
-}
-
-/** Shared EMIT tail for the fallback ops: headers, the readable shell, and halt. */
-function emitShell(status: number, shell: string): string {
-  // b64"…" typed string: the lexer base64-encodes at parse time, so the op
-  // file stays readable HTML. Only backslash and double-quote need escaping;
-  // literal newlines are legal inside the string.
-  const escaped = shell.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  return `  EMIT @web.res.status = ${status},
-       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
-       @web.res.headers.cache-control.0 = "no-cache",
-       @web.res.body = b64"${escaped}",
-       @halt = true
-`;
 }
 
 /** Deploy by shelling out to `txco apply` in the current working directory. */
@@ -277,8 +175,8 @@ function runApply(builder: Builder, out: string): void {
   const res = spawnSync("txco", ["apply"], { stdio: "inherit" });
   if (res.error) {
     builder.log.warn(
-      `txco apply could not start (${res.error.message}); run it yourself from the ` +
-        `workspace that contains ${out}/.`,
+      `txco apply could not start (${res.error.message}); run it yourself from the workspace ` +
+        `whose txco.yaml binds ${out}.`,
     );
   } else if (res.status !== 0) {
     builder.log.warn(`txco apply exited with code ${res.status}; see the output above.`);

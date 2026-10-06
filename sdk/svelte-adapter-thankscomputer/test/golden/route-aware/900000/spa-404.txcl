@@ -1,0 +1,12 @@
+# @txco/svelte-adapter-thankscomputer — SPA 404 (generated; do not edit by hand).
+#
+# A navigation matching no known page route is a real miss: 404, with the
+# shell as the body so the client renders its error page.
+WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
+     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/
+     && @web.req.url.path !~ /^(?:(?:\/)|(?:\/login\/?)|(?:\/book\/([^\/]+?)\/?))$/
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-cache",
+       @web.res.body = b64"<!doctype html><html><head><script type=\"module\">import(\"/app/immutable/start.js\")</script></head><body>\\o/</body></html>",
+       @halt = true

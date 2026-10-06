@@ -1,10 +1,12 @@
 # @txco/svelte-adapter-thankscomputer
 
-A [SvelteKit](https://svelte.dev/docs/kit) adapter that deploys your app to
-**thanks.computer** (txco). It writes a fully static build into a stack's
-`FILES/` directory — served by the built-in `txco://static` op with strong
-ETags and conditional GET — and generates a small **SPA-fallback op** so client
-routes resolve on a hard reload. Deploy the result with `txco apply`.
+A [SvelteKit](https://svelte.dev/docs/kit) adapter for **thanks.computer**
+(txco). It writes a **Web ABI build**:
+- your app as `public/`;
+- the ops a SvelteKit app needs as `ops/`;
+- a `txco-web.json` manifest.
+
+`txco apply` installs the build into a stack.
 
 ```sh
 npm install -D @txco/svelte-adapter-thankscomputer
@@ -18,70 +20,100 @@ import adapter from "@txco/svelte-adapter-thankscomputer";
 
 export default {
   kit: {
-    // REQUIRED: txco never serves a path whose segment starts with "_", so
-    // SvelteKit's default appDir ("_app") would 404 every hashed asset.
-    appDir: "app",
-    adapter: adapter({
-      out: "OPS/web", // the stack dir holding FILES/ and scope folders
-    }),
+    adapter: adapter({ out: "txco-web", fallback: "200.html" }),
   },
 };
 ```
 
-Then build and deploy:
+Bind the build to a stack in your workspace's `txco.yaml`. The path is
+relative to the workspace root, and must lie outside `OPS/`:
 
-```sh
-vite build       # writes OPS/web/FILES/** and OPS/web/900000/spa-fallback.txcl
-txco apply       # ships the stack to your tenant
+```yaml
+stacks:
+  web:
+    abi: www/txco-web
 ```
 
-Your app is now served at the stack's hostname — assets straight from
-`txco://static`, every client route falling back to the app shell.
+Then build, check and deploy:
 
-## Why `appDir` matters
+```sh
+vite build                      # writes www/txco-web/
+txco web check www/txco-web     # installs it on a scratch chassis and probes it
+txco apply                      # or: txco push web
+```
 
-txco treats any request path with a `_`-prefixed segment as private (readable by
-ops, never served over HTTP — e.g. `FILES/_mail/` templates). SvelteKit's default
-`appDir` is `_app`, so `/_app/immutable/*.js` — i.e. all your hashed JS/CSS —
-would silently fail to load. Setting `appDir` to a non-underscore name (`app`,
-`assets`, …) fixes it. The adapter **throws** if you leave it as `_app`.
+## What it writes
 
-## How it works
+```
+txco-web/
+  txco-web.json                   { "abi": 1, "immutable": ["<appDir>/immutable/"] }
+  public/                         client assets + prerendered pages + the fallback shell
+  ops/900000/spa-fallback.txcl    200 + the shell, for a navigation to a known page route
+  ops/900000/spa-404.txcl         404 + the shell, for a navigation that matches no route
+  ops/900900/not-found.txcl       a plain 404 for everything else (an asset miss, a POST)
+```
 
-- `vite build` runs the adapter, which writes client assets and any prerendered
-  pages into `<out>/FILES/`, plus a SPA fallback page (default `index.html`).
-- `txco://static` (the boot stack, scope 50) serves any real file under `FILES/`
-  for the routed tenant — with content-type, a content-hash ETag, and 304s.
-- `txco://static` also does `try_files` resolution: `/` → `index.html`, `/about` →
-  `about.html`, `/blog` → `blog/index.html`. So **prerendered** routes and the
-  homepage serve their own HTML directly.
-- A genuinely **client-rendered** route (no prerendered file) has nothing to
-  resolve, so static falls through and the generated `spa-fallback.txcl` op serves
-  the app shell — deep links and reloads still render correctly.
+The adapter wipes `out` and rewrites it on every build, so a stale op can't
+survive.
+- Commit `ops/` and `txco-web.json` if you want generated ops reviewed in
+  diffs; ignore `public/`.
+- `out` must be a directory of its own. The adapter refuses one inside `OPS/`
+  or one holding anything else.
+
+## How a request is answered
+
+1. **A file in `public/`** is served by `txco://static` before your stack runs.
+   That covers prerendered pages too: `/` → `index.html`, `/about` →
+   `about.html`, `/blog` → `blog/index.html`.
+2. **Your own ops** in the stack (APIs, auth, redirects) run next, at any scope
+   below 900000.
+3. **The build's ops** go last:
+   - a **navigation** (a GET or HEAD of a path with no extension) that matches
+     a page route gets the shell with 200;
+   - any other navigation gets the shell with 404, and the client renders its
+     error page;
+   - everything else gets a plain 404, so every request is answered.
+
+The route matcher comes from SvelteKit's own route table. If a route needs a
+regex feature Go's RE2 lacks (lookaround, backreferences), every navigation
+gets the shell with 200 instead.
+
+## `appDir` and `_` paths
+
+SvelteKit's default `appDir` is `_app`. txco treats a `_`-prefixed path as
+private, except for files installed from a build's `public/`. The installer
+marks those, so `_app/` and `_`-prefixed chunk hashes are served unchanged. An
+`appDir` without `_` (`app`) works too.
 
 ## Options
 
-| Option          | Default        | Description                                                                                  |
-| --------------- | -------------- | -------------------------------------------------------------------------------------------- |
-| `out`           | `"OPS/web"`    | Stack directory holding `FILES/` and scope folders; build lands in `<out>/FILES/`.           |
-| `fallback`      | `"index.html"` | SPA fallback page filename, or `false` to disable SPA mode (serve only prerendered files).   |
-| `fallbackOp`    | `true`         | Generate `<out>/<fallbackScope>/spa-fallback.txcl` to serve the shell for client routes.     |
-| `fallbackScope` | `900000`       | txcl scope for the generated fallback op. Very high by default so this catch-all runs last (after `txco://route` and any ops you add) and leaves the whole 1…899999 range free for your own ops. |
-| `apply`         | `false`        | Run `txco apply` in the current directory after building, to deploy in one step.             |
-| `precompress`   | `false`        | Precompress assets with gzip + brotli.                                                        |
+| Option          | Default        | Meaning |
+| --------------- | -------------- | ------- |
+| `out`           | `"txco-web"`   | The Web ABI directory to write (outside `OPS/`). |
+| `fallback`      | `"index.html"` | The SPA shell's file name in `public/`, or `false` for no SPA (navigations to unknown pages get a plain 404). |
+| `fallbackOp`    | `true`         | Write the navigation ops. |
+| `fallbackScope` | `900000`       | The navigation ops' scope; the catch-all goes 900 above it. |
+| `apply`         | `false`        | Run `txco apply` after the build. |
+| `precompress`   | `false`        | Deprecated and ignored: the edge compresses. |
 
-## Limitations (v1)
+## Moving from 0.2
 
-- **SPA *and* prerendered both work.** `txco://static` resolves clean URLs and
-  directory indexes (`/about` → `about.html`, `/blog` → `blog/index.html`, `/` →
-  `index.html`), so prerendered routes serve their own HTML; the fallback op covers
-  any remaining client-rendered routes. One edge: the fallback's `WHEN` matches
-  extension-less paths, so a client route that ends in a dot-suffix (e.g. `/v1.2`)
-  isn't caught — rare, and prerendering or an explicit op handles it.
-- **Per-file size.** Assets are capped (10 MiB on the fleet path); typical
-  SvelteKit chunks are far under this. A single very large asset needs a CDN.
-- **Whole-stack deploy.** Each `txco apply` replaces the stack version; unchanged
-  assets dedup by content hash, so the cost is metadata, not bytes.
+0.2 wrote into the stack directory (`out: 'OPS/web'`).
+
+1. Set `out` to a directory outside `OPS/` (e.g. `'txco-web'`).
+2. Bind the stack in `txco.yaml`.
+3. Delete the old `OPS/<stack>/FILES/` and the generated
+   `OPS/<stack>/900000/spa-*.txcl`.
+
+The adapter refuses an `out` inside `OPS/`, so a 0.2 config fails loudly
+instead of losing your ops. The chassis must support Web ABI markers;
+`txco apply` checks this for you.
+
+## Limits
+
+- **Static output only.** SSR (`+page.server.ts`, server `+server.ts`) needs a
+  server runner, which no chassis has yet.
+- **Dot paths** (`.well-known/…`) in the build never deploy; the adapter warns.
 
 ## License
 
