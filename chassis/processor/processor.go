@@ -2430,11 +2430,14 @@ func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh
 		// so a human hitting the app would just see raw JSON. Redirect
 		// (303 See Other) to the poll URL — the browser GETs it and
 		// lands on the branded waiting page, which then polls itself.
+		// Whole arrays, not .0: this is the chassis's answer, and the web
+		// head sends every value, so a stack value left at .1 would ride
+		// along.
 		out = jsonx.SetMany(out, []jsonx.PathVal{
 			{Path: "_txc.web.res.status", Val: 303},
-			{Path: "_txc.web.res.headers.location.0", Val: pollURL},
-			{Path: "_txc.web.res.headers.content-type.0", Val: "text/plain; charset=utf-8"},
-			{Path: "_txc.web.res.headers.cache-control.0", Val: "no-store"},
+			{Path: "_txc.web.res.headers.location", Val: []string{pollURL}},
+			{Path: "_txc.web.res.headers.content-type", Val: []string{"text/plain; charset=utf-8"}},
+			{Path: "_txc.web.res.headers.cache-control", Val: []string{"no-store"}},
 			// Non-empty body: the inlet treats an empty _txc.web.res.body as
 			// "no body → emit the whole envelope". The browser discards this
 			// and follows Location.
@@ -2448,10 +2451,10 @@ func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh
 		cbody, _ := json.Marshal(map[string]string{"status": "running", "continuation": rcid})
 		out = jsonx.SetMany(out, []jsonx.PathVal{
 			{Path: "_txc.web.res.status", Val: 202},
-			{Path: "_txc.web.res.headers.location.0", Val: pollURL},
-			{Path: "_txc.web.res.headers.retry-after.0", Val: "3"},
-			{Path: "_txc.web.res.headers.content-type.0", Val: "application/json"},
-			{Path: "_txc.web.res.headers.cache-control.0", Val: "no-store"},
+			{Path: "_txc.web.res.headers.location", Val: []string{pollURL}},
+			{Path: "_txc.web.res.headers.retry-after", Val: []string{"3"}},
+			{Path: "_txc.web.res.headers.content-type", Val: []string{"application/json"}},
+			{Path: "_txc.web.res.headers.cache-control", Val: []string{"no-store"}},
 			{Path: "_txc.web.res.body", Val: base64.StdEncoding.EncodeToString(cbody)},
 		})
 	}

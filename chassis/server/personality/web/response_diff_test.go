@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -200,23 +201,27 @@ func TestStripUnderscoreMatchesSlow(t *testing.T) {
 	t.Logf("fast strip hit rate: %d/8000", fastHits)
 }
 
-// TestApplyResponseHeadHeaders pins the header fan-out behavior: array
-// values set repeatedly (last wins per Set), scalar values set once.
+// TestApplyResponseHeadHeaders pins the header fan-out behavior: every
+// value of an array is sent, a scalar value once. The full rule is pinned
+// by TestWriteResHeaders.
 // Note: header NAMES containing '.' are now written too — the old
 // re-resolve-by-path form silently dropped them; that is a deliberate
 // behavior fix, not a regression.
 func TestApplyResponseHeadHeaders(t *testing.T) {
 	doc := `{"_txc":{"web":{"res":{"status":201,"headers":{"content-type":["text/plain"],"x-multi":["a","b"],"x-scalar":"solo"}}}}}`
 	rec := httptest.NewRecorder()
-	status := applyResponseHead(rec, doc)
+	status, conflicts := applyResponseHead(rec, doc)
 	if status != 201 {
 		t.Fatalf("status = %d, want 201", status)
+	}
+	if conflicts != nil {
+		t.Errorf("conflicts = %q, want none", conflicts)
 	}
 	if got := rec.Header().Get("Content-Type"); got != "text/plain" {
 		t.Errorf("content-type = %q", got)
 	}
-	if got := rec.Header().Get("X-Multi"); got != "b" {
-		t.Errorf("x-multi = %q, want last-wins b", got)
+	if got := rec.Header().Values("X-Multi"); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("x-multi = %q, want both values", got)
 	}
 	if got := rec.Header().Get("X-Scalar"); got != "solo" {
 		t.Errorf("x-scalar = %q", got)

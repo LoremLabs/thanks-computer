@@ -13,25 +13,80 @@ import (
 )
 
 // applyResponseHead applies the status and headers from a response
-// envelope to w, returning the resolved status. It mirrors the inline
+// envelope to w, returning the resolved status and writeResHeaders'
+// conflicts. It mirrors the inline
 // head-application in the buffered handler (checkStatus + checkContentType
 // + the _txc.web.res.headers fan-out) and is used by the streaming path,
 // which must commit status + headers before the first body chunk. It does
 // NOT call WriteHeader — the caller does, after this returns.
-func applyResponseHead(w http.ResponseWriter, output string) int {
+func applyResponseHead(w http.ResponseWriter, output string) (int, []string) {
 	output, status := checkStatus(output)
 	output = checkContentType(output)
-	// Iterate the header values off the already-held Result instead of
-	// re-resolving "_txc.web.res.headers.<key>" against the full doc
-	// per header (each of those Gets re-scanned the whole envelope).
+	conflicts := writeResHeaders(w.Header(), output)
+	return status, conflicts
+}
+
+// singleValued are the response fields HTTP defines as one value. Two
+// different values for one of them are the app's bug (a stack set it from
+// two ops), and browsers reject some outright (Chrome fails a response with
+// two different Location, Content-Disposition or Content-Length values).
+// The writer still sends what the app said; it reports the conflict so the
+// bug can be found.
+var singleValued = map[string]bool{
+	"Content-Type": true, "Content-Length": true, "Content-Disposition": true,
+	"Content-Location": true, "Content-Range": true, "Location": true,
+	"Etag": true, "Last-Modified": true, "Expires": true, "Retry-After": true,
+	"Access-Control-Allow-Origin": true, "Access-Control-Allow-Credentials": true,
+	"Strict-Transport-Security": true, "X-Frame-Options": true,
+	"X-Content-Type-Options": true, "Referrer-Policy": true,
+}
+
+// writeResHeaders renders _txc.web.res.headers onto h, for both the
+// buffered and the streaming writer, and returns the single-value fields
+// that got more than one distinct value.
+//
+// A header's value is an array (@web.res.headers.<name>.0, .1, …), and the
+// chassis sends exactly what the app wrote: every distinct value is its own
+// header line, as HTTP allows (repeated lines of a list-valued field mean
+// the same as one comma-joined line; Set-Cookie must repeat). Ops' outputs
+// merge by appending (processor.MergeJSON), so two ops setting the same
+// header both reach the client — the chassis doesn't arbitrate between
+// them. An exact repeat is written once, the empty Set-Cookie is dropped,
+// and the envelope's values replace any already on h.
+//
+// It iterates the held Result rather than re-resolving
+// "_txc.web.res.headers.<key>" per header, which re-scanned the whole
+// envelope each time.
+func writeResHeaders(h http.Header, output string) []string {
+	seen := map[string]map[string]bool{}
+	var order []string
 	gjson.Get(output, "_txc.web.res.headers").ForEach(func(key, value gjson.Result) bool {
-		value.ForEach(func(k, v gjson.Result) bool {
-			w.Header().Set(key.String(), v.String())
+		name := http.CanonicalHeaderKey(key.String())
+		vals := seen[name]
+		if vals == nil {
+			vals = map[string]bool{}
+			seen[name] = vals
+			order = append(order, name)
+			h.Del(name)
+		}
+		value.ForEach(func(_, v gjson.Result) bool {
+			s := v.String()
+			if vals[s] || (s == "" && name == "Set-Cookie") {
+				return true
+			}
+			vals[s] = true
+			h.Add(name, s)
 			return true
 		})
 		return true
 	})
-	return status
+	var conflicts []string
+	for _, name := range order {
+		if singleValued[name] && len(seen[name]) > 1 {
+			conflicts = append(conflicts, name)
+		}
+	}
+	return conflicts
 }
 
 // applyAdmission translates a transport-neutral admission-denial marker

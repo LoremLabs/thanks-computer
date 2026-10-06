@@ -34,7 +34,7 @@ func TestWriteStreamWritesHeadThenChunks(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		web.writeStream(ctx, cancel, rec, req, head, resCh)
+		web.writeStream(ctx, cancel, rec, req, "rid", head, resCh)
 		close(done)
 	}()
 
@@ -80,7 +80,7 @@ func TestWriteStreamHeadRequestOmitsBody(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		web.writeStream(ctx, cancel, rec, req, head, resCh)
+		web.writeStream(ctx, cancel, rec, req, "rid", head, resCh)
 		close(done)
 	}()
 

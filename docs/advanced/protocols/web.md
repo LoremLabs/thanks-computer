@@ -102,6 +102,42 @@ Content-Length: 17
 Thanks, Computer
 ```
 
+### Headers
+
+A header's value is an array, written as `@web.res.headers.<name>.0`.
+Ops' outputs merge by appending, so when two ops set the same header the
+array holds both values, the later op's last.
+
+The chassis sends every distinct value as its own header line, in that
+order. An exact repeat is sent once.
+
+- That is what HTTP means by a repeated header. For a list-valued header
+  (`Vary`, `Link`, `Cache-Control`), two lines mean the same as one
+  comma-joined line. `Set-Cookie` must repeat, one line per cookie:
+
+  ```txcl
+  EMIT @web.res.headers.set-cookie.0 = "sid=…; Path=/; HttpOnly; Secure",
+       @web.res.headers.set-cookie.1 = "cohort=2026-W40; Path=/"
+  ```
+
+- A single-value header (`Content-Type`, `Location`, `Content-Length`,
+  `Content-Disposition`, …) with two different values is a bug in the stack:
+  two ops both set it. The chassis doesn't pick one. It sends both, and logs
+  a warning naming the header and the request id. Browsers may reject such a
+  response; Chrome fails one with two different `Location`,
+  `Content-Disposition` or `Content-Length` values.
+- To replace a header an earlier op set, delete it in one scope and set it
+  in a later one. `@delete` applies after its scope merges, so a delete and
+  a set in the same op leave nothing:
+
+  ```txcl
+  # scope 500
+  EMIT @delete = ["@web.res.headers.content-type"]
+
+  # scope 600
+  EMIT @web.res.headers.content-type.0 = "text/plain; charset=utf-8"
+  ```
+
 **Streaming:** setting `@web.res.body` in a *non-terminal* scope locks
 the status + headers and switches to chunked transfer — each
 subsequent chunk flushes immediately, with natural backpressure (the

@@ -598,7 +598,7 @@ func (web *WebController) Start() {
 					// StreamHead (status + headers); take over and write
 					// chunks incrementally as they arrive.
 					if res.Type == event.StreamHead {
-						web.writeStream(ctx, cancel, w, r, res, resCh)
+						web.writeStream(ctx, cancel, w, r, rid, res, resCh)
 						return
 					}
 
@@ -660,16 +660,8 @@ func (web *WebController) Start() {
 					output, status := checkStatus(output)
 					output = checkContentType(output)
 
-					// output any headers — iterate the held value Result;
-					// re-resolving the dotted path per header re-scanned
-					// the full response doc every time
-					gjson.Get(output, "_txc.web.res.headers").ForEach(func(key, value gjson.Result) bool {
-						value.ForEach(func(k, v gjson.Result) bool {
-							w.Header().Set(key.String(), v.String())
-							return true
-						})
-						return true
-					})
+					// output every header value the stack wrote
+					web.warnHeaderConflicts(writeResHeaders(w.Header(), output), rid, r)
 
 					// if body, then return body
 					// if no body, then return json
@@ -814,6 +806,17 @@ func (web *WebController) Start() {
 	}
 }
 
+// warnHeaderConflicts logs the single-value headers a response carried two
+// values for (writeResHeaders). Both are sent; the warning is how the
+// stack's bug gets found.
+func (web *WebController) warnHeaderConflicts(conflicts []string, rid string, r *http.Request) {
+	if len(conflicts) == 0 {
+		return
+	}
+	web.pu.Logger.Warn("response has two values for a single-value header — the stack set it from more than one op",
+		zap.Strings("headers", conflicts), zap.String("rid", rid), zap.String("path", r.URL.Path))
+}
+
 // writeStream serves a streamed HTTP response. The processor sends a
 // StreamHead (status + headers snapshot), then zero or more StreamChunk
 // messages (raw body bytes), then a StreamEnd. We write the head once,
@@ -827,10 +830,12 @@ func (web *WebController) writeStream(
 	cancel context.CancelFunc,
 	w http.ResponseWriter,
 	r *http.Request,
+	rid string,
 	head event.Payload,
 	resCh chan event.Payload,
 ) {
-	status := applyResponseHead(w, head.Raw)
+	status, conflicts := applyResponseHead(w, head.Raw)
+	web.warnHeaderConflicts(conflicts, rid, r)
 	w.WriteHeader(status)
 	writeBody := canWriteBody(r, status)
 	rc := http.NewResponseController(w)
