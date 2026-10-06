@@ -1,0 +1,16 @@
+{
+  "description": "Expected JSON pointer of a problem for each invalid manifest. Read by the Go tests (chassis/webabi) and the JS kit, so both validators agree.",
+  "invalid": {
+    "no-abi.json": "",
+    "abi-2.json": "/abi",
+    "routes.json": "",
+    "entry-outside-server.json": "/server/entry",
+    "entry-dotdot.json": "/server/entry",
+    "server-extra-key.json": "/server",
+    "immutable-no-slash.json": "/immutable/0",
+    "immutable-duplicate.json": "/immutable",
+    "immutable-txco.json": "/immutable/0",
+    "immutable-dot.json": "/immutable/0",
+    "not-an-object.json": ""
+  }
+}

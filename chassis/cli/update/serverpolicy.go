@@ -30,6 +30,9 @@ type ServerInfo struct {
 	Chassis        string  `json:"chassis"`
 	BuildTimestamp string  `json:"build_timestamp"`
 	Client         *Policy `json:"client"`
+	// Features names what the chassis can do that an older one can't
+	// (admin.Features), e.g. "web-abi-markers".
+	Features []string `json:"features"`
 }
 
 // FetchServerInfo GETs the JSON form of <baseURL>/healthz (the chassis admin

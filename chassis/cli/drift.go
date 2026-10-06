@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
-	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 )
@@ -30,12 +28,13 @@ type stackDrift struct {
 }
 
 // buildDrifts collects per-stack drift records for the union of local
-// and remote stack names. `localOps` may be nil when the caller only
-// cares about remote-side state.
-func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []bundle.Op, remoteStacks []string) []stackDrift {
+// and remote stack names. ws is the local workspace (its ops, and the Web
+// ABI builds bound to its stacks).
+func buildDrifts(ctx context.Context, c *client.Client, ws *localWorkspace, remoteStacks []string) []stackDrift {
+	dir, localOps := ws.Dir, ws.Ops
 	stackSet := map[string]bool{}
-	for _, op := range localOps {
-		stackSet[op.Stack] = true
+	for _, name := range ws.StackNames() {
+		stackSet[name] = true
 	}
 	for _, name := range remoteStacks {
 		stackSet[name] = true
@@ -74,44 +73,14 @@ func buildDrifts(ctx context.Context, c *client.Client, dir string, localOps []b
 			// caller already walked (no re-walk). Reading raw disk paths instead
 			// made labeled-scope-dir / nested-op / FILES stacks falsely read
 			// "edited since pull". See loadLocalStackFiles.
-			stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(name))
-			files := opsToFiles(opsForStack(localOps, name))
-			if assets, aerr := collectFileAssets(stackDir); aerr == nil {
-				files = append(files, assets...)
-				// Datasets are part of the code manifest apply records, so the
-				// cleanliness hash must include them (fingerprint rows only —
-				// artifacts are hashed streaming, not read).
-				dsFiles, _, derr := collectDatasetFiles(stackDir)
-				if derr == nil {
-					files = append(files, dsFiles...)
-				}
-				// SOURCES/, OUTLETS/, SANDBOXES/ and CAPS/ ride the code manifest too.
-				if srcPacks, serr := collectSourcePacks(stackDir); serr == nil {
-					files = append(files, srcPacks...)
+			// (Any part failing to collect leaves the row unannotated.)
+			if ws.Broken[name] != nil {
+				d.Local += " (web build missing)"
+			} else if build, berr := buildStackFiles(dir, name, opsForStack(localOps, name), ws.withABI(name, collectOpts{})); berr == nil && saved.ManifestHash != "" {
+				if build.Hash() == saved.ManifestHash {
+					d.Local += " (clean)"
 				} else {
-					derr = serr
-				}
-				if outletFiles, oerr := collectOutletFiles(stackDir); oerr == nil {
-					files = append(files, outletFiles...)
-				} else {
-					derr = oerr
-				}
-				if sandboxFiles, sberr := collectSandboxFiles(stackDir); sberr == nil {
-					files = append(files, sandboxFiles...)
-				} else {
-					derr = sberr
-				}
-				if capFiles, cperr := collectCapFiles(stackDir); cperr == nil {
-					files = append(files, capFiles...)
-				} else {
-					derr = cperr
-				}
-				if saved.ManifestHash != "" && derr == nil {
-					if localManifestHash(files) == saved.ManifestHash {
-						d.Local += " (clean)"
-					} else {
-						d.Local += " (edited since pull)"
-					}
+					d.Local += " (edited since pull)"
 				}
 			}
 		}

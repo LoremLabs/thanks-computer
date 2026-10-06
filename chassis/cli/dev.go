@@ -106,6 +106,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	webdavHead := fs.Bool("webdav", false, "start the webdav personality (the drive store as a mountable folder) on the web head with dev defaults: served under http://<dev host>:<web port>/drive/ with Basic auth allowed over plaintext, index at .txco/dev/drive.db and the bytes under .txco/dev/drive/ — so a stack can provision an account with txco://drive/collection + txco://drive/account, issue its password with txco://credential/create, and Finder / rclone can mount it (server <bound-host>, port = the web port, SSL off, path /drive/). Disabled by default. Override TXCO_DRIVE_DB_PATH/DRIVE_OBJECTS_FILE_DIR/DRIVE_PATH_PREFIX.")
 	ippHead := fs.Bool("ipp", false, "start the ipp personality (a stack presented as a PRINTER) with dev defaults: the web head also listens on "+devIPPTLSAddr+" (HTTPS, self-signed certificate kept at .txco/dev/web-selfsigned.crt) and answers IPP on hosts named ipp.<bound-host> — ipps://ipp.localhost:8443/p/<printer>; job store at .txco/dev/ipp.db; every request's operation and attribute NAMES are logged. A tenant has printers only once it has an active `_ipp` stack AND a registered printer (txco://ipp/printer); a client signs in as the printer's principal, with a password from txco://credential/create. Disabled by default. Override TXCO_WEB_TLS_ADDR/IPP_DB_PATH/IPP_WIRE_DEBUG.")
 	lmtpHead := fs.Bool("lmtp", false, "start the LMTP mail head with dev defaults: binds "+devLMTPListenAddr+", relays outbound mail to a local sink ("+devMailRelayAddr+", TLS off — MailHog/Mailpit), and auto-loads ./ingress.yaml from the workspace when present (the local stand-in for minted hostnames). Disabled by default. Override any of TXCO_LMTP_LISTEN_ADDRS/MAIL_RELAY_ADDR/MAIL_RELAY_TLS/INGRESS_CONFIG.")
+	staticOnly := fs.Bool("static-only", false, "deploy a bound Web ABI build's static half even though it has a server entry (no chassis runs server/ yet)")
 	watch := fs.Bool("watch", true, "watch sources and hot-reload: compute edits rebuild + reactivate; OPS edits push to a per-stack draft. On by default (that's what `dev` is for); pass --watch=false to disable.")
 	watchIgnore := fs.StringArray("watch-ignore", nil, "glob pattern (repeatable) whose matching directories are pruned from the watcher — CPU saver in big workspaces. A pattern with `/` matches a dir's path under OPS/ (e.g. `publications/*/FILES`); a bare name matches anywhere (e.g. `node_modules`). Per-stack FILES/ trees are pruned by default; add `dev.watch.includeFiles: true` to txco.yaml to watch them.")
 	apply := fs.Bool("apply", true, "push local OPS/ + computes and activate on startup (manifest-aware; skips stacks already in sync). On by default; pass --apply=false to leave chassis state untouched (e.g. when iterating via the admin UI).")
@@ -170,10 +171,14 @@ Flags:
 
 	// Validate the bundle's op:// refs against the resolved ops map
 	// before spawning anything — fail-fast with a helpful message.
-	ops, err := bundle.Walk(dir)
+	ws, err := readWorkspace(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "dev: walk %s: %v\n", dir, err)
+		fmt.Fprintf(stderr, "dev: %v\n", err)
 		return 1
+	}
+	ops := ws.Ops
+	for _, n := range sortedMapKeys(ws.Broken) {
+		fmt.Fprintf(stderr, "[txco] %s: %v — it deploys once the build exists\n", n, ws.Broken[n])
 	}
 	// Pre-flight: resolve op://NAME per resonator (colocated <name>.js wins, else the
 	// txco.yaml URL). Builds colocated computes (cached) so compile/build errors
@@ -365,7 +370,7 @@ Flags:
 	// after a typo. Keep running and let them fix the file + `txco
 	// apply` to retry.
 	if *apply {
-		if err := devApply(ctx, dir, resolved, ops, stdout, stderr); err != nil {
+		if err := devApply(ctx, ws, resolved, *staticOnly, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "[txco] initial apply failed: %v\n", err)
 			fmt.Fprintf(stderr, "[txco] chassis still running; fix the issue and run `txco apply` to retry.\n")
 		}
@@ -387,7 +392,7 @@ Flags:
 	// localhost to a stack the chassis doesn't have.
 	localhostStack := ""
 	if *apply {
-		localhostStack = devAutoBindLocalhost(ctx, resolved, dir, ops, webURL, stdout)
+		localhostStack = devAutoBindLocalhost(ctx, resolved, dir, ws.Ops, webURL, stdout)
 	}
 
 	// 5b. Optional: spawn the admin-ui Vite dev server. Non-fatal —
@@ -484,13 +489,13 @@ Flags:
 				err := devpkg.WatchOps(ctx, opsDir, watchOpts, func() {
 					applyMu.Lock()
 					defer applyMu.Unlock()
-					freshOps, err := bundle.Walk(dir)
+					fresh, err := readWorkspace(dir)
 					if err != nil {
 						fmt.Fprintf(stderr, "[watch] walk: %v\n", err)
 						return
 					}
-					noteIncludes(freshOps)
-					if err := devApplyToDraft(ctx, dir, resolved, freshOps, state, stdout, stderr); err != nil {
+					noteIncludes(fresh.Ops)
+					if err := devApplyToDraft(ctx, fresh, resolved, *staticOnly, state, stdout, stderr); err != nil {
 						fmt.Fprintf(stderr, "[watch] push to draft: %v\n", err)
 					}
 				})
@@ -508,13 +513,13 @@ Flags:
 					applyMu.Lock()
 					defer applyMu.Unlock()
 					fmt.Fprintln(stdout, "[watch] compute source changed — rebuilding")
-					freshOps, err := bundle.Walk(dir)
+					fresh, err := readWorkspace(dir)
 					if err != nil {
 						fmt.Fprintf(stderr, "[watch] walk: %v\n", err)
 						return
 					}
-					noteIncludes(freshOps)
-					if err := devApply(ctx, dir, resolved, freshOps, stdout, stderr); err != nil {
+					noteIncludes(fresh.Ops)
+					if err := devApply(ctx, fresh, resolved, *staticOnly, stdout, stderr); err != nil {
 						fmt.Fprintf(stderr, "[watch] compute reload: %v\n", err)
 					}
 				})
@@ -522,6 +527,28 @@ Flags:
 					fmt.Fprintf(stderr, "[watch] compute: %v\n", err)
 				}
 			}()
+		}
+
+		// A bound Web ABI build is the producer's output: when a rebuild
+		// settles, re-apply and ACTIVATE, as for a compute — the build is a
+		// deliberate step, with no admin-UI edit to clobber. Works without an
+		// OPS/ tree (a pure framework app).
+		for _, n := range sortedMapKeys(ws.Bindings) {
+			b := ws.Bindings[n]
+			fmt.Fprintf(stdout, "[watch] watching %s (the %s stack's Web ABI build → re-apply + activate)\n", b.ABI, n)
+			go watchABIBuild(ctx, b.Abs, time.Second, func() {
+				applyMu.Lock()
+				defer applyMu.Unlock()
+				fmt.Fprintf(stdout, "[watch] %s rebuilt — re-applying\n", b.ABI)
+				fresh, err := readWorkspace(dir)
+				if err != nil {
+					fmt.Fprintf(stderr, "[watch] walk: %v\n", err)
+					return
+				}
+				if err := devApply(ctx, fresh, resolved, *staticOnly, stdout, stderr); err != nil {
+					fmt.Fprintf(stderr, "[watch] %s: %v\n", b.ABI, err)
+				}
+			})
 		}
 	}
 
@@ -648,8 +675,9 @@ Flags:
 // plane — one draft per stack, files PUT, activate. Mirrors
 // runApply's push path so dev and apply share the same write model.
 // The legacy flat ImportOps endpoint is retired.
-func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bundle.Op, stdout, stderr io.Writer) error {
-	out, builtComputes, cerr := resolveOpRefsColocated(ops, buildOpRefMap(resolved), dir, stderr)
+func devApply(ctx context.Context, ws *localWorkspace, resolved ResolvedTarget, staticOnly bool, stdout, stderr io.Writer) error {
+	dir := ws.Dir
+	out, builtComputes, cerr := resolveOpRefsColocated(ws.Ops, buildOpRefMap(resolved), dir, stderr)
 	if cerr != nil {
 		return cerr
 	}
@@ -670,65 +698,21 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		return err
 	}
 	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, "dev")
-	stacks := groupOpsByStack(out)
-	allStacks := stackNames(out)
+	stacks, allStacks := devStacks(ws, out, staticOnly, stderr)
 	totalFiles := 0
 	skipped := 0
 	for _, stack := range sortedKeys(stacks) {
-		files := opsToFiles(stacks[stack])
-		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
-		if aerr != nil {
-			return fmt.Errorf("%s: collect FILES/: %w", stack, aerr)
+		// `dev` is a full local mirror (manage="all"): the store-seed packs ride
+		// along, so a developer's local VECTORS/+KV/+BLOBS/ are live against the
+		// dev chassis without a separate `txco data apply`.
+		build, berr := buildStackFiles(dir, stack, stacks[stack], ws.withABI(stack, collectOpts{
+			Data: true, Derived: true, KeepSource: keepSource, Built: builtComputes, AllStacks: allStacks,
+		}))
+		if berr != nil {
+			return fmt.Errorf("%s: %w", stack, berr)
 		}
-		files = append(files, assets...)
-		// `dev` is a full local mirror (manage="all"): deploy + reconcile the
-		// store-seed packs too, so a developer's local VECTORS/+KV/+BLOBS/ are
-		// live against the dev chassis without a separate `txco data apply`.
-		packs, blobUploads, perr := collectStorePacks(filepath.Join(dir, "OPS", stack))
-		if perr != nil {
-			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
-		}
-		files = append(files, packs...)
-		// SOURCES/, OUTLETS/, SANDBOXES/ and CAPS/ are code and ride the same draft
-		// as they do on `txco apply` (apply.go); leaving them out here made
-		// dev drop a stack's source declarations on every upload.
-		srcPacks, serr := collectSourcePacks(filepath.Join(dir, "OPS", stack))
-		if serr != nil {
-			return fmt.Errorf("%s: collect SOURCES/: %w", stack, serr)
-		}
-		files = append(files, srcPacks...)
-		outletFiles, oerr := collectOutletFiles(filepath.Join(dir, "OPS", stack))
-		if oerr != nil {
-			return fmt.Errorf("%s: collect OUTLETS/: %w", stack, oerr)
-		}
-		files = append(files, outletFiles...)
-		sandboxFiles, sberr := collectSandboxFiles(filepath.Join(dir, "OPS", stack))
-		if sberr != nil {
-			return fmt.Errorf("%s: collect SANDBOXES/: %w", stack, sberr)
-		}
-		files = append(files, sandboxFiles...)
-		capFiles, cperr := collectCapFiles(filepath.Join(dir, "OPS", stack))
-		if cperr != nil {
-			return fmt.Errorf("%s: collect CAPS/: %w", stack, cperr)
-		}
-		files = append(files, capFiles...)
-		dsFiles, dsUploads, derr := collectDatasetFiles(filepath.Join(dir, "OPS", stack))
-		if derr != nil {
-			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
-		}
-		files = append(files, dsFiles...)
-		var srcUploads []casUpload
-		if keepSource {
-			var srcFiles []client.StackFile
-			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
-			files = append(files, srcFiles...)
-		}
-		treeFiles, treeUploads, terr := stackTreeRows(dir, stack, stacks[stack], allStacks)
-		if terr != nil {
-			return fmt.Errorf("%s: stack tree: %w", stack, terr)
-		}
-		files = append(files, treeFiles...)
-		localHash := localManifestHash(files)
+		files := build.Files
+		localHash := build.Hash()
 
 		// Fast paths against the chassis's current active version:
 		//   1. If a saved .txco/<stack>.state.json says we last pulled
@@ -778,25 +762,8 @@ func devApply(ctx context.Context, dir string, resolved ResolvedTarget, ops []bu
 		// Push path. "active" tells the server to clone from the
 		// current active version when one exists, otherwise start an
 		// empty draft. Mirrors runApply (apply.go:134).
-		if len(dsUploads) > 0 {
-			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: %w", stack, err)
-			}
-		}
-		if len(blobUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, blobUploads, nil, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: %w", stack, err)
-			}
-		}
-		if len(srcUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, srcUploads, nil, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: compute source: %w", stack, err)
-			}
-		}
-		if len(treeUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, treeUploads, nil, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: stack tree: %w", stack, err)
-			}
+		if err := build.ensureResident(ctx, c, stdout, stderr); err != nil {
+			return fmt.Errorf("%s: %w", stack, err)
 		}
 		versionNumber, err := c.CreateDraft(ctx, stack, "active")
 		if err != nil {
@@ -1004,8 +971,9 @@ func workspaceHasCustomBootScope(dir string) bool {
 // from under us (status flipped to 'superseded'), the server returns
 // 409 version_not_draft and we transparently create a fresh draft
 // and retry once.
-func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, ops []bundle.Op, state *devWatchState, stdout, stderr io.Writer) error {
-	out, builtComputes, cerr := resolveOpRefsColocated(ops, buildOpRefMap(resolved), dir, stderr)
+func devApplyToDraft(ctx context.Context, ws *localWorkspace, resolved ResolvedTarget, staticOnly bool, state *devWatchState, stdout, stderr io.Writer) error {
+	dir := ws.Dir
+	out, builtComputes, cerr := resolveOpRefsColocated(ws.Ops, buildOpRefMap(resolved), dir, stderr)
 	if cerr != nil {
 		return cerr
 	}
@@ -1028,8 +996,7 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 		return err
 	}
 	keepSource := chassisKeepsComputeSource(ctx, c, builtComputes, stderr, "dev")
-	stacks := groupOpsByStack(out)
-	allStacks := stackNames(out)
+	stacks, allStacks := devStacks(ws, out, staticOnly, stderr)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	for _, stack := range sortedKeys(stacks) {
@@ -1039,7 +1006,11 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 		// (already in memory from the walk) + a STAT-only walk of FILES/, VECTORS/,
 		// KV/ (no asset content read). First fire after startup has no recorded
 		// fingerprint, so every stack syncs once, then incrementally.
-		fp, ferr := stackSourceFingerprint(stacks[stack], stackDir)
+		abiDir := ""
+		if d := ws.ABI[stack]; d != nil {
+			abiDir = d.Path
+		}
+		fp, ferr := stackSourceFingerprint(stacks[stack], stackDir, abiDir)
 		if ferr != nil {
 			return fmt.Errorf("%s: fingerprint: %w", stack, ferr)
 		}
@@ -1047,74 +1018,17 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 			continue
 		}
 
-		files := opsToFiles(stacks[stack])
-		assets, aerr := collectFileAssets(stackDir)
-		if aerr != nil {
-			return fmt.Errorf("%s: collect FILES/: %w", stack, aerr)
+		// Full local mirror — include store-seed packs (see devApply).
+		build, berr := buildStackFiles(dir, stack, stacks[stack], ws.withABI(stack, collectOpts{
+			Data: true, Derived: true, KeepSource: keepSource, Built: builtComputes, AllStacks: allStacks,
+		}))
+		if berr != nil {
+			return fmt.Errorf("%s: %w", stack, berr)
 		}
-		files = append(files, assets...)
-		// Full local mirror — include store-seed packs (see the watch loop above).
-		packs, blobUploads, perr := collectStorePacks(stackDir)
-		if perr != nil {
-			return fmt.Errorf("%s: collect store packs: %w", stack, perr)
+		if err := build.ensureResident(ctx, c, stdout, stderr); err != nil {
+			return fmt.Errorf("%s: %w", stack, err)
 		}
-		files = append(files, packs...)
-		srcPacks, serr := collectSourcePacks(stackDir)
-		if serr != nil {
-			return fmt.Errorf("%s: collect SOURCES/: %w", stack, serr)
-		}
-		files = append(files, srcPacks...)
-		outletFiles, oerr := collectOutletFiles(stackDir)
-		if oerr != nil {
-			return fmt.Errorf("%s: collect OUTLETS/: %w", stack, oerr)
-		}
-		files = append(files, outletFiles...)
-		sandboxFiles, sberr := collectSandboxFiles(stackDir)
-		if sberr != nil {
-			return fmt.Errorf("%s: collect SANDBOXES/: %w", stack, sberr)
-		}
-		files = append(files, sandboxFiles...)
-		capFiles, cperr := collectCapFiles(stackDir)
-		if cperr != nil {
-			return fmt.Errorf("%s: collect CAPS/: %w", stack, cperr)
-		}
-		files = append(files, capFiles...)
-		dsFiles, dsUploads, derr := collectDatasetFiles(stackDir)
-		if derr != nil {
-			return fmt.Errorf("%s: collect DATASETS/: %w", stack, derr)
-		}
-		files = append(files, dsFiles...)
-		var srcUploads []casUpload
-		if keepSource {
-			var srcFiles []client.StackFile
-			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
-			files = append(files, srcFiles...)
-		}
-		treeFiles, treeUploads, terr := stackTreeRows(dir, stack, stacks[stack], allStacks)
-		if terr != nil {
-			return fmt.Errorf("%s: stack tree: %w", stack, terr)
-		}
-		files = append(files, treeFiles...)
-		if len(dsUploads) > 0 {
-			if err := ensureDatasetBlobs(ctx, c, dsUploads, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: %w", stack, err)
-			}
-		}
-		if len(blobUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, blobUploads, nil, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: %w", stack, err)
-			}
-		}
-		if len(srcUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, srcUploads, nil, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: compute source: %w", stack, err)
-			}
-		}
-		if len(treeUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, treeUploads, nil, stdout, stderr); err != nil {
-				return fmt.Errorf("%s: stack tree: %w", stack, err)
-			}
-		}
+		files := build.Files
 		if n, ok := state.drafts[stack]; ok {
 			if _, err := c.PutDraftFiles(ctx, stack, n, files); err == nil {
 				state.fps[stack] = fp
@@ -1149,8 +1063,16 @@ func devApplyToDraft(ctx context.Context, dir string, resolved ResolvedTarget, o
 // FILES/, VECTORS/, and KV/ asset trees. Mirrors the dirs collectFileAssets /
 // collectStorePacks read, so any change they'd pick up changes the fingerprint
 // — without paying their per-file content reads on every watcher fire.
-func stackSourceFingerprint(ops []bundle.Op, stackDir string) (string, error) {
+func stackSourceFingerprint(ops []bundle.Op, stackDir, abiDir string) (string, error) {
 	h := sha256.New()
+	// A bound Web ABI build: a stat-only walk of the whole build directory.
+	if abiDir != "" {
+		fp, err := treeFingerprint(abiDir)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "abi\x00%s\n", fp)
+	}
 	// Op half: content-hash the op files (cheap; small UTF-8 text in memory).
 	for _, f := range opsToFiles(ops) { // already sorted by Path
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
@@ -1268,6 +1190,9 @@ type chassisOpts struct {
 	// the chassis's own.
 	Started *[]*devpkg.Process
 	Out     **devpkg.Process
+	// Executable is the txco binary to run as the chassis; "" means this
+	// process's own (os.Executable). Tests point it at a built binary.
+	Executable string
 }
 
 // chassisAddrs is where the spawned chassis listens, once defaults and the
@@ -1280,9 +1205,11 @@ type chassisAddrs struct {
 // temp DB. Returns the admin URL and the web URL (the curlable one
 // developers actually hit during dev).
 func startChassis(ctx context.Context, o chassisOpts) (adminURL, webURL string, err error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return "", "", fmt.Errorf("locate self: %w", err)
+	executable := o.Executable
+	if executable == "" {
+		if executable, err = os.Executable(); err != nil {
+			return "", "", fmt.Errorf("locate self: %w", err)
+		}
 	}
 
 	devDir := filepath.Join(o.Workspace, ".txco", "dev")

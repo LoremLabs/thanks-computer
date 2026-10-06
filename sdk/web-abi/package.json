@@ -1,0 +1,53 @@
+{
+  "name": "@txco/web-abi",
+  "version": "0.1.0",
+  "description": "The TxCo Web ABI conformance kit: the txco-web.json schema and validator, the envelope ↔ Fetch bridge every runner uses, and a harness that checks a build's server/ Fetch handler.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "keywords": ["txco", "thanks-computer", "web-abi", "fetch", "conformance"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LoremLabs/thanks-computer.git",
+    "directory": "sdk/web-abi"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": ["dist", "src", "txco-web.schema.json", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./manifest": {
+      "types": "./dist/manifest.d.ts",
+      "default": "./dist/manifest.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "default": "./dist/bridge.js"
+    },
+    "./harness": {
+      "types": "./dist/harness.d.ts",
+      "default": "./dist/harness.js"
+    },
+    "./schema.json": "./txco-web.schema.json"
+  },
+  "bin": {
+    "txco-web-abi": "./dist/cli.js"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

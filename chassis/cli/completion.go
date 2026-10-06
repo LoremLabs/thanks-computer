@@ -273,6 +273,9 @@ var cliCommandTree = []node{
 	{Name: "apply", Desc: "Push the local workspace to a chassis"},
 	{Name: "diff", Desc: "Show pending workspace changes vs chassis"},
 	{Name: "lint", Desc: "Validate the local OPS/ tree offline (collisions, txcl parse)", Flags: []string{"list", "json"}},
+	{Name: "web", Desc: "Web ABI builds", Children: []node{
+		{Name: "check", Desc: "Install a Web ABI build on a scratch chassis and probe it", Flags: []string{"stack", "static-only", "json", "strict", "keep", "timeout", "verbose"}},
+	}},
 	{Name: "status", Desc: "Show local workspace + chassis status"},
 	{Name: "pull", Desc: "Fetch a stack's rules from the chassis"},
 	{Name: "cat", Desc: "Print a deployed stack's file (manifest → CAS); debugging probe", Flags: append([]string{"json"}, targetFlagNames...)},

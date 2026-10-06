@@ -79,7 +79,14 @@ type Op struct {
 	// (paths within the walked filesystem, like SourcePath). Txcl already
 	// holds their contents; `txco dev` watches these for changes.
 	Includes []string `json:"-"`
+
+	// Origin is where the op came from: "" for the author's OPS/ tree,
+	// OriginABI for a Web ABI build's ops/ (WalkABI).
+	Origin string `json:"-"`
 }
+
+// OriginABI marks an op that came from a Web ABI directory's ops/.
+const OriginABI = "abi"
 
 // Diag is a non-fatal-at-walk-time finding about a `.txcl` leaf that could
 // not be turned into a well-formed Op (no numbered ancestor) or that would

@@ -56,10 +56,21 @@ Flags:
 		return 1
 	}
 
-	ops, diags, err := bundle.WalkDiag(dir)
+	ws, err := readWorkspace(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "lint: walk %s: %v\n", dir, err)
+		fmt.Fprintf(stderr, "lint: %v\n", err)
 		return 1
+	}
+	ops, diags := ws.Ops, ws.Diags
+	// A bound stack's Web ABI build: one that can't be installed, or that
+	// collides with the stack's own tree, fails the apply, so it fails lint.
+	for _, n := range sortedMapKeys(ws.Broken) {
+		diags = append(diags, bundle.Diag{Stack: n, Msg: n + ": " + ws.Broken[n].Error()})
+	}
+	for _, n := range sortedMapKeys(ws.ABI) {
+		if _, err := buildStackFiles(dir, n, opsForStack(ops, n), ws.withABI(n, collectOpts{})); err != nil {
+			diags = append(diags, bundle.Diag{Stack: n, Msg: n + ": " + err.Error()})
+		}
 	}
 
 	// WalkDiag only checks directory structure; strict-parse every rule to
@@ -97,6 +108,12 @@ Flags:
 	// apply (see loop_lint.go) — they don't flip the exit code.
 	loopWarns := lintStackLoops(ops)
 	loopWarns = append(loopWarns, lintLoopClause(ops)...)
+	// Web ABI builds: their own warnings, and author ops in the producer band.
+	all := map[string]bool{}
+	for _, n := range ws.StackNames() {
+		all[n] = true
+	}
+	loopWarns = append(loopWarns, abiWarnings(ws, all)...)
 
 	// Stable order for the listing and the report.
 	sort.Slice(ops, func(i, j int) bool {

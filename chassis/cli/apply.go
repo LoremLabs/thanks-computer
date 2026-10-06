@@ -48,6 +48,9 @@ type applyOpts struct {
 	// offline-friendly mode. It reflects "changed since I last applied from here",
 	// not the server's live version, so it can miss out-of-band drift.
 	changed bool
+	// staticOnly deploys a bound Web ABI build's static half when it has a
+	// server entry, which a chassis with no web runner can't run.
+	staticOnly bool
 	// force re-versions EVERY stack even when unchanged, bypassing all skip
 	// short-circuits (the default bulk-list skip, the per-stack GetStack no-op,
 	// and --changed). Use to force a redeploy / fleet reload.
@@ -219,6 +222,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opts.changed, "changed", false, "zero-network fast mode: trust the local .txco/<stack>.state.json digest and skip stacks unchanged since the last apply from this workspace (no bulk list, no per-stack probe). Reflects local record, not server drift; a stack never applied here counts as changed.")
 	fs.BoolVar(&opts.force, "force", false, "re-version every stack even if unchanged (bypass all skip short-circuits); forces a redeploy / fleet reload")
 	fs.BoolVar(&opts.noSource, "no-source", false, "don't store compute sources (each op://NAME .js/.ts) for the admin to show; the new version carries none")
+	fs.BoolVar(&opts.staticOnly, "static-only", false, "deploy a bound Web ABI build's static half even though it has a server entry (no chassis runs server/ yet)")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response (method, URL, status, error body) to stderr. Equivalent to TXCO_VERBOSE=1, which works for ANY txco command.")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -268,25 +272,17 @@ Flags:
 		return 1
 	}
 
-	ops, diags, err := bundle.WalkDiag(dir)
+	ws, err := readWorkspace(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "apply: walk %s: %v\n", dir, err)
+		fmt.Fprintf(stderr, "apply: %v\n", err)
 		return 1
 	}
-	// A whole-tree apply must be clean: a no-step leaf (silently undeployed) or
-	// a flatten collision (would fail server-side at activate) is fatal here.
-	if len(diags) > 0 {
-		for _, d := range diags {
-			fmt.Fprintf(stderr, "apply: %s\n", d.Msg)
-		}
-		return 1
-	}
-	if len(ops) == 0 {
-		fmt.Fprintf(stderr, "apply: no resonators found — expected an OPS/ tree at or above %s.\n"+
+	if len(ws.StackNames()) == 0 {
+		fmt.Fprintf(stderr, "apply: no resonators found — expected an OPS/ tree, or txco.yaml stacks: bindings, at or above %s.\n"+
 			"  Run `txco apply` from your workspace root (the dir containing OPS/), or pass it: `txco apply <dir>`.\n", dir)
 		return 1
 	}
-	return applyOps("apply", dir, ops, opts, "", stdout, stderr)
+	return applyOps("apply", ws, opts, "", stdout, stderr)
 }
 
 // runPush deploys a SINGLE named stack — the inverse of `txco pull <stack>`.
@@ -306,6 +302,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	fs.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "per-request timeout for chassis calls; raise for large FILE uploads (e.g. 10m)")
 	fs.IntVar(&opts.retries, "retries", 3, "retry a transient failure (gateway 5xx, `database is locked`) this many times with backoff before giving up")
 	fs.BoolVar(&opts.noSource, "no-source", false, "don't store compute sources (each op://NAME .js/.ts) for the admin to show; the new version carries none")
+	fs.BoolVar(&opts.staticOnly, "static-only", false, "deploy a bound Web ABI build's static half even though it has a server entry (no chassis runs server/ yet)")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response to stderr (TXCO_VERBOSE=1)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -347,29 +344,16 @@ Flags:
 		return 1
 	}
 
-	ops, diags, err := bundle.WalkDiag(dir)
+	ws, err := readWorkspace(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "push: walk %s: %v\n", dir, err)
+		fmt.Fprintf(stderr, "push: %v\n", err)
 		return 1
 	}
-	// push is scoped to one stack, so a stray elsewhere in the tree only warns;
-	// but a flatten collision *in the pushed stack* would fail at activate, so
-	// surface it early and stop.
-	fatal := false
-	for _, d := range diags {
-		fmt.Fprintf(stderr, "push: %s\n", d.Msg)
-		if d.Stack == stack {
-			fatal = true
-		}
-	}
-	if fatal {
+	if len(ws.StackNames()) == 0 {
+		fmt.Fprintf(stderr, "push: no resonators found — expected an OPS/ tree, or txco.yaml stacks: bindings, at or above %s.\n", dir)
 		return 1
 	}
-	if len(ops) == 0 {
-		fmt.Fprintf(stderr, "push: no resonators found — expected an OPS/ tree at or above %s.\n", dir)
-		return 1
-	}
-	return applyOps("push", dir, ops, opts, stack, stdout, stderr)
+	return applyOps("push", ws, opts, stack, stdout, stderr)
 }
 
 // applyOps is the shared deploy pipeline behind `apply` and `push`. cmd names
@@ -377,27 +361,30 @@ Flags:
 // filtered to that one stack first (the `push` path); "" deploys all stacks
 // (the `apply` path). The flow: resolve op:// refs (+ build colocated
 // computes), client-side parse, loop-lint, apply the target's mock policy,
-// then per stack create a draft, upload, validate, and activate.
-func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string, stdout, stderr io.Writer) int {
+// then per stack create a draft, upload, validate, and activate. A stack
+// bound to a Web ABI build in txco.yaml deploys with the build laid over it.
+func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, stdout, stderr io.Writer) int {
+	dir, ops := ws.Dir, ws.Ops
 	// Every stack in the tree, before `push` or --skip narrows the set: a
 	// nested stack's directory is never part of the stack around it.
 	allStacks := stackNames(ops)
-	if onlyStack != "" {
-		filtered := make([]bundle.Op, 0, len(ops))
-		for _, op := range ops {
-			if op.Stack == onlyStack {
-				filtered = append(filtered, op)
-			}
+	for n := range ws.Bindings {
+		allStacks[n] = true
+	}
+	// The stacks this run deploys: every stack, or just onlyStack, minus --skip.
+	selected := map[string]bool{}
+	for _, n := range ws.StackNames() {
+		if onlyStack == "" || n == onlyStack {
+			selected[n] = true
 		}
-		if len(filtered) == 0 {
-			fmt.Fprintf(stderr, "%s: stack %q not found under %s/OPS/", cmd, onlyStack, dir)
-			if avail := sortedKeys(groupOpsByStack(ops)); len(avail) > 0 {
-				fmt.Fprintf(stderr, " (available: %s)", strings.Join(avail, ", "))
-			}
-			fmt.Fprintln(stderr)
-			return 1
+	}
+	if onlyStack != "" && !selected[onlyStack] {
+		fmt.Fprintf(stderr, "%s: stack %q not found under %s/OPS/ or in txco.yaml stacks:", cmd, onlyStack, dir)
+		if avail := ws.StackNames(); len(avail) > 0 {
+			fmt.Fprintf(stderr, " (available: %s)", strings.Join(avail, ", "))
 		}
-		ops = filtered
+		fmt.Fprintln(stderr)
+		return 1
 	}
 
 	// --skip: drop every stack whose name contains a given substring BEFORE any
@@ -405,34 +392,76 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	// compute-built, listed in --dry-run, or deployed. Substring match, so
 	// `--skip publications` drops the whole publications/ tree.
 	if len(opts.skip) > 0 {
-		skipped := map[string]struct{}{}
-		filtered := make([]bundle.Op, 0, len(ops))
-		for _, op := range ops {
-			if skipMatch(op.Stack, opts.skip) != "" {
-				skipped[op.Stack] = struct{}{}
-				continue
+		var skipped []string
+		for n := range selected {
+			if skipMatch(n, opts.skip) != "" {
+				skipped = append(skipped, n)
+				delete(selected, n)
 			}
-			filtered = append(filtered, op)
 		}
 		if n := len(skipped); n > 0 {
 			if n <= 10 {
-				names := make([]string, 0, n)
-				for s := range skipped {
-					names = append(names, s)
-				}
-				sort.Strings(names)
+				sort.Strings(skipped)
 				fmt.Fprintf(stderr, "%s: skipping %d stack%s (--skip %s): %s\n",
-					cmd, n, pluralS(n), strings.Join(opts.skip, ","), strings.Join(names, ", "))
+					cmd, n, pluralS(n), strings.Join(opts.skip, ","), strings.Join(skipped, ", "))
 			} else {
 				fmt.Fprintf(stderr, "%s: skipping %d stacks matching --skip %s\n",
 					cmd, n, strings.Join(opts.skip, ","))
 			}
 		}
-		ops = filtered
-		if len(ops) == 0 {
+		if len(selected) == 0 {
 			fmt.Fprintf(stderr, "%s: nothing to deploy — every stack matched --skip.\n", cmd)
 			return 0
 		}
+	}
+	filtered := make([]bundle.Op, 0, len(ops))
+	for _, op := range ops {
+		if selected[op.Stack] {
+			filtered = append(filtered, op)
+		}
+	}
+	ops = filtered
+
+	// The OPS/ walk's findings, judged after selection: a no-step leaf
+	// (silently undeployed) or a flatten collision (would fail server-side at
+	// activate) is fatal in a stack this run deploys. A leaf with no
+	// derivable stack is fatal for a whole-tree apply; anything else warns.
+	fatal := false
+	for _, d := range ws.Diags {
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, d.Msg)
+		if selected[d.Stack] || (d.Stack == "" && cmd == "apply") {
+			fatal = true
+		}
+	}
+	// A bound stack whose build can't be installed is fatal when this run
+	// deploys it: deploying it without its web half would break it.
+	for _, n := range sortedMapKeys(ws.Broken) {
+		if selected[n] {
+			fmt.Fprintf(stderr, "%s: %s: %v\n", cmd, n, ws.Broken[n])
+			fatal = true
+		} else if onlyStack == "" {
+			fmt.Fprintf(stderr, "%s: %s (skipped): %v\n", cmd, n, ws.Broken[n])
+		}
+	}
+	// No chassis runs a Web ABI build's server/ yet.
+	for _, n := range sortedMapKeys(ws.ABI) {
+		if !selected[n] || !ws.ABI[n].HasServer {
+			continue
+		}
+		if opts.staticOnly {
+			fmt.Fprintf(stderr, "%s: %s: deploying the static half only (--static-only); its server entry %s is not deployed\n",
+				cmd, n, ws.ABI[n].Manifest.Server.Entry)
+		} else {
+			fmt.Fprintf(stderr, "%s: %s: this build has a server entry (%s); this chassis has no web runner — pass --static-only to deploy its static half\n",
+				cmd, n, ws.ABI[n].Manifest.Server.Entry)
+			fatal = true
+		}
+	}
+	for _, w := range abiWarnings(ws, selected) {
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
+	}
+	if fatal {
+		return 1
 	}
 
 	// Resolve the selected target so we know which operations map to use
@@ -564,6 +593,14 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	c := client.NewWithTimeout(clientTarget, opts.timeout)
 	ctx := context.Background()
 
+	// A Web ABI build's markers (public "_" roots, immutable prefixes) only
+	// work on a chassis that reads them; an older one would store them as
+	// private files and 404 every "_" asset. Confirm before writing.
+	if err := checkMarkerSupport(ctx, ws, selected, clientTarget.Addr); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
+		return 1
+	}
+
 	// In --json mode stdout must carry only the result object, so route
 	// progress chatter (compute uploads) to stderr.
 	progress := stdout
@@ -587,6 +624,11 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 	// the active version), upload the file set, validate, and activate.
 	// `apply`/`push` are push+activate sugar over the versioned control plane.
 	stacks := groupOpsByStack(ops)
+	for n := range selected {
+		if _, ok := stacks[n]; !ok {
+			stacks[n] = nil // a bound build with no ops of its own (a static site)
+		}
+	}
 	results := make([]deployResult, 0, len(stacks))
 	green, red, dim, reset := statusColors(stdout)
 	// failures collects stacks that exhausted their retries so one bad stack
@@ -633,80 +675,15 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 
 	for _, stack := range sortedKeys(stacks) {
 		scan.tick()
-		files := opsToFiles(stacks[stack])
-		assets, aerr := collectFileAssets(filepath.Join(dir, "OPS", stack))
-		if aerr != nil {
-			fmt.Fprintf(stderr, "%s: %s: collect FILES/: %v\n", cmd, stack, aerr)
+		build, berr := buildStackFiles(dir, stack, stacks[stack], ws.withABI(stack, collectOpts{
+			Derived: true, KeepSource: keepSource, Built: builtComputes, AllStacks: allStacks,
+		}))
+		if berr != nil {
+			fmt.Fprintf(stderr, "%s: %s: %v\n", cmd, stack, berr)
 			return 1
 		}
-		files = append(files, assets...)
-		// SOURCES/ inlet packs are CODE, not data: a source declaration is small,
-		// human-authored config that belongs with the ops it feeds (the `_source`
-		// stack), so it deploys on `txco apply` alongside DATASETS — unlike the
-		// data store-seed trees (VECTORS/, KV/, …) that move through `txco data
-		// apply`. The server maps the "SOURCES/" prefix to the srcseed
-		// materializer and upserts only the DECLARED columns of tenant_sources;
-		// the runtime cursor/claim are shadow columns a re-deploy never touches.
-		srcPacks, serr := collectSourcePacks(filepath.Join(dir, "OPS", stack))
-		if serr != nil {
-			fmt.Fprintf(stderr, "%s: %s: collect SOURCES/: %v\n", cmd, stack, serr)
-			return 1
-		}
-		files = append(files, srcPacks...)
-		// OUTLETS/ declarations are CODE too: one small YAML per external
-		// service the stack's ops may call through outlet://; inline in the
-		// draft like a dataset manifest, checked at validate/activate.
-		outletFiles, oerr := collectOutletFiles(filepath.Join(dir, "OPS", stack))
-		if oerr != nil {
-			fmt.Fprintf(stderr, "%s: %s: collect OUTLETS/: %v\n", cmd, stack, oerr)
-			return 1
-		}
-		files = append(files, outletFiles...)
-		// SANDBOXES/ declarations likewise: one small YAML per named bundle a
-		// run grant may open (chassis/sandbox).
-		sandboxFiles, sberr := collectSandboxFiles(filepath.Join(dir, "OPS", stack))
-		if sberr != nil {
-			fmt.Fprintf(stderr, "%s: %s: collect SANDBOXES/: %v\n", cmd, stack, sberr)
-			return 1
-		}
-		files = append(files, sandboxFiles...)
-		// CAPS/ declarations likewise: one small YAML per capability the
-		// stack answers (chassis/capdecl).
-		capFiles, cperr := collectCapFiles(filepath.Join(dir, "OPS", stack))
-		if cperr != nil {
-			fmt.Fprintf(stderr, "%s: %s: collect CAPS/: %v\n", cmd, stack, cperr)
-			return 1
-		}
-		files = append(files, capFiles...)
-		// Datasets are CODE (the manifest names queries the rules call; a query
-		// and schema change deploy atomically), so they join the code manifest
-		// here — unlike store-seed packs, which are data (`txco data apply`).
-		// Artifacts enter as fingerprint-only rows; dsUploads streams any bytes
-		// the chassis CAS is missing right before the draft is created.
-		dsFiles, dsUploads, derr := collectDatasetFiles(filepath.Join(dir, "OPS", stack))
-		if derr != nil {
-			fmt.Fprintf(stderr, "%s: %s: collect DATASETS/: %v\n", cmd, stack, derr)
-			return 1
-		}
-		files = append(files, dsFiles...)
-		// COMPUTES/ rows are CODE too, derived from the colocated sources:
-		// fingerprint-only, their bundles made resident just before the draft.
-		var srcUploads []casUpload
-		if keepSource {
-			var srcFiles []client.StackFile
-			srcFiles, srcUploads = computeSourceRows(stacks[stack], builtComputes)
-			files = append(files, srcFiles...)
-		}
-		// STACKDIR/ is CODE too: the stack's own directory, packed when one
-		// of its ops names $TXCO_STACK_DIR (chassis/stackdir). Fingerprint-
-		// only; the bundle is made resident just before the draft.
-		treeFiles, treeUploads, terr := stackTreeRows(dir, stack, stacks[stack], allStacks)
-		if terr != nil {
-			fmt.Fprintf(stderr, "%s: %s: stack tree: %v\n", cmd, stack, terr)
-			return 1
-		}
-		files = append(files, treeFiles...)
-		localHash := localManifestHash(files)
+		files := build.Files
+		localHash := build.Hash()
 
 		// Fast-skip an unchanged stack with no per-stack round-trip. --force skips
 		// nothing (re-version all). --changed trusts the local last-applied digest
@@ -800,30 +777,15 @@ func applyOps(cmd, dir string, ops []bundle.Op, opts applyOpts, onlyStack string
 		// ✓ line) starts on a clean line. The next iteration repaints below it.
 		scan.clear()
 
-		// Make dataset artifact bytes resident in the chassis CAS before any
-		// draft references them (HEAD per hash, streamed PUT for misses) — the
-		// same before-the-reference discipline as uploadComputes above. Runs
-		// after the unchanged-skip so an in-sync stack costs zero blob probes.
-		if len(dsUploads) > 0 {
-			if err := ensureDatasetBlobs(ctx, c, dsUploads, progress, stderr); err != nil {
-				fmt.Fprintf(stderr, "%s: %s: %v\n", cmd, stack, err)
-				failures = append(failures, stack)
-				continue
-			}
-		}
-		if len(srcUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, srcUploads, nil, progress, stderr); err != nil {
-				fmt.Fprintf(stderr, "%s: %s: compute source: %v\n", cmd, stack, err)
-				failures = append(failures, stack)
-				continue
-			}
-		}
-		if len(treeUploads) > 0 {
-			if err := ensureBlobsResident(ctx, c, treeUploads, nil, progress, stderr); err != nil {
-				fmt.Fprintf(stderr, "%s: %s: stack tree: %v\n", cmd, stack, err)
-				failures = append(failures, stack)
-				continue
-			}
+		// Make every byte the draft will reference resident in the chassis CAS
+		// first (dataset artifacts, compute sources, the stack tree): HEAD per
+		// hash, streamed PUT for misses, the same before-the-reference
+		// discipline as uploadComputes above. Runs after the unchanged-skip so
+		// an in-sync stack costs zero blob probes.
+		if err := build.ensureResident(ctx, c, progress, stderr); err != nil {
+			fmt.Fprintf(stderr, "%s: %s: %v\n", cmd, stack, err)
+			failures = append(failures, stack)
+			continue
 		}
 
 		tPhase := time.Now()
@@ -1147,7 +1109,13 @@ func collectStorePacks(stackDir string) ([]client.StackFile, []casUpload, error)
 // regular file, path-prefixed "<topDir>/<rel>". The per-tree worker for
 // collectFileAssets; an absent topDir yields nil, no error.
 func collectTreeAssets(stackDir, topDir string) ([]client.StackFile, error) {
-	treeDir := filepath.Join(stackDir, topDir)
+	return collectTreeAssetsAs(filepath.Join(stackDir, topDir), topDir)
+}
+
+// collectTreeAssetsAs walks treeDir/** and returns one StackFile per regular
+// file, path-prefixed "<destTop>/<rel>" — so a Web ABI build's public/ can
+// install as a stack's FILES/. An absent treeDir yields nil, no error.
+func collectTreeAssetsAs(treeDir, destTop string) ([]client.StackFile, error) {
 	info, err := os.Stat(treeDir)
 	if err != nil || !info.IsDir() {
 		return nil, nil // no such tree → nothing to collect
@@ -1166,7 +1134,7 @@ func collectTreeAssets(stackDir, topDir string) ([]client.StackFile, error) {
 		if !d.Type().IsRegular() || strings.HasPrefix(filepath.Base(p), ".") {
 			return nil
 		}
-		rel, rerr := filepath.Rel(stackDir, p) // → "<topDir>/<...>"
+		rel, rerr := filepath.Rel(treeDir, p)
 		if rerr != nil {
 			return rerr
 		}
@@ -1176,7 +1144,7 @@ func collectTreeAssets(stackDir, topDir string) ([]client.StackFile, error) {
 		}
 		ch := sha256.Sum256(content)
 		sf := client.StackFile{
-			Path:        filepath.ToSlash(rel),
+			Path:        destTop + "/" + filepath.ToSlash(rel),
 			Content:     string(content),
 			ContentHash: hex.EncodeToString(ch[:]), // over the RAW bytes
 		}
@@ -1260,8 +1228,12 @@ func resolveOpRefsColocated(ops []bundle.Op, urlMap map[string]oprefs.Operation,
 			continue
 		}
 		// op.SourcePath is relative to the workspace root (Walk uses
-		// os.DirFS(root)), so join it back to find siblings on disk.
-		resonatorDir := filepath.Join(workspaceRoot, filepath.Dir(op.SourcePath))
+		// os.DirFS(root)), so join it back to find siblings on disk — unless
+		// it's absolute (a Web ABI build outside the workspace).
+		resonatorDir := filepath.Dir(op.SourcePath)
+		if !filepath.IsAbs(resonatorDir) {
+			resonatorDir = filepath.Join(workspaceRoot, resonatorDir)
+		}
 		perResonator := urlMap // shared until a colocated ref forces a copy
 		copied := false
 		for _, name := range oprefs.References(op.Txcl) {

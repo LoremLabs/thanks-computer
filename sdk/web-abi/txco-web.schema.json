@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thanks.computer/schemas/txco-web-1.json",
+  "title": "TxCo Web ABI manifest (txco-web.json)",
+  "description": "Describes a Web ABI directory: public/ (files), an optional server/ Fetch entry, and ops/ (.txcl). It describes the artifact, never its routing: web behaviour is ops.",
+  "type": "object",
+  "required": ["abi"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "abi": {
+      "description": "The ABI version.",
+      "const": 1
+    },
+    "server": {
+      "description": "The application server, a Fetch handler module: export default { fetch(request, ctx) }. Absent for a static build.",
+      "type": "object",
+      "required": ["entry"],
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "description": "The ES module, relative to the ABI directory and under server/.",
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^server/[^/\\\\][^\\\\]*\\.m?js$"
+        }
+      }
+    },
+    "immutable": {
+      "description": "public/ prefixes whose files carry a content hash in their name, served with a year-long immutable cache. Each ends in '/'.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 512,
+        "pattern": "^[^/\\\\][^\\\\]*/$"
+      }
+    }
+  },
+  "patternProperties": {
+    "^x-": true
+  },
+  "additionalProperties": false
+}

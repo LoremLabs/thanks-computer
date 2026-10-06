@@ -17,7 +17,7 @@ import (
 // churn (input order, OS cruft) MUST NOT (else every stack re-pushes).
 func mustFingerprint(t *testing.T, ops []bundle.Op, stackDir string) string {
 	t.Helper()
-	fp, err := stackSourceFingerprint(ops, stackDir)
+	fp, err := stackSourceFingerprint(ops, stackDir, "")
 	if err != nil {
 		t.Fatalf("stackSourceFingerprint: %v", err)
 	}

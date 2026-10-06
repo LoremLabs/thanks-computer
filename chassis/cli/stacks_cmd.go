@@ -20,8 +20,10 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	"github.com/loremlabs/thanks-computer/chassis/cli/state"
 	"github.com/loremlabs/thanks-computer/chassis/computesrc"
+	"github.com/loremlabs/thanks-computer/chassis/server/static"
 	"github.com/loremlabs/thanks-computer/chassis/stackdir"
 	"github.com/loremlabs/thanks-computer/chassis/txcl/include"
+	"github.com/loremlabs/thanks-computer/chassis/webabi"
 )
 
 // runPull: `txco pull <stack> [--version N] [--force] [<dir>]`
@@ -35,6 +37,9 @@ type pullResult struct {
 	Version      int64  `json:"version"`
 	FilesWritten int    `json:"files_written"`
 	Dir          string `json:"dir"`
+	// SkippedABI counts the paths a Web ABI install owns, which a pull
+	// leaves to the build rather than writing into OPS/<stack>/.
+	SkippedABI int `json:"skipped_abi,omitempty"`
 }
 
 // activateResult is the JSON form of a `txco activate --json`.
@@ -202,6 +207,29 @@ Flags:
 			return 1
 		}
 	}
+	// A Web ABI install's paths (its ops, public/ as FILES/, the markers)
+	// belong to the build, not the author's tree: writing them here would
+	// collide with the build on the next apply. The version's provenance file
+	// lists them; FILES/_txco/ is always the installer's.
+	abiOwned := map[string]bool{}
+	for _, f := range vd.Files {
+		if f.Path == webabi.ProvenancePath {
+			if owned, perr := webabi.ParseProvenance([]byte(f.Content)); perr == nil {
+				for _, p := range owned {
+					abiOwned[p] = true
+				}
+			}
+		}
+	}
+	if len(abiOwned) == 0 {
+		if bindings, _ := loadStackBindings(dir); bindings != nil {
+			if _, bound := bindings[stack]; bound {
+				fmt.Fprintf(stderr, "pull: warning: %s is bound to a Web ABI build, but v%d records no install (deployed before it was bound?); its generated files are written into %s and will collide with the build on the next apply\n",
+					stack, versionNumber, stackDir)
+			}
+		}
+	}
+	skippedABI := 0
 	// Wipe existing on-disk files for this stack and re-materialise.
 	if err := os.RemoveAll(stackDir); err != nil {
 		fmt.Fprintf(stderr, "pull: clear %s: %v\n", stackDir, err)
@@ -212,6 +240,10 @@ Flags:
 		// from each colocated NAME.js/.ts and from the stack's own files, so
 		// a pull leaves them out of the workspace.
 		if computesrc.IsPath(f.Path) || stackdir.IsPath(f.Path) {
+			continue
+		}
+		if abiOwned[f.Path] || (len(abiOwned) > 0 && strings.HasPrefix(f.Path, "FILES/"+static.MarkerDir+"/")) {
+			skippedABI++
 			continue
 		}
 		full := filepath.Join(stackDir, filepath.FromSlash(f.Path))
@@ -256,11 +288,16 @@ Flags:
 
 	if *asJSON {
 		if err := writeJSON(stdout, pullResult{
-			Stack: stack, Version: versionNumber, FilesWritten: len(vd.Files), Dir: stackDir,
+			Stack: stack, Version: versionNumber, FilesWritten: len(vd.Files) - skippedABI, Dir: stackDir,
+			SkippedABI: skippedABI,
 		}); err != nil {
 			fmt.Fprintf(stderr, "pull: encode json: %v\n", err)
 			return 1
 		}
+		return 0
+	}
+	if skippedABI > 0 {
+		fmt.Fprintf(stdout, "pulled %s v%d → %s (%d files; %d left to its Web ABI build)\n", stack, versionNumber, stackDir, len(vd.Files)-skippedABI, skippedABI)
 		return 0
 	}
 	fmt.Fprintf(stdout, "pulled %s v%d → %s (%d files)\n", stack, versionNumber, stackDir, len(vd.Files))
@@ -331,48 +368,18 @@ func localStackClean(dir, name string, saved *state.State) (bool, error) {
 // (the same walker the push uses) and routing through opsToFiles makes the two
 // bases identical. dir is the workspace root (holds OPS/); name is the stack.
 func loadLocalStackFiles(dir, name string) ([]client.StackFile, error) {
-	ops, err := bundle.Walk(dir)
+	ws, err := readWorkspace(dir)
 	if err != nil {
 		return nil, err
 	}
-	files := opsToFiles(opsForStack(ops, name))
-	// The stack's own static assets (FILES/**), on the same basis the push
-	// records them. collectFileAssets walks only this stack's top-level FILES/
-	// (not a nested sub-stack's _mail/FILES/), matching opsToFiles scoping.
-	assets, err := collectFileAssets(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
+	// The code manifest only (no store-seed packs, no derived rows): the basis
+	// the cleanliness hash has always compared against, with the stack's Web
+	// ABI build when it has one.
+	build, err := buildStackFiles(dir, name, opsForStack(ws.Ops, name), ws.withABI(name, collectOpts{}))
 	if err != nil {
 		return nil, err
 	}
-	files = append(files, assets...)
-	// SOURCES/, OUTLETS/, SANDBOXES/ and CAPS/ are part of the code manifest apply
-	// records, so they must be in the cleanliness hash too.
-	srcPacks, err := collectSourcePacks(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, srcPacks...)
-	outletFiles, err := collectOutletFiles(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, outletFiles...)
-	sandboxFiles, err := collectSandboxFiles(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, sandboxFiles...)
-	capFiles, err := collectCapFiles(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, capFiles...)
-	// Datasets join the code manifest the same way apply records them:
-	// manifests inline, artifacts as fingerprint-only rows (hashed streaming).
-	dsFiles, _, err := collectDatasetFiles(filepath.Join(dir, "OPS", filepath.FromSlash(name)))
-	if err != nil {
-		return nil, err
-	}
-	return append(files, dsFiles...), nil
+	return build.Files, nil
 }
 
 // opsForStack narrows a full bundle.Walk result to a single stack's ops.
@@ -424,6 +431,15 @@ Flags:
 		return 1
 	}
 
+	// draft uploads OPS/<stack>/ as it is on disk; a stack bound to a Web
+	// ABI build would lose its web half, so `txco push` is the way.
+	if bindings, berr := loadStackBindings(dir); berr != nil {
+		fmt.Fprintf(stderr, "draft: %v\n", berr)
+		return 1
+	} else if b, bound := bindings[stack]; bound {
+		fmt.Fprintf(stderr, "draft: %s is bound to the Web ABI build %s, which draft doesn't install; use `txco push %s` (or `txco apply`)\n", stack, b.ABI, stack)
+		return 1
+	}
 	stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(stack))
 	files, err := collectStackFiles(stackDir)
 	if err == nil {

@@ -53,11 +53,12 @@ Flags:
 		return 1
 	}
 
-	localOps, err := bundle.Walk(dir)
+	ws, err := readWorkspace(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "diff: walk %s: %v\n", dir, err)
+		fmt.Fprintf(stderr, "diff: %v\n", err)
 		return 1
 	}
+	localOps := ws.Ops
 
 	// Resolve op://NAME references locally so the comparison sees the
 	// same shape the chassis stores. Apply mock-strip too, so a `diff`
@@ -99,7 +100,7 @@ Flags:
 	// Without this, "no changes" is misleading on a chassis that's
 	// been edited out-of-band.
 	remoteStackNames := uniqueStackNamesFromOps(remoteOps)
-	drifts := buildDrifts(ctx, c, dir, localOps, remoteStackNames)
+	drifts := buildDrifts(ctx, c, ws, remoteStackNames)
 	if len(drifts) > 0 {
 		decorateStackURLs(ctx, c, drifts)
 	}

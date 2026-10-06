@@ -205,6 +205,8 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return auth.RunSources(rest, stdout, stderr), true
 	case "data":
 		return runData(rest, stdout, stderr), true
+	case "web":
+		return runWeb(rest, stdout, stderr), true
 	case "cron":
 		return runCron(rest, stdout, stderr), true
 	case "room":
@@ -354,6 +356,7 @@ func printUsage(w io.Writer) {
 			{"activate <stack>", muted("Flip a stack's active version (defaults to most recent draft)")},
 			{"diff [<dir>]", muted("Compare local OPS/ tree against a chassis admin endpoint")},
 			{"lint [<dir>]", muted("Validate the local OPS/ tree offline — collisions, mis-placed files, txcl parse (exit 1 on issues)")},
+			{"web check <abi-dir | stack>", muted("Install a Web ABI build on a scratch chassis and probe it (exit 1 on failure)")},
 			{"status [<dir>]", muted("Per-stack version drift between local and chassis (exit 1 on divergence)")},
 			{"versions <stack>", muted("List versions for a stack with active marker")},
 			{"caps list", muted("List the capabilities the tenant's active stacks declare (CAPS/), with the stack and scope that answer each")},

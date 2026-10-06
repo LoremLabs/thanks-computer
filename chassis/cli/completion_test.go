@@ -150,6 +150,7 @@ var subcommandDispatchers = []struct{ path, file, fn string }{
 	{"source", "auth/sources_cmd.go", "RunSources"},
 	{"caps", "caps.go", "runCaps"},
 	{"stack", "stack_cmd.go", "runStack"},
+	{"web", "webcheck.go", "runWeb"},
 	{"update", "update_cmd.go", "runCLIUpdate"},
 }
 

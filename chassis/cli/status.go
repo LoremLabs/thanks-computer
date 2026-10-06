@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
-	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 )
 
@@ -54,9 +53,9 @@ Flags:
 	// Walk local OPS just enough to learn the stack set. We don't need
 	// the full bundle.Op records — buildDrifts re-reads files from disk
 	// when it wants the manifest hash, so a stack-name walk is enough.
-	localOps, err := bundle.Walk(dir)
+	ws, err := readWorkspace(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "status: walk %s: %v\n", dir, err)
+		fmt.Fprintf(stderr, "status: %v\n", err)
 		return 1
 	}
 
@@ -84,7 +83,7 @@ Flags:
 		remoteNames = append(remoteNames, s.Name)
 	}
 
-	drifts := buildDrifts(context.Background(), c, dir, localOps, remoteNames)
+	drifts := buildDrifts(context.Background(), c, ws, remoteNames)
 	// Annotate each stack with a reachable URL so the user can click
 	// straight through. Best-effort: a chassis without hostname routing
 	// just leaves the column (or JSON field) off.

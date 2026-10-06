@@ -103,6 +103,7 @@ The CLI verbs map onto that flow:
 |---|---|
 | `txco apply [dir]` | Deploy the whole `OPS/` tree: draft + activate per changed stack; expands [`&include`](./txcl/txcl.md#including-files--include) files, resolves `op://` refs; uploads computes. Refuses a stack the chassis moved since this workspace last synced (see below); `--force` overwrites |
 | `txco push <stack>` | Like `apply`, one stack |
+| `stacks:` in `txco.yaml` | Binds a stack to a [Web ABI](./web-abi.md) build: `apply`, `push`, `dev`, `status` and `lint` lay the build over the stack's tree. `--static-only` deploys a build's static half when it has a server entry |
 | `txco pull <stack>` | Materialize a stack's active version (or `--version N`) into local `OPS/<stack>/` — the inverse of `push`, as deployed: `op://` refs come back resolved and `&include`s come back as the included text |
 | `txco draft <stack>` | Upload a draft *without* activating (stage for review); `--activate` flips it too |
 | `txco activate <stack>` | Flip the active-version pointer (defaults to newest draft). Activating an older version = rollback |
@@ -113,7 +114,8 @@ The CLI verbs map onto that flow:
 | `txco runs [--stack S] [--json]` | The tenant's runs in flight on the chassis: rid, inlet, the stack it entered, the scope it is in now, its age ([aborting a run](../abort.md)) |
 | `txco abort <rid>` · `txco abort --stack <name>` | End a run in flight — or every run of a stack — without ending the chassis: ops in flight are cancelled, nothing later runs, the trace says `aborted` and by whom. `--reason` for the trace; confirmation on a non-local chassis ([aborting a run](../abort.md)) |
 | `txco diff [dir]` | Compare local `OPS/` against the running chassis |
-| `txco lint [dir]` | Validate the `OPS/` tree **offline** (no chassis): name collisions, mis-placed files, txcl parse, unconditional-loop warnings; `--list` prints the op graph; exit 1 on errors (CI-friendly) |
+| `txco lint [dir]` | Validate the `OPS/` tree **offline** (no chassis): name collisions, mis-placed files, txcl parse, unconditional-loop warnings, and each [Web ABI](./web-abi.md) build bound in `txco.yaml`; `--list` prints the op graph; exit 1 on errors (CI-friendly) |
+| `txco web check <abi-dir \| stack>` | Install a [Web ABI](./web-abi.md) build on a throwaway chassis and probe it: files, a `_` file, the immutable cache, an unknown page, an unknown asset, a POST, HEAD, a conditional GET. Exit 1 on failure; `--json`, `--strict`, `--keep` |
 | `txco status [dir]` | Per-stack drift summary; exit 1 on divergence (CI-friendly) |
 | `txco edit <stack> <path>` | `$EDITOR` one file of a draft, PATCH it back |
 | `txco data apply [dir]` | Deploy the `VECTORS/`, `KV/`, `BLOBS/`, `CALENDARS/`, `CONTACTS/` packs (code carried forward); same fast-forward rule, plus a refusal over runtime-edited seeded blobs — see [blobs](./blobs.md) |
