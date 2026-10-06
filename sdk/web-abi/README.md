@@ -11,7 +11,7 @@ produces so `txco` can deploy it.
   ops/              ordinary .txcl, in scope directories (ops/900000/…)
 ```
 
-The kit has three parts:
+The kit has four parts:
 
 - **The manifest schema** (`txco-web.schema.json`) and a validator. `txco`
   embeds the same schema file, and both validators pass the same test corpus.
@@ -20,6 +20,11 @@ The kit has three parts:
   turns the `Response` into the delta the chassis merges.
 - **A harness** that checks a build's `server/` before any runner exists, and
   serves a build locally.
+- **The producer helpers** (`@txco/web-abi/producer`) that a framework adapter,
+  preset or plugin writes a build with. They render the ops (a navigation op
+  and the catch-all), write and validate the manifest, and guard the output
+  directory before a build wipes it. Producers built on them answer requests
+  the same way.
 
 `txco web check <out>` checks the rest: the files, the ops, and every request
 the build has to answer.
@@ -74,6 +79,24 @@ import {
 } from "@txco/web-abi/bridge";
 import { validateManifest } from "@txco/web-abi/manifest";
 ```
+
+## Write a producer
+
+```js
+import { checkOutDir, renderOps, writeManifest, writeOps } from "@txco/web-abi/producer";
+
+// Before the build: refuse an output dir inside OPS/, one holding foreign
+// files, or one holding the project.
+const problems = checkOutDir({ dir: out, protect: [root, outDir], notInside: [outDir], entries });
+
+// After it: public/ is in place. One navigation op (the shell with 200 for
+// an app that routes in the browser, or the 404 page with 404), plus the
+// catch-all at 900900.
+await writeOps(out, renderOps({ mode: "spa", producer: "my-adapter", page: { name: "index.html", html } }));
+await writeManifest(out, { abi: 1, immutable: ["assets/"], "x-producer": { name: "my-adapter" } });
+```
+
+`@txco/vite-plugin` is built this way.
 
 ## Develop
 

@@ -1,0 +1,13 @@
+# @txco/web-abi — SPA fallback: known routes (generated; do not edit by hand).
+#
+# Serves the app shell (200.html) with 200 for a navigation to a known
+# page route that no file or earlier op answered. Paired with spa-404.txcl.
+# Regenerated on every build — the shell embeds content-hashed asset URLs.
+WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
+     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/
+     && @web.req.url.path =~ /^(?:(?:\/)|(?:\/book\/([^\/]+?)\/?))$/
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-cache",
+       @web.res.body = b64"<!doctype html><html><head><script type=\"module\" src=\"/assets/index-BxYz12Ab.js\"></script></head><body><div id=\"app\">\\o/</div></body></html>",
+       @halt = true

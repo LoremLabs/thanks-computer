@@ -1,0 +1,57 @@
+{
+  "name": "@txco/astro",
+  "version": "0.1.0",
+  "description": "Astro integration for Thanks, Computer (txco): after `astro build`, writes a Web ABI build — your static site as public/, a 404 page and catch-all as ops/, and txco-web.json — for `txco apply` to install.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "keywords": [
+    "astro",
+    "astro-integration",
+    "withastro",
+    "static",
+    "txco",
+    "thanks-computer",
+    "web-abi"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LoremLabs/thanks-computer.git",
+    "directory": "sdk/astro"
+  },
+  "homepage": "https://github.com/LoremLabs/thanks-computer/tree/master/sdk/astro#readme",
+  "bugs": "https://github.com/LoremLabs/thanks-computer/issues",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@txco/web-abi": "^0.2.0"
+  },
+  "peerDependencies": {
+    "astro": "^5.0.0 || ^6.0.0 || ^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

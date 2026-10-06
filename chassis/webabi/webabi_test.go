@@ -97,6 +97,7 @@ func TestLoad(t *testing.T) {
 		"public/.well-known/security.txt": "contact",
 		"ops/900000/spa-fallback.txcl":    "EMIT .x = 1",
 		"notes.md":                        "stray",
+		"nitro.json":                      `{"preset":"thanks-computer"}`,
 	})
 	d, err := Load(dir)
 	if err != nil {
@@ -127,6 +128,9 @@ func TestLoad(t *testing.T) {
 		if !strings.Contains(warn, w) {
 			t.Errorf("warnings %q lack %q", warn, w)
 		}
+	}
+	if strings.Contains(warn, "nitro.json") {
+		t.Errorf("Nitro's build info is a producer's own file, not a warning: %q", warn)
 	}
 }
 

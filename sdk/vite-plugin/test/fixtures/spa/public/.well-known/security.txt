@@ -1,0 +1,1 @@
+contact: mailto:x@example.com

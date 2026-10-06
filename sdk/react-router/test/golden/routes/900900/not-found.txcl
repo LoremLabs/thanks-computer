@@ -1,0 +1,11 @@
+# @txco/react-router — not found (generated; do not edit by hand).
+#
+# Every other HTTP request that reached the end of the stack: an asset that
+# doesn't exist, a method nothing handles. Without it the request would get
+# the envelope back as JSON. It sits after the navigation ops on purpose: ops
+# in one scope run concurrently.
+WHEN @src == "http"
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"404 not found\n",
+       @halt = true

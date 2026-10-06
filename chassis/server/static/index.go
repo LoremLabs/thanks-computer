@@ -174,16 +174,19 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 
 	st := safeStack(stack)
 
-	// Operator/inline layers first (disk workspace → chassis → embedded),
-	// highest precedence, returning bytes directly. An operator override of
-	// a tenant file still wins.
-	opLayers := make([]layer, 0, 3)
+	// Operator layers first (the stack's disk FILES/ → the chassis-wide
+	// FILES/), returning bytes directly: an operator override of a tenant
+	// file still wins. The embedded chassis default (favicon.ico) comes
+	// last, after the tenant layer, so it answers only when the app has no
+	// file of its own.
+	opLayers := make([]layer, 0, 2)
 	if st != "" {
 		if l, ok := ps[st]; ok {
 			opLayers = append(opLayers, l)
 		}
 	}
-	opLayers = append(opLayers, ch, emb)
+	opLayers = append(opLayers, ch)
+	inline := append(opLayers[:len(opLayers):len(opLayers)], emb)
 
 	// Tenant layer (metadata only; the caller resolves bytes by Hash). Keyed
 	// (slug, stack) so colliding stack names across tenants never merge.
@@ -199,14 +202,14 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 
 	// try_files: exact, then .html, then /index.html (and root → index.html).
 	for _, cand := range indexCandidates(rel) {
-		if r, ok := lookupServable(cand, opLayers, tl, haveTenant); ok {
+		if r, ok := lookupServable(cand, opLayers, tl, haveTenant, emb); ok {
 			return r
 		}
 	}
 
 	// A private path that no layer marked public stays a plain miss, before
 	// the ownership check below can turn it into a 404.
-	if root := privateRoot(rel); root != "" && !publicIn(root, opLayers, tl, haveTenant) {
+	if root := privateRoot(rel); root != "" && !publicIn(root, inline, tl, haveTenant) {
 		return Result{}
 	}
 
@@ -223,7 +226,7 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 	// in place of a chunk would only cascade the failure. Checked on the
 	// original rel, not a candidate.
 	if seg, _, nested := strings.Cut(rel, "/"); nested && filepath.Ext(rel) != "" {
-		for _, l := range opLayers {
+		for _, l := range inline {
 			if _, ok := l.dirs[seg]; ok {
 				return Result{Owned: true}
 			}
@@ -256,13 +259,13 @@ func (ix *Index) Asset(tenant, stack, rel string) (Result, bool) {
 
 	st := safeStack(stack)
 
-	opLayers := make([]layer, 0, 3)
+	opLayers := make([]layer, 0, 2)
 	if st != "" {
 		if l, ok := ps[st]; ok {
 			opLayers = append(opLayers, l)
 		}
 	}
-	opLayers = append(opLayers, ch, emb)
+	opLayers = append(opLayers, ch)
 
 	var tl tenantLayer
 	haveTenant := false
@@ -274,21 +277,28 @@ func (ix *Index) Asset(tenant, stack, rel string) (Result, bool) {
 		}
 	}
 
-	return lookupExact(cand, opLayers, tl, haveTenant)
+	return lookupExact(cand, opLayers, tl, haveTenant, emb)
 }
 
-// lookupExact resolves a single candidate path across the operator/inline
-// layers (bytes inline) then the tenant layer (bytes resolved by content
-// hash downstream). Returns (_, false) on miss.
-func lookupExact(rel string, opLayers []layer, tl tenantLayer, haveTenant bool) (Result, bool) {
+// lookupExact resolves a single candidate path across the operator layers
+// (bytes inline), then the tenant layer (bytes resolved by content hash
+// downstream), then the defaults (the embedded chassis files). Returns
+// (_, false) on miss.
+func lookupExact(rel string, opLayers []layer, tl tenantLayer, haveTenant bool, defaults ...layer) (Result, bool) {
 	if rel == "" {
 		return Result{}, false
 	}
-	for _, l := range opLayers {
-		if v, found := l.files.Get([]byte(rel)); found {
-			e := v.(*entry)
-			return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag}, true
+	inlineHit := func(ls []layer) (Result, bool) {
+		for _, l := range ls {
+			if v, found := l.files.Get([]byte(rel)); found {
+				e := v.(*entry)
+				return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag}, true
+			}
 		}
+		return Result{}, false
+	}
+	if r, ok := inlineHit(opLayers); ok {
+		return r, true
 	}
 	if haveTenant {
 		if me, ok := tl.files[rel]; ok {
@@ -296,27 +306,34 @@ func lookupExact(rel string, opLayers []layer, tl tenantLayer, haveTenant bool) 
 				Ctype: me.ctype, ETag: `"` + me.hash + `"`}, true
 		}
 	}
-	return Result{}, false
+	return inlineHit(defaults)
 }
 
 // lookupServable is lookupExact for HTTP: a candidate under a private root
 // only resolves in a layer that marks that root public, and a hit reports
 // whether its layer marks it immutable. Layers stay first-match-wins among
-// the ones that may serve the candidate.
-func lookupServable(rel string, opLayers []layer, tl tenantLayer, haveTenant bool) (Result, bool) {
+// the ones that may serve the candidate: the operator layers, the tenant's,
+// then the defaults.
+func lookupServable(rel string, opLayers []layer, tl tenantLayer, haveTenant bool, defaults ...layer) (Result, bool) {
 	if rel == "" {
 		return Result{}, false
 	}
 	root := privateRoot(rel)
-	for _, l := range opLayers {
-		if root != "" && !l.isPublic(root) {
-			continue
+	inlineHit := func(ls []layer) (Result, bool) {
+		for _, l := range ls {
+			if root != "" && !l.isPublic(root) {
+				continue
+			}
+			if v, found := l.files.Get([]byte(rel)); found {
+				e := v.(*entry)
+				return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag,
+					Immutable: l.isImmutable(rel)}, true
+			}
 		}
-		if v, found := l.files.Get([]byte(rel)); found {
-			e := v.(*entry)
-			return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag,
-				Immutable: l.isImmutable(rel)}, true
-		}
+		return Result{}, false
+	}
+	if r, ok := inlineHit(opLayers); ok {
+		return r, true
 	}
 	if haveTenant && (root == "" || tl.isPublic(root)) {
 		if me, ok := tl.files[rel]; ok {
@@ -324,7 +341,7 @@ func lookupServable(rel string, opLayers []layer, tl tenantLayer, haveTenant boo
 				Ctype: me.ctype, ETag: `"` + me.hash + `"`, Immutable: tl.isImmutable(rel)}, true
 		}
 	}
-	return Result{}, false
+	return inlineHit(defaults)
 }
 
 // publicIn reports whether any applicable layer marks root public.

@@ -161,3 +161,29 @@ func TestRebuildTenantNilSafe(t *testing.T) {
 		t.Fatalf("fresh index tenant lookup: %+v", r)
 	}
 }
+
+// TestTenantFileBeatsEmbeddedDefault: an app's own favicon.ico is served,
+// not the chassis's; the embedded default still answers for a stack without
+// one, over HTTP and for read-file alike.
+func TestTenantFileBeatsEmbeddedDefault(t *testing.T) {
+	db := tenantDB(t)
+	insTenant(t, db, "tnt_a", "acme", false)
+	insStack(t, db, "s_a", "tnt_a", "web", 10)
+	insFile(t, db, 10, "FILES/favicon.ico", "ACME-ICON", hhex("ACME-ICON"))
+	insStack(t, db, "s_b", "tnt_a", "bare", 11)
+	insFile(t, db, 11, "FILES/index.html", "BARE", hhex("BARE"))
+
+	ix := NewIndex("", zap.NewNop())
+	if err := ix.RebuildTenant(db); err != nil {
+		t.Fatalf("RebuildTenant: %v", err)
+	}
+	if r := ix.Lookup("acme", "web", "/favicon.ico"); !r.Found || r.Hash != hhex("ACME-ICON") || r.Body != nil {
+		t.Fatalf("the tenant's favicon must win over the embedded one: %+v", r)
+	}
+	if r, ok := ix.Asset("acme", "web", "favicon.ico"); !ok || r.Hash != hhex("ACME-ICON") {
+		t.Fatalf("read-file must see the tenant's favicon: %+v", r)
+	}
+	if r := ix.Lookup("acme", "bare", "/favicon.ico"); !r.Found || r.Body == nil || r.Hash != "" {
+		t.Fatalf("a stack without a favicon gets the embedded default: %+v", r)
+	}
+}

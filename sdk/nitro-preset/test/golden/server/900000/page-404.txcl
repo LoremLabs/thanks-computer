@@ -1,0 +1,17 @@
+# @txco/nitro-preset — 404 page (generated; do not edit by hand).
+#
+# Serves a plain 404 page (the build has no 404.html) for any page navigation nothing else answered:
+# no file in public/ and no op of the stack had a page for it.
+# This build has a server (server/), and no chassis runs one yet: a
+# --static-only install serves its prerendered pages, and every other page
+# navigation ends here. A dispatch op replaces this one once a runner exists.
+# Regenerated on every build — the page embeds content-hashed asset URLs.
+WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
+     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-cache",
+       @web.res.body = b64"<!doctype html>
+<html lang=\"en\"><head><meta charset=\"utf-8\"><title>404 Not Found</title></head><body><h1>404 Not Found</h1></body></html>
+",
+       @halt = true

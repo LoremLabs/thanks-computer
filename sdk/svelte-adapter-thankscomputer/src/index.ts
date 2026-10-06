@@ -1,14 +1,16 @@
 import type { Adapter, Builder } from "@sveltejs/kit";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
+
+import { checkOutDir, writeManifest, writeOps } from "@txco/web-abi/producer";
 
 import { renderOps } from "./ops.js";
 
 export { renderOps, knownRoutesRegex, catchAllScope } from "./ops.js";
 
 const NAME = "@txco/svelte-adapter-thankscomputer";
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 
 export interface AdapterOptions {
   /**
@@ -47,10 +49,6 @@ export interface AdapterOptions {
    */
   precompress?: boolean;
 }
-
-// What a Web ABI directory may hold. Anything else in `out` means it isn't
-// one, and wiping it could destroy work.
-const ABI_ENTRIES = new Set(["txco-web.json", "public", "server", "ops", ".gitignore", ".DS_Store"]);
 
 /**
  * SvelteKit adapter for thanks.computer (txco).
@@ -103,19 +101,14 @@ export default function adapter(options: AdapterOptions = {}): Adapter {
         fallbackName: fallback || "",
         producer: NAME,
       });
-      for (const [rel, text] of Object.entries(ops)) {
-        const p = join(out, "ops", rel);
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, text);
-      }
+      await writeOps(out, ops);
 
       const appDir = builder.config.kit.appDir;
-      const manifest = {
+      await writeManifest(out, {
         abi: 1,
         immutable: [`${appDir}/immutable/`],
         "x-producer": { name: NAME, version: VERSION },
-      };
-      writeFileSync(join(out, "txco-web.json"), JSON.stringify(manifest, null, 2) + "\n");
+      });
 
       builder.log.success(`Built a Web ABI build at ${out}/ (${Object.keys(ops).length} ops)`);
       if (apply) {
@@ -129,9 +122,10 @@ export default function adapter(options: AdapterOptions = {}): Adapter {
 
 /**
  * Refuses an `out` that isn't a Web ABI directory: one inside OPS/ (where the
- * walker would read it as a stack, and where 0.2 wrote its output), or an
- * existing directory holding anything a build doesn't write. 0.3 wipes `out`
- * on every build, so a 0.2 setting (`out: 'OPS/web'`) must never reach it.
+ * walker would read it as a stack, and where 0.2 wrote its output), one
+ * holding the project, or an existing directory holding anything a build
+ * doesn't write. 0.3 wipes `out` on every build, so a 0.2 setting
+ * (`out: 'OPS/web'`) must never reach it.
  */
 function guardOut(out: string): void {
   const abs = resolve(out);
@@ -142,15 +136,12 @@ function guardOut(out: string): void {
         `and be bound to the stack in txco.yaml:\n\n  stacks:\n    web:\n      abi: www/txco-web\n`,
     );
   }
-  if (!existsSync(abs)) return;
-  const stray = readdirSync(abs).filter((e) => !ABI_ENTRIES.has(e));
-  if (stray.length > 0) {
-    throw new Error(
-      `${NAME}: out "${out}" holds ${stray.slice(0, 3).join(", ")}${stray.length > 3 ? ", …" : ""}, ` +
-        `which isn't part of a Web ABI build. The adapter wipes out on every build, so point it ` +
-        `at a directory of its own.`,
-    );
-  }
+  const problems = checkOutDir({
+    dir: abs,
+    protect: [process.cwd()],
+    entries: existsSync(abs) ? readdirSync(abs) : null,
+  });
+  if (problems.length > 0) throw new Error(`${NAME}: ${problems.join("\n")}`);
 }
 
 /** Dot paths in public/ never deploy (the installer skips them): say so. */

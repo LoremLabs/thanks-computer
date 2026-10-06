@@ -1,0 +1,14 @@
+# @txco/web-abi — SPA fallback (generated; do not edit by hand).
+#
+# Serves the app shell (index.html) with 200 for any page navigation
+# nothing else answered: the app routes in the browser, so unknown pages get
+# 200 too and the client renders its not-found view.
+# A producer's own note.
+# Regenerated on every build — the shell embeds content-hashed asset URLs.
+WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
+     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-cache",
+       @web.res.body = b64"<!doctype html><html><head><script type=\"module\" src=\"/assets/index-BxYz12Ab.js\"></script></head><body><div id=\"app\">\\o/</div></body></html>",
+       @halt = true

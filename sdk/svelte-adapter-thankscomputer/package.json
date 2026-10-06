@@ -1,6 +1,6 @@
 {
   "name": "@txco/svelte-adapter-thankscomputer",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "SvelteKit adapter for Thanks, Computer (txco): writes a Web ABI build — your app as public/, the ops a SvelteKit app needs as ops/, and txco-web.json — for `txco apply` to install.",
   "license": "MIT",
   "type": "module",
@@ -42,6 +42,9 @@
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "npm run clean && npm run build",
     "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@txco/web-abi": "^0.2.0"
   },
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0"

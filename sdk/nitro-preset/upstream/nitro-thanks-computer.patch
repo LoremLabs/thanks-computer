@@ -1,0 +1,408 @@
+diff --git a/docs/2.deploy/20.providers/thanks-computer.md b/docs/2.deploy/20.providers/thanks-computer.md
+new file mode 100644
+index 0000000..2449798
+--- /dev/null
++++ b/docs/2.deploy/20.providers/thanks-computer.md
+@@ -0,0 +1,59 @@
++# Thanks, Computer
++
++> Deploy Nitro apps to [Thanks, Computer](https://www.thanks.computer).
++
++**Preset:** `thanks-computer` (server), `thanks-computer-static` (prerendered)
++
++:read-more{title="Thanks, Computer" to="https://www.thanks.computer"}
++
++A build is a Web ABI directory, `txco-web/`:
++
++- `public/`, the static output, served by the platform before your app runs;
++- `server/`, the app as a Fetch handler (`thanks-computer` only);
++- `ops/`, the rules that answer what no file does: a page that doesn't exist
++  gets `404.html` with 404, or, for an app rendered in the browser, the app
++  shell with 200;
++- `txco-web.json`, the manifest.
++
++## Deploy a prerendered site
++
++```bash
++npx nitro build --preset thanks-computer-static
++```
++
++Bind the build to a stack in your workspace's `txco.yaml`, then deploy with
++the [txco CLI](https://www.thanks.computer):
++
++```yaml
++stacks:
++  web:
++    abi: txco-web
++```
++
++```bash
++txco web check txco-web
++txco apply
++```
++
++## Deploy a server build
++
++```bash
++npx nitro build --preset thanks-computer
++txco apply --static-only
++```
++
++`--static-only` deploys `public/` and `ops/` until the platform runs the
++`server/` half.
++
++## Options
++
++```ts
++export default defineNitroConfig({
++  thanksComputer: {
++    // Force the browser-rendered app shell for unknown pages (detected for Nuxt `ssr: false`).
++    spa: true,
++    // public/ prefixes cached for a year (derived from `publicAssets` when unset).
++    immutable: ["assets/"],
++  },
++});
++```
+diff --git a/src/presets/_all.gen.ts b/src/presets/_all.gen.ts
+index 450b4f5..d259f49 100644
+--- a/src/presets/_all.gen.ts
++++ b/src/presets/_all.gen.ts
+@@ -23,6 +23,7 @@ import _node from "./node/preset.ts";
+ import _renderCom from "./render.com/preset.ts";
+ import _standard from "./standard/preset.ts";
+ import _stormkit from "./stormkit/preset.ts";
++import _thanksComputer from "./thanks-computer/preset.ts";
+ import _upsun from "./upsun/preset.ts";
+ import _vercel from "./vercel/preset.ts";
+ import _winterjs from "./winterjs/preset.ts";
+@@ -54,6 +55,7 @@ export default [
+   ..._renderCom,
+   ..._standard,
+   ..._stormkit,
++  ..._thanksComputer,
+   ..._upsun,
+   ..._vercel,
+   ..._winterjs,
+diff --git a/src/presets/_types.gen.ts b/src/presets/_types.gen.ts
+index 5f9aed9..720dbda 100644
+--- a/src/presets/_types.gen.ts
++++ b/src/presets/_types.gen.ts
+@@ -6,6 +6,7 @@ import type { PresetOptions as AzureOptions } from "./azure/preset.ts";
+ import type { PresetOptions as CloudflareOptions } from "./cloudflare/preset.ts";
+ import type { PresetOptions as FirebaseOptions } from "./firebase/preset.ts";
+ import type { PresetOptions as NetlifyOptions } from "./netlify/preset.ts";
++import type { PresetOptions as ThanksComputerOptions } from "./thanks-computer/preset.ts";
+ import type { PresetOptions as VercelOptions } from "./vercel/preset.ts";
+ import type { PresetOptions as ZephyrOptions } from "./zephyr/preset.ts";
+ 
+@@ -16,12 +17,13 @@ export interface PresetOptions {
+   cloudflare?: CloudflareOptions;
+   firebase?: FirebaseOptions;
+   netlify?: NetlifyOptions;
++  thanksComputer?: ThanksComputerOptions;
+   vercel?: VercelOptions;
+   zephyr?: ZephyrOptions;
+ }
+ 
+-export const presetsWithConfig = ["awsAmplify","awsLambda","azure","cloudflare","firebase","netlify","vercel","zephyr"] as const;
++export const presetsWithConfig = ["awsAmplify","awsLambda","azure","cloudflare","firebase","netlify","thanksComputer","vercel","zephyr"] as const;
+ 
+-export type PresetName = "alwaysdata" | "aws-amplify" | "aws-lambda" | "azure-swa" | "base-worker" | "bun" | "cleavr" | "cloudflare-dev" | "cloudflare-durable" | "cloudflare-module" | "cloudflare-pages" | "cloudflare-pages-static" | "deno" | "deno-deploy" | "deno-server" | "digital-ocean" | "edgeone" | "edgeone-pages" | "firebase-app-hosting" | "flight-control" | "genezio" | "github-pages" | "gitlab-pages" | "heroku" | "iis-handler" | "iis-node" | "koyeb" | "netlify" | "netlify-edge" | "netlify-static" | "nitro-dev" | "nitro-prerender" | "node" | "node-cluster" | "node-middleware" | "node-server" | "platform-sh" | "render-com" | "standard" | "static" | "stormkit" | "upsun" | "vercel" | "vercel-dev" | "vercel-static" | "winterjs" | "zeabur" | "zeabur-static" | "zephyr" | "zerops" | "zerops-static";
++export type PresetName = "alwaysdata" | "aws-amplify" | "aws-lambda" | "azure-swa" | "base-worker" | "bun" | "cleavr" | "cloudflare-dev" | "cloudflare-durable" | "cloudflare-module" | "cloudflare-pages" | "cloudflare-pages-static" | "deno" | "deno-deploy" | "deno-server" | "digital-ocean" | "edgeone" | "edgeone-pages" | "firebase-app-hosting" | "flight-control" | "genezio" | "github-pages" | "gitlab-pages" | "heroku" | "iis-handler" | "iis-node" | "koyeb" | "netlify" | "netlify-edge" | "netlify-static" | "nitro-dev" | "nitro-prerender" | "node" | "node-cluster" | "node-middleware" | "node-server" | "platform-sh" | "render-com" | "standard" | "static" | "stormkit" | "thanks-computer" | "thanks-computer-static" | "upsun" | "vercel" | "vercel-dev" | "vercel-static" | "winterjs" | "zeabur" | "zeabur-static" | "zephyr" | "zerops" | "zerops-static";
+ 
+-export type PresetNameInput = "alwaysdata" | "aws-amplify" | "awsAmplify" | "aws_amplify" | "aws-lambda" | "awsLambda" | "aws_lambda" | "azure-swa" | "azureSwa" | "azure_swa" | "base-worker" | "baseWorker" | "base_worker" | "bun" | "cleavr" | "cloudflare-dev" | "cloudflareDev" | "cloudflare_dev" | "cloudflare-durable" | "cloudflareDurable" | "cloudflare_durable" | "cloudflare-module" | "cloudflareModule" | "cloudflare_module" | "cloudflare-pages" | "cloudflarePages" | "cloudflare_pages" | "cloudflare-pages-static" | "cloudflarePagesStatic" | "cloudflare_pages_static" | "deno" | "deno-deploy" | "denoDeploy" | "deno_deploy" | "deno-server" | "denoServer" | "deno_server" | "digital-ocean" | "digitalOcean" | "digital_ocean" | "edgeone" | "edgeone-pages" | "edgeonePages" | "edgeone_pages" | "firebase-app-hosting" | "firebaseAppHosting" | "firebase_app_hosting" | "flight-control" | "flightControl" | "flight_control" | "genezio" | "github-pages" | "githubPages" | "github_pages" | "gitlab-pages" | "gitlabPages" | "gitlab_pages" | "heroku" | "iis-handler" | "iisHandler" | "iis_handler" | "iis-node" | "iisNode" | "iis_node" | "koyeb" | "netlify" | "netlify-edge" | "netlifyEdge" | "netlify_edge" | "netlify-static" | "netlifyStatic" | "netlify_static" | "nitro-dev" | "nitroDev" | "nitro_dev" | "nitro-prerender" | "nitroPrerender" | "nitro_prerender" | "node" | "node-cluster" | "nodeCluster" | "node_cluster" | "node-middleware" | "nodeMiddleware" | "node_middleware" | "node-server" | "nodeServer" | "node_server" | "platform-sh" | "platformSh" | "platform_sh" | "render-com" | "renderCom" | "render_com" | "standard" | "static" | "stormkit" | "upsun" | "vercel" | "vercel-dev" | "vercelDev" | "vercel_dev" | "vercel-static" | "vercelStatic" | "vercel_static" | "winterjs" | "zeabur" | "zeabur-static" | "zeaburStatic" | "zeabur_static" | "zephyr" | "zerops" | "zerops-static" | "zeropsStatic" | "zerops_static" | (string & {});
++export type PresetNameInput = "alwaysdata" | "aws-amplify" | "awsAmplify" | "aws_amplify" | "aws-lambda" | "awsLambda" | "aws_lambda" | "azure-swa" | "azureSwa" | "azure_swa" | "base-worker" | "baseWorker" | "base_worker" | "bun" | "cleavr" | "cloudflare-dev" | "cloudflareDev" | "cloudflare_dev" | "cloudflare-durable" | "cloudflareDurable" | "cloudflare_durable" | "cloudflare-module" | "cloudflareModule" | "cloudflare_module" | "cloudflare-pages" | "cloudflarePages" | "cloudflare_pages" | "cloudflare-pages-static" | "cloudflarePagesStatic" | "cloudflare_pages_static" | "deno" | "deno-deploy" | "denoDeploy" | "deno_deploy" | "deno-server" | "denoServer" | "deno_server" | "digital-ocean" | "digitalOcean" | "digital_ocean" | "edgeone" | "edgeone-pages" | "edgeonePages" | "edgeone_pages" | "firebase-app-hosting" | "firebaseAppHosting" | "firebase_app_hosting" | "flight-control" | "flightControl" | "flight_control" | "genezio" | "github-pages" | "githubPages" | "github_pages" | "gitlab-pages" | "gitlabPages" | "gitlab_pages" | "heroku" | "iis-handler" | "iisHandler" | "iis_handler" | "iis-node" | "iisNode" | "iis_node" | "koyeb" | "netlify" | "netlify-edge" | "netlifyEdge" | "netlify_edge" | "netlify-static" | "netlifyStatic" | "netlify_static" | "nitro-dev" | "nitroDev" | "nitro_dev" | "nitro-prerender" | "nitroPrerender" | "nitro_prerender" | "node" | "node-cluster" | "nodeCluster" | "node_cluster" | "node-middleware" | "nodeMiddleware" | "node_middleware" | "node-server" | "nodeServer" | "node_server" | "platform-sh" | "platformSh" | "platform_sh" | "render-com" | "renderCom" | "render_com" | "standard" | "static" | "stormkit" | "thanks-computer" | "thanksComputer" | "thanks_computer" | "thanks-computer-static" | "thanksComputerStatic" | "thanks_computer_static" | "upsun" | "vercel" | "vercel-dev" | "vercelDev" | "vercel_dev" | "vercel-static" | "vercelStatic" | "vercel_static" | "winterjs" | "zeabur" | "zeabur-static" | "zeaburStatic" | "zeabur_static" | "zephyr" | "zerops" | "zerops-static" | "zeropsStatic" | "zerops_static" | (string & {});
+diff --git a/src/presets/thanks-computer/preset.ts b/src/presets/thanks-computer/preset.ts
+new file mode 100644
+index 0000000..0fbf615
+--- /dev/null
++++ b/src/presets/thanks-computer/preset.ts
+@@ -0,0 +1,54 @@
++import { defineNitroPreset } from "../_utils/preset.ts";
++import type { Nitro } from "nitro/types";
++import { writeWebABI } from "./utils.ts";
++
++export type { ThanksComputerOptions as PresetOptions } from "./types.ts";
++
++// https://www.thanks.computer — a Web ABI build: public/, ops/, server/, txco-web.json
++
++const output = {
++  dir: "{{ rootDir }}/txco-web",
++  serverDir: "{{ output.dir }}/server",
++  publicDir: "{{ output.dir }}/public/{{ baseURL }}",
++};
++
++const thanksComputer = defineNitroPreset(
++  {
++    entry: "./thanks-computer/runtime/thanks-computer",
++    serveStatic: false, // The platform serves public/ before the app runs
++    noExternals: true, // server/ deploys without an install step
++    output,
++    commands: {
++      deploy: "txco apply",
++    },
++    hooks: {
++      async compiled(nitro: Nitro) {
++        await writeWebABI(nitro, { server: true });
++      },
++    },
++  },
++  {
++    name: "thanks-computer" as const,
++  }
++);
++
++const thanksComputerStatic = defineNitroPreset(
++  {
++    extends: "static",
++    output,
++    commands: {
++      deploy: "txco apply",
++    },
++    hooks: {
++      async compiled(nitro: Nitro) {
++        await writeWebABI(nitro, { server: false });
++      },
++    },
++  },
++  {
++    name: "thanks-computer-static" as const,
++    static: true,
++  }
++);
++
++export default [thanksComputer, thanksComputerStatic] as const;
+diff --git a/src/presets/thanks-computer/runtime/thanks-computer.ts b/src/presets/thanks-computer/runtime/thanks-computer.ts
+new file mode 100644
+index 0000000..b5c1b5c
+--- /dev/null
++++ b/src/presets/thanks-computer/runtime/thanks-computer.ts
+@@ -0,0 +1,18 @@
++import "#nitro/virtual/polyfills";
++import { useNitroApp } from "nitro/app";
++import type { ServerRequest } from "srvx";
++
++const nitroApp = useNitroApp();
++
++// The Web ABI server shape: `fetch(request, ctx)`, ctx = { client: { ip } }.
++interface ThanksComputerContext {
++  client?: { ip?: string };
++}
++
++export default {
++  async fetch(req: ServerRequest, ctx?: ThanksComputerContext): Promise<Response> {
++    req.runtime ??= { name: "thanks-computer" };
++    req.ip ??= ctx?.client?.ip;
++    return nitroApp.fetch(req);
++  },
++};
+diff --git a/src/presets/thanks-computer/types.ts b/src/presets/thanks-computer/types.ts
+new file mode 100644
+index 0000000..c034d32
+--- /dev/null
++++ b/src/presets/thanks-computer/types.ts
+@@ -0,0 +1,13 @@
++export interface ThanksComputerOptions {
++  /**
++   * Answer every unknown page path with the app shell and status 200, for an
++   * app that routes in the browser. Detected for Nuxt `ssr: false`.
++   */
++  spa?: boolean;
++  /**
++   * The `public/` prefixes the platform caches for a year (e.g. `["assets/"]`),
++   * each a directory ending in "/". Derived from `publicAssets` entries with a
++   * one-year `maxAge` when unset (Nuxt: `_nuxt/`).
++   */
++  immutable?: string[];
++}
+diff --git a/src/presets/thanks-computer/utils.ts b/src/presets/thanks-computer/utils.ts
+new file mode 100644
+index 0000000..c1795b8
+--- /dev/null
++++ b/src/presets/thanks-computer/utils.ts
+@@ -0,0 +1,149 @@
++import fsp from "node:fs/promises";
++import type { Nitro } from "nitro/types";
++import { join, relative } from "pathe";
++import { writeFile } from "../_utils/fs.ts";
++
++// Turns Nitro's output into a Web ABI build for Thanks, Computer:
++//
++//   txco-web/
++//     txco-web.json   the manifest
++//     public/         the site
++//     ops/            the rules that answer what no file does
++//     server/         the app as a Fetch handler (server builds only)
++//
++// The ops are plain txcl. A page navigation nothing else answered gets
++// 404.html with 404 (a prerendered site), or the app shell with 200 (an
++// `ssr: false` app). Every other HTTP request gets a plain 404.
++
++const PRODUCER = "nitro/thanks-computer";
++const SCOPE = 900_000;
++const YEAR = 31_536_000;
++
++type Mode = "static" | "spa" | "server";
++
++export async function writeWebABI(nitro: Nitro, { server }: { server: boolean }) {
++  const { dir, publicDir, serverDir } = nitro.options.output;
++  const opts = nitro.options.thanksComputer || {};
++
++  let entry: string | undefined;
++  if (server && !nitro.options.static) {
++    entry = relative(dir, join(serverDir, "index.mjs"));
++  } else {
++    // No server: anything in server/ is build-time output.
++    await fsp.rm(serverDir, { recursive: true, force: true });
++  }
++
++  const mode: Mode = entry ? "server" : isSpa(nitro) ? "spa" : "static";
++  const page =
++    mode === "spa"
++      ? ((await readPage(publicDir, "200.html")) ?? (await readPage(publicDir, "index.html")))
++      : await readPage(publicDir, "404.html");
++  if (mode === "spa" && !page) {
++    throw new Error("[thanks-computer] an `ssr: false` build needs its shell (200.html or index.html)");
++  }
++
++  await fsp.rm(join(dir, "ops"), { recursive: true, force: true });
++  for (const [path, text] of Object.entries(renderOps(mode, page))) {
++    await writeFile(join(dir, "ops", path), text);
++  }
++
++  const immutable =
++    opts.immutable ||
++    deriveImmutable(nitro.options.publicAssets, nitro.options.baseURL, nitro.options.framework?.name);
++  const manifest = {
++    abi: 1,
++    ...(entry && { server: { entry } }),
++    ...(immutable.length > 0 && { immutable }),
++    "x-producer": { name: PRODUCER },
++    "x-nitro": { preset: nitro.options.preset, mode },
++  };
++  await writeFile(join(dir, "txco-web.json"), JSON.stringify(manifest, null, 2) + "\n");
++
++  nitro.logger.success(
++    `Web ABI build (${mode}) written. Deploy it with \`txco apply\`${entry ? " (\`--static-only\` until the platform runs server/)" : ""}.`
++  );
++}
++
++function isSpa(nitro: Nitro): boolean {
++  const forced = nitro.options.thanksComputer?.spa;
++  if (typeof forced === "boolean") {
++    return forced;
++  }
++  // Nuxt prerenders /index.html as the app shell only for an `ssr: false` app.
++  if (nitro._prerenderedRoutes?.some((r) => r.route === "/index.html")) {
++    return true;
++  }
++  return nitro.options.routeRules?.["/**"]?.ssr === false;
++}
++
++async function readPage(publicDir: string, name: string) {
++  const html = await fsp.readFile(join(publicDir, name), "utf8").catch(() => undefined);
++  return html === undefined ? undefined : { name, html };
++}
++
++// A navigation: a GET or HEAD of a path whose last segment has no extension.
++const NAV_GUARD =
++  '@src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")\n' +
++  "     && @web.req.url.path !~ /(?i)\\.[a-z0-9]+$/";
++
++const BUILTIN_404 =
++  '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>404 Not Found</title></head>' +
++  "<body><h1>404 Not Found</h1></body></html>\n";
++
++function renderOps(mode: Mode, page: { name: string; html: string } | undefined) {
++  const header = (what: string) => `# ${PRODUCER} — ${what} (generated; do not edit by hand).\n`;
++  const nav =
++    mode === "spa"
++      ? { file: "spa-fallback.txcl", what: "SPA fallback", status: 200 }
++      : { file: "page-404.txcl", what: "404 page", status: 404 };
++  return {
++    [`${SCOPE}/${nav.file}`]: `${header(nav.what)}WHEN ${NAV_GUARD}\n${emitPage(nav.status, page?.html ?? BUILTIN_404)}`,
++    // After the navigation op: ops in one scope run concurrently.
++    [`${SCOPE + 900}/not-found.txcl`]: `${header("not found")}WHEN @src == "http"
++  EMIT @web.res.status = 404,
++       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
++       @web.res.body = b64"404 not found\\n",
++       @halt = true
++`,
++  };
++}
++
++function emitPage(status: number, html: string) {
++  const escaped = html.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
++  return `  EMIT @web.res.status = ${status},
++       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
++       @web.res.headers.cache-control.0 = "no-cache",
++       @web.res.body = b64"${escaped}",
++       @halt = true
++`;
++}
++
++// The public/ prefixes whose files the framework caches for a year (Nuxt's
++// `_nuxt/`), minus any that hold a shorter-lived dir, except Nuxt's
++// cache-busted `<buildAssetsDir>/builds`.
++function deriveImmutable(
++  assets: { baseURL?: string; maxAge?: number }[],
++  appBaseURL: string,
++  framework?: string
++): string[] {
++  const trim = (u: string) => u.replace(/^\/+|\/+$/g, "");
++  const norm = (u?: string) => "/" + trim(u || "/");
++  const inside = (inner: string, outer: string) => inner === outer || inner.startsWith(outer + "/");
++  const dirs = assets.map((a) => ({ base: norm(a.baseURL), maxAge: a.maxAge || 0 }));
++  const kept = dirs
++    .filter((c) => c.maxAge >= YEAR && c.base !== "/")
++    .filter(
++      (c) =>
++        !dirs.some(
++          (o) =>
++            o.maxAge < YEAR &&
++            o.base !== "/" &&
++            inside(o.base, c.base) &&
++            !(framework === "nuxt" && o.base === c.base + "/builds")
++        )
++    )
++    .map((c) => c.base);
++  const outer = [...new Set(kept)].filter((b) => !kept.some((o) => o !== b && inside(b, o)));
++  const app = trim(appBaseURL);
++  return outer.map((b) => (app ? `${app}/` : "") + `${trim(b)}/`).sort();
++}
+diff --git a/test/presets/thanks-computer.test.ts b/test/presets/thanks-computer.test.ts
+new file mode 100644
+index 0000000..d33eba6
+--- /dev/null
++++ b/test/presets/thanks-computer.test.ts
+@@ -0,0 +1,30 @@
++import { promises as fsp } from "node:fs";
++import { resolve } from "pathe";
++import { describe, expect, it } from "vitest";
++import { setupTest, testNitro } from "../tests.ts";
++
++describe("nitro:preset:thanks-computer", async () => {
++  const ctx = await setupTest("thanks-computer");
++
++  testNitro(ctx, async () => {
++    const entryPath = resolve(ctx.outDir, "server/index.mjs");
++    const fetchHandler = await import(entryPath).then((m) => m.default.fetch);
++
++    return async ({ url, ...init }) => {
++      const res = await fetchHandler(new Request(`https://test.com${url}`, init), {
++        client: { ip: "203.0.113.7" },
++      });
++      return res;
++    };
++  });
++
++  it("writes a Web ABI build", async () => {
++    const manifest = JSON.parse(await fsp.readFile(resolve(ctx.outDir, "txco-web.json"), "utf8"));
++    expect(manifest.abi).toBe(1);
++    expect(manifest.server).toEqual({ entry: "server/index.mjs" });
++    const ops = await fsp.readdir(resolve(ctx.outDir, "ops/900000"));
++    expect(ops).toEqual(["page-404.txcl"]);
++    const catchAll = await fsp.readFile(resolve(ctx.outDir, "ops/900900/not-found.txcl"), "utf8");
++    expect(catchAll).toContain('WHEN @src == "http"');
++  });
++});

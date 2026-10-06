@@ -1,0 +1,14 @@
+# @txco/nitro-preset — 404 page (generated; do not edit by hand).
+#
+# Serves 404.html with 404 for any page navigation nothing else answered:
+# no file in public/ and no op of the stack had a page for it.
+# A client route that wasn't prerendered still renders: Nuxt's 404.html
+# is its app shell.
+# Regenerated on every build — the page embeds content-hashed asset URLs.
+WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
+     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "text/html; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-cache",
+       @web.res.body = b64"<!doctype html><html><head><script type=\"module\" src=\"/_nuxt/entry.BxYz12Ab.js\"></script></head><body><div id=\"__nuxt\">\\o/</div></body></html>",
+       @halt = true

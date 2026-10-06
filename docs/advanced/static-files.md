@@ -177,3 +177,55 @@ above. A navigation to a client-rendered route gets the app shell from the
 build's `spa-fallback` op, so deep links and hard reloads still render; one
 that matches no route gets the shell with a `404` (`spa-404`); anything else
 gets a plain `404` (`not-found`).
+
+For Nuxt (and other Nitro frameworks),
+[`@txco/nitro-preset`](https://www.npmjs.com/package/@txco/nitro-preset) writes
+the same kind of build:
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({ nitro: { preset: '@txco/nitro-preset' } });
+```
+
+```sh
+nuxt generate                   # writes txco-web/
+txco web check txco-web
+txco apply
+```
+
+`nuxt generate` prerenders every page it can crawl. A navigation to a page
+that doesn't exist gets Nuxt's `404.html` with a `404`, and an `ssr: false`
+app gets its shell with a `200` instead.
+
+A plain Vite app (React, Vue, Solid, Preact or vanilla) adds
+[`@txco/vite-plugin`](https://www.npmjs.com/package/@txco/vite-plugin). It
+copies `dist/` into the build after `vite build`:
+
+```ts
+// vite.config.ts
+import txco from '@txco/vite-plugin';
+
+export default defineConfig({ plugins: [react(), txco()] });
+```
+
+Every page path gets `index.html` with a `200`, so the client router renders
+it. A multi-page build gets its `404.html` with a `404` instead.
+
+React Router (framework mode) adds
+[`@txco/react-router`](https://www.npmjs.com/package/@txco/react-router) as a
+preset, and Astro adds [`@txco/astro`](https://www.npmjs.com/package/@txco/astro)
+as an integration:
+
+```ts
+// react-router.config.ts
+export default { ssr: false, presets: [txco()] } satisfies Config;
+```
+
+```js
+// astro.config.mjs
+export default defineConfig({ integrations: [txco()] });
+```
+
+React Router's route table decides the status: a known route gets the shell
+with a `200`, any other path the shell with a `404`. An Astro site gets its
+`404.html` with a `404`. SolidStart builds through the Nitro preset.

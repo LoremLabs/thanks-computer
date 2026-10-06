@@ -1,8 +1,8 @@
 # @txco/svelte-adapter-thankscomputer — SPA fallback: known routes (generated; do not edit by hand).
 #
-# Serves the app shell (200.html) with 200 for a navigation to a
-# client-rendered page route that no file or earlier op answered. The route
-# set comes from SvelteKit's own route table. Paired with spa-404.txcl.
+# Serves the app shell (200.html) with 200 for a navigation to a known
+# page route that no file or earlier op answered. Paired with spa-404.txcl.
+# The route set comes from SvelteKit's own route table.
 # Regenerated on every build — the shell embeds content-hashed asset URLs.
 WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
      && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/

@@ -18,6 +18,21 @@ A producer — a framework adapter, a Nitro preset, a Vite plugin — writes a
 There is no routing language in the manifest: whatever the framework needs —
 an SPA fallback, a 404 page, a server dispatch — it writes as ordinary ops.
 
+## Producers
+
+| Framework | Producer | A navigation to a page that doesn't exist gets |
+| --- | --- | --- |
+| SvelteKit | [`@txco/svelte-adapter-thankscomputer`](../../sdk/svelte-adapter-thankscomputer/) 0.3 | the shell with 404, from SvelteKit's route table; a known client route gets the shell with 200 |
+| Nuxt, Analog, SolidStart (Nitro 2) | [`@txco/nitro-preset`](../../sdk/nitro-preset/) (`thanks-computer`) | `404.html` with 404 for a prerendered site; the shell with 200 for an `ssr: false` app |
+| React Router 7 and 8 | [`@txco/react-router`](../../sdk/react-router/) | the shell with 404, from React Router's route table; a known route gets the shell with 200 |
+| Astro | [`@txco/astro`](../../sdk/astro/) | `404.html` with 404 |
+| Plain Vite (React, Vue, Solid, Preact, vanilla) | [`@txco/vite-plugin`](../../sdk/vite-plugin/) | `index.html` with 200 for a single-page app; `404.html` with 404 for a multi-page one |
+
+All of them end in the same catch-all. A new producer writes its ops with
+[`@txco/web-abi/producer`](../../sdk/web-abi/), which renders the same rules. A Nitro build also has `server/` when the
+framework builds one (`nuxt build`); deploy its static half with
+`--static-only` until a runner exists.
+
 ## Bind a stack to a build
 
 Name the build in `txco.yaml`:

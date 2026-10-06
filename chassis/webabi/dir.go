@@ -107,6 +107,9 @@ func Load(dir string) (*Dir, error) {
 		for _, e := range entries {
 			switch name := e.Name(); {
 			case name == ManifestName, name == "public", name == "server", name == "ops", strings.HasPrefix(name, "."):
+			case name == "nitro.json":
+				// Nitro's build info, beside the build it describes: `nitro
+				// deploy` and `nitro preview` read it. Never installed.
 			case e.IsDir() && (name == "FILES" || isNumber(name)):
 				// The layout a pre-ABI adapter (SvelteKit adapter 0.2) writes into
 				// its out dir: public/ and ops/ here would be stale.

@@ -1,0 +1,64 @@
+{
+  "name": "@txco/nitro-preset",
+  "version": "0.1.0",
+  "description": "Nitro preset for Thanks, Computer (txco): builds a Nuxt or other Nitro app as a Web ABI build — your site as public/, the ops it needs as ops/, its server as server/, and txco-web.json — for `txco apply` to install.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "keywords": [
+    "nitro",
+    "nitro-preset",
+    "nuxt",
+    "analog",
+    "txco",
+    "thanks-computer",
+    "static",
+    "web-abi"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LoremLabs/thanks-computer.git",
+    "directory": "sdk/nitro-preset"
+  },
+  "homepage": "https://github.com/LoremLabs/thanks-computer/tree/master/sdk/nitro-preset#readme",
+  "bugs": "https://github.com/LoremLabs/thanks-computer/issues",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/preset.d.ts",
+      "default": "./dist/preset.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@txco/web-abi": "^0.2.0"
+  },
+  "peerDependencies": {
+    "nitropack": "^2.11.0"
+  },
+  "peerDependenciesMeta": {
+    "nitropack": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "nitropack": "^2.13.4",
+    "typescript": "^5.4.0"
+  }
+}
