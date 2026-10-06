@@ -89,6 +89,28 @@ func TestHandleHealthJSONNoPolicy(t *testing.T) {
 	}
 }
 
+// TestHandleHealthJSONFeatures: the JSON probe lists what this chassis can
+// do, so a client (txco apply, for a Web ABI build) can check before relying
+// on it.
+func TestHandleHealthJSONFeatures(t *testing.T) {
+	c := &Controller{pu: &processor.Unit{Conf: config.Config{}}}
+	rec := httptest.NewRecorder()
+	c.handleHealth(rec, httptest.NewRequest(http.MethodGet, "/healthz?format=json", nil))
+	var resp struct {
+		Features []string `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range resp.Features {
+		found = found || f == "web-abi-markers"
+	}
+	if !found {
+		t.Fatalf("features = %v, want web-abi-markers", resp.Features)
+	}
+}
+
 func withAccept(r *http.Request, v string) *http.Request {
 	r.Header.Set("Accept", v)
 	return r

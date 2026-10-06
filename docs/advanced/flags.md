@@ -177,7 +177,7 @@ the same list. What the main ones mean, together: [the runtime reference](./serv
 | `--filecas-store-s3-bucket` | — | Reserved: S3-compatible filecas bucket (fleet overlay; unused in open core) |
 | `--filecas-store-s3-prefix` | — | Reserved: S3-compatible filecas key prefix (fleet overlay; unused in open core) |
 | `--filecas-cache-bytes` | `67108864` | In-memory LRU budget (bytes) fronting filecas Get (64MiB). 0 disables the cache. |
-| `--filecas-max-file-bytes` | `10485760` | Max size of a single FILES/ asset served from the CAS (10MiB); larger is indexed but 404s on serve. Also the per-entry LRU guard. |
+| `--filecas-max-file-bytes` | `10485760` | Largest FILES/ asset the file store's memory cache keeps (10MiB); a larger one is still served, read from the store each time. |
 | `--dataset-cache-dir` | `./chassis/data/datasets` | Node-local materialise cache for DATASETS/ artifacts (one <hash>.sqlite per content hash) fronting the filecas backend. Fleet nodes point this at persistent disk (e.g. /data/datasets). |
 | `--dataset-cache-bytes` | `4294967296` | Disk budget (bytes) for the dataset materialise cache; LRU eviction closes the read handle and removes the cached file (4GiB). 0 = unbounded. |
 | `--dataset-max-file-bytes` | `4294967296` | Max size of a single DATASETS/ artifact accepted by the blob upload endpoint and enforced again at activation (4GiB). |

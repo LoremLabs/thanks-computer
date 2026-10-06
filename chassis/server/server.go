@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -781,21 +780,19 @@ func awaitTerminalState(ctx context.Context, runs *continuation.Runs, runID, sta
 //     request must NOT fall through to the app;
 //   - otherwise → "{}" (no _txc.web.res, no halt) so the request keeps
 //     flowing through scope 100 (route) / 1000 (404) as before.
+//
+// Only GET and HEAD are static's: any other method falls through "{}" to
+// the stack, so a POST to /login reaches the app instead of login.html. A
+// request with no method (an internal caller) counts as GET. A path with a
+// "_"-prefixed segment is private unless its layer marks it public; Lookup
+// enforces that, and falls through on a private path without leaking it.
 func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store, in []byte) string {
+	if m := gjson.GetBytes(in, "_txc.web.req.method").String(); m != "" && m != http.MethodGet && m != http.MethodHead {
+		return "{}"
+	}
 	reqPath := gjson.GetBytes(in, "_txc.web.req.url.path").String()
 	stack := gjson.GetBytes(in, "_txc.route.stack").String()
 	tenant := gjson.GetBytes(in, "_txc.route.tenant").String()
-
-	// Privacy convention: any request-path segment beginning with "_" is a
-	// private asset (e.g. FILES/_mail/ templates) — indexed and readable by
-	// ops, but never served over HTTP. Fall through "{}" (NOT 404) so its
-	// existence doesn't leak. Runs before Lookup, so the Owned-prefix branch
-	// can't leak either. path.Clean resolves "/a/../_x" to its real segments.
-	for _, seg := range strings.Split(strings.Trim(path.Clean("/"+reqPath), "/"), "/") {
-		if seg != "" && seg[0] == '_' {
-			return "{}"
-		}
-	}
 
 	r := ix.Lookup(tenant, stack, reqPath)
 
@@ -810,17 +807,20 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 	// it must revalidate — otherwise a deploy's new HTML (and thus the new asset URLs)
 	// isn't picked up until the cache lapses. `max-age=0, must-revalidate` makes the
 	// browser check every time; the strong ETag makes that check a cheap 304. Other
-	// assets (typically content-hashed, immutable) stay cacheable.
+	// assets stay cacheable for an hour, or a year when their layer marks them
+	// immutable (content-hashed names, which change whenever the bytes do).
 	cacheControl := "public, max-age=3600"
-	if strings.HasPrefix(r.Ctype, "text/html") {
+	switch {
+	case strings.HasPrefix(r.Ctype, "text/html"):
 		cacheControl = "max-age=0, must-revalidate"
+	case r.Immutable:
+		cacheControl = "public, max-age=31536000, immutable"
 	}
 
 	// Conditional GET applies to any Found result (inline or CAS) and is
 	// checked before fetching bytes — a 304 never touches the CAS/LRU.
 	if r.Found {
-		if inm := gjson.GetBytes(in, "_txc.web.req.headers.If-None-Match.0").String(); inm != "" &&
-			(inm == r.ETag || inm == "*") {
+		if ifNoneMatches(in, r.ETag) {
 			env := "{}"
 			env, _ = sjson.Set(env, "_txc.web.res.status", 304)
 			env, _ = sjson.Set(env, "_txc.web.res.headers.etag.0", r.ETag)
@@ -866,6 +866,22 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 	default:
 		return "{}"
 	}
+}
+
+// ifNoneMatches reports whether the request's If-None-Match names etag (a
+// quoted strong ETag). Every value of the header counts, and every entry of
+// a list in each. The comparison is weak, as RFC 9110 requires, so a `W/`
+// tag (what a compressing proxy may turn a strong one into) still matches.
+func ifNoneMatches(in []byte, etag string) bool {
+	var vals []string
+	gjson.GetBytes(in, "_txc.web.req.headers.If-None-Match").ForEach(func(_, v gjson.Result) bool {
+		vals = append(vals, v.String())
+		return true
+	})
+	if len(vals) == 0 {
+		return false
+	}
+	return chdrive.NoneMatch(strings.Join(vals, ", "), strings.Trim(etag, `"`))
 }
 
 func dispatchEnvelope(raw, missAction string) (string, string) {

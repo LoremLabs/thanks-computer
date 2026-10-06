@@ -88,6 +88,98 @@ func TestStaticResultBodyLayeredAndETag(t *testing.T) {
 	}
 }
 
+// If-None-Match is a list, may arrive on several lines, and compares weakly
+// (RFC 9110): any entry naming the file's ETag, a W/ form of it, or "*"
+// earns a 304; anything else gets the file.
+func TestStaticResultBodyIfNoneMatchForms(t *testing.T) {
+	ws := t.TempDir()
+	mkfile(t, ws, "OPS/site/FILES/robots.txt", "User-agent: *")
+	ix := static.NewIndex(ws, zap.NewNop())
+	full := staticResultBody(context.Background(), ix, nil, reqIn(t, "/robots.txt", "site", ""))
+	etag := gjson.Get(full, "_txc.web.res.headers.etag.0").String() // quoted
+	bare := etag[1 : len(etag)-1]
+
+	for name, c := range map[string]struct {
+		lines []string
+		want  int64
+	}{
+		"exact":                {[]string{etag}, 304},
+		"weak":                 {[]string{`W/` + etag}, 304},
+		"in a list":            {[]string{`"nope", ` + etag}, 304},
+		"weak in a list":       {[]string{`"nope", W/` + etag}, 304},
+		"on a second line":     {[]string{`"nope"`, etag}, 304},
+		"star":                 {[]string{"*"}, 304},
+		"unquoted":             {[]string{bare}, 304},
+		"no entry names it":    {[]string{`"nope", W/"other"`}, 200},
+		"a prefix is no match": {[]string{`"` + bare[:10] + `"`}, 200},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := string(reqIn(t, "/robots.txt", "site", ""))
+			for i, l := range c.lines {
+				in, _ = sjson.Set(in, "_txc.web.req.headers.If-None-Match."+string(rune('0'+i)), l)
+			}
+			env := staticResultBody(context.Background(), ix, nil, []byte(in))
+			if got := gjson.Get(env, "_txc.web.res.status").Int(); got != c.want {
+				t.Fatalf("status=%d want %d; env=%s", got, c.want, env)
+			}
+		})
+	}
+}
+
+// Static answers GET and HEAD only: any other method reaches the stack, so a
+// POST to /login is the app's, not login.html. No method counts as GET.
+func TestStaticResultBodyMethods(t *testing.T) {
+	ws := t.TempDir()
+	mkfile(t, ws, "OPS/site/FILES/login.html", "<!doctype html>login")
+	mkfile(t, ws, "OPS/site/FILES/assets/app.css", "body{}")
+	ix := static.NewIndex(ws, zap.NewNop())
+	for _, c := range []struct {
+		method, path string
+		served       bool
+	}{
+		{"", "/login", true},
+		{"GET", "/login", true},
+		{"HEAD", "/login", true},
+		{"POST", "/login", false},
+		{"PUT", "/assets/app.css", false},
+		{"DELETE", "/assets/gone.css", false}, // not even the Owned 404
+	} {
+		in, _ := sjson.SetBytes(reqIn(t, c.path, "site", ""), "_txc.web.req.method", c.method)
+		if c.method == "" {
+			in = reqIn(t, c.path, "site", "")
+		}
+		env := staticResultBody(context.Background(), ix, nil, in)
+		if served := gjson.Get(env, "_txc.halt").Bool(); served != c.served {
+			t.Errorf("%s %s: served=%v want %v; env=%s", c.method, c.path, served, c.served, env)
+		}
+	}
+}
+
+// A file under a prefix its layer marks immutable gets a year-long cache;
+// HTML always revalidates, even there. A dot path is a miss.
+func TestStaticResultBodyImmutableAndDotPath(t *testing.T) {
+	ws := t.TempDir()
+	mkfile(t, ws, "OPS/site/FILES/index.html", "<!doctype html>home")
+	mkfile(t, ws, "OPS/site/FILES/app/immutable/x.js", "x")
+	mkfile(t, ws, "OPS/site/FILES/app/immutable/page.html", "<!doctype html>p")
+	mkfile(t, ws, "OPS/site/FILES/"+static.ImmutableMarker("app/immutable/"), "")
+	ix := static.NewIndex(ws, zap.NewNop())
+
+	cc := func(p string) string {
+		env := staticResultBody(context.Background(), ix, nil, reqIn(t, p, "site", ""))
+		return gjson.Get(env, "_txc.web.res.headers.cache-control.0").String()
+	}
+	if got := cc("/app/immutable/x.js"); got != "public, max-age=31536000, immutable" {
+		t.Errorf("immutable asset cache-control=%q", got)
+	}
+	if got := cc("/app/immutable/page.html"); got != "max-age=0, must-revalidate" {
+		t.Errorf("html under an immutable prefix cache-control=%q", got)
+	}
+	if env := staticResultBody(context.Background(), ix, nil, reqIn(t, "/.env", "site", "")); env != "{}" {
+		t.Errorf("/.env: want a fall-through, got %s", env)
+	}
+}
+
 // HTML must revalidate (so a deploy's new HTML + asset URLs are picked up); other
 // (content-hashed) assets stay cacheable. The 304 echoes the same policy.
 func TestStaticResultBodyCachePolicy(t *testing.T) {

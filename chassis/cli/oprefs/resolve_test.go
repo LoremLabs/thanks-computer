@@ -145,6 +145,28 @@ func TestHasRefs(t *testing.T) {
 	}
 }
 
+func TestMalformedExecRefs(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{`EXEC "op://ssr/render"`, []string{"op://ssr/render"}},
+		{"WHEN .x == 1\n  EXEC \"op://a.b\"", []string{"op://a.b"}},
+		{"EXEC \"op://a/b\"\nEXEC \"op://a/b\"", []string{"op://a/b"}}, // distinct
+		{`EXEC "op://"`, []string{"op://"}},
+		{`EXEC "op://GOOD_name-1"`, nil},            // resolvable: HasRefs' job
+		{`SET .ref = "op://vault/item/field"`, nil}, // data, not an EXEC operand
+		{`# EXEC "op://a/b" is just docs`, nil},     // a comment
+		{`EXEC "http://x/y"`, nil},
+	}
+	for _, tc := range cases {
+		got := MalformedExecRefs(tc.in)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("MalformedExecRefs(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestResolveOpRefsEmptyURLErrors(t *testing.T) {
 	ops := map[string]Operation{
 		"PARTIAL": {URL: ""}, // configured but no URL

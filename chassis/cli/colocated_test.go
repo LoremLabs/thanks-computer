@@ -113,3 +113,19 @@ export default op<In>(({ input }) => ({ doubled: input.n * 2 }));`)
 		t.Fatalf("ts compute not resolved: built=%d txcl=%q", len(built), sub[0].Txcl)
 	}
 }
+
+// TestResolveOpRefsRefusesMalformedExec: an EXEC op:// ref whose name can
+// never resolve (a '/' or '.') fails the apply, naming the rule, instead of
+// activating and failing at its first dispatch.
+func TestResolveOpRefsRefusesMalformedExec(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "OPS/site/100/render.txcl"), `EXEC "op://ssr/render"`)
+	ops, err := bundle.Walk(root)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	_, _, err = resolveOpRefsColocated(ops, map[string]oprefs.Operation{}, root, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "op://ssr/render") || !strings.Contains(err.Error(), "site/100/render") {
+		t.Fatalf("want an error naming op://ssr/render and site/100/render, got %v", err)
+	}
+}

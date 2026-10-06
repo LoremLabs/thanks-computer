@@ -29,9 +29,12 @@ type entry struct {
 type layer struct {
 	files *radix.Tree         // rel -> *entry
 	dirs  map[string]struct{} // first path segment of every nested file
+	marks
 }
 
-func emptyLayer() layer { return layer{files: radix.New(), dirs: map[string]struct{}{}} }
+func emptyLayer() layer {
+	return layer{files: radix.New(), dirs: map[string]struct{}{}, marks: newMarks()}
+}
 
 // metaEntry is a tenant FILES/ asset known only by its content hash; the
 // bytes are resolved lazily from the filecas store (kept out of memory).
@@ -48,6 +51,7 @@ type metaEntry struct {
 type tenantLayer struct {
 	files map[string]*metaEntry
 	dirs  map[string]struct{}
+	marks
 }
 
 // Result is the outcome of a Lookup.
@@ -66,6 +70,9 @@ type Result struct {
 	Size  int64
 	Ctype string
 	ETag  string
+	// Immutable: the file sits under a prefix its layer marked immutable
+	// (content-hashed), so it may be cached for a year. Set by Lookup only.
+	Immutable bool
 }
 
 // Index is the in-memory static set, three layers deep (per routed
@@ -146,8 +153,20 @@ func (ix *Index) Rebuild() {
 // answers 404 rather than leaking to app routing; a bare top-level miss
 // passes through. Mirrors nginx try_files / Caddy / the layout
 // adapter-static emits. Pure in-memory; no filesystem access.
+//
+// Privacy: a path with a "_"-prefixed segment is private (e.g. FILES/_mail/
+// templates: readable by ops through Asset, never served over HTTP) unless
+// the layer holding it marks that path's root public (FILES/_txco/public/,
+// what a Web ABI install writes for its public/ tree). A private path is
+// a plain miss, never Owned, so its existence doesn't leak.
 func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 	rel := safeRel(reqPath)
+	if rel == "" && !isRootPath(reqPath) {
+		// A dot segment (/.env, /.well-known/x) is never a static file.
+		// safeRel answers "" for it, which would otherwise read as the
+		// root and serve index.html.
+		return Result{}
+	}
 
 	ix.mu.Lock()
 	emb, ch, ps, tn := ix.embedded, ix.chassis, ix.perStack, ix.tenant
@@ -180,9 +199,15 @@ func (ix *Index) Lookup(tenant, stack, reqPath string) Result {
 
 	// try_files: exact, then .html, then /index.html (and root → index.html).
 	for _, cand := range indexCandidates(rel) {
-		if r, ok := lookupExact(cand, opLayers, tl, haveTenant); ok {
+		if r, ok := lookupServable(cand, opLayers, tl, haveTenant); ok {
 			return r
 		}
+	}
+
+	// A private path that no layer marked public stays a plain miss, before
+	// the ownership check below can turn it into a 404.
+	if root := privateRoot(rel); root != "" && !publicIn(root, opLayers, tl, haveTenant) {
+		return Result{}
 	}
 
 	// No file resolved. Static owns the path only if it's under a directory
@@ -274,6 +299,44 @@ func lookupExact(rel string, opLayers []layer, tl tenantLayer, haveTenant bool) 
 	return Result{}, false
 }
 
+// lookupServable is lookupExact for HTTP: a candidate under a private root
+// only resolves in a layer that marks that root public, and a hit reports
+// whether its layer marks it immutable. Layers stay first-match-wins among
+// the ones that may serve the candidate.
+func lookupServable(rel string, opLayers []layer, tl tenantLayer, haveTenant bool) (Result, bool) {
+	if rel == "" {
+		return Result{}, false
+	}
+	root := privateRoot(rel)
+	for _, l := range opLayers {
+		if root != "" && !l.isPublic(root) {
+			continue
+		}
+		if v, found := l.files.Get([]byte(rel)); found {
+			e := v.(*entry)
+			return Result{Found: true, Body: e.body, Ctype: e.ctype, ETag: e.etag,
+				Immutable: l.isImmutable(rel)}, true
+		}
+	}
+	if haveTenant && (root == "" || tl.isPublic(root)) {
+		if me, ok := tl.files[rel]; ok {
+			return Result{Found: true, Hash: me.hash, Size: me.size,
+				Ctype: me.ctype, ETag: `"` + me.hash + `"`, Immutable: tl.isImmutable(rel)}, true
+		}
+	}
+	return Result{}, false
+}
+
+// publicIn reports whether any applicable layer marks root public.
+func publicIn(root string, opLayers []layer, tl tenantLayer, haveTenant bool) bool {
+	for _, l := range opLayers {
+		if l.isPublic(root) {
+			return true
+		}
+	}
+	return haveTenant && tl.isPublic(root)
+}
+
 // indexCandidates returns the try_files probe order for a request path:
 // exact, then a clean-URL ".html" sibling, then a "/index.html" directory
 // index. Root ("") → "index.html". A path whose last segment already has
@@ -330,15 +393,18 @@ func (ix *Index) RebuildTenant(db *sql.DB) error {
 			}
 			return err // keep prior layer
 		}
-		if hash == "" {
-			continue
-		}
 		rel := safeRel(strings.TrimPrefix(p, "FILES/"))
 		if rel == "" {
 			continue
 		}
 		sl, st := safeSeg(slug), safeStack(name)
 		if sl == "" || st == "" {
+			continue
+		}
+		// A marker is known by its path alone, before the empty-hash skip:
+		// its bytes are never read (on the fleet they are not in the row).
+		isMark := isMarker(rel)
+		if hash == "" && !isMark {
 			continue
 		}
 		stacks := out[sl]
@@ -348,13 +414,18 @@ func (ix *Index) RebuildTenant(db *sql.DB) error {
 		}
 		tl, ok := stacks[st]
 		if !ok {
-			tl = tenantLayer{files: map[string]*metaEntry{}, dirs: map[string]struct{}{}}
+			tl = tenantLayer{files: map[string]*metaEntry{}, dirs: map[string]struct{}{}, marks: newMarks()}
+		}
+		if isMark {
+			tl.marks.add(rel)
 			stacks[st] = tl
+			continue
 		}
 		tl.files[rel] = &metaEntry{hash: hash, size: sz, ctype: contentType(rel, nil)}
 		if seg, _, nested := strings.Cut(rel, "/"); nested {
 			tl.dirs[seg] = struct{}{}
 		}
+		stacks[st] = tl
 	}
 	if err := rows.Err(); err != nil {
 		if ix.log != nil {
@@ -382,6 +453,10 @@ func (ix *Index) buildEmbedded() layer {
 		}
 		rel := safeRel(strings.TrimPrefix(p, "files/"))
 		if rel == "" {
+			return nil
+		}
+		if isMarker(rel) {
+			l.marks.add(rel)
 			return nil
 		}
 		b, rerr := embeddedFS.ReadFile(p)
@@ -459,6 +534,10 @@ func (ix *Index) walkInto(l *layer, root string, b *budget) {
 		}
 		safe := safeRel(slash)
 		if safe == "" {
+			return nil
+		}
+		if isMarker(safe) {
+			l.marks.add(safe) // by path: no bytes read, no budget taken
 			return nil
 		}
 		info, ierr := d.Info()

@@ -217,15 +217,23 @@ func checkIfMatch(ifMatch string, live bool, etag string) error {
 // resource is live and an entry names it ("*" naming any live resource,
 // which is how a client asks to create only). Weak comparison.
 func checkIfNoneMatch(ifNoneMatch string, live bool, etag string) error {
-	if !live {
-		return nil
-	}
-	for _, e := range parseETagList(ifNoneMatch) {
-		if e.tag == "*" || e.tag == etag {
-			return ErrPrecondition
-		}
+	if live && NoneMatch(ifNoneMatch, etag) {
+		return ErrPrecondition
 	}
 	return nil
+}
+
+// NoneMatch reports whether an If-None-Match value names etag (bare, with
+// no quotes): "*", or any entry of a list, weak or strong. If-None-Match
+// uses weak comparison (RFC 9110 §13.1.2), so `W/"x"` names "x". Exported
+// for the static file server's conditional GET.
+func NoneMatch(ifNoneMatch, etag string) bool {
+	for _, e := range parseETagList(ifNoneMatch) {
+		if e.tag == "*" || e.tag == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // checkPreconditions applies both conditional headers against the live

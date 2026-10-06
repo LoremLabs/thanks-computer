@@ -1252,6 +1252,10 @@ func resolveOpRefsColocated(ops []bundle.Op, urlMap map[string]oprefs.Operation,
 	seen := map[string]bool{}
 	for i, op := range ops {
 		out[i] = op
+		if bad := oprefs.MalformedExecRefs(op.Txcl); len(bad) > 0 {
+			return nil, nil, fmt.Errorf("%s (%s/%d/%s): %s: %s", op.SourcePath, op.Stack, op.Scope, op.Name,
+				strings.Join(bad, ", "), oprefs.MalformedHint)
+		}
 		if !oprefs.HasRefs(op.Txcl) {
 			continue
 		}

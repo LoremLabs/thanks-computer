@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/spf13/pflag"
 
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
+	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/txcl"
 )
 
@@ -64,7 +66,11 @@ Flags:
 	// catch txcl syntax errors the walker can't see.
 	var parseErrs []lintParseError
 	for _, op := range ops {
-		if msgs := txcl.Validate(op.Txcl); len(msgs) > 0 {
+		msgs := txcl.Validate(op.Txcl)
+		if bad := oprefs.MalformedExecRefs(op.Txcl); len(bad) > 0 {
+			msgs = append(msgs, strings.Join(bad, ", ")+": "+oprefs.MalformedHint)
+		}
+		if len(msgs) > 0 {
 			parseErrs = append(parseErrs, lintParseError{op.Stack, op.Scope, op.Name, msgs})
 		}
 	}

@@ -94,6 +94,28 @@ func TestActivateOpRefInCommentAllowed(t *testing.T) {
 	}
 }
 
+// A malformed EXEC op:// ref (a name no resolver can match) is a validate
+// error; activation is unchanged, so an already-active version never starts
+// failing on a node.
+func TestValidateFlagsMalformedOpRef(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin"})
+	v := callCreateDraft(t, c, "malstack", "")
+	callPutFiles(t, c, "malstack", v, []stackFile{
+		{Path: "100/bad.txcl", Content: `EXEC "op://ssr/render"`},
+		{Path: "200/data.txcl", Content: `EMIT .ref = "op://vault/item"`},
+	})
+	code, resp := callValidate(t, c, "malstack", v)
+	if code != http.StatusOK || resp.OK {
+		t.Fatalf("validate: code=%d ok=%v, want 200 and not ok", code, resp.OK)
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0].Path != "100/bad.txcl" || !strings.Contains(resp.Errors[0].Err, "op://ssr/render") {
+		t.Fatalf("want one error for 100/bad.txcl naming op://ssr/render, got %+v", resp.Errors)
+	}
+	if resp := callActivate(t, c, "malstack", v); resp.VersionNumber != v {
+		t.Fatalf("activation must be unchanged, got %+v", resp)
+	}
+}
+
 // Validate surfaces the unresolved op:// as a per-file error before the
 // author tries to activate.
 func TestValidateFlagsUnresolvedOpRef(t *testing.T) {

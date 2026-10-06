@@ -2921,6 +2921,15 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 			})
 			continue
 		}
+		// A malformed `EXEC "op://a/b"` is invisible to HasRefs, activates,
+		// and fails at its first dispatch. Validate only: the fleet's
+		// activation path stays as it was, so no already-active version can
+		// start failing on a node.
+		if bad := oprefs.MalformedExecRefs(f.Content); len(bad) > 0 {
+			resp.OK = false
+			resp.Errors = append(resp.Errors, validateError{Path: f.Path, Err: strings.Join(bad, ", ") + ": " + oprefs.MalformedHint})
+			continue
+		}
 		if include.Has(f.Content) {
 			resp.OK = false
 			resp.Errors = append(resp.Errors, validateError{Path: f.Path, Err: "unexpanded &include — " + unexpandedIncludeHint})

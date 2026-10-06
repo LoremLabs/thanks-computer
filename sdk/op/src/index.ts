@@ -28,8 +28,8 @@ export interface Logger {
   debug(...args: unknown[]): void;
 }
 
-/** Everything a handler is given. Capability fields (fetch/kv/secrets) are not
- *  part of v1 — they arrive once the host capability + grant model lands. */
+/** Everything a handler is given. Capability fields (fetch/kv) are not part
+ *  of v1 — they arrive once the host capability + grant model lands. */
 export interface OpContext<Input = any, Env = Record<string, unknown>> {
   /** The selected request envelope (the op's input). */
   input: Input;

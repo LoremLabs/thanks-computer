@@ -84,3 +84,34 @@ func References(txcl string) []string {
 func HasRefs(txcl string) bool {
 	return strings.Contains(txcl, `"op://`) && opRefRE.MatchString(txcl)
 }
+
+// execOpLiteralRE matches an EXEC operand that uses the op:// scheme,
+// whatever its name: `EXEC "op://…"` at the start of a line (so a `#`
+// comment never matches).
+var execOpLiteralRE = regexp.MustCompile(`(?m)^[ \t]*EXEC[ \t]+"op://([^"]*)"`)
+
+var opNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// MalformedExecRefs returns the distinct `op://…` EXEC operands in txcl
+// whose name opRefRE can never match (`EXEC "op://ssr/render"`). Such a ref
+// is never resolved at apply and never flagged by HasRefs, so the stack
+// would activate and then fail at the rule's first dispatch as an
+// unsupported EXEC value. Only EXEC operands count: an op:// string used as
+// data (a secret manager's reference, say) is the author's business.
+func MalformedExecRefs(txcl string) []string {
+	if !strings.Contains(txcl, `"op://`) {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range execOpLiteralRE.FindAllStringSubmatch(txcl, -1) {
+		if name := m[1]; !opNameRE.MatchString(name) && !seen[name] {
+			seen[name] = true
+			out = append(out, "op://"+name)
+		}
+	}
+	return out
+}
+
+// MalformedHint explains a MalformedExecRefs result.
+const MalformedHint = "an op:// name is letters, digits, '_' and '-' only (no '/' or '.'), so this ref can never resolve — rename the operation"

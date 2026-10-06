@@ -890,6 +890,16 @@ func (c *Controller) bootstrapHintURL() string {
 	return "http://" + addr
 }
 
+// Features names what this chassis can do that an older one can't, for a
+// client to check before relying on it. The JSON /healthz lists them.
+//
+//	web-abi-markers  the static index reads FILES/_txco/ markers (public "_"
+//	                 roots, immutable prefixes). `txco apply` refuses to send
+//	                 a Web ABI build to a chassis without it: an older one
+//	                 would store the markers as private files, and every "_"
+//	                 asset would 404.
+var Features = []string{"web-abi-markers"}
+
 // handleHealth is the unauthenticated liveness probe. By default it returns
 // the legacy plain-text "ok\n" so load-balancer / uptime probes are
 // unchanged. When the caller asks for JSON (Accept: application/json or
@@ -916,12 +926,14 @@ func (c *Controller) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Chassis        string        `json:"chassis,omitempty"`
 		BuildTimestamp string        `json:"build_timestamp,omitempty"`
 		Client         *clientPolicy `json:"client,omitempty"`
+		Features       []string      `json:"features"`
 	}{
 		Status:         "ok",
 		Version:        b.Version,
 		Commit:         b.Commit,
 		Chassis:        b.Chassis,
 		BuildTimestamp: b.BuildTimestamp,
+		Features:       Features,
 	}
 	// Only advertise a policy block when the operator set at least one value;
 	// a vanilla chassis stays silent (the CLI treats absence as "no policy").
