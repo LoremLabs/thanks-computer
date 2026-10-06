@@ -1,7 +1,8 @@
 # @txco/svelte-adapter-thankscomputer
 
-A [SvelteKit](https://svelte.dev/docs/kit) adapter for **thanks.computer**
+A [SvelteKit](https://svelte.dev/docs/kit) adapter for [Thanks, computer](https://www.thanks.computer)
 (txco). It writes a **Web ABI build**:
+
 - your app as `public/`;
 - the ops a SvelteKit app needs as `ops/`;
 - a `txco-web.json` manifest.
@@ -55,8 +56,10 @@ txco-web/
 
 The adapter wipes `out` and rewrites it on every build, so a stale op can't
 survive.
-- Commit `ops/` and `txco-web.json` if you want generated ops reviewed in
-  diffs; ignore `public/`.
+
+- Add `out` to `.gitignore`. It's all build output, and the fallback ops embed
+  the page shell, asset hashes included, so they change on every build. Build
+  before you push: `txco` refuses a binding whose build is missing.
 - `out` must be a directory of its own. The adapter refuses one inside `OPS/`
   or one holding anything else.
 
@@ -87,14 +90,14 @@ marks those, so `_app/` and `_`-prefixed chunk hashes are served unchanged. An
 
 ## Options
 
-| Option          | Default        | Meaning |
-| --------------- | -------------- | ------- |
-| `out`           | `"txco-web"`   | The Web ABI directory to write (outside `OPS/`). |
+| Option          | Default        | Meaning                                                                                                       |
+| --------------- | -------------- | ------------------------------------------------------------------------------------------------------------- |
+| `out`           | `"txco-web"`   | The Web ABI directory to write (outside `OPS/`).                                                              |
 | `fallback`      | `"index.html"` | The SPA shell's file name in `public/`, or `false` for no SPA (navigations to unknown pages get a plain 404). |
-| `fallbackOp`    | `true`         | Write the navigation ops. |
-| `fallbackScope` | `900000`       | The navigation ops' scope; the catch-all goes 900 above it. |
-| `apply`         | `false`        | Run `txco apply` after the build. |
-| `precompress`   | `false`        | Deprecated and ignored: the edge compresses. |
+| `fallbackOp`    | `true`         | Write the navigation ops.                                                                                     |
+| `fallbackScope` | `900000`       | The navigation ops' scope; the catch-all goes 900 above it.                                                   |
+| `apply`         | `false`        | Run `txco apply` after the build.                                                                             |
+| `precompress`   | `false`        | Deprecated and ignored: the edge compresses.                                                                  |
 
 ## Moving from 0.2
 

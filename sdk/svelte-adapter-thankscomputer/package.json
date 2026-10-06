@@ -1,7 +1,7 @@
 {
   "name": "@txco/svelte-adapter-thankscomputer",
   "version": "0.3.0",
-  "description": "SvelteKit adapter for thanks.computer (txco): writes a Web ABI build — your app as public/, the ops a SvelteKit app needs as ops/, and txco-web.json — for `txco apply` to install.",
+  "description": "SvelteKit adapter for Thanks, Computer (txco): writes a Web ABI build — your app as public/, the ops a SvelteKit app needs as ops/, and txco-web.json — for `txco apply` to install.",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,

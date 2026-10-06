@@ -52,8 +52,10 @@ The rules for the binding:
   error, never a silently dropped binding.
 
 The producer wipes and rewrites `<out>` on every build, so a stale generated op
-can't survive. Commit `<out>/ops/` and `txco-web.json` if you want generated
-ops reviewed in diffs; ignore `<out>/public/`.
+can't survive. Gitignore all of `<out>`: it's generated from source, and a
+producer's ops can embed build output (the SvelteKit adapter's fallback ops
+carry the page shell, asset hashes included), so they change on every build.
+Build before you push: `txco` refuses a binding whose build is missing.
 
 ## The manifest
 

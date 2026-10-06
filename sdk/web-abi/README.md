@@ -81,3 +81,7 @@ import { validateManifest } from "@txco/web-abi/manifest";
 npm install
 npm test     # tsc, then node --test (Node 20+)
 ```
+
+## License
+
+MIT
