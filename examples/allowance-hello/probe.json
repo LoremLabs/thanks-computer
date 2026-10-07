@@ -1,0 +1,53 @@
+{
+  "note": "Allowances: define a roomy allowance and do work under it (200), define a one-fuel allowance and do work under it (refused 429 allowance_exhausted before the work scope runs), do work under a name with no definition (metered, 200), then read an allowance's window. Binds localhost → allowance-demo (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "bind": [
+    {
+      "host": "localhost",
+      "stack": "allowance-demo"
+    }
+  ],
+  "checks": [
+    {
+      "name": "define a roomy allowance",
+      "method": "POST",
+      "path": "/allowance/set?name=roomy&fuel=100000&per=hour",
+      "status": 200,
+      "contains": "\"fuel\":100000"
+    },
+    {
+      "name": "work inside the roomy allowance runs",
+      "method": "GET",
+      "path": "/work?as=roomy",
+      "status": 200,
+      "contains": "\"work\":\"done\""
+    },
+    {
+      "name": "define a one-fuel allowance",
+      "method": "POST",
+      "path": "/allowance/set?name=tiny&fuel=1&per=hour",
+      "status": 200,
+      "contains": "\"name\":\"tiny\""
+    },
+    {
+      "name": "work inside the spent allowance is refused 429",
+      "method": "GET",
+      "path": "/work?as=tiny",
+      "status": 429,
+      "contains": "Too Many Requests"
+    },
+    {
+      "name": "a name with no definition is metered, not limited",
+      "method": "GET",
+      "path": "/work?as=unlisted",
+      "status": 200,
+      "contains": "\"defined\":false"
+    },
+    {
+      "name": "read an allowance's window",
+      "method": "GET",
+      "path": "/allowance?name=roomy",
+      "status": 200,
+      "contains": "\"remaining\""
+    }
+  ]
+}

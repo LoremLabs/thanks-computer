@@ -190,6 +190,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runConfig(rest, stdout, stderr), true
 	case "dns":
 		return runDNS(rest, stdout, stderr), true
+	case "allowance", "allowances":
+		// A tenant's own fuel budgets (txco://allowance/enter puts a request
+		// in one). Same signed-target resolution as kv.
+		return auth.RunAllowance(rest, stdout, stderr), true
 	case "kv":
 		// Read-only inspection of the op-writable KV store (e.g.
 		// `txco kv list subscribers`). Lives in the auth package to reuse
@@ -379,6 +383,7 @@ func printUsage(w io.Writer) {
 		{"Diagnose & connect", []row{
 			{"trace [<rid>]", muted("Render the execution trace for a request (use ") + hint("`txco trace last`") + muted(" for the most recent)")},
 			{"kv list <namespace>", muted("List keys in the op-writable KV store")},
+			{"allowance <command>", muted("A tenant's own fuel budgets (list/get/set/delete)")},
 			{"notebook <command>", muted("Read a stack's notebooks (list/read/tail/export)")},
 			{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
 			{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},

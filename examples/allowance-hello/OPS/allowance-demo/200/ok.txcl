@@ -1,0 +1,7 @@
+# Answer with the allowance op's own object (set / get / enter), plus the
+# work's result for /work.
+WHEN ._al.name != null
+  EMIT @web.res.body = &b64encode(&to_json(&object("allowance", ._al, "work", ._work))),
+       @web.res.status = 200,
+       @web.res.headers.content-type.0 = "application/json",
+       @halt = true

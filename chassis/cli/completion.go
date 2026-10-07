@@ -317,6 +317,12 @@ var cliCommandTree = []node{
 	{Name: "mcp", Desc: "MCP subcommands", Children: mcpChildren},
 	{Name: "config", Desc: "Config shortcuts (alias namespace for auth)", Children: configChildren},
 	{Name: "dns", Desc: "DNS zone + record management", Children: dnsChildren},
+	{Name: "allowance", Desc: "A tenant's own fuel budgets", Aliases: []string{"allowances"}, Children: []node{
+		{Name: "list", Desc: "Every allowance and its current window", Aliases: []string{"ls"}, Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
+		{Name: "get", Desc: "One allowance's current window", Aliases: []string{"show"}, Flags: []string{"tenant", "profile", "target", "url"}},
+		{Name: "set", Desc: "Create or replace: --fuel N per hour, day or month", Flags: []string{"tenant", "profile", "target", "url", "fuel", "per"}},
+		{Name: "delete", Desc: "Remove an allowance's definition", Aliases: []string{"rm"}, Flags: []string{"tenant", "profile", "target", "url"}},
+	}},
 	{Name: "kv", Desc: "Inspect the op-writable KV store", Children: []node{
 		{Name: "list", Desc: "List keys in a namespace (e.g. blog_subscribers)", Aliases: []string{"ls"}, Flags: []string{"tenant", "profile", "target", "url", "limit", "after", "all"}},
 	}},

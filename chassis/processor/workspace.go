@@ -603,6 +603,7 @@ func (pu *Unit) workspaceAccount(ctx context.Context, rid, tenant, opID string, 
 			Status:     status,
 			BytesIn:    bytesIn,
 			BytesOut:   bytesOut,
+			Allowance:  AllowanceScope(ctx),
 		})
 	}
 	_ = addFuel(ctx, workspaceFuel(wallMS), opID)

@@ -186,6 +186,7 @@ is a package on the default registry ([sharing stacks](../packages.md)).
 | `txco source status` | Each declared remote source (`SOURCES/`) and its poll state; read-only |
 | `txco mcp doctor <url>` | Probe an MCP server: handshake + tool list ([mcp](./protocols/mcp.md)) |
 | `txco kv list <namespace>` | List the keys an op accumulated in the KV store ([kv](./kv.md)) |
+| `txco allowance list\|get\|set\|delete` | The tenant's own fuel budgets: `set <name> --fuel N --per hour\|day\|month` ([allowances](./allowances.md)) |
 | `txco notebook {list,read,tail,export}` | Read the append-only notebooks a stack writes, oldest first ([notebooks](./notebooks.md)) |
 
 ## Operator & misc

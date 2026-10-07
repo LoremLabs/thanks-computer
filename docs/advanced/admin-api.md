@@ -134,6 +134,7 @@ Tenant-scoped, under `/v1/tenants/{tenant}`:
 | `GET /auth/actors` · `POST /auth/actors/{id}/revoke` | Actor list / revoke |
 | `GET /traces/requests.json` · `/requests/{rid}.json` · `/traces/stream` | Trace list / detail / live stream ([trace.md](./trace.md)) |
 | `GET /kv/{namespace}` | Keys an op accumulated in the KV store (`kv:*:read`) |
+| `GET /allowances` · `GET\|PUT\|DELETE /allowances/{name}` | The tenant's own fuel budgets and their current windows (`kv:*:read`; set and delete need `kv:*:write`) — see [allowances](./allowances.md) |
 | `GET /notebooks/{namespace}` · `/notebooks/{namespace}/{name}` | Notebooks in a namespace / a notebook's entries — `?after&since&until&tail&type&limit`, `?format=ndjson` streams (`notebook:*:read`, [notebooks.md](./notebooks.md)) |
 | `POST /registry/token` | A short-lived package-registry token for the tenant's own namespace (`package:<name>:push` · `:pull`); 404 unless configured — [below](#registry-tokens) |
 | `GET /runs` | The tenant's runs in flight in this process (`run:*:read`): `{runs: [{rid, tenant, src, entry, stack, stage, started, age_ms, aborted_by}]}` ([abort.md](../abort.md)) |

@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -28,6 +29,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/allowance"
 	"github.com/loremlabs/thanks-computer/chassis/attach"
 	authregistry "github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/authn"
@@ -172,6 +174,11 @@ type Unit struct {
 	// workspace invocation emits a usage event (src="compute" /
 	// src="workspace") alongside the per-request one.
 	Usage usage.Sink
+
+	// Allowances is the tenant-defined fuel budget store (txco://allowance/*
+	// and the admin API share it, so a definition set on this node is seen
+	// at once by its charges). nil when no KV store is configured.
+	Allowances *allowance.Store
 
 	// Secrets is the per-tenant secret-store Resolver. Non-nil when
 	// --secret-master-key is configured AND its file loads cleanly at
@@ -661,13 +668,13 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	// state already in ctx. See chassis/processor/budget.go.
 	ctx, _, _ = loadBudget(ctx, raw, pu.Conf)
 	if err := decrementTTL(ctx, stage); err != nil {
-		if emitBudgetExhausted(err, resCh) {
+		if emitBudgetExhausted(ctx, err, raw, resCh) {
 			return nil
 		}
 		return err
 	}
 	if err := addFuel(ctx, fuelCostScopeEnter, stage); err != nil {
-		if emitBudgetExhausted(err, resCh) {
+		if emitBudgetExhausted(ctx, err, raw, resCh) {
 			return nil
 		}
 		return err
@@ -678,7 +685,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	if parent, ok := ctx.Value(ctxKeyParentStage).(string); ok && parent != "" {
 		penalty, err := chargeTransition(ctx, parent, stage)
 		if err != nil {
-			if emitBudgetExhausted(err, resCh) {
+			if emitBudgetExhausted(ctx, err, raw, resCh) {
 				return nil
 			}
 			return err
@@ -2734,7 +2741,8 @@ func (pu *Unit) emitResumeUsage(ss continuation.StageSuspended, finalRaw []byte,
 		Billable:   true,
 		// The suspended envelope still carries the request that started
 		// the run, so a resumed segment bills against the same hostname.
-		WebHost: WebHostFromEnvelope(ss.ScopeEnvelope),
+		WebHost:   WebHostFromEnvelope(ss.ScopeEnvelope),
+		Allowance: cmp.Or(AllowanceFromEnvelope(string(finalRaw)), AllowanceFromEnvelope(ss.ScopeEnvelope)),
 	})
 }
 
@@ -2777,6 +2785,7 @@ func (pu *Unit) emitResumeSegmentUsage(ctx context.Context, suspendEnvelope, run
 		Fuel:       delta,
 		Billable:   true,
 		WebHost:    WebHostFromEnvelope(suspendEnvelope),
+		Allowance:  cmp.Or(AllowanceFromEnvelope(suspendEnvelope), AllowanceScope(ctx)),
 	})
 }
 
@@ -3390,6 +3399,7 @@ func (pu *Unit) ExecCompute(ctx context.Context, op operation.Operation) (event.
 			BytesIn:    len(op.Input),
 			BytesOut:   len(out),
 			MemBytes:   int(cm.MemoryBytes),
+			Allowance:  AllowanceScope(ctx),
 		})
 	}
 	// Fuel charge for compute wall-clock, on top of the flat 25-fuel EXEC

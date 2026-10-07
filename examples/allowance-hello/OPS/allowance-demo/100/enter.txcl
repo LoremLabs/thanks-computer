@@ -1,0 +1,9 @@
+# GET /work?as=<name> — step 1: put this request in the allowance. Its own
+# scope, before the work: a spent allowance is refused at the NEXT scope
+# entry (429 allowance_exhausted, Retry-After = the window's end), and an
+# allowance with fuel left lowers this request's fuel ceiling to what the
+# window has left. A name with no definition is metered, never refused.
+WHEN @src == "http" && @web.req.url.path == "/work"
+  EXEC "txco://allowance/enter"
+    WITH name = @web.req.url.query.as.0,
+         into = "_al"

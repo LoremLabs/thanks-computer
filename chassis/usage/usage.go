@@ -60,6 +60,11 @@ type UsageEvent struct {
 	AdmissionReason string
 	Billable        bool
 
+	// Allowance is the tenant-defined budget the request ran under
+	// (`txco://allowance/enter`), or "" for none. Its fuel counts against
+	// that allowance as well as the tenant. See chassis/allowance.
+	Allowance string
+
 	// WebHost is the hostname the CLIENT asked for — the HTTP Host header
 	// (`_txc.web.req.host`), e.g. "www.dripl.it". It answers "which of the
 	// tenant's sites was this?", which tenant+stack alone cannot: one stack
@@ -134,6 +139,9 @@ func (s *ZapSink) WriteEvent(ev UsageEvent) {
 	}
 	if ev.Principal != "" {
 		fields = append(fields, zap.String("principal", ev.Principal))
+	}
+	if ev.Allowance != "" {
+		fields = append(fields, zap.String("allowance", ev.Allowance))
 	}
 	// Admission denials: tag the line so log-based billing/analytics can
 	// exclude rejected traffic. billable is emitted only when false — the

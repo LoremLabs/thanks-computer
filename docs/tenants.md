@@ -71,6 +71,6 @@ Everything, keyed at the database row:
 | [Secrets](./advanced/runbook-secret-store.md) | Scoped `(tenant, stack, name)`; materialization can't cross the line |
 | [Traces](./visibility.md) | Tenant-attributed; the admin API only serves them under `/v1/tenants/{slug}/…` |
 | [Cron](./advanced/protocols/cron.md) | Each tenant with a `_cron` stack gets its own tick envelope |
-| Usage & [fuel](./advanced/fuel.md) | Every request's spend is attributed to its tenant — the quota/billing dimension |
+| Usage & [fuel](./advanced/fuel.md) | Every request's spend is attributed to its tenant — the quota/billing dimension; a tenant can carve its own budgets out of it with [allowances](./advanced/allowances.md) |
 | Outbound [mail](./advanced/protocols/sendmail.md) | Per-tenant rate limits, and the from-domain must be *that tenant's* verified hostname |
 | People | Actors hold *per-tenant* memberships with per-tenant capabilities |

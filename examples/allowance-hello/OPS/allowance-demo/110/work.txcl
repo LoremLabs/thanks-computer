@@ -1,0 +1,4 @@
+# GET /work — step 2: the work the allowance pays for. Reaching this scope
+# at all means the allowance let the request through.
+WHEN ._al.entered == true
+  EMIT ._work = "done"

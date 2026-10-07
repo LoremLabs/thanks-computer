@@ -36,6 +36,7 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
+	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 )
@@ -128,11 +129,17 @@ var ctxKeyParentStage = ctxKeyType{name: "parent-stage"}
 // without a lock. The seen-set + recent-ring use a mutex (rare write, never
 // hot enough to matter).
 type budgetState struct {
-	fuel      atomic.Int64
-	ttl       atomic.Int64
-	maxFuel   int64
+	fuel atomic.Int64
+	ttl  atomic.Int64
+	// maxFuel is the request's fuel ceiling (0 = unlimited). Atomic because
+	// entering an allowance may lower it mid-request; nothing raises it.
+	maxFuel   atomic.Int64
 	maxTTL    int64
 	penaltyMs int64
+
+	// allowance is the tenant-defined budget the request entered
+	// (txco://allowance/enter); nil until then. Write-once per name.
+	allowance atomic.Pointer[allowancePin]
 
 	mu     sync.Mutex
 	seen   map[string]bool
@@ -202,14 +209,15 @@ func loadBudget(ctx context.Context, raw string, conf config.Config) (context.Co
 		return ctx, existing.fuel.Load(), existing.ttl.Load()
 	}
 	s := &budgetState{
-		maxFuel:   int64(conf.MaxFuelPerRequest),
 		maxTTL:    int64(conf.OpScopeTTLMax),
 		penaltyMs: int64(conf.OpRepeatPenaltyMs),
 		seen:      map[string]bool{},
 	}
+	s.maxFuel.Store(int64(conf.MaxFuelPerRequest))
 	if v := gjson.Get(raw, "_txc.fuel_used"); v.Exists() {
 		s.fuel.Store(v.Int())
 	}
+	restoreAllowance(s, raw)
 	if v := gjson.Get(raw, "_txc.ttl"); v.Exists() {
 		s.ttl.Store(v.Int())
 	} else {
@@ -254,19 +262,34 @@ func addFuel(ctx context.Context, cost int64, stage string) error {
 	if s == nil {
 		return nil // accounting not initialized — pre-Run callers (rare); silently allow
 	}
-	used := s.fuel.Add(cost)
-	if s.maxFuel > 0 && used > s.maxFuel {
-		s.mu.Lock()
-		recent := append([]string(nil), s.recent...)
-		s.mu.Unlock()
-		return &FuelExhaustedError{
-			MaxFuel:         s.maxFuel,
-			FuelUsed:        used,
-			LastStage:       stage,
-			LastTransitions: recent,
-		}
+	return s.overBudget(s.fuel.Add(cost), stage)
+}
+
+// overBudget is the one exhaustion rule addFuel and fuelExceeded share. A
+// request that entered a spent allowance is refused at its next check; a
+// request over its ceiling is refused as the allowance's when the allowance
+// set that ceiling, else as plain fuel exhaustion.
+func (s *budgetState) overBudget(used int64, stage string) error {
+	p := s.allowance.Load()
+	if p != nil && p.denied {
+		return p.exhausted(used, stage)
 	}
-	return nil
+	max := s.maxFuel.Load()
+	if max <= 0 || used <= max {
+		return nil
+	}
+	if p != nil && p.cap > 0 && p.cap == max {
+		return p.exhausted(used, stage)
+	}
+	s.mu.Lock()
+	recent := append([]string(nil), s.recent...)
+	s.mu.Unlock()
+	return &FuelExhaustedError{
+		MaxFuel:         max,
+		FuelUsed:        used,
+		LastStage:       stage,
+		LastTransitions: recent,
+	}
 }
 
 // fuelExceeded reports whether the request is already over its fuel
@@ -281,19 +304,7 @@ func fuelExceeded(ctx context.Context, stage string) error {
 	if s == nil {
 		return nil
 	}
-	used := s.fuel.Load()
-	if s.maxFuel > 0 && used > s.maxFuel {
-		s.mu.Lock()
-		recent := append([]string(nil), s.recent...)
-		s.mu.Unlock()
-		return &FuelExhaustedError{
-			MaxFuel:         s.maxFuel,
-			FuelUsed:        used,
-			LastStage:       stage,
-			LastTransitions: recent,
-		}
-	}
-	return nil
+	return s.overBudget(s.fuel.Load(), stage)
 }
 
 // decrementTTL decrements the request's hop counter by 1. Returns a
@@ -375,11 +386,17 @@ func syncBudgetToEnvelope(ctx context.Context, raw string) string {
 	s.mu.Unlock()
 	// After the first sync all three paths exist, so this is one
 	// splice pass instead of three full-envelope copies per scope hop.
-	return jsonx.SetMany(raw, []jsonx.PathVal{
+	raw = jsonx.SetMany(raw, []jsonx.PathVal{
 		{Path: "_txc.fuel_used", Val: s.fuel.Load()},
 		{Path: "_txc.ttl", Val: s.ttl.Load()},
 		{Path: "_txc._seen", Val: seen},
 	})
+	// Set apart, and only when pinned: an object value would push the three
+	// sets above off SetMany's single-pass path.
+	if p := s.allowance.Load(); p != nil {
+		raw, _ = sjson.Set(raw, "_txc.allowance", p.envelope())
+	}
+	return raw
 }
 
 // StripBudgetFromOutbound deletes the chassis-internal budget fields from
@@ -435,17 +452,46 @@ func clampTTL(envelope string, requested int64) int64 {
 // emitBudgetExhausted serializes an exhaustion error into the final response
 // payload and pushes it through resCh. Returns true if the error was a
 // budget exhaustion (caller swallows the error in that case), false
-// otherwise (caller bubbles up).
-func emitBudgetExhausted(err error, resCh chan event.Payload) bool {
-	var raw string
+// otherwise (caller bubbles up). raw is the envelope the request was
+// running with when it gave up.
+func emitBudgetExhausted(ctx context.Context, err error, raw string, resCh chan event.Payload) bool {
+	var body string
 	switch e := err.(type) {
 	case *FuelExhaustedError:
-		raw = e.AsJSON()
+		body = e.AsJSON()
 	case *TTLExhaustedError:
-		raw = e.AsJSON()
+		body = e.AsJSON()
+	case *AllowanceExhaustedError:
+		// A spent allowance is refused like a tenant over its rate limit:
+		// the shared admission marker, which each head renders in its own
+		// protocol (web 429 + Retry-After, LMTP 451).
+		body = admission.MarkDenied(e.AsJSON(), admission.Decision{
+			Status: 429, Reason: AllowanceDenyReason, Retry: e.RetryAfter(time.Now()),
+		}, "")
 	default:
 		return false
 	}
-	resCh <- event.Payload{Raw: raw, Type: event.JSON}
+	resCh <- event.Payload{Raw: withBillingFields(ctx, body, raw), Type: event.JSON}
 	return true
+}
+
+// withBillingFields stamps what the usage line reads off a final payload onto
+// an exhaustion body: the fuel burned (the live counter), the allowance it ran
+// under, and the routed tenant and stack, copied from the envelope. Without
+// them a request that hit the cap — the most expensive kind — bills zero fuel
+// against the entry stage. server.go strips `_txc.fuel_used` before the
+// client sees the body.
+func withBillingFields(ctx context.Context, body, raw string) string {
+	sets := []jsonx.PathVal{{Path: "_txc.fuel_used", Val: fuelUsedFromCtx(ctx)}}
+	if s := budgetFromCtx(ctx); s != nil {
+		if p := s.allowance.Load(); p != nil {
+			sets = append(sets, jsonx.PathVal{Path: "_txc.allowance", Val: p.envelope()})
+		}
+	}
+	for _, p := range []string{"_txc.tenant", "_txc.stack"} {
+		if v := gjson.Get(raw, p); v.Exists() {
+			sets = append(sets, jsonx.PathVal{Path: p, Val: v.String()})
+		}
+	}
+	return jsonx.SetMany(body, sets)
 }

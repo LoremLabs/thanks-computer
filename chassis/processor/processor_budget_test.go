@@ -131,6 +131,55 @@ func TestRunFuelExhaustionTightLoop(t *testing.T) {
 	}
 }
 
+// TestRunBudgetExhaustionCarriesBillingFields: an exhaustion payload is the
+// request's final payload, so it is what server.go reads the usage line from.
+// It must carry the fuel the request burned (`_txc.fuel_used`) and the routed
+// stack, or the most expensive requests — the ones that hit the cap — bill
+// zero fuel against the entry stage. (The tenant comes from the processor's
+// pin, not the payload.) The error body itself stays top-level, as clients
+// see it today.
+func TestRunBudgetExhaustionCarriesBillingFields(t *testing.T) {
+	cases := []struct {
+		name            string
+		maxFuel, maxTTL int
+		code            string
+		minFuel         int64
+	}{
+		{"fuel", 200, 0, "txco_fuel_exhausted", 201},
+		{"ttl", 0, 5, "txcl_scope_ttl_exhausted", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pu := withBudget(t, tc.maxFuel, tc.maxTTL, 0)
+			seedBudgetOp(t, pu, "boot/loop", 0, `EMIT @goto = "boot/loop/0"`)
+
+			resCh := make(chan event.Payload, 2)
+			in := `{"_txc":{"stack":"loop"}}`
+			if err := pu.Run(context.Background(), in, "boot/loop/0", resCh); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			var p event.Payload
+			select {
+			case p = <-resCh:
+			default:
+				t.Fatal("expected an exhaustion payload on resCh")
+			}
+			if code := gjson.Get(p.Raw, "code").String(); code != tc.code {
+				t.Fatalf("code = %q, want %q (payload: %s)", code, tc.code, p.Raw)
+			}
+			if fuel := FuelUsedFromEnvelope(p.Raw); fuel < tc.minFuel {
+				t.Errorf("FuelUsedFromEnvelope = %d, want >= %d — the usage line would bill this request as free (payload: %s)", fuel, tc.minFuel, p.Raw)
+			}
+			if s := gjson.Get(p.Raw, "_txc.stack").String(); s != "loop" {
+				t.Errorf("_txc.stack = %q, want %q (usage would attribute to the entry stage)", s, "loop")
+			}
+			if v := gjson.Get(StripBudgetFromOutbound(p.Raw), "_txc.fuel_used"); v.Exists() {
+				t.Errorf("StripBudgetFromOutbound left _txc.fuel_used on the exhaustion payload")
+			}
+		})
+	}
+}
+
 // TestRunRepeatPenaltySleeps sets a 30ms penalty per repeated transition
 // and asserts the request takes at least that long when the loop iterates.
 // Wired-vs-disabled check (compared with the previous TTL test, where

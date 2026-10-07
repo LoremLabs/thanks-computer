@@ -622,6 +622,13 @@ func (c *Controller) Start() {
 	// See chassis/server/admin/kv_endpoints.go.
 	tenantR.HandleFunc("/kv/{namespace}", c.handleListKV).Methods(http.MethodGet)
 
+	// A tenant's own fuel budgets (`txco allowance`), kept in reserved KV
+	// namespaces and gated by the KV capabilities. See allowance_endpoints.go.
+	tenantR.HandleFunc("/allowances", c.handleListAllowances).Methods(http.MethodGet)
+	tenantR.HandleFunc("/allowances/{name}", c.handleGetAllowance).Methods(http.MethodGet)
+	tenantR.HandleFunc("/allowances/{name}", c.handleSetAllowance).Methods(http.MethodPut)
+	tenantR.HandleFunc("/allowances/{name}", c.handleDeleteAllowance).Methods(http.MethodDelete)
+
 	// Read-only listing + reading of the notebook store (txco://notebook/*):
 	// heads by namespace, entries by cursor / time window / tail, NDJSON
 	// export. See chassis/server/admin/notebook_endpoints.go.

@@ -93,20 +93,20 @@ func (pu *Unit) fastForward(ctx context.Context, raw, stage string, resCh chan e
 		// penalty sleep is unreachable; it is honored anyway so behavior
 		// stays identical if that invariant ever shifts.
 		if berr := decrementTTL(ctx, hopStage); berr != nil {
-			if emitBudgetExhausted(berr, resCh) {
+			if emitBudgetExhausted(ctx, berr, raw, resCh) {
 				return nil, hopStage, raw, true, nil
 			}
 			return nil, hopStage, raw, false, berr
 		}
 		if berr := addFuel(ctx, fuelCostScopeEnter, hopStage); berr != nil {
-			if emitBudgetExhausted(berr, resCh) {
+			if emitBudgetExhausted(ctx, berr, raw, resCh) {
 				return nil, hopStage, raw, true, nil
 			}
 			return nil, hopStage, raw, false, berr
 		}
 		penalty, berr := chargeTransition(ctx, prev, hopStage)
 		if berr != nil {
-			if emitBudgetExhausted(berr, resCh) {
+			if emitBudgetExhausted(ctx, berr, raw, resCh) {
 				return nil, hopStage, raw, true, nil
 			}
 			return nil, hopStage, raw, false, berr

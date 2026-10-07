@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
+	"github.com/loremlabs/thanks-computer/chassis/allowance"
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/attach"
@@ -1392,6 +1393,19 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			zap.String("sid", conf.ServerId))
 	}
 
+	// Allowances (txco://allowance/*): a tenant's own fuel budgets, kept in
+	// the tenant's KV under reserved namespaces. The store's KV view has no
+	// TTL ceiling — a month window's counter must outlive --kv-max-ttl. The
+	// tee charges each allowance from the usage path, so they are metered
+	// only while usage is on.
+	var allowStore *allowance.Store
+	if kv != nil {
+		allowStore = allowance.NewStore(kvstore.New(kv, conf.KVMaxValueBytes, 0))
+		if usageSink != nil {
+			usageSink = allowance.NewTee(usageSink, allowStore, logger)
+		}
+	}
+
 	// Continuation store: durable, immutable, derived-state storage for
 	// suspended (async) runs. The file backend is the bundled default
 	// and self-registers via the blank import. Construction failure is a
@@ -1685,6 +1699,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// Per-compute usage events (src="compute") ride the same usage sink as
 	// per-request usage. nil-safe when usage is disabled.
 	pu.Usage = usageSink
+	pu.Allowances = allowStore
 	logger.Info("compute runtime loaded",
 		zap.Int("max_memory_mb", conf.ComputeMaxMemoryMB),
 		zap.Duration("max_wall", computeWall))
@@ -1845,6 +1860,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// redis, via --kvstore). Tenant-scoped via processor.TenantScope; namespace
 	// defaults to the routed stack. See chassis/server/kv.go + chassis/kv.
 	kvHandle := kvstore.New(kv, conf.KVMaxValueBytes, time.Duration(conf.KVMaxTTL)*time.Second)
+	// Tenant-defined fuel budgets (txco://allowance/enter|get|set|delete|list).
+	// See chassis/server/allowance.go + chassis/allowance.
+	for op, h := range map[string]func(context.Context, *allowance.Store, []byte) (event.Payload, error){
+		"enter": allowanceEnter, "get": allowanceGet, "set": allowanceSet,
+		"delete": allowanceDelete, "list": allowanceList,
+	} {
+		pu.Handle([]byte("txco://allowance/"+op), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return h(ctx, allowStore, in)
+			}))
+	}
 	pu.Handle([]byte("txco://kv/get"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return kvGet(ctx, kvHandle, in)
@@ -2996,14 +3022,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 							if stack == "" {
 								stack = stage
 							}
-							// A request the admission gate denied (suspend / rate /
-							// concurrency / drain) is non-usage: tag it so
-							// billing/analytics never count rejected traffic as
-							// load. The customer stack never ran, so zero fuel
-							// regardless of any boot-stage accrual.
-							denied := gjson.GetBytes(finalPayload, "_txc.admission.denied").Bool()
+							denied, reason, billable := admissionBilling(finalPayload)
 							fuel := fuelUsed
-							if denied {
+							if !billable {
 								fuel = 0
 							}
 							usageSink.WriteEvent(usage.UsageEvent{
@@ -3024,8 +3045,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 								WebHost:         processor.WebHostFromEnvelope(eventRaw),
 								Fuel:            fuel,
 								AdmissionDenied: denied,
-								AdmissionReason: gjson.GetBytes(finalPayload, "_txc.admission.reason").String(),
-								Billable:        !denied,
+								AdmissionReason: reason,
+								Billable:        billable,
+								Allowance:       processor.AllowanceFromEnvelope(string(finalPayload)),
 							})
 						}
 						// Tenant telemetry: hand _txc.telemetry.metrics
@@ -3199,4 +3221,16 @@ func nonEmptyStrings(in []string) []string {
 		}
 	}
 	return out
+}
+
+// admissionBilling reads a final payload's admission marker for the usage
+// line. A request the admission gate denied (suspend / rate / concurrency /
+// drain) is non-usage: the customer stack never ran, so it is not billable
+// and its fuel is zeroed regardless of any boot-stage accrual. A spent
+// allowance is the one denial that comes after the stack ran: what the
+// request burned before entering the allowance is real usage and bills.
+func admissionBilling(finalPayload []byte) (denied bool, reason string, billable bool) {
+	denied = gjson.GetBytes(finalPayload, "_txc.admission.denied").Bool()
+	reason = gjson.GetBytes(finalPayload, "_txc.admission.reason").String()
+	return denied, reason, !denied || reason == processor.AllowanceDenyReason
 }

@@ -1,0 +1,6 @@
+# GET /allowance?name=<name> — the allowance's current window: its fuel,
+# what is used, what is left, and when the window resets.
+WHEN @src == "http" && @web.req.url.path == "/allowance"
+  EXEC "txco://allowance/get"
+    WITH name = @web.req.url.query.name.0,
+         into = "_al"

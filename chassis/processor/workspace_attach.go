@@ -238,6 +238,9 @@ func (pu *Unit) meterAttach(att *attach.Attachment, opID string, bytesIn, bytesO
 		BytesOut:   int(bytesOut),
 		Fuel:       workspaceFuel(workspace.LeaseHeartbeatInterval.Milliseconds()),
 		Billable:   true,
+		// The attachment's context descends from the request that opened
+		// it, so its heartbeats bill the allowance that request entered.
+		Allowance: AllowanceScope(att.Context()),
 	})
 }
 

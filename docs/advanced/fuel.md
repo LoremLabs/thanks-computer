@@ -70,6 +70,11 @@ The final fuel value is logged on the per-request `usage` line
 (`fuel=N`) — single-tenant deployments can ignore it; tenant-aware
 deployments aggregate it for quota or billing.
 
+A tenant can also give part of its work a fuel budget of its own — so much
+per hour, day or month for one customer, agent or feature — with
+[allowances](./allowances.md). A request that enters one has its ceiling
+lowered to what the allowance has left.
+
 ## Repeat transitions: backpressure before the kill
 
 The chassis keeps a per-request seen-set of stage transitions
@@ -118,6 +123,11 @@ trace:
 
 For the full step-by-step picture, pull the [trace](./trace.md) for
 that rid.
+
+An exhausted request still bills what it burned: the chassis stamps
+`_txc.fuel_used` and the routed `_txc.stack` onto the payload, so the
+`usage` line counts the request at its real cost against the stack that
+ran it, and strips the fuel before the client sees the body.
 
 ## Apply-time lint: catching typos before runtime
 

@@ -1,0 +1,10 @@
+# POST /allowance/set?name=<name>&fuel=N[&per=hour|day|month] — define (or
+# replace) an allowance: so much fuel per UTC window. A real tenant does this
+# when it makes the thing the allowance is for (a customer, an agent), or by
+# hand with `txco allowance set`.
+WHEN @src == "http" && @web.req.method == "POST" && @web.req.url.path == "/allowance/set"
+  EXEC "txco://allowance/set"
+    WITH name = @web.req.url.query.name.0,
+         fuel = @web.req.url.query.fuel.0,
+         per  = @web.req.url.query.per.0,
+         into = "_al"
