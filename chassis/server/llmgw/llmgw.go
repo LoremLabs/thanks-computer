@@ -17,7 +17,6 @@ import (
 	"database/sql"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -85,12 +84,7 @@ func New(ctx context.Context, pu *processor.Unit, resolver *ingress.DBResolver, 
 		return nil, errors.New("llmgw: invalid --llm-upstream-url: " + base)
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control:   egress.DialControl(guard),
-	}).DialContext
+	transport := egress.Transport(guard)
 	transport.DisableCompression = true
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 100

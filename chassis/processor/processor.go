@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"net"
 	"net/http"
 	"regexp"
 	"sort"
@@ -532,23 +531,17 @@ func New(conf config.Config, logger *zap.Logger, reg registry.Registry, mc *metr
 	//
 	// otelhttp.NewTransport then wraps the tuned transport so outbound
 	// calls propagate trace context.
-	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	//
+	// Egress policy is enforced at the dial step (egress.Transport):
+	// Control runs after DNS resolution with the concrete IP about to be
+	// connected, so it inspects the address actually dialed (DNS-rebinding
+	// safe), and no environment proxy can stand in for the destination.
+	// The default "open" guard permits everything.
+	baseTransport := egress.Transport(guard)
 	baseTransport.MaxIdleConns = 1000
 	baseTransport.MaxIdleConnsPerHost = 1000
 	baseTransport.MaxConnsPerHost = 0 // unlimited concurrent
 	baseTransport.IdleConnTimeout = 10 * time.Second
-
-	// Egress policy is enforced at the dial step. Control runs after DNS
-	// resolution with the concrete IP about to be connected, so it
-	// inspects the address actually dialed (DNS-rebinding safe). The
-	// Timeout/KeepAlive mirror http.DefaultTransport's implicit dialer
-	// so connection behaviour is otherwise unchanged. The default "open"
-	// guard permits everything.
-	baseTransport.DialContext = (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control:   egress.DialControl(guard),
-	}).DialContext
 
 	httpClient := &http.Client{
 		Transport: otelhttp.NewTransport(baseTransport),

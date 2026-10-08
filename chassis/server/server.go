@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1558,12 +1557,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// tenant-supplied.
 	var telemetryProc *telemetry.Processor
 	if conf.TelemetryEnabled {
-		tTransport := http.DefaultTransport.(*http.Transport).Clone()
-		tTransport.DialContext = (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-			Control:   egress.DialControl(guard),
-		}).DialContext
+		tTransport := egress.Transport(guard)
 		dropped := func(tenant, reason string, n int64) {
 			mc.RecordTelemetryDrop(context.Background(), tenant, reason, n)
 		}

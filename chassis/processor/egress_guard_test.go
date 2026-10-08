@@ -18,7 +18,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/resonator"
 )
 
-// guardedClient mirrors the transport New() builds: the egress Guard is
+// guardedClient uses the transport New() builds on: the egress Guard is
 // enforced via net.Dialer.Control at the dial step.
 func guardedClient(t *testing.T, policy string) *http.Client {
 	t.Helper()
@@ -26,12 +26,7 @@ func guardedClient(t *testing.T, policy string) *http.Client {
 	if err != nil {
 		t.Fatalf("egress.Open(%q): %v", policy, err)
 	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.DialContext = (&net.Dialer{
-		Timeout: 2 * time.Second,
-		Control: egress.DialControl(g),
-	}).DialContext
-	return &http.Client{Transport: tr, Timeout: 2 * time.Second}
+	return &http.Client{Transport: egress.Transport(g), Timeout: 2 * time.Second}
 }
 
 // TestExecHTTPEgressGuard proves the dial-step policy: a 127.0.0.1
