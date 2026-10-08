@@ -2348,6 +2348,21 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	pu.Handle([]byte("txco://copy"), event.OpsHandlerFunc(ops.Copy))
 	pu.Handle([]byte("txco://web-render"), event.OpsHandlerFunc(ops.WebRender))
 
+	// `txco://html/extract`: one public HTML page in, the values CSS
+	// selectors pick out of it as JSON. The fetch dials through the same
+	// egress guard as every op dial; per-node fetch and parse slots, a
+	// per-tenant in-flight cap and a per-tenant rate bound it (the
+	// --html-extract-* flags). See chassis/server/html_extract.go.
+	hxDeps, hxErr := newHTMLExtractDeps(conf, guard)
+	if hxErr != nil {
+		cancel()
+		return ctx, nil, hxErr
+	}
+	pu.Handle([]byte("txco://html/extract"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return htmlExtract(ctx, hxDeps, in)
+		}))
+
 	// `txco://sendmail`: render + submit an outbound email from the
 	// `_sendmail` envelope contract a rule assembled. Struct-based op (needs
 	// the real runtime DB for the campaign guard, the mirror snapshot for the

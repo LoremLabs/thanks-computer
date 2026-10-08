@@ -234,6 +234,12 @@ type Config struct {
 	OutletEgressRelays           []string `id:"outlet-egress-relays" default:"" desc:"SOCKS5 relays for outlet egress: relay — ip:port on the fleet's private network (or on the tunnel, with --outlet-egress-wg-config), tried in order. Empty means relay egress is unavailable on this node: an outlet asking for it fails with txco_outlet_connect_failed. ()"`
 	OutletPGExecMode             string   `id:"outlet-pg-exec-mode" default:"describe-exec" desc:"pgx execution mode for the postgres outlet driver: describe-exec (default; a describe round trip per statement, never stale, safe behind any pooler) or cache-describe (descriptions cached per connection; one round trip per statement). Both use the extended protocol. (describe-exec)"`
 	OutletEgressWGConfig         string   `id:"outlet-egress-wg-config" default:"" desc:"Path to a WireGuard configuration (wg-quick INI: [Interface] PrivateKey/Address, [Peer] PublicKey/Endpoint/AllowedIPs) the chassis brings up in-process — no kernel interface, no root — to reach --outlet-egress-relays by their tunnel addresses. Empty: relays are reached over the host network. The file holds a private key; keep it readable by the chassis only. ()"`
+	HTMLExtractTimeout           string   `id:"html-extract-timeout" default:"5s" desc:"Ceiling on one txco://html/extract call: the fetch (dial, TLS, redirects, headers, body) and the parse together; the op's own deadline can only shorten it (5s)."`
+	HTMLExtractMaxBytes          int      `id:"html-extract-max-bytes" default:"3145728" desc:"Largest page txco://html/extract downloads; a longer body fails with txco_html_response_too_large and nothing is extracted (3145728, 3MiB)."`
+	HTMLExtractConcurrency       int      `id:"html-extract-concurrency" default:"16" desc:"txco://html/extract fetches in flight on this node, across tenants; a call waits for a slot until its deadline (16)."`
+	HTMLExtractParseConcurrency  int      `id:"html-extract-parse-concurrency" default:"2" desc:"txco://html/extract parses running at once on this node; each can hold about 70 MB and a second of CPU on a 3 MiB page, so keep it near the node's CPU count (2)."`
+	HTMLExtractTenantConcurrency int      `id:"html-extract-tenant-concurrency" default:"4" desc:"txco://html/extract calls one tenant may have in flight on this node; one more fails at once with txco_html_busy (4)."`
+	HTMLExtractRatePerMin        int      `id:"html-extract-rate-per-min" default:"60" desc:"txco://html/extract calls one tenant may start per minute on this node; more fail with txco_html_rate_limited. 0 = unlimited (60)."`
 	SnapshotBootstrapRef         string   `id:"snapshot-bootstrap-ref" default:"" desc:"If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap."`
 	FeedSource                   string   `id:"feed-source" default:"nop" desc:"Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged."`
 	FeedSourceFileDir            string   `id:"feed-source-file-dir" default:"./chassis/data/feed" desc:"Root directory for the file feed source (./chassis/data/feed)"`
@@ -738,6 +744,15 @@ func Load() (Config, error) {
 	}
 	if _, err = time.ParseDuration(config.OutletIdleClose); err != nil {
 		log.Fatalf("unable to parse --outlet-idle-close %q", config.OutletIdleClose)
+	}
+	if d, err := time.ParseDuration(config.HTMLExtractTimeout); err != nil || d <= 0 {
+		log.Fatalf("unable to parse --html-extract-timeout %q (want a positive duration)", config.HTMLExtractTimeout)
+	} else if d > opTimeoutMaxDur {
+		log.Fatalf("html-extract-timeout (%s) must be <= op-timeout-max (%s)", config.HTMLExtractTimeout, config.OpTimeoutMax)
+	}
+	if config.HTMLExtractMaxBytes <= 0 || config.HTMLExtractConcurrency <= 0 || config.HTMLExtractParseConcurrency <= 0 ||
+		config.HTMLExtractTenantConcurrency <= 0 || config.HTMLExtractRatePerMin < 0 {
+		log.Fatalf("--html-extract-max-bytes, -concurrency, -parse-concurrency and -tenant-concurrency must be positive, and -rate-per-min not negative")
 	}
 	switch config.OutletEgress {
 	case "direct", "relay":

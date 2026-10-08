@@ -28,6 +28,7 @@
 | `txco://static` | Serve static files with layered lookup: the stack's `FILES/` → workspace `FILES/` → embedded defaults. Caps: 1 MiB/file, 2048 files, 64 MiB total. See `examples/quickstart-hello-world` for the rule pattern. |
 | `txco://read-file` | Read a stack's `FILES/` asset(s) into the document as data (templates, fixtures, config) — the read-into-the-tree counterpart to `static`. See [read-file](./read-file.md). |
 | `txco://web-render` | Read a source path, optionally render Markdown→HTML, set `@web.res.*`, halt. Pages without a backend. |
+| `txco://html/extract` | Fetch one public HTML page and return the values CSS selectors pick out of it, as JSON; never the page. The fetch is http(s) on 80/443 through the egress policy, bounded in redirects, bytes and time. See [html-extract](./html-extract.md). |
 | `txco://sendmail` | Render + submit outbound email from the `_sendmail` contract — see [sendmail](./protocols/sendmail.md). |
 | `txco://relay` | Forward an inbound message VERBATIM (the `.forward` primitive) — see [relay](./protocols/relay.md). Only fires from the inbound-mail path (LMTP). |
 | `txco://hmac-sign` | Compute an HMAC signature (key via `WITH secrets.*`). |

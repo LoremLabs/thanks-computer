@@ -104,6 +104,18 @@ const (
 	// bounded by the drive limits instead. Exported because the handlers
 	// live in package server and charge via AddFuel.
 	FuelCostDrivePerMiB int64 = 100
+	// FuelCostHTMLExtract is txco://html/extract's charge per fetch it
+	// starts, on top of the flat dispatch fuel: an outbound request is
+	// worth more than a local op. The bytes it downloads pay
+	// FuelCostHTMLPerMiB (rounded up), and parsing and matching pay
+	// FuelCostHTMLExtractPerMs of their wall-clock — the nano-op compute
+	// rate, because it is the same kind of work: chassis CPU on untrusted
+	// input. A 100 KB page that parses in 5 ms pays about 235 with the
+	// dispatch; a dense 3 MiB page, about 2,000. Exported because the
+	// handler lives in package server.
+	FuelCostHTMLExtract      int64 = 50
+	FuelCostHTMLPerMiB       int64 = 100
+	FuelCostHTMLExtractPerMs int64 = 10
 )
 
 // AddFuel is the exported charge point for core op handlers that do

@@ -64,6 +64,7 @@ require (
 
 require (
 	github.com/OpenPrinting/goipp v1.2.0
+	github.com/andybalholm/cascadia v1.3.5
 	github.com/blevesearch/bleve/v2 v2.6.1
 	github.com/blevesearch/bleve_index_api v1.4.1
 	github.com/coder/websocket v1.8.15
