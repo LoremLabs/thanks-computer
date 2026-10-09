@@ -141,7 +141,7 @@ node. Stale files are swept at boot.
 | `--op-payload-max`        | `4194304` | Max op payload, bytes (4 MiB)                      |
 | `--max-fuel-per-request`  | `100000`  | Fuel budget per request — see [fuel.md](./fuel.md) |
 | `--compute-max-memory-mb` | `32`      | Memory cap per sandboxed nano-op                   |
-| `--compute-max-wall`      | `250ms`   | Wall-clock cap per nano-op invocation              |
+| `--compute-max-wall`      | `500ms`   | Wall-clock cap per nano-op invocation              |
 
 ## Network policy
 

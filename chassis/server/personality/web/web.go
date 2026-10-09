@@ -651,6 +651,12 @@ func (web *WebController) Start() {
 
 					output := res.Raw // is this doubling the allocation?
 
+					// A run that failed answers as a failure: 500 (or its own
+					// status), not cached, the error alone (response.go).
+					if res.Type == event.ErrorStr {
+						output = failureResponse(output)
+					}
+
 					// Shared admission gate denials arrive transport-neutral
 					// (_txc.admission.*); render them as this personality's HTTP
 					// status/body before the normal _txc.web.res.* path.

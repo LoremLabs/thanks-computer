@@ -135,6 +135,31 @@ func applyAdmission(output string) string {
 	return output
 }
 
+// failureResponse renders a run that failed (the processor's ErrorStr
+// answer: a halting op error such as a compute that threw or ran out of
+// wall-clock, a failed continuation or deferred op, a cancel) as the
+// failure it is: 500 unless the payload carries its own status (an
+// abort's 503), never cached, and the body the error alone
+// ({"error": {...}}), never the envelope, even where SHOW_PRIVATE_VARS
+// (dev) shows envelopes. Without it a failed compute answered 200 with the
+// writer's own _txc bookkeeping as its body.
+func failureResponse(output string) string {
+	if !gjson.Get(output, "_txc.web.res.status").Exists() {
+		output, _ = sjson.Set(output, "_txc.web.res.status", http.StatusInternalServerError)
+	}
+	if !gjson.Get(output, "_txc.web.res.headers.cache-control").Exists() {
+		output, _ = sjson.Set(output, "_txc.web.res.headers.cache-control.0", "no-store")
+	}
+	if gjson.Get(output, "_txc.web.res.body").String() == "" {
+		body, ok := stripTopLevelUnderscoreFast(output)
+		if !ok {
+			body = stripTopLevelUnderscoreSlow(output)
+		}
+		output, _ = sjson.Set(output, "_txc.web.res.body", base64.StdEncoding.EncodeToString([]byte(body)))
+	}
+	return output
+}
+
 // getOutput convert a body from base64, or return json
 func getOutput(output string, hidePrivate bool) ([]byte, error) {
 

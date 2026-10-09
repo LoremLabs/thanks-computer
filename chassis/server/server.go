@@ -1680,7 +1680,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// op would fail loudly rather than silently no-op.
 	computeWall, werr := time.ParseDuration(conf.ComputeMaxWall)
 	if werr != nil || computeWall <= 0 {
-		computeWall = 250 * time.Millisecond
+		computeWall = 500 * time.Millisecond
 		if werr != nil {
 			logger.Warn("invalid compute-max-wall; using default",
 				zap.String("value", conf.ComputeMaxWall), zap.Duration("default", computeWall))

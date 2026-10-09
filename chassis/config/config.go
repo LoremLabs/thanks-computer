@@ -177,7 +177,7 @@ type Config struct {
 	ContinuableTimeoutDefault    string   `id:"continuable-timeout-default" default:"10m" desc:"Default runtime budget for a WITH mode=continuable op when WITH timeout is omitted. Bounds the upstream work both pre- and post-promotion. Not capped by op-timeout-max. (10m)"`
 	DeferredJoinSlack            string   `id:"deferred-join-slack" default:"60s" desc:"Flat pad added to a deferred-join op's runtime budget when computing the run's reap deadline, covering downstream synchronous scopes. (60s)"`
 	ComputeMaxMemoryMB           int      `id:"compute-max-memory-mb" default:"32" desc:"Per-invocation memory cap for a sandboxed compute (op://) in MB. (32)"`
-	ComputeMaxWall               string   `id:"compute-max-wall" default:"250ms" desc:"Per-invocation wall-clock cap for a sandboxed compute (op://); the guest is killed if it exceeds this. (250ms)"`
+	ComputeMaxWall               string   `id:"compute-max-wall" default:"500ms" desc:"Per-invocation wall-clock cap for a sandboxed compute (op://); the guest is killed if it exceeds this. (500ms)"`
 	WorkspaceProvider            string   `id:"workspace-provider" default:"" desc:"Backend for workspace:// ops: {local, <overlay providers>}. Empty = workspace:// disabled (ops fail loudly). ()"`
 	WorkspaceAllowLocal          bool     `id:"workspace-allow-local" default:"false" desc:"Permit the local workspace provider (commands run as the chassis uid on this host, no isolation). Never implied by --env; must be set explicitly. (false)"`
 	WorkspaceLocalRoot           string   `id:"workspace-local-root" default:"./chassis/data/workspaces" desc:"Root directory for local workspaces: <root>/<tenant>/<stack>/<name>. (./chassis/data/workspaces)"`

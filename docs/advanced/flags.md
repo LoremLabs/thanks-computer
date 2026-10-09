@@ -134,7 +134,7 @@ the same list. What the main ones mean, together: [the runtime reference](./serv
 | `--continuable-timeout-default` | `10m` | Default runtime budget for a WITH mode=continuable op when WITH timeout is omitted. Bounds the upstream work both pre- and post-promotion. Not capped by op-timeout-max. (10m) |
 | `--deferred-join-slack` | `60s` | Flat pad added to a deferred-join op's runtime budget when computing the run's reap deadline, covering downstream synchronous scopes. (60s) |
 | `--compute-max-memory-mb` | `32` | Per-invocation memory cap for a sandboxed compute (op://) in MB. (32) |
-| `--compute-max-wall` | `250ms` | Per-invocation wall-clock cap for a sandboxed compute (op://); the guest is killed if it exceeds this. (250ms) |
+| `--compute-max-wall` | `500ms` | Per-invocation wall-clock cap for a sandboxed compute (op://); the guest is killed if it exceeds this. (500ms) |
 | `--workspace-provider` | — | Backend for workspace:// ops: {local, <overlay providers>}. Empty = workspace:// disabled (ops fail loudly). () |
 | `--workspace-allow-local` | `false` | Permit the local workspace provider (commands run as the chassis uid on this host, no isolation). Never implied by --env; must be set explicitly. (false) |
 | `--workspace-local-root` | `./chassis/data/workspaces` | Root directory for local workspaces: <root>/<tenant>/<stack>/<name>. (./chassis/data/workspaces) |
