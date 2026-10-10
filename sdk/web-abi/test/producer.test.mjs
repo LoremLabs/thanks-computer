@@ -54,6 +54,14 @@ for (const [name, opts] of Object.entries(cases)) {
   test(`renderOps: ${name}`, async () => check(name, renderOps(opts)));
 }
 
+test("renderOps: a routes build's 200 trusts the route table (no extension guard); its 404 and an spa build keep it", () => {
+  const ext = "@web.req.url.path !~ /(?i)\\.[a-z0-9]+$/";
+  const routes = renderOps(cases.routes);
+  assert.ok(!routes["900000/spa-fallback.txcl"].includes(ext), "a known route is a page whatever dots it carries");
+  assert.ok(routes["900000/spa-404.txcl"].includes(ext), "an unknown dotted path is an asset miss, the catch-all's");
+  assert.ok(renderOps(cases.spa)["900000/spa-fallback.txcl"].includes(ext), "with no route table the extension is the only signal");
+});
+
 test("renderOps: an spa build needs its shell; the scope moves both ops", () => {
   assert.throws(() => renderOps({ ...base, mode: "spa", page: null }), /needs its shell/);
   assert.throws(() => renderOps({ ...base, mode: "routes", page: cases.spa.page }), /route matcher/);

@@ -56,8 +56,9 @@ app shell, asset hashes included, so they change on every build.
    asset, or a `.data` file, is served before your stack runs.
 2. **Your own ops** in the stack run next.
 3. **The preset's ops** go last:
-   - a navigation to a path your routes know (`/users/42` for
-     `users/:id`) gets the app shell with status 200;
+   - a GET or HEAD of a path your routes know (`/users/42` for
+     `users/:id`, and `/users/4.2` too: a param may hold a dot) gets the app
+     shell with status 200;
    - any other navigation gets the shell with status 404, and the client
      renders its error boundary;
    - everything else, such as a missing asset or a POST, gets a plain 404.

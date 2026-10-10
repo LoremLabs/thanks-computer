@@ -71,10 +71,11 @@ survive.
 2. **Your own ops** in the stack (APIs, auth, redirects) run next, at any scope
    below 900000.
 3. **The build's ops** go last:
-   - a **navigation** (a GET or HEAD of a path with no extension) that matches
-     a page route gets the shell with 200;
-   - any other navigation gets the shell with 404, and the client renders its
-     error page;
+   - a GET or HEAD of a path that matches a **page route** gets the shell with
+     200 — whatever dots the path carries (a param may hold one:
+     `/p/mister.parade`), since the route table decides what a page is;
+   - any other **navigation** (a GET or HEAD of a path with no extension) gets
+     the shell with 404, and the client renders its error page;
    - everything else gets a plain 404, so every request is answered.
 
 The route matcher comes from SvelteKit's own route table. If a route needs a

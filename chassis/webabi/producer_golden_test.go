@@ -81,9 +81,10 @@ func TestSvelteKitGoldenOpsRoute(t *testing.T) {
 	}{
 		{"GET", "/", true, false},
 		{"GET", "/book/moby-dick", true, false},
+		{"GET", "/book/moby.dick", true, false}, // a param may hold a dot: the route table decides
 		{"HEAD", "/login", true, false},
 		{"GET", "/nope/deeper", false, true},
-		{"GET", "/v1.2", false, false},            // a dot: the catch-all's
+		{"GET", "/v1.2", false, false},            // a dot on no known route: the catch-all's
 		{"GET", "/app/x.JS", false, false},        // case-insensitive
 		{"POST", "/book/moby-dick", false, false}, // not a navigation
 		{"DELETE", "/nope", false, false},
@@ -177,10 +178,14 @@ var navWhen = regexp.MustCompile(`(?s)WHEN .*?\n(?:\s+&&[^\n]*\n)*`)
 
 // TestProducerGoldensShareGuards: every producer's catch-all is the same
 // rule, and its navigation ops open with the same guard (a GET or HEAD of an
-// extensionless path), so a fix to one reaches the others.
+// extensionless path), so a fix to one reaches the others. The one
+// exception is deliberate: a routes-mode 200 (the op that matches the route
+// table) carries no extension guard — a path a page route knows is a page
+// whatever dots it carries — while its 404 keeps it.
 func TestProducerGoldensShareGuards(t *testing.T) {
-	const guard = `WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
-     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/`
+	const method = `WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")`
+	const ext = `     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/`
+	const guard = method + "\n" + ext
 	var catchAll string
 	for _, root := range producerGoldens {
 		for _, f := range goldenFiles(t, root) {
@@ -194,7 +199,15 @@ func TestProducerGoldensShareGuards(t *testing.T) {
 				}
 				continue
 			}
-			if when := navWhen.FindString(body); !strings.HasPrefix(when, guard) {
+			when := navWhen.FindString(body)
+			if strings.Contains(when, "@web.req.url.path =~ /") {
+				// A routes-mode 200: the method guard, then the route table, and no extension guard.
+				if !strings.HasPrefix(when, method) || strings.Contains(when, ext) {
+					t.Errorf("%s: a routes-mode fallback must open with the method guard and carry no extension guard:\n%s", f, when)
+				}
+				continue
+			}
+			if !strings.HasPrefix(when, guard) {
 				t.Errorf("%s: the navigation op doesn't open with the shared guard:\n%s", f, when)
 			}
 		}
@@ -218,6 +231,7 @@ func TestReactRouterGoldenOpsRoute(t *testing.T) {
 		known bool
 	}{
 		{"/", true}, {"/about", true}, {"/ABOUT/", true}, {"/users", true}, {"/users/42", true}, {"/users/42/", true},
+		{"/users/42.json", true}, // a param may hold a dot: the route table decides
 		{"/docs", true}, {"/en/docs", true}, {"/pricing", true}, {"/beta/pricing", true},
 		{"/files", true}, {"/files/a/b/c", true}, {"/Exact", true},
 		{"/exact", false}, {"/users/42/edit", false}, {"/en/fr/docs", false}, {"/nope", false}, {"/aboutx", false},
@@ -230,7 +244,7 @@ func TestReactRouterGoldenOpsRoute(t *testing.T) {
 			t.Errorf("spa-404 GET %s: %v, want %v", c.path, got, !c.known)
 		}
 	}
-	for _, e := range []string{webEnv("POST", "/about"), webEnv("GET", "/users/42.json"), cronEnv} {
+	for _, e := range []string{webEnv("POST", "/about"), webEnv("GET", "/nope.json"), cronEnv} {
 		if fallback.WhenMatches(e) || page404.WhenMatches(e) {
 			t.Errorf("a navigation op matched a non-navigation: %s", e)
 		}

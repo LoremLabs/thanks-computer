@@ -11,13 +11,20 @@ import { MANIFEST_NAME, PRODUCER_SCOPE, validateManifest } from "./manifest.js";
 /** Where the catch-all sits: after the navigation op, since ops in one scope run concurrently. */
 export const catchAllScope = (scope: number): number => scope + 900;
 
+/** An HTTP GET or HEAD: what a navigation is made of. */
+export const METHOD_GUARD = '@src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")';
+
 /**
  * A navigation: an HTTP GET or HEAD of a path whose last segment has no
  * extension. Everything else (an asset miss, a POST) is the catch-all's.
+ *
+ * A producer with a route table ("routes" mode) trusts the table instead for
+ * its 200: a path a page route knows is a page whatever dots it carries (a
+ * param may hold one — /p/mister.parade), so that op opens with METHOD_GUARD
+ * alone; its 404 op and every producer without a table keep this guard, so
+ * an asset miss is still the catch-all's plain 404.
  */
-export const NAV_GUARD =
-  '@src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")\n' +
-  "     && @web.req.url.path !~ /(?i)\\.[a-z0-9]+$/";
+export const NAV_GUARD = METHOD_GUARD + "\n" + "     && @web.req.url.path !~ /(?i)\\.[a-z0-9]+$/";
 
 /** The page a 404 op serves when the build has no 404.html. */
 export const BUILTIN_404 =
@@ -80,8 +87,11 @@ export function renderOps(o: RenderOptions): Record<string, string> {
 #
 # Serves the app shell (${o.page.name}) with 200 for a navigation to a known
 # page route that no file or earlier op answered. Paired with spa-404.txcl.
+# The route table decides what a page is: a path it knows is one whatever
+# dots it carries (a param may hold one), so this op has no extension guard;
+# spa-404 and the catch-all keep it, and an asset miss is still a plain 404.
 ${extra}# Regenerated on every build — the shell embeds content-hashed asset URLs.
-WHEN ${NAV_GUARD}
+WHEN ${METHOD_GUARD}
      && @web.req.url.path =~ /${o.routes}/
 ${emitPage(200, o.page.html)}`;
     out[`${scope}/spa-404.txcl`] = `# ${o.producer} — SPA 404 (generated; do not edit by hand).

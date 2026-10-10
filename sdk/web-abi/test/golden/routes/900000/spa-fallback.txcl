@@ -2,9 +2,11 @@
 #
 # Serves the app shell (200.html) with 200 for a navigation to a known
 # page route that no file or earlier op answered. Paired with spa-404.txcl.
+# The route table decides what a page is: a path it knows is one whatever
+# dots it carries (a param may hold one), so this op has no extension guard;
+# spa-404 and the catch-all keep it, and an asset miss is still a plain 404.
 # Regenerated on every build — the shell embeds content-hashed asset URLs.
 WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
-     && @web.req.url.path !~ /(?i)\.[a-z0-9]+$/
      && @web.req.url.path =~ /^(?:(?:\/)|(?:\/book\/([^\/]+?)\/?))$/
   EMIT @web.res.status = 200,
        @web.res.headers.content-type.0 = "text/html; charset=utf-8",
