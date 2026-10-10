@@ -715,3 +715,61 @@ func setURLVarsForTest(r *http.Request, vars map[string]string) *http.Request {
 
 // _ = context import is used implicitly via httptest.NewRequest.
 var _ = context.Background
+
+// TestHostnameRefusesUnhostedStack — create, attach and mint all refuse a
+// stack that never gets a hostname (an inlet like `autoreply/_mail`, or a
+// system stack) with 400 stack_not_hostable, even when the stack exists,
+// and the hint names the base stack to bind instead.
+func TestHostnameRefusesUnhostedStack(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin", AuthMode: "open", StructuredHostSuffix: ".stacks.example"})
+	seedStackForTest(t, c, "tnt_default", "autoreply/_mail")
+	refused := func(t *testing.T, rr *httptest.ResponseRecorder, wantBase bool) {
+		t.Helper()
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "stack_not_hostable") {
+			t.Fatalf("status=%d body=%s, want 400 stack_not_hostable", rr.Code, rr.Body.String())
+		}
+		if wantBase && !strings.Contains(rr.Body.String(), `base stack \"autoreply\"`) {
+			t.Errorf("hint should name the base stack: %s", rr.Body.String())
+		}
+	}
+
+	t.Run("create", func(t *testing.T) {
+		body := mustJSON(t, map[string]any{"hostname": "mail.example.test", "stack": "autoreply/_mail"})
+		rr := httptest.NewRecorder()
+		c.handleCreateHostname(rr, withTenantContext(httptest.NewRequest(http.MethodPost,
+			"/v1/tenants/default/hostnames", bytes.NewReader(body)), "tnt_default"))
+		refused(t, rr, true)
+	})
+	t.Run("mint", func(t *testing.T) {
+		for _, stack := range []string{"autoreply/_mail", "/autoreply/_mail/", "_sys"} {
+			body := mustJSON(t, map[string]any{"stack": stack})
+			rr := httptest.NewRecorder()
+			c.handleMintHostname(rr, withTenantContext(httptest.NewRequest(http.MethodPost,
+				"/v1/tenants/default/hostnames/mint", bytes.NewReader(body)), "tnt_default"))
+			refused(t, rr, stack != "_sys")
+		}
+	})
+	t.Run("attach", func(t *testing.T) {
+		createBody := mustJSON(t, map[string]any{"hostname": "attach.example.test"})
+		c.handleCreateHostname(httptest.NewRecorder(), withTenantContext(
+			httptest.NewRequest(http.MethodPost, "/v1/tenants/default/hostnames",
+				bytes.NewReader(createBody)), "tnt_default"))
+		rr := httptest.NewRecorder()
+		req := mustMuxVarsRequest(t, http.MethodPost,
+			"/v1/tenants/default/hostnames/attach.example.test/attach", "tnt_default",
+			map[string]string{"hostname": "attach.example.test"})
+		req.Body = io.NopCloser(bytes.NewReader(mustJSON(t, map[string]any{"stack": "autoreply/_mail"})))
+		req.Header.Set("Content-Type", "application/json")
+		c.handleAttachHostname(rr, req)
+		refused(t, rr, true)
+	})
+
+	var n int
+	if err := c.pu.RuntimeDB.QueryRow(
+		`SELECT COUNT(*) FROM tenant_hostnames WHERE stack LIKE '%/\_%' ESCAPE '\' OR stack = '_sys'`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("%d hostname rows bound to an unhosted stack, want 0", n)
+	}
+}

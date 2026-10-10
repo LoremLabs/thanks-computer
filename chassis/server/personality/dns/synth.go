@@ -328,7 +328,7 @@ func synthesize(z *zone, cfg SynthConfig, stacks []stackInfo) []dns.RR {
 
 	// Per active stack: <label>.<origin> A/AAAA + MX.
 	for _, s := range stacks {
-		if !isSynthesizableStack(s.name) {
+		if !tenants.HostedStack(s.name) {
 			continue
 		}
 		label := tenants.StackLabel(s.name)
@@ -496,18 +496,4 @@ func mkAddrs(owner string, ttl uint32, ips []string) []dns.RR {
 		}
 	}
 	return out
-}
-
-// isSynthesizableStack mirrors the admin-side isMintableStack: synthesize
-// records only for real, non-system stacks (skip `_`-prefixed, boot,
-// txc-continuation).
-func isSynthesizableStack(stack string) bool {
-	if stack == "" || strings.HasPrefix(stack, "_") {
-		return false
-	}
-	ls := strings.ToLower(stack)
-	if ls == "boot" || strings.HasPrefix(ls, "boot/") || ls == "txc-continuation" {
-		return false
-	}
-	return true
 }

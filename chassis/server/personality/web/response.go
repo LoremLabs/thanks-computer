@@ -22,6 +22,7 @@ import (
 func applyResponseHead(w http.ResponseWriter, output string) (int, []string) {
 	output, status := checkStatus(output)
 	output = checkContentType(output)
+	output = applyNegotiation(output)
 	conflicts := writeResHeaders(w.Header(), output)
 	return status, conflicts
 }

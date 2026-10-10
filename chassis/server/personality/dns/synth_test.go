@@ -209,8 +209,10 @@ func TestSynthesisPattern(t *testing.T) {
 	db := newTestDB(t)
 	seedPatternZone(t, db, patTenant, "pat.example.com", fixedTS)
 	seedActiveStack(t, db, patTenant, "web-api", fixedTS)
-	// A system stack must NOT be synthesized.
+	// A system stack must NOT be synthesized, nor a convention handler
+	// nested under an app stack: neither gets a routing host.
 	seedActiveStack(t, db, patTenant, "_sys", fixedTS)
+	seedActiveStack(t, db, patTenant, "web-api/_mail", fixedTS)
 	snap := buildOrDie(t, db, patCfg())
 
 	t.Run("apex NS synthesized", func(t *testing.T) {
@@ -240,9 +242,17 @@ func TestSynthesisPattern(t *testing.T) {
 		}
 	})
 	t.Run("system stack not synthesized", func(t *testing.T) {
-		_, _, rcode := snap.Lookup(q("-sys.pat.example.com.", dns.TypeA))
+		// StackLabel("_sys") is "sys": the name it would get.
+		_, _, rcode := snap.Lookup(q("sys.pat.example.com.", dns.TypeA))
 		if rcode != dns.RcodeNameError {
 			t.Fatalf("_sys leaked: rcode=%d", rcode)
+		}
+	})
+	t.Run("nested convention handler not synthesized", func(t *testing.T) {
+		// StackLabel("web-api/_mail") is "web-api-mail".
+		_, _, rcode := snap.Lookup(q("web-api-mail.pat.example.com.", dns.TypeA))
+		if rcode != dns.RcodeNameError {
+			t.Fatalf("web-api/_mail leaked: rcode=%d", rcode)
 		}
 	})
 }

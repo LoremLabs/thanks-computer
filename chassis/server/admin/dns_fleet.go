@@ -227,7 +227,7 @@ const zoneHostTSLayout = "2006-01-02T15:04:05Z"
 // activeMintableStacks returns the tenant's active, non-system stack names —
 // the set that gets a `<label>.<origin>` host synthesized + routed. Read from
 // the passed tx so just-committed-in-tx state is visible. Mirrors the dns
-// head's synthesis filter (isSynthesizableStack) via isMintableStack.
+// head's synthesis filter: both use tenants.HostedStack.
 func (c *Controller) activeMintableStacks(ctx context.Context, tx *sql.Tx, tenantID string) ([]string, error) {
 	rows, err := tx.QueryContext(ctx,
 		c.rb(`SELECT name FROM stacks WHERE tenant_id = ? AND active_version IS NOT NULL`), tenantID)

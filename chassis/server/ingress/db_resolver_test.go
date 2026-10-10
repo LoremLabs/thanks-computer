@@ -568,3 +568,40 @@ func TestDBResolverLiveHandleAfterSwap(t *testing.T) {
 		t.Fatal("nil dbFn should miss safely")
 	}
 }
+
+// TestDBResolverSkipsUnhostedStack — a row bound straight to an inlet or
+// system stack (`web/_mail`, `_sys`) never routes a web request or a
+// connection, verified or not, through either lookup path: HTTP for the
+// name would otherwise run the inlet's ops. A row on the base stack still
+// routes. The admin refuses such binds; this covers rows made before.
+func TestDBResolverSkipsUnhostedStack(t *testing.T) {
+	db := newDBResolverTestStore(t)
+	seedTenant(t, db, "tnt_a", "acme")
+	seedHostnameFull(t, db, "thn_a", "www.acme.example", "tnt_a", "web", "2026-01-02T00:00:00Z", "")
+	seedHostnameFull(t, db, "thn_b", "mail.acme.example", "tnt_a", "web/_mail", "2026-01-02T00:00:00Z", "")
+	seedHostnameFull(t, db, "thn_c", "sys.acme.example", "tnt_a", "_sys", "2026-01-02T00:00:00Z", "")
+	seedStack(t, db, "tnt_a", "web", true)
+	seedStack(t, db, "tnt_a", "web/_mail", true)
+	seedStack(t, db, "tnt_a", "web/_mail/_tcp", true)
+
+	cache := NewHostRouteCache()
+	if err := cache.Rebuild(db); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	cached := NewDBResolverFunc(nil, func() *sql.DB { return nil }, nil, false)
+	cached.SetHostRouteCache(cache)
+
+	for name, r := range map[string]*DBResolver{"sql": NewDBResolver(nil, db, nil, false), "cache": cached} {
+		if got, ok := r.Resolve(RouteKey{Src: "http", Hostname: "www.acme.example"}); !ok || got.Stack != "web" {
+			t.Errorf("%s: base stack must still route: got %+v ok=%v", name, got, ok)
+		}
+		for _, host := range []string{"mail.acme.example", "sys.acme.example"} {
+			if got, ok := r.Resolve(RouteKey{Src: "http", Hostname: host}); ok {
+				t.Errorf("%s: http %s must not route; got %+v", name, host, got)
+			}
+		}
+		if got, ok := r.Resolve(RouteKey{Src: "tcp", Listener: "edge", Hostname: "mail.acme.example"}); ok {
+			t.Errorf("%s: tcp mail.acme.example must not route; got %+v", name, got)
+		}
+	}
+}

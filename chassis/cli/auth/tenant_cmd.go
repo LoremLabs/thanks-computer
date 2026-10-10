@@ -541,8 +541,10 @@ Available commands:
   add --mint --stack <stack> [--tenant SLUG]
                                          Mint a structured (auto-generated)
                                          host bound to <stack> — verified +
-                                         DKIM, no DNS setup. Gives a non-web
-                                         stack (e.g. a _mail channel) a host.
+                                         DKIM, no DNS setup. For a mail-only
+                                         stack pass the base (--stack shop):
+                                         mail reaches shop/_mail. A _ stack
+                                         itself never gets a hostname.
   attach <hostname> --stack <stack> [--tenant SLUG]
                                          Bind a claimed hostname to a stack
   remove <hostname> [--tenant SLUG]      Release a hostname (soft-delete)
@@ -634,7 +636,8 @@ func runHostnamesAdd(args []string, stdout, stderr io.Writer) int {
 	// --mint: the chassis generates a structured host (<stack>-<rand>.<suffix>,
 	// or <stack>.<delegated-zone>) bound to --stack and returns it verified +
 	// DKIM-signing. No positional hostname; reachable immediately — ideal for a
-	// non-web stack (e.g. a mail-only `_mail` channel) that has no host to claim.
+	// mail-only stack with no host to claim. --stack names the base stack
+	// (`shop`), whose mail reaches `shop/_mail`; the server refuses a `_` stack.
 	if *mint {
 		if strings.TrimSpace(*stack) == "" {
 			PrintCLIError(stderr, "auth tenant hostnames add --mint: --stack is required")

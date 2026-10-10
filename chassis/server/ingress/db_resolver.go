@@ -501,7 +501,21 @@ func (r *DBResolver) lookupHTTP(db *sql.DB, canonical string, strict bool) (Rout
 //   - requireVerified=true (production): unverified rows miss.
 //   - strict (tcp): unverified rows miss and no WARN — silence is the
 //     designed outcome, not a misconfiguration.
+//   - a row bound to a stack that never gets a hostname
+//     (tenants.HostedStack, e.g. `web/_mail`) misses, verified or not.
 func (r *DBResolver) shapeHTTPTarget(slug, stack string, verified bool, canonical string, strict bool) (RouteTarget, bool) {
+	if !tenants.HostedStack(stack) {
+		// A row bound straight to an inlet or system stack (`web/_mail`)
+		// predates the admin's refusal. Routing it would run the inlet's
+		// ops for a web request, so it misses, with a WARN once per row.
+		if _, alreadyWarned := r.warned.LoadOrStore("unhosted:"+canonical, struct{}{}); !alreadyWarned {
+			r.logger.Warn("hostname is bound to a stack that never gets a hostname; not routing it (attach it to the base stack)",
+				zap.String("hostname", canonical),
+				zap.String("tenant", slug),
+				zap.String("stack", stack))
+		}
+		return RouteTarget{}, false
+	}
 	if !verified {
 		if strict || r.requireVerified {
 			return RouteTarget{}, false

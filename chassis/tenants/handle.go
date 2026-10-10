@@ -86,6 +86,27 @@ func SanitizeSlugHint(s string) string { return sanitizeHint(s) }
 // usable hint can be derived).
 func RandLabel() string { return randLabel() }
 
+// HostedStack reports whether a stack gets a hostname of its own: an
+// auto-minted routing host, and the per-stack records the DNS head
+// synthesizes in a delegated zone. One rule for both, so a name never
+// resolves without routing. A stack with a `_`-prefixed segment never
+// does: chassis system stacks (`_sys`) and per-tenant convention handlers,
+// whether at the root (`_cron`, `_mail`) or nested under an app stack
+// (`test-01/_mail`). Those are mail/cron/system machinery, not web apps.
+// The boot and continuation stacks are excluded too.
+func HostedStack(stack string) bool {
+	// HasPrefix catches a `_`-prefixed root segment; Contains("/_")
+	// catches a `_`-prefixed nested segment (e.g. `test-01/_mail`).
+	if stack == "" || strings.HasPrefix(stack, "_") || strings.Contains(stack, "/_") {
+		return false
+	}
+	ls := strings.ToLower(stack)
+	if ls == "boot" || strings.HasPrefix(ls, "boot/") || ls == "txc-continuation" {
+		return false
+	}
+	return true
+}
+
 // StackLabel is the deterministic leftmost DNS label for a stack within
 // a per-tenant delegated DNS zone — the sanitized stack name with NO
 // random suffix (the zone is tenant-scoped, so the label is already

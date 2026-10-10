@@ -130,6 +130,9 @@ func (c *Controller) handleCreateHostname(w http.ResponseWriter, r *http.Request
 	// validated against the tenant's stacks here so we never land a
 	// row pointing at nothing.
 	if req.Stack != "" {
+		if refuseUnhostedStack(w, req.Stack) {
+			return
+		}
 		_, _, err := c.lookupStack(r.Context(), c.pu.RuntimeDB, ac.TenantID, req.Stack)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -296,6 +299,9 @@ func (c *Controller) handleMintHostname(w http.ResponseWriter, r *http.Request) 
 	stack := strings.Trim(strings.TrimSpace(req.Stack), "/")
 	if stack == "" {
 		writeJSONError(w, http.StatusBadRequest, "stack_required", nil)
+		return
+	}
+	if refuseUnhostedStack(w, stack) {
 		return
 	}
 	// The host binds to the BASE stack, but a mail-only deployment only has the
@@ -487,6 +493,26 @@ func (c *Controller) handleRevokeHostname(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// refuseUnhostedStack answers 400 stack_not_hostable, and reports true,
+// when stack can never carry a hostname (tenants.HostedStack): a stack with
+// a `_` segment is an inlet or system stack, entered from its base stack's
+// hostname. Bound directly, HTTP for the name would run the inlet's ops
+// (a `_mail` stack's, say) and mail for it would look for `<stack>/_mail`
+// under the inlet. The resolver never routes such a row either.
+func refuseUnhostedStack(w http.ResponseWriter, stack string) bool {
+	if tenants.HostedStack(stack) {
+		return false
+	}
+	detail := map[string]any{"stack": stack,
+		"hint": "a system stack, or one with a `_` segment, never gets a hostname"}
+	if i := strings.Index(stack, "/_"); i > 0 {
+		base := stack[:i]
+		detail["hint"] = fmt.Sprintf("bind the base stack %q: its hostname's mail reaches %s/_mail, and its other inlets are entered from it too", base, base)
+	}
+	writeJSONError(w, http.StatusBadRequest, "stack_not_hostable", detail)
+	return true
+}
+
 // --- Attachment endpoint --------------------------------------------
 
 type attachHostnameRequest struct {
@@ -521,6 +547,9 @@ func (c *Controller) handleAttachHostname(w http.ResponseWriter, r *http.Request
 	}
 	if strings.TrimSpace(req.Stack) == "" {
 		writeJSONError(w, http.StatusBadRequest, "stack_required", nil)
+		return
+	}
+	if refuseUnhostedStack(w, req.Stack) {
 		return
 	}
 

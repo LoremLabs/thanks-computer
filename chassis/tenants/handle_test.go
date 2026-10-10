@@ -80,3 +80,21 @@ func TestSanitizeHint(t *testing.T) {
 		}
 	}
 }
+
+func TestHostedStack(t *testing.T) {
+	hosted := []string{"shop", "web", "website/canary", "a"}
+	skipped := []string{"", "_sys", "_cron", "boot", "boot/0", "BOOT/1", "txc-continuation",
+		// nested `_`-prefixed convention handlers: a stack's mail/cron
+		// entry, not a web app.
+		"test-01/_mail", "test-01/_cron", "website/canary/_mail"}
+	for _, s := range hosted {
+		if !HostedStack(s) {
+			t.Errorf("HostedStack(%q)=false, want true", s)
+		}
+	}
+	for _, s := range skipped {
+		if HostedStack(s) {
+			t.Errorf("HostedStack(%q)=true, want false", s)
+		}
+	}
+}

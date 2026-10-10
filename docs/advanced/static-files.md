@@ -93,7 +93,7 @@ Every file carries a strong `ETag` (its content hash). A conditional `GET` whose
 
 | File | `Cache-Control` |
 |---|---|
-| HTML | `max-age=0, must-revalidate` — the entry point always revalidates, so a deploy's new asset URLs are picked up |
+| HTML, markdown | `max-age=0, must-revalidate` — the entry point always revalidates, so a deploy's new asset URLs are picked up |
 | under a prefix marked immutable | `public, max-age=31536000, immutable` |
 | anything else | `public, max-age=3600` |
 
@@ -124,6 +124,78 @@ The one exception is a path its stack marks public, with a marker file at
 including its first `_` segment (`_app`, `assets/_chunk.js`). A [Web ABI](./web-abi.md) build's
 installer writes these for the files in its `public/` tree — which is how
 SvelteKit's `_app/` is served — and anything else under `_` stays private.
+:::
+
+## Markdown for agents
+
+A site can answer an agent that asks for markdown with markdown, and a browser
+with its HTML, at the same URL:
+
+```
+GET /about
+Accept: text/markdown
+
+HTTP/1.1 200 OK
+Content-Type: text/markdown; charset=utf-8
+Vary: Accept
+```
+
+Add a `_markdown` inlet beside the stack the hostname is bound to, with the
+pages as `.md` files and at least one op:
+
+```
+OPS/
+  web/
+    100/...
+    _markdown/
+      FILES/index.md         /
+      FILES/about.md         /about   (or FILES/about/index.md)
+      9000/not_found.txcl    any other page, in markdown
+```
+
+Its existence is the opt-in, as for `<stack>/_mail` and `<stack>/_tcp`: there
+is nothing to bind or configure, and an inlet gets no hostname of its own.
+
+**Who enters it.** A `GET` or `HEAD` of a page (the root, or a path whose last
+segment has no extension) whose `Accept` names `text/markdown` with a q at
+least that of `text/html`. `text/html`'s q comes from its most specific match:
+`text/html`, then `text/*`, then `*/*`. So:
+
+| `Accept` | Gets |
+|---|---|
+| `text/markdown` | markdown |
+| `text/markdown, text/html;q=0.9` | markdown |
+| `text/markdown, text/html` | markdown (naming markdown at all is the signal; no browser does) |
+| a browser's, `*/*`, or none | HTML |
+| `text/html, text/markdown;q=0.5` | HTML |
+
+Everything else stays on the stack: other methods, and asset paths (`/app.js`,
+`/robots.txt`), so an agent still gets those as they are.
+
+**What answers.** Static serves the inlet's `FILES/` first, by the same rules
+with `.md` in place of `.html` (`/` → `index.md`, `/about` → `about.md` or
+`about/index.md`), as `text/markdown; charset=utf-8` with an ETag. The
+inlet's files only: never the stack's, the chassis-wide layer or the embedded
+defaults. A page with no file runs the inlet's ops, which answer the rest (a
+page built from data, or a markdown 404) and set the content type themselves.
+
+**The headers.** Every page answer on the host, from either stack, static or
+op, gets `Vary: Accept`, added to any `Vary` the stack set. An HTML page whose
+markdown is a file in the inlet also gets
+
+```
+Link: </about.md>; rel="alternate"; type="text/markdown"
+```
+
+and that URL serves the file to anyone, whatever their `Accept`, when the
+stack has no `about.md` of its own. A page an op renders as markdown isn't
+advertised: the chassis can't know it exists without running it. A host
+without a `_markdown` inlet gets neither header.
+
+:::note
+A stack with no ops counts as withdrawn (`txco deactivate` leaves an empty
+version), so an inlet of files alone is never entered: keep at least one op,
+such as the markdown 404. A streamed answer doesn't get the two headers.
 :::
 
 ## Dynamic pages without a backend

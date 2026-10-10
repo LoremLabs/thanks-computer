@@ -665,6 +665,7 @@ func (web *WebController) Start() {
 					// after processing, we need to check: status, content-type, headers, body (in that order)
 					output, status := checkStatus(output)
 					output = checkContentType(output)
+					output = applyNegotiation(output)
 
 					// output every header value the stack wrote
 					web.warnHeaderConflicts(writeResHeaders(w.Header(), output), rid, r)

@@ -2469,23 +2469,10 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 }
 
 // isMintableStack reports whether a stack should get an auto-minted
-// structured (web) hostname. Any stack with a `_`-prefixed segment never
-// does — chassis system stacks (`_sys`, the continuation stack) AND
-// per-tenant convention handlers, whether at the root (`_cron`, `_mail`)
-// or NESTED under an app stack (`test-01/_mail`, `test-01/_cron`). Those
-// are mail/cron/system machinery, not web apps, so a web hostname for
-// them is meaningless (and confusing). The boot stack is excluded too.
+// structured (web) hostname: tenants.HostedStack, the rule the DNS head's
+// per-stack synthesis shares.
 func isMintableStack(stack string) bool {
-	// HasPrefix catches a `_`-prefixed root segment; Contains("/_")
-	// catches a `_`-prefixed nested segment (e.g. `test-01/_mail`).
-	if stack == "" || strings.HasPrefix(stack, "_") || strings.Contains(stack, "/_") {
-		return false
-	}
-	ls := strings.ToLower(stack)
-	if ls == "boot" || strings.HasPrefix(ls, "boot/") || ls == "txc-continuation" {
-		return false
-	}
-	return true
+	return tenants.HostedStack(stack)
 }
 
 // structuredURL builds the reachable URL for a minted hostname. Scheme

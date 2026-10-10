@@ -138,6 +138,12 @@ order. An exact repeat is sent once.
   EMIT @web.res.headers.content-type.0 = "text/plain; charset=utf-8"
   ```
 
+**Headers the chassis adds.** On a host whose stack has a `_markdown` inlet,
+every page answer gets `Vary: Accept` (merged into any `Vary` the stack set),
+and an HTML page with a markdown file gets a `Link` to it, `rel="alternate"`.
+Nothing is added on any other host. See
+[markdown for agents](../static-files.md#markdown-for-agents).
+
 **Streaming:** setting `@web.res.body` in a *non-terminal* scope locks
 the status + headers and switches to chunked transfer — each
 subsequent chunk flushes immediately, with natural backpressure (the

@@ -794,7 +794,21 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 	stack := gjson.GetBytes(in, "_txc.route.stack").String()
 	tenant := gjson.GetBytes(in, "_txc.route.tenant").String()
 
-	r := ix.Lookup(tenant, stack, reqPath)
+	// A markdown inlet (`<stack>/_markdown`, entered by negotiation) serves
+	// .md files only. Anywhere else a .md path the stack lacks may be its
+	// markdown inlet's: the URL an HTML answer advertises (Link
+	// rel=alternate) serves whatever the request's Accept says.
+	var r static.Result
+	if static.IsMarkdownStack(stack) {
+		r = ix.LookupMarkdown(tenant, stack, reqPath)
+	} else {
+		r = ix.Lookup(tenant, stack, reqPath)
+		if !r.Found && stack != "" && strings.HasSuffix(reqPath, ".md") {
+			if md := ix.MarkdownFile(tenant, stack+"/"+static.MarkdownInlet, reqPath); md.Found {
+				r = md
+			}
+		}
+	}
 
 	// Terminal helper: every static answer halts the pipeline (same
 	// mechanism _sys/boot/1000/notfound.txcl relies on).
@@ -811,7 +825,8 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 	// immutable (content-hashed names, which change whenever the bytes do).
 	cacheControl := "public, max-age=3600"
 	switch {
-	case strings.HasPrefix(r.Ctype, "text/html"):
+	case strings.HasPrefix(r.Ctype, "text/html"), strings.HasPrefix(r.Ctype, "text/markdown"):
+		// Markdown is the same page in another form, so it revalidates too.
 		cacheControl = "max-age=0, must-revalidate"
 	case r.Immutable:
 		cacheControl = "public, max-age=31536000, immutable"
@@ -1782,9 +1797,14 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// — no jump, no re-tenant yet — so scopes before 100 can inspect or
 	// override it for every request. On a miss it returns `{}` and
 	// _sys/boot/1000 serves the 404.
+	//
+	// negotiateMarkdown then moves a page request that prefers markdown into
+	// the hostname stack's `_markdown` inlet, when it has one (negotiate.go).
+	// It reads staticIndex, assigned below, only at request time.
+	var mdFiles markdownFiles
 	pu.Handle([]byte("txco://detect-tenant"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
-			return event.Payload{Raw: detectTenantBody(resolver, in), Type: event.JSON}, nil
+			return event.Payload{Raw: negotiateMarkdown(detectTenantBody(resolver, in), in, resolver, mdFiles), Type: event.JSON}, nil
 		}))
 
 	// `txco://route` is the EXECUTE half (scope 100): pure mechanism
@@ -1817,6 +1837,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// every dbcache reload (stack activation, hostname change, fs-watch)
 	// — never on the request path.
 	staticIndex := static.NewIndex(conf.SystemOpstacksDir, logger)
+	mdFiles = staticIndex
 	if dbc != nil {
 		// Initial tenant FILES/ metadata build (path → content hash) from the
 		// live snapshot; mirrors admission's Rebuild(dbc.Snapshot()).
