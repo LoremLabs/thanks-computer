@@ -1,6 +1,6 @@
 {
   "name": "@txco/web-abi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The TxCo Web ABI kit: the txco-web.json schema and validator, the envelope ↔ Fetch bridge every runner uses, a harness that checks a build's server/ Fetch handler, and the ops and manifest writer producers share.",
   "license": "MIT",
   "type": "module",
