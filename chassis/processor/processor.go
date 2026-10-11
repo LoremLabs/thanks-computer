@@ -1154,7 +1154,19 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		// (The failing op itself recorded its own error step inside Exec; it
 		// may get a duplicate cancelled step here — harmless diagnostic noise.)
 		flushInflight("cancelled", "halted: "+e.Error())
-		resCh <- event.Payload{Raw: string(failPayload(e.Error())), Type: event.ErrorStr}
+		if streamOpen(ctx, raw) {
+			// The client already has its answer (a body flushed from an
+			// earlier scope, the head locked): the error payload would be
+			// dropped by the stream writers and the request would hold to
+			// its deadline. End the stream; the error rides on the
+			// terminator's envelope and the trace has the failed step.
+			pu.Logger.Warn("run failed on an open stream; ending the stream, the client has its answer",
+				zap.String("err", e.Error()))
+			withErr, _ := sjson.SetRaw(raw, "error", gjson.GetBytes(failPayload(e.Error()), "error").Raw)
+			pu.endStream(ctx, withErr, resCh)
+		} else {
+			resCh <- event.Payload{Raw: string(failPayload(e.Error())), Type: event.ErrorStr}
+		}
 		span.End()
 		return e
 	}
@@ -2404,6 +2416,32 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 	return nil
 }
 
+// streamOpen reports whether the HTTP response is already streaming: a body
+// flushed from a non-terminal scope (the flag the streaming block in Run
+// sets on the envelope) or an op that opened the stream itself (stream.go).
+func streamOpen(ctx context.Context, raw string) bool {
+	if gjson.Get(raw, "_txc.runtime.http_stream_open").Bool() {
+		return true
+	}
+	s := streamSinkFrom(ctx)
+	return s != nil && s.Opened()
+}
+
+// endStream closes a streaming response in place of a payload its writers
+// would drop (a promotion's 202, a failure's error): the client has its
+// head and body, and the head is locked. The envelope rides on the
+// terminator, as the terminal-scope close sends it, so the dispatch tee
+// bills and files the request as usual.
+func (pu *Unit) endStream(ctx context.Context, raw string, resCh chan event.Payload) {
+	select {
+	case resCh <- event.Payload{Raw: syncBudgetToEnvelope(ctx, raw), Type: event.StreamEnd}:
+	case <-ctx.Done():
+	}
+	if s := streamSinkFrom(ctx); s != nil {
+		s.markClosed()
+	}
+}
+
 // emitContinuation202 synthesizes and emits the client "still running"
 // response for a suspended run. The poll/deferred-response URL is the same
 // request path + ?_txc.continuation=<rcid> (the dedicated GET was removed;
@@ -2412,7 +2450,25 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 //
 // Shared by the same-scope barrier (suspendBarrierScope) and the
 // deferred-join suspend path so both emit an identical 202/303.
+//
+// A response already STREAMING is ended instead. A body written in a
+// non-terminal scope went out as a StreamHead and its chunk at that scope's
+// end (the head locked, the request kept open for the rest of the
+// pipeline), so the client already has its answer; the 202 would be a JSON
+// payload the stream writers (web, grant, websocket) do not handle, and no
+// StreamEnd would ever come from a pipeline that suspends here — the
+// request held to its deadline and was reset (seen on www.onepony.com
+// 2026-10-11: the loop's early 200 to the chat, then `0501` promoting).
+// The terminator carries the envelope as the terminal-scope close does, so
+// the dispatch tee bills and files the request as usual.
 func (pu *Unit) emitContinuation202(ctx context.Context, raw, rcid string, resCh chan event.Payload) {
+	if streamOpen(ctx, raw) {
+		pu.Logger.Info("continuation promoted on an open stream; ending the stream, the client has its answer",
+			zap.String("rcid", rcid))
+		pu.endStream(ctx, raw, resCh)
+		return
+	}
+
 	reqFields := gjson.GetMany(raw,
 		"_txc.web.req.url.path", "_txc.web.req.headers.Accept.0",
 		"_txc.web.req.url.query.format.0")

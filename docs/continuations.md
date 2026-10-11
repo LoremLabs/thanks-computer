@@ -78,6 +78,21 @@ caveat: a `compute://` error under continuable records a failed
 terminal and the flow continues (best-effort continuation semantics)
 rather than taking the sync path's loud fatal halt.
 
+**A response already streaming.** A `@web.res.body` written in a
+non-terminal scope goes out at once as a stream head and a chunk, and
+the request stays open for the rest of the pipeline (HTTP response
+streaming, `processor.go`). If a continuable op then promotes, the
+client already has its answer: the chassis **ends the stream** at the
+promotion instead of emitting the 202 — the head is locked anyway, and
+a 202 would be a payload the stream writers drop, leaving the request
+open to its deadline. So "answer early, then hand off" works: emit the
+response in a scope before the continuable op, without `@halt`, and the
+client gets it at the hand-off; the resumed flow runs the rest with no
+client waiting (as it does after a 202). A failure in a later scope ends
+an open stream the same way (the error on the terminator's envelope and
+in the trace) rather than emitting an error payload the client's answer
+already pre-empted.
+
 **Non-web inlets.** The 202/wait-page story is the web inlet's. On an
 LMTP-driven stack, a promotion closes the mail session with whatever
 verdict is already on the envelope; if no verdict was emitted yet, the
