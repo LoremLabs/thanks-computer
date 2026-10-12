@@ -97,10 +97,10 @@ Flags:
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tENTERS\tTIMEOUT\tINPUT\tDESCRIPTION")
+	fmt.Fprintln(tw, "NAME\tENTERS\tTIMEOUT\tINPUT\tOUTPUT\tDESCRIPTION")
 	for _, cp := range caps {
 		if cp.Err != "" {
-			fmt.Fprintf(tw, "%s\t%s\t-\t-\tBROKEN: %s\n", cp.Name, cp.Stack, cp.Err)
+			fmt.Fprintf(tw, "%s\t%s\t-\t-\t-\tBROKEN: %s\n", cp.Name, cp.Stack, cp.Err)
 			continue
 		}
 		timeout := "-"
@@ -109,14 +109,14 @@ Flags:
 		}
 		// Where a call enters: the declaring stack at its start (<stack>/0),
 		// or at the scope the declaration names.
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", cp.Name, cp.Stage, timeout, capInputLabel(cp.Input), capDescLabel(cp.Description))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", cp.Name, cp.Stage, timeout, capInputLabel(cp.Input), capInputLabel(cp.Output), capDescLabel(cp.Description))
 	}
 	_ = tw.Flush()
 	return 0
 }
 
-// capInputLabel renders a capability's inputs: sorted, a required one
-// marked with `*`.
+// capInputLabel renders a capability's inputs or outputs: sorted, a
+// required one marked with `*`.
 func capInputLabel(input map[string]client.CapInput) string {
 	if len(input) == 0 {
 		return "-"

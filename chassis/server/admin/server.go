@@ -539,6 +539,9 @@ func (c *Controller) Start() {
 	// The tenant's capability catalogue: what its active stacks declare
 	// under CAPS/ (chassis/capdecl), by name. Read-only; `txco caps list`.
 	tenantR.HandleFunc("/caps", c.handleListCaps).Methods(http.MethodGet)
+	// The entries the tenant's stacks declare under CALLS/ (chassis/calldecl),
+	// by stack and name. Read-only; `txco calls list`.
+	tenantR.HandleFunc("/calls", c.handleListCalls).Methods(http.MethodGet)
 
 	// The runs in flight in this process, and the abort of one (`txco
 	// runs`, `txco abort <rid>`). See chassis/server/admin/runs.go.

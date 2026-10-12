@@ -111,6 +111,7 @@ The CLI verbs map onto that flow:
 | `txco stack set web=true\|false <stack>` | Turn a stack's own public web URL on or off (`--match <substr>` selects several) |
 | `txco versions <stack>` | List a stack's versions, active one marked |
 | `txco caps list [--json]` | The tenant's capability catalogue: what its active stacks declare under `CAPS/`, and where a call enters ([capabilities](./capabilities.md#the-catalogue)) |
+| `txco calls list [--stack <name>] [--json]` | The entries the tenant's active stacks declare under `CALLS/`: where a call enters, what it takes and answers ([calls](./calls.md#declaring-an-entry)) |
 | `txco runs [--stack S] [--json]` | The tenant's runs in flight on the chassis: rid, inlet, the stack it entered, the scope it is in now, its age ([aborting a run](../abort.md)) |
 | `txco abort <rid>` · `txco abort --stack <name>` | End a run in flight — or every run of a stack — without ending the chassis: ops in flight are cancelled, nothing later runs, the trace says `aborted` and by whom. `--reason` for the trace; confirmation on a non-local chassis ([aborting a run](../abort.md)) |
 | `txco diff [dir]` | Compare local `OPS/` against the running chassis |

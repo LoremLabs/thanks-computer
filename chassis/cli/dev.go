@@ -24,6 +24,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/loremlabs/thanks-computer/chassis/calldecl"
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/cli/auth"
 	"github.com/loremlabs/thanks-computer/chassis/cli/banner"
@@ -1078,7 +1079,7 @@ func stackSourceFingerprint(ops []bundle.Op, stackDir, abiDir string) (string, e
 		fmt.Fprintf(h, "op\x00%s\x00%s\n", f.Path, f.Content)
 	}
 	// Asset half: stat-only walk of the same trees the collectors read.
-	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, storeseed.DirSources, outlet.Dir, sandbox.Dir, capdecl.Dir, dataset.Dir} {
+	for _, top := range []string{"FILES", storeseed.DirVectors, storeseed.DirKV, storeseed.DirCalendars, storeseed.DirContacts, storeseed.DirBlobs, storeseed.DirSources, outlet.Dir, sandbox.Dir, capdecl.Dir, calldecl.Dir, dataset.Dir} {
 		treeDir := filepath.Join(stackDir, top)
 		info, err := os.Stat(treeDir)
 		if err != nil || !info.IsDir() {

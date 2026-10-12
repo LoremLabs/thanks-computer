@@ -362,6 +362,11 @@ func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, 
 			// The inlet's contract: no rule answered is no capability.
 			code, status = "txco_cap_unknown", http.StatusNotFound
 			message = "no rule in " + d.Stage(stack) + " (the declaring stack's entry) answered " + name
+		case len(capdecl.Missing(d.Output, out.output)) > 0:
+			// The declaration promised outputs the stack did not write: the
+			// inlet's invalid_output, at the status a bad answer carries.
+			code, status = "txco_cap_invalid_output", http.StatusBadGateway
+			message = name + " answered without the output its declaration promises: " + strings.Join(capdecl.Missing(d.Output, out.output), ", ")
 		}
 	case verdictNoStack:
 		code, status = "txco_cap_unknown", http.StatusNotFound

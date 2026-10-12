@@ -338,3 +338,41 @@ func TestEarlyFeedsThenFinishes(t *testing.T) {
 		t.Fatalf("body: %q", body)
 	}
 }
+
+// A declaration that promises outputs is held to them: an answer without a
+// required one is a 502 invalid_output, carrying what the stack did write.
+func TestHandleChecksDeclaredOutput(t *testing.T) {
+	f := newFake(t)
+	f.verdict = allowed()
+	f.g.lookup = func(_ context.Context, _, name string) (string, *capdecl.Decl, error) {
+		if name != "card.note" {
+			return "", nil, capdecl.ErrNotDeclared
+		}
+		return "loop", &capdecl.Decl{Entry: 7000, Output: map[string]capdecl.Field{"id": {Required: true}, "note": {}}}, nil
+	}
+	f.answer = func(env string) (string, error) {
+		out, _ := sjson.SetRaw(env, "_cap.output", `{"note":"n"}`)
+		return out, nil
+	}
+	w := f.post(t, "card.note", "rg1.tok", `{}`)
+	if w.Code != http.StatusOK || code(w) != "invalid_output" || status(w) != http.StatusBadGateway ||
+		!strings.Contains(gjson.Get(w.Body.String(), "error.message").String(), "id") ||
+		gjson.Get(w.Body.String(), "output.note").String() != "n" {
+		t.Errorf("missing declared output: %d %s", w.Code, w.Body.String())
+	}
+	f.answer = func(env string) (string, error) {
+		out, _ := sjson.SetRaw(env, "_cap.output", `{"id":9}`)
+		return out, nil
+	}
+	if w := f.post(t, "card.note", "rg1.tok", `{}`); !gjson.Get(w.Body.String(), "ok").Bool() {
+		t.Errorf("declared output present: %s", w.Body.String())
+	}
+	// An undeclared capability is held to nothing.
+	f.answer = func(env string) (string, error) {
+		out, _ := sjson.SetRaw(env, "_cap.output", `{}`)
+		return out, nil
+	}
+	if w := f.post(t, "legacy.thing", "rg1.tok", `{}`); !gjson.Get(w.Body.String(), "ok").Bool() {
+		t.Errorf("undeclared: %s", w.Body.String())
+	}
+}

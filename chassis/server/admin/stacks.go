@@ -27,6 +27,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
+	"github.com/loremlabs/thanks-computer/chassis/calldecl"
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
@@ -438,7 +439,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS", computesrc.Dir, stackdir.Dir:
+		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS", "CALLS", computesrc.Dir, stackdir.Dir:
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -541,6 +542,18 @@ func validateStackFilePath(p string) error {
 		if capdecl.Name(p) == "" {
 			return fmt.Errorf("capability declarations must be a single <name>%s file directly under %s/, name lowercase words joined by dots, such as crm.lookup (got %q)",
 				capdecl.DeclExt, capdecl.Dir, p)
+		}
+		return nil
+	}
+
+	// CALLS/<name>.yaml declares an entry of this stack a call may name
+	// (chassis/calldecl): where it enters, what it takes, what it answers.
+	// Same shape; contents and the entry scope are checked at
+	// validate/activate (deepValidateCalls).
+	if calldecl.IsCallPath(p) {
+		if calldecl.Name(p) == "" {
+			return fmt.Errorf("call declarations must be a single <name>%s file directly under %s/, name matching [a-z][a-z0-9_-]* (got %q)",
+				calldecl.DeclExt, calldecl.Dir, p)
 		}
 		return nil
 	}
@@ -2577,6 +2590,12 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				writeJSONError(w, http.StatusUnprocessableEntity, "cap_invalid", issuesDetail(issues, capIssuesHint))
 				return
 			}
+			// Call-entry gate: every CALLS/ declaration parses and its entry
+			// names a scope of this version.
+			if issues := c.deepValidateCalls(r.Context(), versionID); len(issues) > 0 {
+				writeJSONError(w, http.StatusUnprocessableEntity, "call_invalid", issuesDetail(issues, callIssuesHint))
+				return
+			}
 		}
 	}
 	// Lookup failures fall through: materialiseStackVersion re-runs both
@@ -2957,6 +2976,13 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 	// Capability gate — every declaration parses, names a scope of this
 	// version, and a name no other active stack of the tenant declares.
 	for _, issue := range c.deepValidateCaps(r.Context(), ac.TenantID, stackID, versionID) {
+		resp.OK = false
+		resp.Checked++
+		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})
+	}
+	// Call-entry gate — every CALLS/ declaration parses and names a scope
+	// of this version.
+	for _, issue := range c.deepValidateCalls(r.Context(), versionID) {
 		resp.OK = false
 		resp.Checked++
 		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})

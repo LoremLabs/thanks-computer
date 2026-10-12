@@ -73,7 +73,7 @@ func TestDeepValidateCaps(t *testing.T) {
 	for p, body := range map[string]string{
 		"CAPS/ai.chat.yaml":   "description: Ask the model.\nentry: 7000\ninput:\n  messages:\n    required: true\n",
 		"CAPS/card.note.yaml": "entry: 7000\n",
-		"CAPS/unknown.yaml":   "entry: 7000\noutput: {}\n",
+		"CAPS/unknown.yaml":   "entry: 7000\nextra: 1\n",
 		"CAPS/negative.yaml":  "entry: -7\n",
 		"CAPS/start.yaml":     "description: enters at the stack's start\n",
 		"CAPS/noscope.yaml":   "entry: 7100\n",
@@ -88,7 +88,7 @@ func TestDeepValidateCaps(t *testing.T) {
 
 	issues := c.deepValidateCaps(ctx, "tnt_default", "stk_loop", 1)
 	want := map[string]string{
-		"CAPS/unknown.yaml":   "field output not found",
+		"CAPS/unknown.yaml":   "field extra not found",
 		"CAPS/negative.yaml":  "want a scope of this stack",
 		"CAPS/noscope.yaml":   "entry 7100 names no scope of this stack",
 		"CAPS/mail.send.yaml": `already declared by the active stack "other"`,
@@ -137,7 +137,7 @@ func TestHandleListCaps(t *testing.T) {
 
 	putCapFile(t, c, 10, "CAPS/mail.send.yaml", "description: Send a message.\nentry: 100\ninput:\n  to:\n    required: true\ntimeout: 60000\n", "")
 	putCapFile(t, c, 10, "CAPS/run.finish.yaml", "", fleetHash)
-	putCapFile(t, c, 10, "CAPS/broken.yaml", "entry: 100\noutput: {}\n", "")
+	putCapFile(t, c, 10, "CAPS/broken.yaml", "entry: 100\nextra: 1\n", "")
 	putCapFile(t, c, 10, "SANDBOXES/workstation.yaml", "capabilities: [mail.send]\n", "")
 	putCapFile(t, c, 1, "CAPS/draft.only.yaml", "entry: 100\n", "") // not active
 	putCapFile(t, c, 20, "CAPS/ai.chat.yaml", "entry: 100\n", "")   // another tenant
@@ -159,7 +159,7 @@ func TestHandleListCaps(t *testing.T) {
 		t.Fatalf("want 3 caps, got %s", w.Body.String())
 	}
 	broken, mail, finish := resp.Caps[0], resp.Caps[1], resp.Caps[2]
-	if broken.Name != "broken" || broken.Stack != "other" || !strings.Contains(broken.Err, "field output not found") {
+	if broken.Name != "broken" || broken.Stack != "other" || !strings.Contains(broken.Err, "field extra not found") {
 		t.Errorf("broken row: %+v", broken)
 	}
 	if mail.Name != "mail.send" || mail.Stack != "other" || mail.Entry != 100 || mail.Stage != "other/100" ||
@@ -179,6 +179,109 @@ func TestHandleListCaps(t *testing.T) {
 	// A tenant with none answers an empty list, not null.
 	w = get(withTenantCapsCtx(httptest.NewRequest(http.MethodGet, "/v1/tenants/x/caps", nil), "tnt_none", []string{"opstack:*:read"}))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"caps":[]`) {
+		t.Fatalf("empty tenant: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestValidateStackFilePathCalls(t *testing.T) {
+	for _, p := range []string{"CALLS/orient.yaml", "CALLS/send-mail.yaml"} {
+		if err := validateStackFilePath(p); err != nil {
+			t.Errorf("validateStackFilePath(%q) = %v, want nil", p, err)
+		}
+	}
+	for _, p := range []string{"CALLS/orient.json", "CALLS/a/orient.yaml", "CALLS/Orient.yaml", "CALLS/a.b.yaml", "CALLS/.yaml", "calls/orient.yaml"} {
+		if err := validateStackFilePath(p); err == nil {
+			t.Errorf("validateStackFilePath(%q) = nil, want error", p)
+		}
+	}
+}
+
+func TestDeepValidateCalls(t *testing.T) {
+	ctx := context.Background()
+	c := newTestController(t, config.Config{})
+	capsFixture(t, c)
+	const fleetHash = "ca115"
+	c.fcas = &mapStore{m: map[string][]byte{fleetHash: []byte("entry: 7000\n")}}
+	for p, body := range map[string]string{
+		"CALLS/orient.yaml":   "description: Compile.\nentry: 7000\ninput:\n  job:\n    required: true\noutput:\n  prompt:\n    required: true\n",
+		"CALLS/start.yaml":    "description: enters at the stack's start\n",
+		"CALLS/unknown.yaml":  "entry: 7000\nextra: 1\n",
+		"CALLS/negative.yaml": "entry: -7\n",
+		"CALLS/noscope.yaml":  "entry: 7100\n",
+		"CALLS/badout.yaml":   "output:\n  Prompt: {}\n",
+		"100/plain.txcl":      `EXEC "txco://copy" WITH from = "a", to = "b"`,
+		"7000/run.txcl":       `EXEC "txco://copy" WITH from = "a", to = "b"`,
+	} {
+		putCapFile(t, c, 1, p, body, "")
+	}
+	putCapFile(t, c, 1, "CALLS/validate.yaml", "", fleetHash)
+
+	issues := c.deepValidateCalls(ctx, 1)
+	want := map[string]string{
+		"CALLS/unknown.yaml":  "field extra not found",
+		"CALLS/negative.yaml": "want a scope of this stack",
+		"CALLS/noscope.yaml":  "entry 7100 names no scope of this stack",
+		"CALLS/badout.yaml":   "output.Prompt",
+	}
+	if len(issues) != len(want) {
+		t.Fatalf("want %d issues, got %+v", len(want), issues)
+	}
+	for _, i := range issues {
+		sub, ok := want[i.Path]
+		if !ok || !strings.Contains(i.Err, sub) || !strings.HasPrefix(i.Err, "call declaration:") {
+			t.Errorf("unexpected issue %+v", i)
+		}
+	}
+	if issues := c.deepValidateCalls(ctx, 999); len(issues) != 0 {
+		t.Fatalf("empty version: %+v", issues)
+	}
+}
+
+func TestHandleListCalls(t *testing.T) {
+	c := newTestController(t, config.Config{})
+	capsFixture(t, c)
+	const fleetHash = "ca115"
+	c.fcas = &mapStore{m: map[string][]byte{fleetHash: []byte("description: Validate a record.\nentry: 7000\n")}}
+
+	putCapFile(t, c, 10, "CALLS/orient.yaml", "description: Compile.\nentry: 100\ninput:\n  job:\n    required: true\noutput:\n  prompt:\n    required: true\ntimeout: 20000\n", "")
+	putCapFile(t, c, 10, "CALLS/validate.yaml", "", fleetHash)
+	putCapFile(t, c, 10, "CALLS/broken.yaml", "entry: []\n", "")
+	putCapFile(t, c, 10, "CAPS/mail.send.yaml", "entry: 100\n", "")
+	putCapFile(t, c, 1, "CALLS/draft.yaml", "entry: 100\n", "")   // not active
+	putCapFile(t, c, 20, "CALLS/theirs.yaml", "entry: 100\n", "") // another tenant
+
+	get := func(r *http.Request) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c.handleListCalls(w, r)
+		return w
+	}
+	w := get(withTenantCapsCtx(httptest.NewRequest(http.MethodGet, "/v1/tenants/default/calls", nil), "tnt_default", []string{"opstack:*:read"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var resp listCallsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 3 || len(resp.Calls) != 3 {
+		t.Fatalf("want 3 entries, got %s", w.Body.String())
+	}
+	broken, orient, validate := resp.Calls[0], resp.Calls[1], resp.Calls[2]
+	if broken.Name != "broken" || broken.Stack != "other" || !strings.HasPrefix(broken.Err, "call declaration:") {
+		t.Errorf("broken row: %+v", broken)
+	}
+	if orient.Name != "orient" || orient.Stage != "other/100" || !orient.Input["job"].Required || !orient.Output["prompt"].Required || orient.Timeout != 20000 {
+		t.Errorf("orient row: %+v", orient)
+	}
+	if validate.Name != "validate" || validate.Stage != "other/7000" || validate.Description != "Validate a record." {
+		t.Errorf("validate (CAS) row: %+v", validate)
+	}
+	w = get(withTenantCapsCtx(httptest.NewRequest(http.MethodGet, "/v1/tenants/default/calls", nil), "tnt_default", []string{"kv:*:read"}))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("without opstack read: status %d", w.Code)
+	}
+	w = get(withTenantCapsCtx(httptest.NewRequest(http.MethodGet, "/v1/tenants/x/calls", nil), "tnt_none", []string{"opstack:*:read"}))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"calls":[]`) {
 		t.Fatalf("empty tenant: %d %s", w.Code, w.Body.String())
 	}
 }

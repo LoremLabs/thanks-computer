@@ -275,10 +275,11 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	// only shorten the wait. A name nobody declares goes to `_cap`.
 	wait := g.maxWait
 	var implStack, implTo string
+	var implDecl *capdecl.Decl
 	if g.lookup != nil {
 		switch stack, d, lerr := g.lookup(r.Context(), v.Tenant, name); {
 		case lerr == nil:
-			implStack, implTo = stack, d.Stage(stack)
+			implStack, implTo, implDecl = stack, d.Stage(stack), d
 			if t := d.TimeoutDuration(); t > 0 && t < wait {
 				wait = t
 			}
@@ -369,6 +370,18 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 		g.log.Info("cap: the stack answered an error", append(fields, zap.String("code", code))...)
 		e.fail(http.StatusUnprocessableEntity, code, msg)
 	case f[3].Exists():
+		// A declaration that promises outputs is held to them: an answer
+		// without one is a bad answer (502), with what the stack did write.
+		if implDecl != nil {
+			if missing := capdecl.Missing(implDecl.Output, f[3].Raw); len(missing) > 0 {
+				g.log.Info("cap: the stack answered without its declared output", append(fields, zap.Strings("missing", missing))...)
+				e.finish(answer{Output: json.RawMessage(f[3].Raw), Error: &answerError{
+					Code: "invalid_output", Status: http.StatusBadGateway,
+					Message: name + " answered without the output its declaration promises: " + strings.Join(missing, ", "),
+				}})
+				return
+			}
+		}
 		g.log.Info("cap: answered", fields...)
 		e.finish(answer{OK: true, Output: json.RawMessage(f[3].Raw)})
 	default:

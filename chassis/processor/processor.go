@@ -169,6 +169,11 @@ type Unit struct {
 	// declares nothing here.
 	Caps CapLookup
 
+	// CallDecls finds a declared entry of a stack (CALLS/<name>.yaml): what
+	// `WITH entry` on a call:// resolves through (call.go). nil-safe: a
+	// chassis with none declares no entries.
+	CallDecls CallLookup
+
 	// Attachments is the registry of attached transports — a live resource
 	// in a workspace (a PTY, or a workspace-local service) bound to one
 	// WebSocket session for the life of a lease. The `workspace://<name>/attach`

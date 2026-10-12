@@ -14,6 +14,8 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/calldecl"
+	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
@@ -30,6 +32,7 @@ import (
 //	     timeout = 20000          the call's own limit (ms)
 //	     stack   = <expr>         replaces the ref's stack, as WITH name does
 //	                              for cap://
+//	     entry   = "orient"       a declared entry of the callee (CALLS/)
 //	EXEC "call://app/_orient"
 //
 // The callee starts from a fresh envelope — its identity facts plus
@@ -43,6 +46,14 @@ import (
 // (txco_call_*). Nothing else of the callee's envelope comes back, and
 // nothing outside `into` is written, so two calls in one scope cannot
 // collide. A `@halt` in the callee ends only the callee.
+//
+// `WITH entry` names a declared entry of the callee (CALLS/<entry>.yaml,
+// chassis/calldecl): the call enters at the declared scope, is bounded by
+// the declared timeout when that is shorter, must carry the entry's
+// required inputs (txco_call_invalid_input, before the callee runs) and
+// gets back its required outputs (txco_call_invalid_output, after it
+// ends, with what the callee did write). A call that names no entry is
+// checked for nothing.
 //
 // A call isolates DATA, not AUTHORITY: the callee runs with the request's
 // tenant, principal, secrets and run grant. It is not a security boundary.
@@ -75,6 +86,15 @@ const (
 	verdictFailed      = "failed"      // the callee's run failed without an answer
 	verdictBudget      = "budget"      // the request's budget ran out inside the callee
 )
+
+// CallLookup finds a declared entry of a stack on this chassis: the
+// stack's active version's CALLS/<name>.yaml. It answers
+// calldecl.ErrNotDeclared when the stack declares no such entry. The server
+// wires the same source txco://calls/list reads. nil-safe: a chassis with
+// none declares no entries.
+type CallLookup interface {
+	Lookup(ctx context.Context, tenant, stack, name string) (*capdecl.Decl, error)
+}
 
 // callError is the `error` member of a result object: the callee's own
 // `_call.error`, or the engine's verdict. Stopped and Running are set only
@@ -158,11 +178,45 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 			return fail("txco_call_target", "WITH stack is not a stack name: "+verr.Error())
 		}
 	}
-
-	out := pu.runFrame(ctx, op, frameSpec{
+	input := metaInput(op.Meta)
+	spec := frameSpec{
 		stack: stack, scope: scope, source: "call", channel: callDefaultInto,
-		input: metaInput(op.Meta), what: stack,
-	})
+		input: input, what: stack,
+	}
+
+	// `WITH entry` names a declared entry of the callee: where the call
+	// enters, what it must carry, what it will answer, and a timeout that
+	// can only shorten the call's. A missing required input fails before
+	// the callee runs.
+	var entry *capdecl.Decl
+	if name := strings.TrimSpace(gjson.Get(op.Meta, "entry").String()); name != "" {
+		if !calldecl.ValidName(name) {
+			return fail("txco_call_target", "WITH entry is not an entry name ([a-z][a-z0-9_-]*): "+name)
+		}
+		if scope != 0 {
+			return fail("txco_call_target", "name the entry or the scope, not both: call://"+stack+"/"+strconv.Itoa(scope)+" with entry "+name)
+		}
+		tenant := tenantScope(ctx)
+		if tenant == "" || pu.CallDecls == nil {
+			return fail("txco_call_no_entry", stack+" declares no entry "+name+" here")
+		}
+		d, derr := pu.CallDecls.Lookup(ctx, tenant, stack, name)
+		switch {
+		case errors.Is(derr, calldecl.ErrNotDeclared):
+			return fail("txco_call_no_entry", stack+" declares no entry "+name+" ("+calldecl.DeclPath(name)+")")
+		case derr != nil:
+			return fail("txco_call_failed", "reading entry "+name+" of "+stack+": "+derr.Error())
+		}
+		if missing := capdecl.Missing(d.Input, input); len(missing) > 0 {
+			return fail("txco_call_invalid_input", "entry "+name+" of "+stack+" requires input: "+strings.Join(missing, ", "))
+		}
+		entry = d
+		spec.scope = d.Entry
+		spec.timeout = d.TimeoutDuration()
+		spec.facts = map[string]any{"entry": name}
+	}
+
+	out := pu.runFrame(ctx, op, spec)
 	var ce *callError
 	switch {
 	case out.verdict == verdictBudget:
@@ -173,6 +227,13 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 		ce = out.own
 		if ce.Code == "" {
 			ce.Code = "txco_call_error" // the callee said so but gave no code
+		}
+	case entry != nil:
+		// A declared entry promised its outputs; what the callee did write
+		// still comes back.
+		if missing := capdecl.Missing(entry.Output, out.output); len(missing) > 0 {
+			ce = &callError{Code: "txco_call_invalid_output",
+				Message: stack + " answered without the output its entry promises: " + strings.Join(missing, ", ")}
 		}
 	}
 	if ce != nil {

@@ -102,6 +102,11 @@ Flags:
 	for _, m := range checkCapDecls(ops, dir) {
 		diags = append(diags, bundle.Diag{Msg: "cap: " + m})
 	}
+	// Call-entry check: every CALLS/ declaration parses and names a scope
+	// of the stack (chassis/calldecl). Errors for the same reason.
+	for _, m := range checkCallDecls(ops, dir) {
+		diags = append(diags, bundle.Diag{Msg: "call: " + m})
+	}
 
 	// Reuse apply's static loop-shape lint (unconditional self-loops /
 	// 2-stack ping-pongs). Warnings only, same conservative semantics as
@@ -109,6 +114,7 @@ Flags:
 	loopWarns := lintStackLoops(ops)
 	loopWarns = append(loopWarns, lintLoopClause(ops)...)
 	loopWarns = append(loopWarns, lintCalls(ops)...)
+	loopWarns = append(loopWarns, lintCallEntries(ops, dir)...)
 	// Web ABI builds: their own warnings, and author ops in the producer band.
 	all := map[string]bool{}
 	for _, n := range ws.StackNames() {

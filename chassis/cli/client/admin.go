@@ -1450,12 +1450,56 @@ type Cap struct {
 	Stage       string              `json:"stage"`
 	Description string              `json:"description,omitempty"`
 	Input       map[string]CapInput `json:"input,omitempty"`
+	Output      map[string]CapInput `json:"output,omitempty"`
 	Timeout     int                 `json:"timeout,omitempty"`
 	Err         string              `json:"err,omitempty"`
 }
 
 type listCapsResponse struct {
 	Caps []Cap `json:"caps"`
+}
+
+// Call is one declared entry of a tenant's stacks: what an active stack
+// declares under CALLS/ (chassis/calldecl). Err is set, and the
+// declaration's fields are empty, when the active row does not parse.
+type Call struct {
+	Stack       string              `json:"stack"`
+	Name        string              `json:"name"`
+	Entry       int                 `json:"entry"`
+	Stage       string              `json:"stage"`
+	Description string              `json:"description,omitempty"`
+	Input       map[string]CapInput `json:"input,omitempty"`
+	Output      map[string]CapInput `json:"output,omitempty"`
+	Timeout     int                 `json:"timeout,omitempty"`
+	Err         string              `json:"err,omitempty"`
+}
+
+type listCallsResponse struct {
+	Calls []Call `json:"calls"`
+}
+
+// ListCalls returns the entries the target tenant's active stacks declare.
+func (c *Client) ListCalls(ctx context.Context) ([]Call, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.scopedURL("/calls"), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out listCallsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode list calls: %w", err)
+	}
+	return out.Calls, nil
 }
 
 // ListCaps returns the target tenant's capability catalogue, by name.

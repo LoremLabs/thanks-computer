@@ -101,3 +101,60 @@ func TestRunCapsUsage(t *testing.T) {
 		t.Errorf("unknown command: exit=%d %q", code, errb.String())
 	}
 }
+
+func callsStub(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/calls") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+const callsStubBody = `{"count":3,"calls":[` +
+	`{"stack":"app","name":"onboard","entry":200,"stage":"app/200"},` +
+	`{"stack":"app/_orient","name":"broken","err":"call declaration: entry is required"},` +
+	`{"stack":"app/_orient","name":"orient","entry":100,"stage":"app/_orient/100","description":"Compile the context.","input":{"job":{"required":true},"text":{}},"output":{"prompt":{"required":true},"sources":{}},"timeout":20000}]}`
+
+func TestRunCallsListTable(t *testing.T) {
+	t.Setenv("TXCO_HOME", t.TempDir())
+	srv := callsStub(t, callsStubBody)
+
+	var out, errb bytes.Buffer
+	if code := runCalls([]string{"list", "--addr", srv.URL}, &out, &errb); code != 0 {
+		t.Fatalf("exit=%d; stderr=%q", code, errb.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 4 || !strings.HasPrefix(lines[0], "STACK") || !strings.Contains(lines[0], "OUTPUT") {
+		t.Fatalf("table:\n%s", out.String())
+	}
+	for i, want := range [][]string{
+		{"app", "onboard", "app/200"},
+		{"app/_orient", "broken", "BROKEN: call declaration: entry is required"},
+		{"app/_orient", "orient", "app/_orient/100", "20000ms", "job*,text", "prompt*,sources", "Compile the context."},
+	} {
+		for _, w := range want {
+			if !strings.Contains(lines[i+1], w) {
+				t.Errorf("line %d lacks %q: %s", i+1, w, lines[i+1])
+			}
+		}
+	}
+	// --stack narrows; --json is the records.
+	out.Reset()
+	if code := runCalls([]string{"list", "--addr", srv.URL, "--stack", "app"}, &out, &errb); code != 0 || strings.Count(out.String(), "\n") != 2 {
+		t.Fatalf("--stack: exit=%d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := runCalls([]string{"list", "--addr", srv.URL, "--json"}, &out, &errb); code != 0 {
+		t.Fatalf("--json: exit=%d; stderr=%q", code, errb.String())
+	}
+	var recs []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &recs); err != nil || len(recs) != 3 || recs[2]["name"] != "orient" {
+		t.Fatalf("json: %v %s", err, out.String())
+	}
+}

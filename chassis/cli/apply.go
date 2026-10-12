@@ -519,6 +519,14 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		}
 		return 1
 	}
+	// Call-entry check — every CALLS/ declaration of every stack parses and
+	// its entry names a scope of the stack. Errors too.
+	if cerrs := checkCallDecls(ops, dir); len(cerrs) > 0 {
+		for _, m := range cerrs {
+			fmt.Fprintf(stderr, "%s: call entry error at %s\n", cmd, m)
+		}
+		return 1
+	}
 
 	// Apply-time lint for unconditional loop shapes (self-loops and
 	// 2-stack ping-pongs). Warnings only — design-time complement to the
@@ -539,6 +547,9 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 	// Apply-time lint for `call://` targets: a callee outside this apply,
 	// and a callee in it with a rule the call engine refuses. Warnings only.
 	for _, w := range lintCalls(ops) {
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
+	}
+	for _, w := range lintCallEntries(ops, dir) {
 		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
 	}
 

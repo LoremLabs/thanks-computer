@@ -129,6 +129,7 @@ type capRecord struct {
 	Stage       string                        `json:"stage"`
 	Description string                        `json:"description,omitempty"`
 	Input       map[string]capdecl.InputField `json:"input,omitempty"`
+	Output      map[string]capdecl.Field      `json:"output,omitempty"`
 	Timeout     int                           `json:"timeout,omitempty"`
 	// Err is set instead of the declaration's fields when the active row
 	// does not parse (it deployed before a rule tightened, or its bytes are
@@ -202,7 +203,7 @@ func (c *Controller) handleListCaps(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		rec.Entry, rec.Stage = d.Entry, d.Stage(rw.stack)
-		rec.Description, rec.Input, rec.Timeout = d.Description, d.Input, d.Timeout
+		rec.Description, rec.Input, rec.Output, rec.Timeout = d.Description, d.Input, d.Output, d.Timeout
 		caps = append(caps, rec)
 	}
 	writeJSON(w, http.StatusOK, listCapsResponse{Caps: caps, Count: len(caps)})

@@ -54,7 +54,9 @@ type capOut struct {
 	Stage       string                        `json:"stage"`
 	Description string                        `json:"description"`
 	Input       map[string]capdecl.InputField `json:"input"`
+	Output      map[string]capdecl.Field      `json:"output"`
 	Params      []string                      `json:"params"`
+	Returns     []string                      `json:"returns"`
 	Timeout     int                           `json:"timeout"`
 }
 
@@ -102,9 +104,14 @@ func capsList(ctx context.Context, d capsDeps, _ []byte) (event.Payload, error) 
 		if input == nil {
 			input = map[string]capdecl.InputField{}
 		}
+		output := e.Decl.Output
+		if output == nil {
+			output = map[string]capdecl.Field{}
+		}
 		out.Items = append(out.Items, capOut{
 			Name: e.Name, Stack: e.Stack, Entry: e.Decl.Entry, Stage: e.Decl.Stage(e.Stack),
-			Description: e.Decl.Description, Input: input, Params: e.Decl.Params(), Timeout: e.Decl.Timeout,
+			Description: e.Decl.Description, Input: input, Output: output,
+			Params: e.Decl.Params(), Returns: e.Decl.Returns(), Timeout: e.Decl.Timeout,
 		})
 	}
 	out.Count = len(out.Items)

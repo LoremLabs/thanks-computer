@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/loremlabs/thanks-computer/chassis/calldecl"
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
@@ -39,6 +40,7 @@ var kindDirs = map[string]bool{
 	outlet.Dir:             true,
 	sandbox.Dir:            true,
 	capdecl.Dir:            true,
+	calldecl.Dir:           true,
 	computesrc.Dir:         true,
 	stackdir.Dir:           true,
 }

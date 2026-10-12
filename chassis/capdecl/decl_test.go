@@ -51,7 +51,7 @@ func TestParseDecl(t *testing.T) {
 	}
 
 	bad := map[string]string{
-		"unknown key":        "entry: 7000\noutput: {}\n",
+		"unknown key":        "entry: 7000\nextra: 1\n",
 		"negative entry":     "entry: -1\n",
 		"entry not a number": "entry: seven\n",
 		"entry a stage":      "entry: loop/7000\n",
@@ -130,5 +130,55 @@ func TestCheckEntry(t *testing.T) {
 	}
 	if err := CheckEntry(start, nil); err == nil || !strings.Contains(err.Error(), "no scope to answer") {
 		t.Fatalf("no entry, a stack with no scopes: %v", err)
+	}
+}
+
+func TestParseDeclOutput(t *testing.T) {
+	d, err := ParseDecl([]byte("entry: 7000\noutput:\n  mid:\n    description: the message id\n    required: true\n  queued: {}\n"))
+	if err != nil {
+		t.Fatalf("valid output: %v", err)
+	}
+	if !d.Output["mid"].Required || d.Output["mid"].Description != "the message id" || d.Output["queued"].Required {
+		t.Fatalf("output decoded wrong: %+v", d.Output)
+	}
+	if got := d.Returns(); !reflect.DeepEqual(got, []string{"mid", "queued"}) {
+		t.Fatalf("Returns = %v", got)
+	}
+	for name, body := range map[string]string{
+		"bad output name":  "output:\n  Mid: {}\n",
+		"long output note": "output:\n  mid:\n    description: " + strings.Repeat("x", MaxInputDescription+1) + "\n",
+	} {
+		if _, err := ParseDecl([]byte(body)); err == nil || !strings.Contains(err.Error(), "output") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Another kind names itself in its errors.
+	if _, err := ParseDeclAs("call declaration", []byte("entry: -1\n")); err == nil || !strings.HasPrefix(err.Error(), "call declaration:") {
+		t.Errorf("ParseDeclAs: %v", err)
+	}
+}
+
+func TestMissing(t *testing.T) {
+	fields := map[string]Field{"job": {Required: true}, "text": {}, "mode": {Required: true}}
+	for doc, want := range map[string][]string{
+		`{"job":{"id":1},"mode":"fast","text":"hi"}`: nil,
+		`{"job":{"id":1},"mode":"fast"}`:             nil,
+		`{"job":null,"mode":"fast"}`:                 {"job"},
+		`{"text":"hi"}`:                              {"job", "mode"},
+		`{}`:                                         {"job", "mode"},
+		``:                                           {"job", "mode"},
+	} {
+		if got := Missing(fields, doc); !reflect.DeepEqual(got, want) {
+			t.Errorf("Missing(%s) = %v, want %v", doc, got, want)
+		}
+	}
+	if got := Missing(nil, `{}`); got != nil {
+		t.Errorf("no fields: %v", got)
+	}
+}
+
+func TestParseDeclOutputUnknownKey(t *testing.T) {
+	if _, err := ParseDecl([]byte("output:\n  mid:\n    type: string\n")); err == nil || !strings.Contains(err.Error(), "type not found") {
+		t.Errorf("unknown output key: %v", err)
 	}
 }

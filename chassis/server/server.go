@@ -2071,6 +2071,15 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return capsList(ctx, capsDeps{decls: capDecls}, in)
 		}))
+	// The entries the tenant's stacks declare under CALLS/ (chassis/calldecl):
+	// what `WITH entry` on a call:// resolves through, and the list a rule
+	// reads.
+	callDecls := &callDeclSource{dbc: dbc, fcas: fcas}
+	pu.CallDecls = callDecls
+	pu.Handle([]byte("txco://calls/list"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return callsList(ctx, callsDeps{decls: callDecls}, in)
+		}))
 
 	// txco://run/abort: end a run in flight on this chassis — the calling
 	// tenant's own — from a rule, so a stack can build its own stop with

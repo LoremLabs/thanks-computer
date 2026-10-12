@@ -59,6 +59,7 @@ timeout: 30000
 | **The name** | The file's stem: lowercase words joined by dots (`crm.lookup`, `mail.send`), each word `[a-z][a-z0-9_-]*`. It is what a node calls, what a sandbox and a standing grant name, and what the `_grant` stack sees. |
 | **`description`** | Optional. What a caller reads to decide whether to call: a person, or a model choosing a tool. At most 2048 characters. |
 | **`input`** | Optional. The fields a call carries: `<field>: {description, required}`. A field is `[a-z][a-z0-9_]*`; at most 32. It is published in [the catalogue](#the-catalogue); the chassis does not check a call against it — the stack that answers checks its own input. |
+| **`output`** | Optional. The fields the answer carries, in the same shape; at most 32. Published in the catalogue, and **checked**: an answer that lacks a `required` output is a bad answer (`invalid_output`, 502, with what the stack did write), from the inlet and when the capability is [answered here](#answered-here). |
 | **`timeout`** | Optional, milliseconds. It can only shorten how long the chassis waits for the answer (`--op-timeout-max` is the ceiling). |
 | **`entry`** | Optional. See below. |
 | **Anything else** | A deploy error. Only what the chassis reads is declared. |
@@ -217,6 +218,7 @@ What comes back, beside `into`:
 | `txco_cap_unavailable` | The parent could not decide, or the run failed |
 | `txco_cap_transport` | The parent could not be reached |
 | _the stack's own code_ | The answering stack set `._cap.error`: its `code` and `message` arrive as written |
+| `txco_cap_invalid_output` | The answering stack's declaration promises an output it did not write; `cap.error.message` names it |
 | `txco_cap_budget`, `txco_cap_unsupported`, `txco_cap_boundary`, `txco_cap_depth`, `txco_cap_cancelled` | Answered here, and the run could not be completed: the request's budget ran out inside it, its stack tried to suspend or stream, jumped out of itself, nested past the limit, or the request ended — the same verdicts a [call](./calls.md#the-result) gets |
 
 - **The rule never sees the token.** It arrived with the request that

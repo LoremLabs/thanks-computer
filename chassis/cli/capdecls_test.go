@@ -46,7 +46,7 @@ func TestCheckCapDecls(t *testing.T) {
 	// A declaration that does not parse, an entry that names no scope of
 	// its stack, and a name a second stack of the workspace declares: one
 	// message each, against the file.
-	writeFile(t, filepath.Join(root, "OPS/loop/CAPS/broken.yaml"), "entry: 7000\noutput: {}\n")
+	writeFile(t, filepath.Join(root, "OPS/loop/CAPS/broken.yaml"), "entry: 7000\nextra: 1\n")
 	writeFile(t, filepath.Join(root, "OPS/loop/CAPS/card.note.yaml"), "entry: 7100\n")
 	writeFile(t, filepath.Join(root, "OPS/other/CAPS/mail.send.yaml"), "entry: 100\n")
 	msgs := checkCapDecls(ops, root)
@@ -56,7 +56,7 @@ func TestCheckCapDecls(t *testing.T) {
 	all := strings.Join(msgs, "\n")
 	for _, want := range []string{
 		"loop/CAPS/broken.yaml: capability declaration:",
-		"field output not found",
+		"field extra not found",
 		"loop/CAPS/card.note.yaml: capability declaration: entry 7100 names no scope of this stack",
 		`other/CAPS/mail.send.yaml: capability "mail.send" is already declared by stack "loop"`,
 	} {
@@ -79,5 +79,43 @@ func TestLintCapErrorFlipsExit(t *testing.T) {
 	stderr.Reset()
 	if code := runLint([]string{root}, &stdout, &stderr); code != 1 || !strings.Contains(stdout.String(), "cap: ") || !strings.Contains(stdout.String(), "names no scope") {
 		t.Fatalf("an entry with no scope must fail lint: exit %d\n%s%s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestCollectAndCheckCallDecls(t *testing.T) {
+	root := t.TempDir()
+	stackDir := filepath.Join(root, "OPS/app/_orient")
+	if files, err := collectCallFiles(stackDir); err != nil || files != nil {
+		t.Fatalf("absent CALLS/: %v %v", files, err)
+	}
+	writeFile(t, filepath.Join(stackDir, "CALLS/orient.yaml"), "entry: 100\ninput:\n  job:\n    required: true\noutput:\n  prompt:\n    required: true\n")
+	writeFile(t, filepath.Join(stackDir, "CALLS/validate.yaml"), "entry: 300\n")
+	writeFile(t, filepath.Join(stackDir, "CALLS/.hidden.yaml"), "x")
+	files, err := collectCallFiles(stackDir)
+	if err != nil || len(files) != 2 || files[0].Path != "CALLS/orient.yaml" || files[1].Path != "CALLS/validate.yaml" || files[0].ContentHash == "" {
+		t.Fatalf("collect: %+v %v", files, err)
+	}
+	writeFile(t, filepath.Join(stackDir, "100/compile.txcl"), `EMIT ._call.output.prompt = "p"`+"\n")
+	writeFile(t, filepath.Join(root, "OPS/app/100/call.txcl"), `WITH entry = "orient", input = &object("job", ._job) EXEC "call://app/_orient"`+"\n")
+	writeFile(t, filepath.Join(root, "OPS/app/200/typo.txcl"), `WITH entry = "orientt" EXEC "call://app/_orient"`+"\n")
+	writeFile(t, filepath.Join(root, "OPS/app/300/elsewhere.txcl"), `WITH entry = "x" EXEC "call://billing"`+"\n")
+	ops, _, err := bundle.WalkDiag(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// validate names scope 300, which app/_orient lacks.
+	msgs := checkCallDecls(ops, root)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "validate.yaml") || !strings.Contains(msgs[0], "entry 300 names no scope") {
+		t.Fatalf("checkCallDecls = %v", msgs)
+	}
+	// The typo'd entry is warned about; the declared one and the callee
+	// outside the workspace are not.
+	warns := lintCallEntries(ops, root)
+	if len(warns) != 1 || !strings.Contains(warns[0], `entry "orientt"`) || !strings.Contains(warns[0], "txco_call_no_entry") {
+		t.Fatalf("lintCallEntries = %v", warns)
+	}
+	writeFile(t, filepath.Join(stackDir, "CALLS/Bad Name.yaml"), "entry: 100\n")
+	if _, err := collectCallFiles(stackDir); err == nil || !strings.Contains(err.Error(), "Bad Name.yaml") {
+		t.Fatalf("bad name must fail: %v", err)
 	}
 }

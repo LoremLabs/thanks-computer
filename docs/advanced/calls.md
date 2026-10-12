@@ -36,6 +36,7 @@ grants nothing a jump would not._
 | Call a stack | [Calling](#calling) |
 | Answer a call | [Answering](#answering) |
 | Read the result | [The result](#the-result) |
+| Declare what a stack takes and answers | [Declaring an entry](#declaring-an-entry) |
 | Know what a call may and may not do | [The boundary](#the-boundary), [What a call refuses](#what-a-call-refuses) |
 | Bound a call | [Deadline and cancellation](#deadline-and-cancellation), [Depth and fuel](#depth-and-fuel) |
 | See it in a trace | [In the trace](#in-the-trace) |
@@ -107,6 +108,66 @@ callee that wants to answer for itself after such a call overwrites
 `._call.output` (and clears `._call.error` with `@delete` if it handled the
 inner failure).
 
+## Declaring an entry
+
+A stack that is called from several places, or by rules someone else
+maintains, declares its entries: one small file per entry under the
+reserved `CALLS/` directory, beside `CAPS/`:
+
+```yaml
+# OPS/app/_orient/CALLS/orient.yaml
+description: Compile the context needed for a job.
+entry: 100
+timeout: 20000
+input:
+  job:
+    description: the job record
+    required: true
+  text:
+    description: the message to answer
+output:
+  prompt:
+    description: the compiled prompt
+    required: true
+  sources:
+    description: the documents it drew on
+```
+
+| | |
+|---|---|
+| **The name** | The file's stem, `[a-z][a-z0-9_-]*`. An entry is the stack's own: two stacks may each have an `orient`. |
+| **`entry`** | The scope the call enters at (default 0, the stack's start). It must name a scope the stack has; `txco apply` refuses one that doesn't. |
+| **`timeout`** | Milliseconds. It can only shorten the call's own timeout. |
+| **`input`**, **`output`** | The fields the call carries and the answer carries: `<field>: {description, required}`, each `[a-z][a-z0-9_]*`, at most 32. Not a schema: the chassis checks names and `required`, nothing about shape. |
+
+The shape is the [capability declaration](./capabilities.md#declaring-one)'s,
+so a stack that answers callers inside the tenant and outside it writes the
+same contract twice under two names.
+
+A rule names the entry when it calls:
+
+```txcl
+WITH input = &object("job", ._job, "text", ._msg.text), entry = "orient", into = "_orient"
+EXEC "call://app/_orient"
+```
+
+- The call enters at the declared scope, and `.entry` names the entry
+  to the callee. Naming an entry and a scope together (`call://app/_orient/100`
+  with `WITH entry`) is `txco_call_target`.
+- **A missing required input fails before the callee runs:**
+  `txco_call_invalid_input`, naming the fields.
+- **A missing required output fails after it ends:**
+  `txco_call_invalid_output`, with `output` still carrying what the callee
+  did write.
+- An entry the stack does not declare is `txco_call_no_entry`. `txco apply`
+  warns when a literal `WITH entry` names one its callee, in the same apply,
+  lacks.
+- A call that names no entry is checked for nothing, as before.
+
+`txco calls list` and `txco://calls/list` show every entry the tenant's
+active stacks declare, with what each takes and answers, so a stack that
+composes others reads the contracts instead of carrying a copy.
+
 ## The result
 
 When the call ends, the caller finds **one object under `into`, and nothing
@@ -144,7 +205,9 @@ The engine's own error codes:
 | Code | When |
 |---|---|
 | `txco_call_no_stack` | No stack of that name in this tenant. |
-| `txco_call_target` | `WITH stack` is not a stack name. |
+| `txco_call_target` | `WITH stack` is not a stack name, `WITH entry` is not an entry name, or an entry was named beside a scope. |
+| `txco_call_no_entry` | The callee declares no such entry ([declaring an entry](#declaring-an-entry)). |
+| `txco_call_invalid_input`, `txco_call_invalid_output` | The call lacks an input the entry requires (checked before the callee runs), or the answer lacks an output it promises (checked after; `output` carries what was written). |
 | `txco_call_boundary` | The callee jumped to another stack ([the boundary](#the-boundary)). |
 | `txco_call_unsupported` | The callee tried to suspend or stream ([what a call refuses](#what-a-call-refuses)). |
 | `txco_call_timeout`, `txco_call_cancelled` | The deadline, or the request was cancelled; `stopped` and `running` say what the callee's ops did ([deadline](#deadline-and-cancellation)). |

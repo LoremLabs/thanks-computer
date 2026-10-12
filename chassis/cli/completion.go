@@ -290,6 +290,9 @@ var cliCommandTree = []node{
 	{Name: "caps", Desc: "The tenant's capability catalogue (CAPS/ declarations)", Children: []node{
 		{Name: "list", Desc: "List declared capabilities with the stack and scope that answer each", Aliases: []string{"ls"}, Flags: append([]string{"json"}, targetFlagNames...)},
 	}},
+	{Name: "calls", Desc: "The entries the tenant's stacks declare (CALLS/ declarations)", Children: []node{
+		{Name: "list", Desc: "List declared entries with where a call enters and what it takes and answers", Aliases: []string{"ls"}, Flags: append([]string{"stack", "json"}, targetFlagNames...)},
+	}},
 	{Name: "runs", Desc: "List the tenant's runs in flight on the chassis", Flags: append([]string{"stack", "json"}, targetFlagNames...)},
 	{Name: "abort", Desc: "End a run in flight (by rid, or every run of --stack) without ending the chassis", Flags: append([]string{"stack", "reason", "json"}, targetFlagNames...)},
 	{Name: "edit", Desc: "Edit a rule and apply on save"},
