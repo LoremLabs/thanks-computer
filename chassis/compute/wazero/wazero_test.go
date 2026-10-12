@@ -2,6 +2,7 @@ package wazero
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -184,5 +185,132 @@ func TestJSFixtureOnWazero(t *testing.T) {
 	}
 	if gjson.GetBytes(out, "in").Int() != 42 {
 		t.Fatalf("JS compute dropped input field: %s", out)
+	}
+}
+
+// linkedFixture loads the committed dynamically linked JS fixture
+// (testdata/src/js/linked.js) on e, checking it takes the linked path.
+func linkedFixture(t *testing.T, e *engine) compute.Instance {
+	t.Helper()
+	wasm, err := os.ReadFile("testdata/src/js/linked.js.wasm")
+	if err != nil {
+		t.Fatalf("read linked fixture (regenerate with `javy build … -C dynamic`): %v", err)
+	}
+	inst, err := e.Load(context.Background(), compute.Artifact{Alg: "sha256", Digest: "js-linked", Engine: Name, Wasm: wasm})
+	if err != nil {
+		t.Fatalf("Load linked: %v", err)
+	}
+	if _, ok := inst.(*dynamicInstance); !ok {
+		t.Fatalf("linked fixture loaded as %T, want *dynamicInstance", inst)
+	}
+	return inst
+}
+
+func idleLinkers(e *engine) int {
+	e.linkMu.Lock()
+	defer e.linkMu.Unlock()
+	return len(e.linkers)
+}
+
+// TestLinkedOpReusesLinker: calls in a row share one linker, and each still
+// starts from a fresh plugin instance (the guest's global counter reads 1).
+func TestLinkedOpReusesLinker(t *testing.T) {
+	e := newEngine(t).(*engine)
+	inst := linkedFixture(t, e)
+	lim := compute.Limits{MaxWall: 5 * time.Second}
+	for i := 1; i <= 3; i++ {
+		out, err := inst.Invoke(context.Background(), []byte(fmt.Sprintf(`{"in":%d}`, i)), lim)
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if gjson.GetBytes(out, "in").Int() != int64(i) || !gjson.GetBytes(out, "linked").Bool() {
+			t.Fatalf("call %d: output %s", i, out)
+		}
+		if runs := gjson.GetBytes(out, "runs").Int(); runs != 1 {
+			t.Fatalf("call %d: runs = %d, want 1 (state carried over from an earlier call)", i, runs)
+		}
+		if n := idleLinkers(e); n != 1 {
+			t.Fatalf("after call %d: %d idle linkers, want 1", i, n)
+		}
+	}
+}
+
+// TestLinkedOpFailureDropsLinker: a linker whose call failed is closed, not
+// kept, and the next call runs clean on a new one.
+func TestLinkedOpFailureDropsLinker(t *testing.T) {
+	e := newEngine(t).(*engine)
+	inst := linkedFixture(t, e)
+	lim := compute.Limits{MaxWall: 5 * time.Second}
+
+	if _, err := inst.Invoke(context.Background(), []byte(`{"throw":true}`), lim); err == nil {
+		t.Fatal("throwing guest returned no error")
+	}
+	if n := idleLinkers(e); n != 0 {
+		t.Fatalf("after a guest error: %d idle linkers, want 0", n)
+	}
+	if _, err := inst.Invoke(context.Background(), []byte(`{"spin":true}`), compute.Limits{MaxWall: 200 * time.Millisecond}); err == nil {
+		t.Fatal("spinning guest returned no error; wall-clock limit did not fire")
+	}
+	if n := idleLinkers(e); n != 0 {
+		t.Fatalf("after a wall-limit kill: %d idle linkers, want 0", n)
+	}
+	out, err := inst.Invoke(context.Background(), []byte(`{"in":7}`), lim)
+	if err != nil || gjson.GetBytes(out, "in").Int() != 7 || gjson.GetBytes(out, "runs").Int() != 1 {
+		t.Fatalf("call after failures: out=%s err=%v", out, err)
+	}
+	if n := idleLinkers(e); n != 1 {
+		t.Fatalf("after a clean call: %d idle linkers, want 1", n)
+	}
+}
+
+// TestLinkedOpConcurrent: calls in flight together each get a linker of
+// their own, and the pool keeps no more than maxIdleLinkers afterwards.
+func TestLinkedOpConcurrent(t *testing.T) {
+	e := newEngine(t).(*engine)
+	inst := linkedFixture(t, e)
+	const n = 3 * maxIdleLinkers
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			out, err := inst.Invoke(context.Background(), []byte(fmt.Sprintf(`{"in":%d}`, i)), compute.Limits{MaxWall: 10 * time.Second})
+			if err == nil && (gjson.GetBytes(out, "in").Int() != int64(i) || gjson.GetBytes(out, "runs").Int() != 1) {
+				err = fmt.Errorf("call %d: output %s", i, out)
+			}
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := idleLinkers(e); got < 1 || got > maxIdleLinkers {
+		t.Fatalf("%d idle linkers, want 1..%d", got, maxIdleLinkers)
+	}
+}
+
+// TestCloseDropsLinkers: Close releases the idle linkers, and a linker handed
+// back afterwards isn't kept.
+func TestCloseDropsLinkers(t *testing.T) {
+	e := newEngine(t).(*engine)
+	inst := linkedFixture(t, e)
+	if _, err := inst.Invoke(context.Background(), []byte(`{}`), compute.Limits{MaxWall: 5 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := e.takeLinker(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.giveLinker(context.Background(), l, true)
+	if n := idleLinkers(e); n != 0 {
+		t.Fatalf("after Close: %d idle linkers, want 0", n)
 	}
 }

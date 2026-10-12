@@ -352,6 +352,8 @@ func TestLintCalls(t *testing.T) {
 			Txcl: `WITH stack = ._next EXEC "call://app/_orient"`},
 		{Stack: "app", Scope: 400, Name: "slow", SourcePath: "/tmp/slow.txcl",
 			Txcl: `EXEC "call://app/_slow"`},
+		{Stack: "app", Scope: 500, Name: "past", SourcePath: "/tmp/past.txcl",
+			Txcl: `EXEC "call://app/_slow/200"`},
 		{Stack: "app/_orient", Scope: 100, Name: "compile", SourcePath: "/tmp/compile.txcl",
 			Txcl: `WHEN @src == "call" EMIT ._call.output.prompt = "p"`},
 		{Stack: "app/_slow", Scope: 100, Name: "job", SourcePath: "/tmp/job.txcl",
@@ -366,5 +368,11 @@ func TestLintCalls(t *testing.T) {
 	}
 	if !containsSubstring(got, `app/_slow/100/job (WITH mode = "async")`) || !containsSubstring(got, "txco_call_unsupported") {
 		t.Errorf("missing the refused-rule warning: %v", got)
+	}
+	// A call that enters past the refused rule (call://app/_slow/200) is not warned about.
+	for _, w := range got {
+		if strings.Contains(w, "/tmp/past.txcl") {
+			t.Errorf("a call entering after the refused rule must not warn: %s", w)
+		}
 	}
 }

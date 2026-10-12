@@ -488,6 +488,45 @@ func canonCycleKey(a, b stageRef) string {
 	return bk + "|" + ak
 }
 
+// refusedRule is a rule the call engine refuses inside a call: `WITH mode =
+// "async"` or `"continuable"`, with a literal mode. Only what is knowable
+// statically.
+type refusedRule struct {
+	scope int
+	text  string
+}
+
+// refusedRules finds, per stack of the bundle, the rules a call cannot run.
+func refusedRules(ops []bundle.Op) map[string][]refusedRule {
+	refused := map[string][]refusedRule{}
+	for _, op := range ops {
+		r, perr := txcl.Resonator(op.Txcl)
+		if perr != nil || r == nil {
+			continue
+		}
+		if mode, ok := literalString(r.With["mode"]); ok && (mode == "async" || mode == "continuable") {
+			refused[op.Stack] = append(refused[op.Stack], refusedRule{
+				scope: op.Scope,
+				text:  fmt.Sprintf("%s/%d/%s (WITH mode = %q)", op.Stack, op.Scope, op.Name, mode),
+			})
+		}
+	}
+	return refused
+}
+
+// refusedFrom is the refused rules of stack at or after scope: a call enters
+// there and runs forward, so a rule before its entry is never reached (a
+// backward bare-scope jump could reach one; the lint does not chase jumps).
+func refusedFrom(refused map[string][]refusedRule, stack string, scope int) []refusedRule {
+	var out []refusedRule
+	for _, rr := range refused[stack] {
+		if rr.scope >= scope {
+			out = append(out, rr)
+		}
+	}
+	return out
+}
+
 // lintCalls warns about what an `EXEC "call://…"` cannot know until it
 // runs, where the bundle being applied can tell in advance:
 //
@@ -495,9 +534,11 @@ func canonCycleKey(a, b stageRef) string {
 //     one is a result error (txco_call_no_stack) at the call, not an apply
 //     error; the warning is the reminder that the two trees are versioned
 //     apart.
-//   - the callee is in this apply and holds a rule that cannot run inside a
-//     call: `WITH mode = "async"` or `"continuable"` (the chassis refuses it
-//     with txco_call_unsupported). Only a literal mode is knowable here.
+//   - the callee is in this apply and holds, at or after where the call
+//     enters, a rule that cannot run inside a call: `WITH mode = "async"` or
+//     `"continuable"` (the chassis refuses it with txco_call_unsupported).
+//     A call that names a declared entry (`WITH entry`) enters where the
+//     declaration says, which lintCallEntries reads; it is checked there.
 //
 // Only literal targets are checked; a stack chosen at run time (`WITH
 // stack = ._next`) is not knowable statically. Warnings only, like the other
@@ -509,25 +550,14 @@ func lintCalls(ops []bundle.Op) []string {
 	for _, op := range ops {
 		inBundle[op.Stack] = true
 	}
-	// A callee's refused rules, found once per stack.
-	refused := map[string][]string{}
-	for _, op := range ops {
-		r, perr := txcl.Resonator(op.Txcl)
-		if perr != nil || r == nil {
-			continue
-		}
-		if mode, ok := literalString(r.With["mode"]); ok && (mode == "async" || mode == "continuable") {
-			refused[op.Stack] = append(refused[op.Stack],
-				fmt.Sprintf("%s/%d/%s (WITH mode = %q)", op.Stack, op.Scope, op.Name, mode))
-		}
-	}
+	refused := refusedRules(ops)
 
 	for _, op := range ops {
 		r, perr := txcl.Resonator(op.Txcl)
 		if perr != nil || r == nil || !strings.HasPrefix(r.Exec, opname.CallScheme) {
 			continue
 		}
-		stack, _, err := opname.CallTarget(r.Exec)
+		stack, scope, err := opname.CallTarget(r.Exec)
 		if err != nil {
 			continue // the parser reported it
 		}
@@ -538,11 +568,14 @@ func lintCalls(ops []bundle.Op) []string {
 				op.SourcePath, op.Stack, op.Scope, op.Name, stack))
 			continue
 		}
-		for _, rule := range refused[stack] {
+		if _, named := literalString(r.With["entry"]); named {
+			continue // lintCallEntries knows where it enters
+		}
+		for _, rr := range refusedFrom(refused, stack, scope) {
 			warnings = append(warnings, fmt.Sprintf(
 				"lint: %s (%s/%d/%s) calls stack %q, whose rule %s cannot run inside a call; "+
 					"the call ends with txco_call_unsupported when that rule fires",
-				op.SourcePath, op.Stack, op.Scope, op.Name, stack, rule))
+				op.SourcePath, op.Stack, op.Scope, op.Name, stack, rr.text))
 		}
 	}
 

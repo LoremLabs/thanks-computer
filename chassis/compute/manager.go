@@ -7,13 +7,15 @@ import (
 )
 
 // Manager is the default Runner: it resolves a ref to its artifact and runs
-// it on the artifact's engine. Engines are opened once per name and reused
-// (an engine owns any per-digest compile cache); a fresh Instance is loaded
-// per invocation. Implements Runner.
+// it on the artifact's engine. Resolved artifacts are kept in memory by ref
+// (see resolve). Engines are opened once per name and reused (an engine owns
+// any per-digest compile cache); a fresh Instance is loaded per invocation.
+// Implements Runner.
 type Manager struct {
-	res Resolver
-	cfg EngineConfig
-	lim Limits
+	res  Resolver
+	cfg  EngineConfig
+	lim  Limits
+	arts *artifactCache
 
 	mu      sync.Mutex
 	engines map[string]Engine
@@ -28,6 +30,7 @@ func NewManager(res Resolver, lim Limits) *Manager {
 		res:     res,
 		lim:     lim,
 		cfg:     EngineConfig{MaxMemoryMB: lim.MaxMemoryMB},
+		arts:    newArtifactCache(DefaultArtifactCacheBytes),
 		engines: map[string]Engine{},
 	}
 }
@@ -46,12 +49,32 @@ func (m *Manager) engine(name string) (Engine, error) {
 	return e, nil
 }
 
+// resolve returns ref's artifact, from memory when this Manager has resolved
+// it before. On a remote artifact store a resolve is a network round trip,
+// which cost more than the op itself on every call; a ref names its content,
+// so a kept artifact can't go stale. Only bytes that hash to the ref's digest
+// are kept, so a bad read is never reused, and errors aren't kept, so an
+// artifact uploaded after a miss is found on the next call.
+func (m *Manager) resolve(ctx context.Context, ref Ref) (Artifact, error) {
+	if art, ok := m.arts.get(ref); ok {
+		return art, nil
+	}
+	art, err := m.res.Resolve(ctx, ref)
+	if err != nil {
+		return Artifact{}, err
+	}
+	if matchesDigest(ref, art.Wasm) {
+		m.arts.put(ref, art)
+	}
+	return art, nil
+}
+
 // Run satisfies Runner: resolve → open engine → load → invoke → close.
 func (m *Manager) Run(ctx context.Context, ref Ref, input []byte) ([]byte, error) {
 	if m.res == nil {
 		return nil, errors.New("compute: no resolver configured")
 	}
-	art, err := m.res.Resolve(ctx, ref)
+	art, err := m.resolve(ctx, ref)
 	if err != nil {
 		return nil, err
 	}

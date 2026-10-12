@@ -128,10 +128,13 @@ func checkCallDecls(ops []bundle.Op, dir string) []string {
 	return msgs
 }
 
-// lintCallEntries warns when a `call://` names, with a literal `WITH
-// entry`, an entry its callee — in this apply — does not declare: the call
-// would answer txco_call_no_entry. A callee outside the apply is lintCalls's
-// warning; an entry chosen at run time is not knowable here. Warnings only.
+// lintCallEntries warns about a `call://` that names, with a literal `WITH
+// entry`, an entry of a callee in this apply: one the callee does not
+// declare (the call would answer txco_call_no_entry), or one at or after
+// whose scope the callee holds a rule a call cannot run (`WITH mode =
+// "async"` or `"continuable"`; txco_call_unsupported when it fires). A
+// callee outside the apply is lintCalls's warning; an entry chosen at run
+// time is not knowable here. Warnings only.
 func lintCallEntries(ops []bundle.Op, dir string) []string {
 	var warnings []string
 	_, stacks := stackScopes(ops)
@@ -139,6 +142,7 @@ func lintCallEntries(ops []bundle.Op, dir string) []string {
 	for _, s := range stacks {
 		inBundle[s] = true
 	}
+	refused := refusedRules(ops)
 	declared := map[string]map[string]*calldecl.Decl{}
 	for _, op := range ops {
 		r, perr := txcl.Resonator(op.Txcl)
@@ -160,10 +164,18 @@ func lintCallEntries(ops []bundle.Op, dir string) []string {
 			decls, _ := loadCallDecls(filepath.Join(dir, "OPS", filepath.FromSlash(stack)))
 			declared[stack] = decls
 		}
-		if declared[stack][entry] == nil {
+		d := declared[stack][entry]
+		if d == nil {
 			warnings = append(warnings, fmt.Sprintf(
 				"lint: %s (%s/%d/%s) calls entry %q of stack %q, which declares no %s; the call answers txco_call_no_entry",
 				op.SourcePath, op.Stack, op.Scope, op.Name, entry, stack, calldecl.DeclPath(entry)))
+			continue
+		}
+		for _, rr := range refusedFrom(refused, stack, d.Entry) {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s (%s/%d/%s) calls entry %q of stack %q, which enters at %d, and its rule %s cannot run inside a call; "+
+					"the call ends with txco_call_unsupported when that rule fires",
+				op.SourcePath, op.Stack, op.Scope, op.Name, entry, stack, d.Entry, rr.text))
 		}
 	}
 	return warnings

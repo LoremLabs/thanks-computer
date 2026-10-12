@@ -50,3 +50,5 @@ chassis/server/personality/ipp/ui/dist/*
 !chassis/server/personality/ipp/ui/dist/.gitkeep
 .txco/
 *.wasm
+# The compute engine's JS fixtures are committed so its tests need no javy.
+!chassis/compute/wazero/testdata/src/js/*.wasm

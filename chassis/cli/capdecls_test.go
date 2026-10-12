@@ -96,6 +96,8 @@ func TestCollectAndCheckCallDecls(t *testing.T) {
 		t.Fatalf("collect: %+v %v", files, err)
 	}
 	writeFile(t, filepath.Join(stackDir, "100/compile.txcl"), `EMIT ._call.output.prompt = "p"`+"\n")
+	writeFile(t, filepath.Join(stackDir, "50/early.txcl"), `EXEC "https://worker.example/x" WITH mode = "async"`+"\n")
+	writeFile(t, filepath.Join(stackDir, "150/later.txcl"), `EXEC "https://worker.example/y" WITH mode = "continuable", continue_after = "1s"`+"\n")
 	writeFile(t, filepath.Join(root, "OPS/app/100/call.txcl"), `WITH entry = "orient", input = &object("job", ._job) EXEC "call://app/_orient"`+"\n")
 	writeFile(t, filepath.Join(root, "OPS/app/200/typo.txcl"), `WITH entry = "orientt" EXEC "call://app/_orient"`+"\n")
 	writeFile(t, filepath.Join(root, "OPS/app/300/elsewhere.txcl"), `WITH entry = "x" EXEC "call://billing"`+"\n")
@@ -110,9 +112,18 @@ func TestCollectAndCheckCallDecls(t *testing.T) {
 	}
 	// The typo'd entry is warned about; the declared one and the callee
 	// outside the workspace are not.
+	// The typo'd entry is warned about, and so is the continuable rule at
+	// 150, after the entry at 100; the async rule at 50, before it, is not.
 	warns := lintCallEntries(ops, root)
-	if len(warns) != 1 || !strings.Contains(warns[0], `entry "orientt"`) || !strings.Contains(warns[0], "txco_call_no_entry") {
+	if len(warns) != 2 || !containsSubstring(warns, `entry "orientt"`) || !containsSubstring(warns, "txco_call_no_entry") ||
+		!containsSubstring(warns, `app/_orient/150/later (WITH mode = "continuable")`) || containsSubstring(warns, "app/_orient/50/early") {
 		t.Fatalf("lintCallEntries = %v", warns)
+	}
+	// And lintCalls leaves the entry-named calls to lintCallEntries.
+	for _, w := range lintCalls(ops) {
+		if strings.Contains(w, "cannot run inside a call") {
+			t.Errorf("lintCalls warned about a call that names an entry: %s", w)
+		}
 	}
 	writeFile(t, filepath.Join(stackDir, "CALLS/Bad Name.yaml"), "entry: 100\n")
 	if _, err := collectCallFiles(stackDir); err == nil || !strings.Contains(err.Error(), "Bad Name.yaml") {
