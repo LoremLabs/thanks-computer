@@ -2,11 +2,15 @@ package processor
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/tidwall/gjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/txcl"
 )
 
 // seedRule inserts a single ops row into the per-test SQLite handle so a
@@ -187,4 +191,142 @@ func TestSelectDefaultTypedNumber(t *testing.T) {
 	if got := gjson.Get(p.Raw, "out").Int(); got != 42 {
 		t.Errorf("numeric default: out = %d, want 42", got)
 	}
+}
+
+// TestSelectEachRequestCarriesItsOwnValue — the parsed rule is shared by
+// every request that runs it (opsindex: "read-only by contract"), so
+// SELECT's per-request writes must never land on it. They used to: the
+// synthetic EMIT entries were prepended onto the shared Resonator.Emit,
+// so from the second request on the merged response carried the FIRST
+// request's value at every SELECT'd path (later entries win, and the
+// first request's were always last). Three requests, three values.
+func TestSelectEachRequestCarriesItsOwnValue(t *testing.T) {
+	cases := []struct {
+		name, rule string
+		tag        bool // the rule's own EMIT writes .tag = "t"
+	}{
+		{"no exec", `SELECT .v AS .out`, false},
+		{"exec", `SELECT .v AS .out EXEC "txco://test-capture"`, false},
+		{"with emit", `SELECT .v AS .out EMIT .tag = "t"`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pu, _ := newTestUnit(t)
+			got := captureHandler(t, pu, "txco://test-capture")
+			seedRule(t, pu, "sel/each", "each", tc.rule)
+
+			for _, v := range []string{"seqA", "seqB", "seqC"} {
+				p := runOne(t, pu, `{"v":"`+v+`"}`, "sel/each/0")
+				if out := gjson.Get(p.Raw, "out").String(); out != v {
+					t.Errorf("request v=%s: merged out = %q, want %q; body=%s", v, out, v, p.Raw)
+				}
+				if tc.tag && gjson.Get(p.Raw, "tag").String() != "t" {
+					t.Errorf("request v=%s: the rule's own EMIT lost; body=%s", v, p.Raw)
+				}
+				if c, _ := got.Load().(string); c != "" && gjson.Get(c, "out").String() != v {
+					t.Errorf("request v=%s: op was handed out = %q", v, gjson.Get(c, "out").String())
+				}
+			}
+		})
+	}
+}
+
+// TestSelectAuthoredEmitStillWins — a rule's own EMIT on a SELECT'd path
+// overrides the SELECT on every request, not just the first.
+func TestSelectAuthoredEmitStillWins(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	seedRule(t, pu, "sel/pin", "pin", `SELECT .v AS .out EMIT .out = "pinned"`)
+
+	for _, v := range []string{"a", "b", "c"} {
+		p := runOne(t, pu, `{"v":"`+v+`"}`, "sel/pin/0")
+		if out := gjson.Get(p.Raw, "out").String(); out != "pinned" {
+			t.Errorf("request v=%s: out = %q, want pinned; body=%s", v, out, p.Raw)
+		}
+	}
+}
+
+// TestSelectLeavesSharedRuleUntouched — ResonatingOps hands back an op
+// whose Emit carries this request's SELECT values, and the parsed rule
+// it came from is exactly as it was: no Emit grown onto a rule that had
+// none, no entries added to one that had some.
+func TestSelectLeavesSharedRuleUntouched(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	ctx := context.Background()
+	seedRule(t, pu, "sel/bare", "bare", `SELECT .v AS .out`)
+	seedRule(t, pu, "sel/emit", "emit", `SELECT .v AS .out EMIT .tag = "t"`)
+
+	for _, stage := range []string{"sel/bare/0", "sel/emit/0"} {
+		ops, err := pu.OpsForStage(ctx, stage)
+		if err != nil || len(ops) != 1 {
+			t.Fatalf("%s: OpsForStage = %d ops, %v", stage, len(ops), err)
+		}
+		if ops[0].Resonator == nil {
+			res, perr := txcl.Resonator(ops[0].Txcl)
+			if perr != nil {
+				t.Fatalf("%s: parse: %v", stage, perr)
+			}
+			ops[0].Resonator = res
+		}
+		shared := ops[0].Resonator
+		before := 0
+		if shared.Emit != nil {
+			before = len(shared.Emit.Overrides)
+		}
+		for _, v := range []string{"a", "b"} {
+			in := make([]operation.Operation, len(ops))
+			copy(in, ops)
+			got, err := pu.ResonatingOps(`{"v":"`+v+`"}`, in, "")
+			if err != nil || len(got) != 1 {
+				t.Fatalf("%s: ResonatingOps = %d ops, %v", stage, len(got), err)
+			}
+			if got[0].Resonator == shared {
+				t.Errorf("%s: the SELECT'd op still points at the shared rule", stage)
+			}
+			if e := got[0].Resonator.Emit; e == nil || len(e.Overrides) != before+1 || e.Overrides[0].Path != ".out" {
+				t.Errorf("%s: this op's Emit = %+v, want the SELECT entry then the rule's %d", stage, e, before)
+			}
+		}
+		after := 0
+		if shared.Emit != nil {
+			after = len(shared.Emit.Overrides)
+		}
+		if stage == "sel/bare/0" && shared.Emit != nil {
+			t.Errorf("%s: the shared rule grew an Emit: %+v", stage, shared.Emit)
+		}
+		if after != before {
+			t.Errorf("%s: shared rule's Emit went from %d to %d entries", stage, before, after)
+		}
+	}
+}
+
+// TestSelectConcurrentRequestsKeepTheirOwnValues — many requests at once
+// through one parsed rule; each merged response carries its own value.
+// Run with -race: appending onto the shared rule was also a data race.
+func TestSelectConcurrentRequestsKeepTheirOwnValues(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	// One connection: each go-sqlite3 :memory: connection is its own
+	// empty database (dbcache pins the real snapshot the same way).
+	pu.Dbc.Db.SetMaxOpenConns(1)
+	seedRule(t, pu, "sel/many", "many", `SELECT .v AS .out EMIT .tag = "t"`)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 8; i++ {
+				v := fmt.Sprintf("g%d-i%d", g, i)
+				resCh := make(chan event.Payload, 1)
+				if err := pu.Run(context.Background(), `{"v":"`+v+`"}`, "sel/many/0", resCh); err != nil {
+					t.Errorf("Run: %v", err)
+					return
+				}
+				p := <-resCh
+				if out := gjson.Get(p.Raw, "out").String(); out != v {
+					t.Errorf("request %s: out = %q", v, out)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }

@@ -3831,15 +3831,19 @@ func (pu *Unit) ResonatingOps(input string, ops []operation.Operation, hashSeed 
 			}
 			// Merge into Emit so the writes survive into the
 			// post-EXEC overlay. User-authored EMIT (if any) goes
-			// last → wins on conflict.
-			if op.Resonator.Emit == nil {
-				op.Resonator.Emit = &resonator.Set{Overrides: synthetic}
-			} else {
-				op.Resonator.Emit.Overrides = append(
-					append([]resonator.BranchValue{}, synthetic...),
-					op.Resonator.Emit.Overrides...,
-				)
+			// last → wins on conflict. The parsed rule is shared by
+			// every request that runs it (opsindex: read-only by
+			// contract), so the merge goes on THIS op's shallow copy
+			// of it, never the rule: written there, the first
+			// request's literals came last and won for every later
+			// request, and the list grew on each one.
+			merged := synthetic
+			if op.Resonator.Emit != nil {
+				merged = append(merged, op.Resonator.Emit.Overrides...)
 			}
+			own := *op.Resonator
+			own.Emit = &resonator.Set{Overrides: merged}
+			op.Resonator = &own
 			// Carry `_ts` forward — inlets stamp it once; nothing
 			// downstream re-creates it on the dispatched view.
 			if ts := gjson.Get(op.Input, "_ts"); ts.Exists() {

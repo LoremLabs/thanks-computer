@@ -27,7 +27,9 @@ package processor
 // shared across requests and goroutines. That is safe by design —
 // WhenMatches uses a value receiver and never writes back into the
 // shared When tree (see resonator.go), and the processor only reads
-// Resonator fields after parse. Everything per-request (Input, Output,
+// Resonator fields after parse; a clause that needs a per-request
+// variant of the rule (SELECT's synthetic EMIT) takes a shallow copy
+// onto its own op first. Everything per-request (Input, Output,
 // Meta, OpID, Secrets) lives on the per-request copy that atOrAbove
 // returns, built with operation.Copy() (fresh OpID, zero secret bag).
 
