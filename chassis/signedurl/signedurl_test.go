@@ -112,3 +112,43 @@ func TestSignRefusesIncompleteClaims(t *testing.T) {
 		t.Error("a 16-byte key was accepted")
 	}
 }
+
+func TestNameClaim(t *testing.T) {
+	s := testSigner(t, 1, 1)
+	now := time.Unix(1_800_000_000, 0)
+	in := Claims{Tenant: "acme", Collection: "dc_1", Resource: "dr_1", SHA256: strings.Repeat("ab", 32), Expires: now.Add(time.Minute).Unix(), Name: "Acme contract (signed).pdf"}
+	tok, err := s.Sign(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Verify(tok, now)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got.Name != in.Name {
+		t.Errorf("name = %q, want %q", got.Name, in.Name)
+	}
+	// A token with no name parses as none, and carries no `n` at all.
+	in.Name = ""
+	tok, _ = s.Sign(in)
+	raw, _ := base64.RawURLEncoding.DecodeString(strings.Split(tok, ".")[1])
+	if strings.Contains(string(raw), `"n"`) {
+		t.Errorf("an empty name is in the token: %s", raw)
+	}
+	if got, _ := s.Verify(tok, now); got.Name != "" {
+		t.Errorf("name = %q, want none", got.Name)
+	}
+}
+
+func TestSignRefusesATokenTooLongToVerify(t *testing.T) {
+	s := testSigner(t, 1, 1)
+	now := time.Unix(1_800_000_000, 0)
+	in := Claims{Tenant: "acme", Collection: "dc_1", Resource: "dr_1", SHA256: strings.Repeat("ab", 32), Expires: now.Add(time.Minute).Unix(), Name: strings.Repeat("<", 300)}
+	if _, err := s.Sign(in); !errors.Is(err, ErrTooLong) {
+		t.Errorf("err = %v, want ErrTooLong", err)
+	}
+	in.Name = strings.Repeat("n", 255)
+	if tok, err := s.Sign(in); err != nil || len(tok) > maxTokenLen {
+		t.Errorf("a 255-byte plain name: err %v, %d bytes", err, len(tok))
+	}
+}

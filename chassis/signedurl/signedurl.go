@@ -45,18 +45,23 @@ var (
 	ErrInvalid = errors.New("signedurl: invalid token")
 	// ErrExpired is a genuine token past its expiry.
 	ErrExpired = errors.New("signedurl: token expired")
+	// ErrTooLong is a claim set (a long Name, JSON-escaped) that would make a
+	// token Verify refuses: Sign never mints one.
+	ErrTooLong = errors.New("signedurl: token too long")
 )
 
 // Claims is what a token grants: a read of resource Resource in collection
 // Collection of tenant Tenant, while its content is still SHA256, until
-// Expires.
+// Expires. Name, when set, is the filename the download is served under
+// (the signer's choice; the document's own name otherwise).
 type Claims struct {
 	Tenant     string `json:"t"`
-	Collection string `json:"c"` // collection id
-	Resource   string `json:"r"` // resource id
-	SHA256     string `json:"h"` // bare hex of the pinned content
-	Expires    int64  `json:"e"` // unix seconds
-	KeyVersion int    `json:"k"` // master-key generation that signed it
+	Collection string `json:"c"`           // collection id
+	Resource   string `json:"r"`           // resource id
+	SHA256     string `json:"h"`           // bare hex of the pinned content
+	Expires    int64  `json:"e"`           // unix seconds
+	KeyVersion int    `json:"k"`           // master-key generation that signed it
+	Name       string `json:"n,omitempty"` // the download's filename, if the signer chose one
 }
 
 // Signer signs and verifies tokens under one key.
@@ -91,7 +96,11 @@ func (s *Signer) Sign(c Claims) (string, error) {
 		return "", err
 	}
 	signed := version + "." + base64.RawURLEncoding.EncodeToString(raw)
-	return signed + "." + base64.RawURLEncoding.EncodeToString(s.mac(signed)), nil
+	token := signed + "." + base64.RawURLEncoding.EncodeToString(s.mac(signed))
+	if len(token) > maxTokenLen {
+		return "", ErrTooLong
+	}
+	return token, nil
 }
 
 // Verify returns the claims of a genuine, unexpired token. The MAC is

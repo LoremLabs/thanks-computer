@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -41,6 +42,10 @@ const (
 	// driveSignTTLMax caps `ttl`. The fetch must START inside the window; a
 	// download in progress is not cut off when the token expires.
 	driveSignTTLMax = time.Hour
+	// driveSignNameMax bounds a `filename` as a filesystem does (NAME_MAX).
+	// It rides in the token, JSON-escaped, and the signer refuses a token
+	// that would be too long to verify (signedurl.ErrTooLong).
+	driveSignNameMax = 255
 )
 
 // signedURLBase is the public origin signed URLs are minted on: the
@@ -67,8 +72,10 @@ func signedURLBase(conf config.Config) string {
 
 // driveSign mints a signed URL for one file of the pinned tenant. WITH
 // `collection` + (`path` | `resource_id`), optional `ttl` seconds (default
-// 600, at most 3600). Result at `into`: {url, expires_at, ttl, resource_id,
-// path, name, size, content_type, sha256}.
+// 600, at most 3600), optional `filename` — the name the download is served
+// under (Content-Disposition), the document's own name otherwise: a bare
+// name, no slashes, up to 255 bytes. Result at `into`: {url, expires_at,
+// ttl, resource_id, path, name, filename, size, content_type, sha256}.
 //
 // The fetcher should check what it received against `sha256` — the URL
 // guarantees it, but the fetcher is the one who can prove it.
@@ -100,6 +107,14 @@ func driveSign(ctx context.Context, d driveDeps, in []byte) (event.Payload, erro
 				"`ttl` is seconds, 1 to "+strconv.Itoa(int(driveSignTTLMax/time.Second))), nil
 		}
 	}
+	filename := ""
+	if f := gjson.GetBytes(meta, "filename"); f.Exists() {
+		filename = strings.TrimSpace(f.String())
+		if f.Type != gjson.String || filename == "" || len(filename) > driveSignNameMax || !bareFilename(filename) {
+			return driveErr(into, "txco_drive_invalid_arg",
+				"`filename` is a bare name for the download: no slashes, no control characters, 1 to "+strconv.Itoa(driveSignNameMax)+" bytes"), nil
+		}
+	}
 	res, found, err := driveStatFor(ctx, d, coll.ID, path, id)
 	if err != nil {
 		return driveStoreErr(into, err), nil
@@ -121,8 +136,12 @@ func driveSign(ctx context.Context, d driveDeps, in []byte) (event.Payload, erro
 		Resource:   res.ResourceID,
 		SHA256:     res.ETag,
 		Expires:    expires.Unix(),
+		Name:       filename,
 	})
 	if err != nil {
+		if errors.Is(err, signedurl.ErrTooLong) {
+			return driveErr(into, "txco_drive_invalid_arg", "`filename` is too long for a signed URL"), nil
+		}
 		return driveErr(into, "txco_drive_store", err.Error()), nil
 	}
 	driveChargeBytes(ctx, res.Size, in)
@@ -134,10 +153,73 @@ func driveSign(ctx context.Context, d driveDeps, in []byte) (event.Payload, erro
 	out.Set(into+".resource_id", res.ResourceID)
 	out.Set(into+".path", res.Path)
 	out.Set(into+".name", chdrive.BaseOf(res.Path))
+	out.Set(into+".filename", downloadName(filename, res.Path))
 	out.Set(into+".size", res.Size)
 	out.Set(into+".content_type", res.ContentType)
 	out.Set(into+".sha256", res.ETag)
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
+}
+
+// bareFilename says whether name can be a download's filename: no path
+// separators, no control characters. Quotes and non-ASCII are fine; the
+// header encodes them (attachmentDisposition).
+func bareFilename(name string) bool {
+	for _, r := range name {
+		if r == '/' || r == '\\' || r < 0x20 || r == 0x7f || r == unicode.ReplacementChar {
+			return false
+		}
+	}
+	return true
+}
+
+// downloadName is the filename a signed download is served under: the
+// signer's `filename` when it chose one, else the document's own name.
+func downloadName(chosen, path string) string {
+	if chosen != "" {
+		return chosen
+	}
+	return chdrive.BaseOf(path)
+}
+
+// attachmentDisposition renders the Content-Disposition header for name:
+// always an attachment, with the name both ways browsers read it — a
+// plain `filename` (ASCII; anything else replaced) and an RFC 5987
+// `filename*` (UTF-8, percent-encoded), the second winning where both
+// are understood. An empty name is a bare `attachment`.
+func attachmentDisposition(name string) string {
+	if name == "" {
+		return "attachment"
+	}
+	ascii := make([]byte, 0, len(name))
+	for _, r := range name {
+		switch {
+		case r == '"':
+			ascii = append(ascii, '\'')
+		case r < 0x20 || r > 0x7e:
+			ascii = append(ascii, '_')
+		default:
+			ascii = append(ascii, byte(r))
+		}
+	}
+	return `attachment; filename="` + string(ascii) + `"; filename*=UTF-8''` + rfc5987Escape(name)
+}
+
+// rfc5987Escape percent-encodes every byte of s but RFC 5987's attr-char
+// set (the characters that need no quoting in a parameter value).
+func rfc5987Escape(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strings.IndexByte("!#$&+-.^_`|~", c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&15])
+	}
+	return b.String()
 }
 
 // signedBodyBudget is the write deadline for streaming size bytes: the web
@@ -159,8 +241,9 @@ func signedBodyBudget(size int64) time.Duration {
 //
 // The response is inert wherever it lands: this path answers on every
 // hostname the web head serves, so a tenant's document must never render as
-// a page on someone's origin. It is always an attachment, never sniffed,
-// sandboxed, and never cached.
+// a page on someone's origin. It is always an attachment — named after the
+// document, or as the signer chose — never sniffed, sandboxed, and never
+// cached.
 func signedHandler(store *chdrive.Store, signer *signedurl.Signer, adm admission.Provider, logger *zap.Logger) http.HandlerFunc {
 	notFound := func(w http.ResponseWriter) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -221,7 +304,7 @@ func signedHandler(store *chdrive.Store, signer *signedurl.Signer, adm admission
 		}
 		h := w.Header()
 		h.Set("Content-Type", ct)
-		h.Set("Content-Disposition", "attachment")
+		h.Set("Content-Disposition", attachmentDisposition(downloadName(c.Name, res.Path)))
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Content-Security-Policy", "sandbox; default-src 'none'")
 		h.Set("Cache-Control", "private, no-store")

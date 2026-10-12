@@ -94,7 +94,7 @@ func TestDriveSignAndFetch(t *testing.T) {
 	// Inert wherever it lands: never a page on somebody's origin.
 	for k, v := range map[string]string{
 		"Content-Type":            "application/pdf",
-		"Content-Disposition":     "attachment",
+		"Content-Disposition":     `attachment; filename="report.pdf"; filename*=UTF-8''report.pdf`,
 		"X-Content-Type-Options":  "nosniff",
 		"Content-Security-Policy": "sandbox; default-src 'none'",
 		"Cache-Control":           "private, no-store",
@@ -120,6 +120,63 @@ func TestDriveSignAndFetch(t *testing.T) {
 	if gjson.Get(out, "_drive.error").Exists() || gjson.Get(out, "_drive.ttl").Int() != 30 {
 		t.Errorf("sign by id = %s", out)
 	}
+	if got := gjson.Get(out, "_drive.filename").String(); got != "report.pdf" {
+		t.Errorf("filename (the document's own) = %q", got)
+	}
+
+	// The longest plain name signs; a name the JSON escaping blows up (`<` is
+	// six bytes escaped) would make a token too long to verify, so it is
+	// refused here, never minted as a URL nobody can redeem.
+	out = callDrive(t, driveSign, d, "acme", `{"collection":"docs","path":"report.pdf","filename":"`+strings.Repeat("n", 255)+`","into":"_sig"}`)
+	if gjson.Get(out, "_sig.error").Exists() {
+		t.Errorf("a 255-byte name: %s", out)
+	}
+	out = callDrive(t, driveSign, d, "acme", `{"collection":"docs","path":"report.pdf","filename":"`+strings.Repeat("<", 200)+`","into":"_sig"}`)
+	if got := gjson.Get(out, "_sig.error.code").String(); got != "txco_drive_invalid_arg" {
+		t.Errorf("a name too long once escaped: code = %q (%s)", got, out)
+	}
+
+	// A filename of the signer's choosing names the download instead:
+	// stored under an id, served under its name — with the characters a
+	// name may carry (spaces, parentheses, non-ASCII) encoded both ways.
+	callDrive(t, drivePut, d, "acme", `{"collection":"docs","path":"Pins/pf_1/blob","value":"the contract","encoding":"utf8","content_type":"application/pdf","parents":true}`)
+	for name, tc := range map[string]struct{ filename, header string }{
+		"plain":     {"contract.pdf", `attachment; filename="contract.pdf"; filename*=UTF-8''contract.pdf`},
+		"spaces":    {"Acme contract (signed).pdf", `attachment; filename="Acme contract (signed).pdf"; filename*=UTF-8''Acme%20contract%20%28signed%29.pdf`},
+		"non-ascii": {"résumé \\\"final\\\".pdf", `attachment; filename="r_sum_ 'final'.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9%20%22final%22.pdf`},
+	} {
+		out = callDrive(t, driveSign, d, "acme", `{"collection":"docs","path":"Pins/pf_1/blob","filename":"`+tc.filename+`","into":"_sig"}`)
+		if gjson.Get(out, "_sig.error").Exists() || gjson.Get(out, "_sig.filename").String() != strings.ReplaceAll(tc.filename, `\"`, `"`) {
+			t.Fatalf("%s: sign = %s", name, out)
+		}
+		res, _ := signedGet(t, h, http.MethodGet, gjson.Get(out, "_sig.url").String(), nil)
+		if got := res.Header.Get("Content-Disposition"); res.StatusCode != 200 || got != tc.header {
+			t.Errorf("%s: %d Content-Disposition = %q, want %q", name, res.StatusCode, got, tc.header)
+		}
+	}
+}
+
+func TestAttachmentDisposition(t *testing.T) {
+	for in, want := range map[string]string{
+		"":              "attachment",
+		"a.txt":         `attachment; filename="a.txt"; filename*=UTF-8''a.txt`,
+		"two words.png": `attachment; filename="two words.png"; filename*=UTF-8''two%20words.png`,
+		"naïve;x=1":     `attachment; filename="na_ve;x=1"; filename*=UTF-8''na%C3%AFve%3Bx%3D1`,
+	} {
+		if got := attachmentDisposition(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+	for _, bad := range []string{"../x", "a/b", "a\\b", "tab\there", "\x7f"} {
+		if bareFilename(bad) {
+			t.Errorf("%q should not be a bare filename", bad)
+		}
+	}
+	for _, ok := range []string{"a.txt", "résumé.pdf", `say "hi".txt`, "semi;colon"} {
+		if !bareFilename(ok) {
+			t.Errorf("%q should be a bare filename", ok)
+		}
+	}
 }
 
 func TestDriveSignRefusals(t *testing.T) {
@@ -137,6 +194,10 @@ func TestDriveSignRefusals(t *testing.T) {
 		"ttl too long":     {"acme", `{"collection":"docs","path":"folder","ttl":3601}`, "txco_drive_invalid_arg"},
 		"ttl zero":         {"acme", `{"collection":"docs","path":"folder","ttl":0}`, "txco_drive_invalid_arg"},
 		"ttl not a number": {"acme", `{"collection":"docs","path":"folder","ttl":"soon"}`, "txco_drive_invalid_arg"},
+		"filename a path":  {"acme", `{"collection":"docs","path":"folder","filename":"../x.pdf"}`, "txco_drive_invalid_arg"},
+		"filename empty":   {"acme", `{"collection":"docs","path":"folder","filename":"  "}`, "txco_drive_invalid_arg"},
+		"filename long":    {"acme", `{"collection":"docs","path":"folder","filename":"` + strings.Repeat("n", 256) + `"}`, "txco_drive_invalid_arg"},
+		"filename number":  {"acme", `{"collection":"docs","path":"folder","filename":7}`, "txco_drive_invalid_arg"},
 		"no tenant":        {"", `{"collection":"docs","path":"folder"}`, "txco_drive_no_tenant"},
 	} {
 		if got := gjson.Get(callDrive(t, driveSign, d, tc.tenant, tc.meta), "_drive.error.code").String(); got != tc.code {

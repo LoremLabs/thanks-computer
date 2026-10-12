@@ -83,7 +83,7 @@ collection is always addressed by `collection` (its name); a resource by
 | `drive/mkdir` | `collection`, `path`; `parents` | `{resource_id, path, created, modseq}` — an existing directory is `created: false` |
 | `drive/move` | `collection`, `path`, `to`; `overwrite`; `parents` (for `to`) | `{resource_id, path, from, kind, etag, modseq}` — the id is kept |
 | `drive/copy` | `collection`, `path`, `to`; `overwrite`; `parents` | the same shape; a NEW id (every descendant too) |
-| `drive/sign` | `collection`; `path` XOR `resource_id`; `ttl` (seconds, default 600, at most 3600) | `{url, expires_at, ttl, resource_id, path, name, size, content_type, sha256}` — a short-lived URL for that exact document; see [signed URLs](#signed-urls-a-file-by-reference) |
+| `drive/sign` | `collection`; `path` XOR `resource_id`; `ttl` (seconds, default 600, at most 3600); `filename` (the name the download is served under — a bare name, no slashes, up to 255 bytes; the document's own name otherwise) | `{url, expires_at, ttl, resource_id, path, name, filename, size, content_type, sha256}` — a short-lived URL for that exact document; see [signed URLs](#signed-urls-a-file-by-reference) |
 
 Every item of `list`, and `stat`'s `resource`, is
 `{resource_id, kind (file | dir), path, name, parent, size, content_type,
@@ -133,7 +133,12 @@ expires.** What keeps that narrow:
   tenant is suspended" are the same bare `404`.
 - **Inert.** The path answers on every ordinary hostname the web head
   serves, so the response is always an attachment — `nosniff`, sandboxed,
-  `no-store` — and can never render as a page on someone's origin.
+  `no-store` — and can never render as a page on someone's origin. The
+  attachment is named: `Content-Disposition: attachment; filename="…";
+  filename*=UTF-8''…` carries the document's own name, or the `filename`
+  the signer chose (a file stored under an id, served under its name). A
+  browser following a link to the URL saves it under that name; an `<img>`
+  pointing at it still renders.
 - **Stateless.** The token is the claims and an HMAC under a key derived
   from the secret store's master key; nothing is stored, and any node of a
   fleet sharing that key serves any node's URLs. No master key on the node ⇒
