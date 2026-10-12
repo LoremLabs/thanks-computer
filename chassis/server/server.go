@@ -2063,6 +2063,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// Registered unconditionally: a chassis with no declarations answers an
 	// empty catalogue. See chassis/server/caps.go.
 	capDecls := &capDeclSource{dbc: dbc, fcas: fcas}
+	// A `cap://` whose name a stack of the request's tenant declares runs
+	// here, in process, on the call engine (processor/cap.go); the rest go
+	// up to the parent.
+	pu.Caps = capDecls
 	pu.Handle([]byte("txco://caps/list"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return capsList(ctx, capsDeps{decls: capDecls}, in)

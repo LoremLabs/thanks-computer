@@ -5,6 +5,9 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 )
 
 // An execution frame is one invocation of the pipeline inside a request.
@@ -92,12 +95,13 @@ func rootFrame(source string) *frame {
 	return &frame{source: source, peels: true, mayStream: true, mayContinue: true}
 }
 
-// newCallFrame is the frame a `call://` pushes: boxed to stack, with a fresh
+// newCallFrame is the frame a call pushes (a `call://`, or a capability
+// answered on this chassis): boxed to stack, under source, with a fresh
 // transition history and the version-0 policies.
-func newCallFrame(parent *frame, stack, input string, caller frameCaller) *frame {
+func newCallFrame(parent *frame, stack, source, input string, caller frameCaller) *frame {
 	return &frame{
 		stack:   stack,
-		source:  "call",
+		source:  source,
 		depth:   parent.callDepth() + 1,
 		input:   input,
 		caller:  caller,
@@ -222,4 +226,53 @@ func (f *frame) failure() *callError {
 	}
 	cp := *f.fail
 	return &cp
+}
+
+// resumeFrame is the frame a resumed continuation runs in: the request's
+// own policies, except that nobody is on the other end of its channel, so
+// it cannot stream.
+func resumeFrame(source string) *frame {
+	return &frame{source: source, peels: true, mayContinue: true}
+}
+
+// detachedFrame is the frame a detached op runs in — a promoted continuable
+// op, a local async op — on a context of its own: no client to stream to.
+func detachedFrame(source string) *frame {
+	return &frame{source: source, peels: true, mayContinue: true}
+}
+
+// resumeContext builds the context a resumed continuation runs under, from
+// the chassis-stamped envelope captured at suspend: the tenant, the source
+// and the principal re-pinned from it — never from merged worker output,
+// which a hostile worker could have shaped — the resume identity, and a
+// frame that cannot stream. Run's first-Run block is skipped once the
+// snapshot is attached, so everything it would have pinned is pinned here,
+// in one place for both resume paths.
+func (pu *Unit) resumeContext(ctx context.Context, scopeEnvelope string, ident resumeIdent) context.Context {
+	rctx := withResumeRun(ctx, ident)
+	rctx = WithTenant(rctx, gjson.Get(scopeEnvelope, "_txc.tenant").String())
+	src := gjson.Get(scopeEnvelope, "_txc.src").String()
+	rctx = WithSource(rctx, src)
+	rctx = withPrincipalFrom(rctx, scopeEnvelope)
+	return withFrame(rctx, resumeFrame(src))
+}
+
+// attachResumeSnapshot pins the opstack frozen at suspend onto rctx, so
+// every lookup of the resumed execution — this stage, the next, any deeper
+// advancement or re-suspend — resolves against it rather than the live
+// opstack. No snapshot, or one that cannot be rebuilt, leaves the live
+// opstack in place (pre-snapshot runs, untenanted paths). The returned
+// release closes the snapshot; call it when the resume returns.
+func (pu *Unit) attachResumeSnapshot(ctx, rctx context.Context, runID string) (context.Context, func()) {
+	snapData, serr := pu.Runs.ReadOpstackSnapshot(ctx, runID)
+	if serr != nil || len(snapData) == 0 {
+		return rctx, func() {}
+	}
+	snapDB, berr := buildSnapshotDB(snapData)
+	if berr != nil {
+		pu.Logger.Warn("opstack snapshot rebuild failed; resuming against live opstack",
+			zap.String("run", runID), zap.Error(berr))
+		return rctx, func() {}
+	}
+	return context.WithValue(rctx, ctxKeyOpstackSnap, snapDB), func() { snapDB.Close() }
 }

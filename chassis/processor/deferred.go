@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
@@ -652,24 +651,19 @@ func (pu *Unit) resumeDeferredJoin(ctx context.Context, runID, stage string, ss 
 	if rc, rcErr := pu.Runs.ReadRunCreated(ctx, runID); rcErr == nil {
 		rcid = rc.RunContinuationID
 	}
-	rctx := withResumeRun(ctx, resumeIdent{
+	// The same context Resume builds (resumeContext, frame.go): the tenant,
+	// the source and the principal re-pinned from the scope envelope, the
+	// resume identity, a frame that cannot stream; plus the deferred
+	// identity, so the re-run's floor check and a later same-run barrier
+	// find the run.
+	rctx := pu.resumeContext(ctx, ss.ScopeEnvelope, resumeIdent{
 		runID: runID, rcid: rcid,
 		segStage: stage, segFuel: FuelUsedFromEnvelope(ss.ScopeEnvelope),
 		segBytes: len(ss.ScopeEnvelope), segStart: start,
 	})
 	rctx = withDeferredRun(rctx, runID, rcid)
-	rctx = WithTenant(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.tenant").String())
-	rctx = withPrincipalFrom(rctx, ss.ScopeEnvelope)
-
-	if snapData, serr := pu.Runs.ReadOpstackSnapshot(ctx, runID); serr == nil && len(snapData) > 0 {
-		if snapDB, berr := buildSnapshotDB(snapData); berr != nil {
-			pu.Logger.Warn("opstack snapshot rebuild failed; resuming against live opstack",
-				zap.String("run", runID), zap.Error(berr))
-		} else {
-			defer snapDB.Close()
-			rctx = context.WithValue(rctx, ctxKeyOpstackSnap, snapDB)
-		}
-	}
+	rctx, releaseSnap := pu.attachResumeSnapshot(ctx, rctx, runID)
+	defer releaseSnap()
 
 	// Re-run the join scope. Run's prelude re-runs the floor check (already-
 	// joined ops are skipped) and then executes the join scope's own ops.

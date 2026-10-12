@@ -47,18 +47,33 @@ import (
 // A call isolates DATA, not AUTHORITY: the callee runs with the request's
 // tenant, principal, secrets and run grant. It is not a security boundary.
 //
-// The frame (frame.go) is what makes a call a call: it carries the boundary,
-// the policies the version-0 engine refuses (streaming, suspension), the
-// frame's own transition history, and the ops in flight the engine waits on
-// when the call is cancelled. The same engine is meant to serve a capability
-// answered on the chassis that declares it; see docs/todo-stack-call.md in
-// the service repo.
+// The engine below (runFrame) is what makes a call a call: a frame
+// (frame.go) carrying the boundary, the policies the version-0 engine
+// refuses (streaming, suspension), the frame's own transition history, and
+// the ops in flight the engine waits on when the call is cancelled. The same
+// engine serves a capability answered on the chassis that declares it
+// (cap.go, execCapLocal): the two ways in differ only in what they stamp
+// and how they shape the answer. See docs/todo-stack-call.md in the service
+// repo.
 
 const (
 	callDefaultInto    = "_call"
 	callDepthDefault   = 8
 	callDefaultTimeout = 60 * time.Second
 	callDefaultGrace   = 2 * time.Second
+)
+
+// The engine's verdicts on a frame, short; each way in composes its own
+// code from them (txco_call_<verdict>, txco_cap_<verdict>).
+const (
+	verdictNoStack     = "no_stack"    // no stack of that name in the tenant
+	verdictBoundary    = "boundary"    // the callee jumped out of its stack
+	verdictUnsupported = "unsupported" // the callee tried to suspend or stream
+	verdictTimeout     = "timeout"     // the deadline
+	verdictCancelled   = "cancelled"   // the request ended the call
+	verdictDepth       = "depth"       // calls nested past the limit
+	verdictFailed      = "failed"      // the callee's run failed without an answer
+	verdictBudget      = "budget"      // the request's budget ran out inside the callee
 )
 
 // callError is the `error` member of a result object: the callee's own
@@ -143,16 +158,84 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 			return fail("txco_call_target", "WITH stack is not a stack name: "+verr.Error())
 		}
 	}
-	input := `{}`
-	if v := gjson.Get(op.Meta, "input"); v.Exists() && v.Type != gjson.Null {
-		input = v.Raw
+
+	out := pu.runFrame(ctx, op, frameSpec{
+		stack: stack, scope: scope, source: "call", channel: callDefaultInto,
+		input: metaInput(op.Meta), what: stack,
+	})
+	var ce *callError
+	switch {
+	case out.verdict == verdictBudget:
+		ce = &callError{Code: out.budget, Message: out.message}
+	case out.verdict != "":
+		ce = &callError{Code: "txco_call_" + out.verdict, Message: out.message}
+	case out.own != nil:
+		ce = out.own
+		if ce.Code == "" {
+			ce.Code = "txco_call_error" // the callee said so but gave no code
+		}
 	}
+	if ce != nil {
+		ce.Stopped, ce.Running = out.stopped, out.running
+	}
+	return callPayload(into, callResult{
+		OK: ce == nil, Output: json.RawMessage(out.output), Error: ce,
+		Stack: stack, Version: out.version, MS: out.ms,
+	}), nil
+}
+
+// metaInput is the rule's resolved `WITH input`, or {} so the callee's rules
+// see a shape, not a hole.
+func metaInput(meta string) string {
+	if v := gjson.Get(meta, "input"); v.Exists() && v.Type != gjson.Null {
+		return v.Raw
+	}
+	return `{}`
+}
+
+// frameSpec is what a way in asks of the engine: which stack to run and from
+// where, under which source, with what input and which further facts, and
+// the top-level key the callee answers at.
+type frameSpec struct {
+	stack   string
+	scope   int
+	source  string         // "call" or "cap": `_txc.src`, and the facts key `_txc.<source>`
+	channel string         // the callee's answer key: "_call" or "_cap"
+	input   string         // JSON
+	facts   map[string]any // more facts under `_txc.<source>.*`, beside input, caller and depth
+	timeout time.Duration  // > 0: bounds the frame further than the op's deadline does
+	what    string         // the thing called, for messages: "app/_orient", "mail.send"
+}
+
+// frameOutcome is what the engine answers: its own verdict ("" when it has
+// none), the callee's own error when it wrote one and the engine had no
+// verdict, and the callee's output.
+type frameOutcome struct {
+	verdict  string
+	budget   string // the budget's own code, when verdict is verdictBudget
+	message  string
+	stopped  *bool
+	running  []string
+	own      *callError // the callee's `<channel>.error`
+	output   string     // the callee's `<channel>.output`, or {}
+	answered bool       // the callee wrote an output or an error
+	version  int64
+	ms       int64
+}
+
+// runFrame runs spec.stack on a frame of its own inside this request and
+// reads back what it answered. op is the rule that asked, named to the
+// callee as its caller.
+func (pu *Unit) runFrame(ctx context.Context, op operation.Operation, spec frameSpec) frameOutcome {
+	start := time.Now()
+	elapsed := func() int64 { return time.Since(start).Milliseconds() }
 
 	parent := frameFrom(ctx)
 	if parent.callDepth()+1 > pu.callDepthLimit() {
-		return fail("txco_call_depth", fmt.Sprintf("calls nest %d deep; the limit is %d", parent.callDepth()+1, pu.callDepthLimit()))
+		return frameOutcome{verdict: verdictDepth, output: `{}`, ms: elapsed(),
+			message: fmt.Sprintf("calls nest %d deep; the limit is %d", parent.callDepth()+1, pu.callDepthLimit())}
 	}
-	fr := newCallFrame(parent, stack, input, frameCaller{
+	fr := newCallFrame(parent, spec.stack, spec.source, spec.input, frameCaller{
 		Stack: op.Stack, Stage: op.Stack + "/" + strconv.Itoa(op.Scope), Op: op.Name,
 	})
 
@@ -160,12 +243,17 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 	// tracer, secrets — with the frame's own facts in place of the caller's.
 	// Each of these keys would otherwise be inherited by the nested Run,
 	// which skips its first-Run block because the snapshot is already
-	// pinned (design §2.6).
+	// pinned (design §2.6). A way in may bound the frame further.
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if spec.timeout > 0 {
+		var tcancel context.CancelFunc
+		cctx, tcancel = context.WithTimeout(cctx, spec.timeout)
+		defer tcancel()
+	}
 	fr.ctx = cctx
 	cctx = withFrame(cctx, fr)
-	cctx = WithSource(cctx, "call")
+	cctx = WithSource(cctx, spec.source)
 	cctx = context.WithValue(cctx, ctxKeyParentStage, "")
 	cctx = withStreamSink(cctx, nil)
 	cctx = withResumeRun(cctx, resumeIdent{})
@@ -174,23 +262,23 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 	// A missing callee is a result error, not an authoring one: the callee
 	// deploys separately. Looked up under the frame, so a parent's scopes
 	// cannot stand in for it.
-	probe, perr := pu.OpsForStage(cctx, stack+"/0")
+	probe, perr := pu.OpsForStage(cctx, spec.stack+"/0")
 	if perr != nil {
-		return fail("txco_call_failed", "looking up "+stack+": "+perr.Error())
+		return frameOutcome{verdict: verdictFailed, output: `{}`, ms: elapsed(), message: "looking up " + spec.stack + ": " + perr.Error()}
 	}
 	if len(probe) == 0 {
-		return fail("txco_call_no_stack", "no stack "+stack+" in this tenant")
+		return frameOutcome{verdict: verdictNoStack, output: `{}`, ms: elapsed(), message: "no stack " + spec.stack + " in this tenant"}
 	}
 	tenant := tenantScope(ctx)
-	version := pu.stackVersion(cctx, tenant, stack)
-	entry := stack + "/" + strconv.Itoa(scope)
+	version := pu.stackVersion(cctx, tenant, spec.stack)
+	entry := spec.stack + "/" + strconv.Itoa(spec.scope)
 
 	tr := trace.FromContext(ctx)
 	tr.Event(trace.TimelineEvent{
 		Ts: time.Now(), Event: "call.enter",
 		Fields: map[string]any{
-			"stack": stack, "stage": entry, "version": version, "depth": fr.depth,
-			"caller": fr.caller.Stage + "/" + fr.caller.Op, "input_bytes": len(input),
+			"via": spec.source, "what": spec.what, "stack": spec.stack, "stage": entry, "version": version,
+			"depth": fr.depth, "caller": fr.caller.Stage + "/" + fr.caller.Op, "input_bytes": len(spec.input),
 		},
 	})
 
@@ -212,36 +300,39 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 			}
 		}
 	}()
-	runErr := pu.Run(cctx, pu.callEnvelope(cctx, op, fr), entry, resCh)
+	runErr := pu.Run(cctx, pu.frameEnvelope(cctx, op, fr, spec), entry, resCh)
 	close(stop)
 	<-drained
 
-	// What the call came to, in order of cause: a boundary or policy
+	// What the frame came to, in order of cause: a boundary or policy
 	// refusal the frame recorded; the deadline or a cancellation, after
 	// waiting for the callee's ops to stop; the budget; then what the
 	// callee answered.
-	ce := fr.failure()
+	out := frameOutcome{output: `{}`, version: version}
+	if f := fr.failure(); f != nil {
+		out.verdict, out.message = f.Code, f.Message
+	}
 	if cctx.Err() != nil {
 		cancel()
 		stopped, running := fr.waitOps(pu.callStopGrace())
-		if ce == nil {
-			code, msg := "txco_call_cancelled", stack+" was cancelled"
+		if out.verdict == "" {
+			out.verdict, out.message = verdictCancelled, spec.what+" was cancelled"
 			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-				code, msg = "txco_call_timeout", stack+" ran past its deadline"
+				out.verdict, out.message = verdictTimeout, spec.what+" ran past its deadline"
 			}
-			ce = &callError{Code: code, Message: msg}
 		}
-		ce.Stopped = &stopped
-		ce.Running = running
+		out.stopped, out.running = &stopped, running
 	}
-	if ce == nil {
-		ce = budgetExhaustedInCall(ctx, entry)
+	if out.verdict == "" {
+		if code, msg := budgetExhaustedInCall(ctx, entry); code != "" {
+			out.verdict, out.budget, out.message = verdictBudget, code, msg
+		}
 	}
 	final := ""
-	if ce == nil {
+	if out.verdict == "" {
 		switch {
 		case len(captured) == 0 && runErr != nil:
-			ce = &callError{Code: "txco_call_failed", Message: runErr.Error()}
+			out.verdict, out.message = verdictFailed, runErr.Error()
 		case len(captured) == 0:
 			// Nothing emitted and no error: an empty answer.
 		case captured[0].Type == event.JSON:
@@ -251,54 +342,58 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 			if msg == "" {
 				msg = captured[0].Raw
 			}
-			ce = &callError{Code: "txco_call_failed", Message: msg}
+			out.verdict, out.message = verdictFailed, msg
 		default:
-			ce = &callError{Code: "txco_call_unsupported", Message: stack + " streamed its answer; a call cannot stream"}
+			out.verdict, out.message = verdictUnsupported, spec.what+" streamed its answer; a call cannot stream"
 		}
 	}
-	output := `{}`
 	if final != "" {
-		if o := gjson.Get(final, "_call.output"); o.Exists() && o.Type != gjson.Null {
-			output = o.Raw
+		if o := gjson.Get(final, spec.channel+".output"); o.Exists() && o.Type != gjson.Null {
+			out.output, out.answered = o.Raw, true
 		}
-		if e := gjson.Get(final, "_call.error"); ce == nil && e.Exists() && e.Type != gjson.Null {
-			ce = &callError{Code: e.Get("code").String(), Message: e.Get("message").String()}
-			if e.Type == gjson.String {
-				ce.Message = e.String()
-			}
-			if ce.Code == "" {
-				ce.Code = "txco_call_error"
+		if e := gjson.Get(final, spec.channel+".error"); e.Exists() && e.Type != gjson.Null {
+			out.answered = true
+			if out.verdict == "" {
+				out.own = &callError{Code: e.Get("code").String(), Message: e.Get("message").String()}
+				if e.Type == gjson.String {
+					out.own.Message = e.String()
+				}
 			}
 		}
 	}
-	ms := time.Since(start).Milliseconds()
+	out.ms = elapsed()
 	fields := map[string]any{
-		"stack": stack, "version": version, "depth": fr.depth, "ms": ms, "ok": ce == nil,
+		"via": spec.source, "what": spec.what, "stack": spec.stack, "version": version,
+		"depth": fr.depth, "ms": out.ms, "ok": out.verdict == "" && out.own == nil,
 	}
-	if ce != nil {
-		fields["code"] = ce.Code
-		if ce.Stopped != nil {
-			fields["stopped"] = *ce.Stopped
+	if out.verdict != "" {
+		fields["verdict"] = out.verdict
+		if out.stopped != nil {
+			fields["stopped"] = *out.stopped
 		}
-		pu.Logger.Debug("call: returned with an error",
-			zap.String("stack", stack), zap.String("code", ce.Code), zap.String("message", ce.Message))
+		pu.Logger.Debug("call: returned with the engine's verdict",
+			zap.String("via", spec.source), zap.String("stack", spec.stack),
+			zap.String("verdict", out.verdict), zap.String("message", out.message))
+	} else if out.own != nil {
+		fields["code"] = out.own.Code
 	}
 	tr.Event(trace.TimelineEvent{Ts: time.Now(), Event: "call.return", Fields: fields})
-	return callPayload(into, callResult{
-		OK: ce == nil, Output: json.RawMessage(output), Error: ce,
-		Stack: stack, Version: version, MS: ms,
-	}), nil
+	return out
 }
 
-// callEnvelope is the fresh document a callee starts from: the identity
+// frameEnvelope is the fresh document a callee starts from: the identity
 // facts the chassis stamps, and the input. Rules cannot write `_txc`, so a
 // callee cannot forge its own input or caller; anything else it needs
 // arrives in `input`. The tenant and rid come from the request's pins, with
 // the caller's envelope as the fallback for a context that has none (tests,
-// untenanted paths).
-func (pu *Unit) callEnvelope(ctx context.Context, op operation.Operation, fr *frame) string {
-	call := map[string]any{"input": json.RawMessage(fr.input), "caller": fr.caller, "depth": fr.depth}
-	txc := map[string]any{"src": fr.source, "stack": fr.stack, "call": call}
+// untenanted paths). The way in's own facts go beside input, caller and
+// depth under `_txc.<source>`.
+func (pu *Unit) frameEnvelope(ctx context.Context, op operation.Operation, fr *frame, spec frameSpec) string {
+	facts := map[string]any{"input": json.RawMessage(fr.input), "caller": fr.caller, "depth": fr.depth}
+	for k, v := range spec.facts {
+		facts[k] = v
+	}
+	txc := map[string]any{"src": fr.source, "stack": fr.stack, fr.source: facts}
 	if t := tenantScope(ctx); t != "" {
 		txc["tenant"] = t
 	} else if t := gjson.Get(op.Input, "_txc.tenant").String(); t != "" {
@@ -317,28 +412,28 @@ func (pu *Unit) callEnvelope(ctx context.Context, op operation.Operation, fr *fr
 }
 
 // budgetExhaustedInCall reports the request's budget state after a callee
-// ran, as a call error: the callee that spent the last of the fuel or the
-// last hop ended on the exhaustion, and the caller learns it here before
-// its own next charge refuses it too.
-func budgetExhaustedInCall(ctx context.Context, stage string) *callError {
+// ran, as the budget's own code and message: the callee that spent the last
+// of the fuel or the last hop ended on the exhaustion, and the caller learns
+// it here before its own next charge refuses it too.
+func budgetExhaustedInCall(ctx context.Context, stage string) (code, message string) {
 	s := budgetFromCtx(ctx)
 	if s == nil {
-		return nil
+		return "", ""
 	}
 	switch e := s.overBudget(s.fuel.Load(), stage).(type) {
 	case nil:
 	case *FuelExhaustedError:
-		return &callError{Code: "txco_fuel_exhausted", Message: e.Error()}
+		return "txco_fuel_exhausted", e.Error()
 	case *AllowanceExhaustedError:
-		return &callError{Code: "txco_allowance_exhausted", Message: e.Error()}
+		return "txco_allowance_exhausted", e.Error()
 	default:
-		return &callError{Code: "txco_fuel_exhausted", Message: e.Error()}
+		return "txco_fuel_exhausted", e.Error()
 	}
 	if s.maxTTL > 0 && s.ttl.Load() <= 0 {
-		return &callError{Code: "txcl_scope_ttl_exhausted",
-			Message: fmt.Sprintf("the request's %d stage hops were used up inside the call", s.maxTTL)}
+		return "txcl_scope_ttl_exhausted",
+			fmt.Sprintf("the request's %d stage hops were used up inside the call", s.maxTTL)
 	}
-	return nil
+	return "", ""
 }
 
 // stackVersion is the callee stack's active version number in the request's

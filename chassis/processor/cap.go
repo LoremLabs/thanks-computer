@@ -16,10 +16,12 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/sandbox"
+	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
 // A NODE is a chassis that another chassis — its PARENT — dispatched a run
@@ -118,6 +120,23 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 		name = strings.TrimSpace(v.String())
 		if !sandbox.ValidCapability(name) {
 			return capFailure(into, name, "txco_cap_unknown", "WITH name is not a capability name (lowercase words joined by dots)", 0, ""), nil
+		}
+	}
+	// Resolution is a lookup, never a search: a name a stack of THIS
+	// tenant declares is answered here, in process, on the call engine; any
+	// other goes up to the parent. A chassis with no declarations (pu.Caps
+	// nil) or a request with no tenant pinned declares nothing here.
+	if tenant := tenantScope(ctx); tenant != "" && pu.Caps != nil {
+		switch stack, d, lerr := pu.Caps.Lookup(ctx, tenant, name); {
+		case lerr == nil:
+			return pu.execCapLocal(ctx, op, name, into, stack, d), nil
+		case errors.Is(lerr, capdecl.ErrNotDeclared):
+			// Not here: the parent, below.
+		default:
+			pu.Logger.Warn("cap: the capability's declaration could not be read",
+				zap.String("tenant", tenant), zap.String("capability", name), zap.Error(lerr))
+			return capFailure(into, name, "txco_cap_unavailable",
+				"the capability's declaration could not be read", http.StatusServiceUnavailable, ""), nil
 		}
 	}
 	parent := strings.TrimRight(strings.TrimSpace(pu.Conf.ParentURL), "/")
@@ -284,4 +303,104 @@ func capInput(meta string) json.RawMessage {
 		return json.RawMessage(v.Raw)
 	}
 	return json.RawMessage(`{}`)
+}
+
+// CapLookup finds who answers a capability on this chassis: the tenant's
+// active stack that declares it, and the declaration. It answers
+// capdecl.ErrNotDeclared for a name no active stack declares. The server
+// wires the same source the capability inlet routes by.
+type CapLookup interface {
+	Lookup(ctx context.Context, tenant, name string) (stack string, d *capdecl.Decl, err error)
+}
+
+// execCapLocal answers a `cap://` whose name a stack of this tenant
+// declares: the declaring stack runs here, in process, on the call engine
+// (call.go), entered at the scope its declaration names, bounded by the
+// declared timeout when that is shorter than the op's, and the answer takes
+// the shape every cap:// answer takes — the output under `into`, the facts
+// beside it at `cap.*`, every failure as data at `cap.error` with the status
+// it would have carried from the inlet.
+//
+// The call runs with the request's authority, as a jump to the declaring
+// stack's entry already would: the `_grant` stack decides calls that arrive
+// WITH a run grant, at the inlet; a rule of the tenant's own code on the
+// declaring chassis presents none. What the callee sees is the capability
+// envelope — `@src == "cap"`, `@cap.name`, `@cap.input`, `@cap.caller`,
+// `@cap.depth`, `@cap.impl` — so one implementation serves both ways in,
+// and nothing of the caller's envelope but the input.
+func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, into, stack string, d *capdecl.Decl) event.Payload {
+	spec := frameSpec{
+		stack: stack, scope: d.Entry, source: "cap", channel: capDefaultInto,
+		input: metaInput(op.Meta), what: name,
+		facts: map[string]any{
+			"tenant": tenantScope(ctx),
+			"name":   name,
+			"impl":   map[string]string{"stack": stack, "to": d.Stage(stack)},
+		},
+		timeout: d.TimeoutDuration(),
+	}
+	if p := PrincipalScope(ctx); p != "" {
+		spec.facts["principal"] = map[string]string{"id": p}
+	}
+	out := pu.runFrame(ctx, op, spec)
+
+	code, status, message := "", 0, out.message
+	switch out.verdict {
+	case "":
+		switch {
+		case out.own != nil:
+			// The stack's own error: its code as it is, at the status the
+			// inlet gives a stack's refusal.
+			code, status, message = strings.TrimSpace(out.own.Code), http.StatusUnprocessableEntity, out.own.Message
+			if code == "" {
+				code = "error"
+			}
+			if len(message) > 1000 {
+				message = message[:1000]
+			}
+		case !out.answered:
+			// The inlet's contract: no rule answered is no capability.
+			code, status = "txco_cap_unknown", http.StatusNotFound
+			message = "no rule in " + d.Stage(stack) + " (the declaring stack's entry) answered " + name
+		}
+	case verdictNoStack:
+		code, status = "txco_cap_unknown", http.StatusNotFound
+	case verdictTimeout:
+		code, status = "txco_cap_timeout", http.StatusGatewayTimeout
+	case verdictFailed:
+		code, status = "txco_cap_unavailable", http.StatusServiceUnavailable
+	case verdictBudget:
+		code, status = "txco_cap_budget", http.StatusTooManyRequests
+		message = out.budget + ": " + out.message
+	default:
+		// boundary, unsupported, depth, cancelled: the call could not be
+		// run as asked.
+		code, status = "txco_cap_"+out.verdict, http.StatusInternalServerError
+	}
+	if code != "" {
+		pu.Logger.Info("cap: refused or failed here",
+			zap.String("capability", name), zap.String("stack", stack), zap.Int("status", status),
+			zap.String("code", code), zap.Int64("ms", out.ms))
+		p := capFailure(into, name, code, message, status, "")
+		if out.stopped != nil {
+			p.Raw, _ = sjson.Set(p.Raw, "cap.error.stopped", *out.stopped)
+			if len(out.running) > 0 {
+				p.Raw, _ = sjson.Set(p.Raw, "cap.error.running", out.running)
+			}
+		}
+		p.Raw, _ = sjson.Set(p.Raw, "cap.ms", out.ms)
+		return p
+	}
+	raw, werr := sjson.SetRaw(`{}`, into, out.output)
+	if werr != nil {
+		return capFailure(into, name, "txco_cap_answer", "the output could not be placed at into", http.StatusOK, "")
+	}
+	raw, _ = sjson.Set(raw, "cap.name", name)
+	raw, _ = sjson.Set(raw, "cap.status", http.StatusOK)
+	raw, _ = sjson.Set(raw, "cap.ms", out.ms)
+	trace.FromContext(ctx).Event(trace.TimelineEvent{
+		Ts: time.Now(), Event: "cap.answered",
+		Fields: map[string]any{"capability": name, "stack": stack, "here": true, "ms": out.ms},
+	})
+	return event.Payload{Raw: raw, Type: event.JSON}
 }

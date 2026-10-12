@@ -162,6 +162,13 @@ type Unit struct {
 	// opened no identity store).
 	Grants GrantHandoff
 
+	// Caps finds who answers a capability on this chassis: the tenant's
+	// active stack that declares it, and the declaration. A `cap://` whose
+	// name is declared here runs in process on the call engine (cap.go);
+	// one that is not goes up to the parent. nil-safe: a chassis with none
+	// declares nothing here.
+	Caps CapLookup
+
 	// Attachments is the registry of attached transports — a live resource
 	// in a workspace (a PTY, or a workspace-local service) bound to one
 	// WebSocket session for the life of a lease. The `workspace://<name>/attach`
@@ -636,18 +643,24 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		// the pipeline with nobody on the other end of resCh, so they keep
 		// the buffered single-payload contract. Nil sink = "this run
 		// cannot stream", which is what op code checks.
-		_, resuming := resumeRunFrom(ctx)
-		_, deferred := deferredRunFrom(ctx)
-		if !resuming && !deferred && streamSinkFrom(ctx) == nil &&
-			gjson.Get(raw, "_txc.src").String() == "http" {
+		//
+		// The frame (frame.go) says whether this run may stream. A context
+		// that arrives with none is the inlet's own first Run: it gets the
+		// root frame, with every policy as it was before frames existed. A
+		// context that arrives with one — a resume, a detached op, a call
+		// made from detached work — keeps it, and its policy decides.
+		fr := frameFrom(ctx)
+		if fr == nil {
+			src := gjson.Get(raw, "_txc.src").String()
+			_, resuming := resumeRunFrom(ctx)
+			_, deferred := deferredRunFrom(ctx)
+			fr = rootFrame(src)
+			fr.mayStream = !resuming && !deferred && src == "http"
+			ctx = withFrame(ctx, fr)
+		}
+		if fr.mayStream && streamSinkFrom(ctx) == nil {
 			ctx = withStreamSink(ctx, &streamSink{resCh: resCh})
 		}
-
-		// The request's root frame (frame.go): the one the inlet's run
-		// executes in, with every policy as it was before frames existed.
-		// A call pushes a frame of its own (call.go); nothing here reads
-		// the frame except where a call differs.
-		ctx = withFrame(ctx, rootFrame(gjson.Get(raw, "_txc.src").String()))
 	}
 
 	pu.Logger.Debug("RUN!", zap.String("stage", stage), zap.String("in", raw))
@@ -800,7 +813,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 	if fr := frameFrom(ctx); fr.isCall() && !fr.mayContinue {
 		for _, o := range ops {
 			if isAsyncOp(o) || isContinuableOp(o) {
-				fr.failWith("txco_call_unsupported", fmt.Sprintf("%s/%d/%s: WITH mode = %q cannot run inside a call",
+				fr.failWith(verdictUnsupported, fmt.Sprintf("%s/%d/%s: WITH mode = %q cannot run inside a call",
 					o.Stack, o.Scope, o.Name, gjson.Get(o.Meta, "mode").String()))
 				span.End()
 				return nil
@@ -1598,7 +1611,7 @@ func (pu *Unit) advanceAfterScope(
 		continuing := !(halt || breakHere) && ((len(gotoStage) > 0) || (len(nextOps) > 0))
 		switch {
 		case gotoStage != "" && !halt && !breakHere && !fr.confines(gotoStage):
-			fr.failWith("txco_call_boundary", fmt.Sprintf("%s jumped to %s, outside the called stack %s", stage, gotoStage, fr.stack))
+			fr.failWith(verdictBoundary, fmt.Sprintf("%s jumped to %s, outside the called stack %s", stage, gotoStage, fr.stack))
 			tr.Event(trace.TimelineEvent{
 				Ts: time.Now(), Event: "call.boundary",
 				Fields: map[string]any{"from": stage, "to": gotoStage, "stack": fr.stack},
@@ -1606,7 +1619,7 @@ func (pu *Unit) advanceAfterScope(
 			endSpan()
 			return true, nil
 		case !fr.mayStream && continuing && sf[2].String() != "":
-			fr.failWith("txco_call_unsupported", fmt.Sprintf("%s wrote @web.res.body before its last scope; a call cannot stream a body", stage))
+			fr.failWith(verdictUnsupported, fmt.Sprintf("%s wrote @web.res.body before its last scope; a call cannot stream a body", stage))
 			endSpan()
 			return true, nil
 		}
@@ -2782,40 +2795,24 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 	// stacks. The tenant must come only from chassis-origin data, never
 	// from worker-supplied output — same invariant Run enforces by
 	// pinning once from the original `raw`.
-	rctx := withResumeRun(ctx, resumeIdent{
+	//
+	// The source and the principal are re-pinned from the same envelope: a
+	// resumed scope runs under a fresh context (every resume caller starts
+	// from Background), and Run's first-Run pin block is skipped once the
+	// opstack snapshot is attached — so without this, SourceScope(ctx) is
+	// "" after a suspend and every op that gates on the pinned source
+	// (txco://websocket/reply, txco://relay) refuses. resumeContext
+	// (frame.go) is the one place both resume paths build this.
+	rctx := pu.resumeContext(ctx, ss.ScopeEnvelope, resumeIdent{
 		runID:    runID,
 		segStage: stage, segFuel: FuelUsedFromEnvelope(ss.ScopeEnvelope),
 		segBytes: len(ss.ScopeEnvelope), segStart: start,
 	})
-	rctx = WithTenant(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.tenant").String())
-	// Re-pin the originating inlet the same way, from the same chassis-
-	// stamped envelope: a resumed scope runs under a fresh context (every
-	// resume caller starts from Background), and Run's first-Run pin block
-	// is skipped once the opstack snapshot is attached below — so without
-	// this, SourceScope(ctx) is "" after a suspend and every op that gates
-	// on the pinned source (txco://websocket/reply, txco://relay) refuses.
-	rctx = WithSource(rctx, gjson.Get(ss.ScopeEnvelope, "_txc.src").String())
-	// And the principal, from the same envelope, which stampPrincipal wrote.
-	rctx = withPrincipalFrom(rctx, ss.ScopeEnvelope)
 
-	// Resume against the opstack frozen at suspend, not the live one. The
-	// snapshot DB is attached to rctx so EVERY opstack lookup in the
-	// resumed execution — this stage, nextOps, and any deeper
-	// goto/next-stage advancement or re-suspend — resolves against it
-	// (opstackDB(ctx) reads ctxKeyOpstackSnap). Absent/empty snapshot ⇒
-	// no override ⇒ falls back to the live opstack (back-compat for
-	// pre-snapshot runs and untenanted/_sys). Held for the whole
-	// synchronous resume; closed when it returns.
-	if snapData, serr := pu.Runs.ReadOpstackSnapshot(ctx, runID); serr == nil && len(snapData) > 0 {
-		snapDB, berr := buildSnapshotDB(snapData)
-		if berr != nil {
-			pu.Logger.Warn("opstack snapshot rebuild failed; resuming against live opstack",
-				zap.String("run", runID), zap.Error(berr))
-		} else {
-			defer snapDB.Close()
-			rctx = context.WithValue(rctx, ctxKeyOpstackSnap, snapDB)
-		}
-	}
+	// Resume against the opstack frozen at suspend, not the live one, held
+	// for the whole synchronous resume (attachResumeSnapshot, frame.go).
+	rctx, releaseSnap := pu.attachResumeSnapshot(ctx, rctx, runID)
+	defer releaseSnap()
 
 	ops, err := pu.OpsForStage(rctx, stage)
 	if err != nil {

@@ -202,7 +202,7 @@ What comes back, beside `into`:
 | | |
 |---|---|
 | `cap.name`, `cap.status`, `cap.ms` | The capability, the answer's status, the round trip in milliseconds |
-| `cap.rid` | The parent's request id for the call: its trace of the decision and the run |
+| `cap.rid` | The parent's request id for the call: its trace of the decision and the run. Absent when the capability was answered here. |
 | `cap.error.{code, message, status}` | Set when the call did not get an answer. `into` is `{}` then. |
 
 **Every failure is data**, so a rule can gate on it and the run goes on:
@@ -217,12 +217,35 @@ What comes back, beside `into`:
 | `txco_cap_unavailable` | The parent could not decide, or the run failed |
 | `txco_cap_transport` | The parent could not be reached |
 | _the stack's own code_ | The answering stack set `._cap.error`: its `code` and `message` arrive as written |
+| `txco_cap_budget`, `txco_cap_unsupported`, `txco_cap_boundary`, `txco_cap_depth`, `txco_cap_cancelled` | Answered here, and the run could not be completed: the request's budget ran out inside it, its stack tried to suspend or stream, jumped out of itself, nested past the limit, or the request ended — the same verdicts a [call](./calls.md#the-result) gets |
 
 - **The rule never sees the token.** It arrived with the request that
   started this run, in one header; the web head moved it into the run's
   context before any rule ran, and `cap://` presents it. It is in no
   envelope and no trace.
-- **A run that arrived without a grant can call nothing.**
+- **A run that arrived without a grant can call nothing on the parent.** It can
+  still call a capability declared on this chassis, which is answered here.
+
+### Answered here
+
+A name that a stack of the request's tenant declares on THIS chassis is
+answered here, in process, on the [call engine](./calls.md): the declaring
+stack runs inside the same request, entered at its declared `entry`, bounded
+by its declared `timeout` when that is shorter than the op's, on a fresh
+envelope — `@src == "cap"`, `@cap.name`, `@cap.input`, `@cap.caller`
+(`{stack, stage, op}`), `@cap.depth`, `@cap.impl` — and answers at
+`._cap.output` or `._cap.error` exactly as it would a call from a node. One
+implementation serves both ways in. The answer takes the same shape, with no
+`cap.rid` (it is this request). Resolution is a lookup, never a search: a
+name declared here is answered here even when a parent is configured and
+the run carries a grant; any other name goes up.
+
+Such a call runs with the request's authority, as a jump to the declaring
+stack's entry already would: the `_grant` stack decides calls that arrive
+WITH a run grant, at the inlet; a rule of the tenant's own code presents
+none. What a call isolates is data, not authority ([calls](./calls.md)).
+The whole run shares the request's fuel and deadline and appends to its
+trace, with `call.enter` / `call.return` events marked `via: cap`.
 
 ## The catalogue
 

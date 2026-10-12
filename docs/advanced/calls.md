@@ -255,6 +255,30 @@ OpenTelemetry the callee's spans are children of the calling op's
 Redaction hints of every stack a request visits apply to the whole trace,
 so a callee's hints also cover the caller's later steps.
 
+## Capabilities answered here
+
+The same engine has a second way in. `EXEC "cap://<name>"` on a chassis
+where a stack of the request's tenant **declares** `<name>` (`CAPS/`,
+[capabilities](./capabilities.md#answered-here)) runs that stack here, in
+process, as a frame on this request — not up to a parent, and not through
+the bus. The two ways in differ only in what they stamp and how they shape
+the answer:
+
+| | `call://` | `cap://`, declared here |
+|---|---|---|
+| Names | a stack, by place | a capability, by name; the catalogue says which stack |
+| Enters at | the ref's scope (default 0) | the declaration's `entry` |
+| The callee sees | `@src == "call"`, `@call.input`, `@call.caller`, `@call.depth` | `@src == "cap"`, `@cap.name`, `@cap.input`, `@cap.caller`, `@cap.depth`, `@cap.impl` |
+| The callee answers at | `._call.output` / `._call.error` | `._cap.output` / `._cap.error`, as it would a call from a node |
+| The caller gets | one result object under `into` | cap://'s shape: the output under `into`, `cap.name`, `cap.status`, `cap.ms`, failures at `cap.error` |
+| Bounded by | `WITH timeout` | `WITH timeout`, and the declared `timeout` when shorter |
+| No answer | `ok: true, output: {}` | `txco_cap_unknown` (the inlet's contract: no rule answered) |
+
+Everything else is the same: the boundary, the refusals, the deadline and
+the wait on cancellation, the depth, the shared budget, the per-frame
+history, the trace events (marked `via: cap`). A capability may call a
+capability, or a stack, and the depth counts across both.
+
 ## A call, a jump, a capability
 
 | | Moves the stage | Moves the identity (`@stack`) | Returns | Runs the parent's scopes | Isolation | Authority |
@@ -262,6 +286,7 @@ so a callee's hints also cover the caller's later steps.
 | `@goto`, `goto://`, `EXEC "<stack>/<scope>"` | yes | no | no | yes (overlay) | none | the request's |
 | `txco://route` | yes | yes | no | yes (overlay) | none | the request's |
 | `call://` | for the callee | for the callee | **yes** | **no** | envelope only | the request's |
+| `cap://`, declared here | for the callee | for the callee | **yes** | **no** | envelope only | the request's ([above](#capabilities-answered-here)) |
 | `cap://` (up to a parent) | another chassis | — | yes | — | envelope | the run grant, decided by `_grant` ([capabilities](./capabilities.md)) |
 
 Use a jump to hand a request over for good (the boot → service handoff, a

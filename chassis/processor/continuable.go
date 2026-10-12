@@ -195,6 +195,11 @@ func (pu *Unit) detachedOpContext(ctx context.Context, raw string, timeout time.
 	if rid != "" {
 		dctx = context.WithValue(dctx, config.CtxKeyRid, rid)
 	}
+	// The detached frame (frame.go): the request's policies, with no client
+	// to stream to. A call made from detached work pushes its own frame on
+	// top and keeps it — a nested Run installs the root frame only on a
+	// context that has none.
+	dctx = withFrame(dctx, detachedFrame(sourceScope(ctx)))
 	dctx, fuelStart, _ := loadBudget(dctx, raw, pu.Conf)
 	dctx, cancel := context.WithTimeout(dctx, timeout)
 	// The detached work stays reachable by the run's rid: an abort of the
