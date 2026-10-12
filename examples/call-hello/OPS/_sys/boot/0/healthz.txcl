@@ -1,0 +1,18 @@
+# _sys/boot scope 0 — default health endpoint.
+#
+# Runs in parallel with detect-tenant at scope 0 (both are scope-0 ops;
+# scope 0 fires for every request, pinned to _sys, before routing). The
+# WHEN gate makes this a no-op for everything except a web request to
+# the exact path /_txc/healthz; on a hit it emits a 200 "ok" response
+# and halts, short-circuiting the pipeline before route/404 — so it
+# answers even on a fresh chassis with no tenants or hostnames.
+# Operator-overridable like any _sys rule.
+#
+# _txc.src is "http" for web; the inlet stamps the path at
+# _txc.web.req.url.path. @ is sugar for ._txc. ; b64"..." encodes the
+# body the web inlet expects base64-encoded.
+WHEN @src == "http" && @web.req.url.path == "/_txc/healthz"
+  EMIT @web.res.status = 200,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"ok\n",
+       @halt = true

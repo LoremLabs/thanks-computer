@@ -1,0 +1,5 @@
+# Entry `quote`, step 2: a FRIEND code takes 10 off. A later scope's EMIT
+# overwrites the earlier total, as any later write does.
+WHEN @src == "call" && @call.entry == "quote" && @call.input.code == "FRIEND"
+  EMIT ._call.output.total = &sub(@call.input.amount, 10),
+       ._call.output.discount = 10

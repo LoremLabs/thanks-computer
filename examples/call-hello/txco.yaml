@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — both stacks are rules only. `_pricing` is
+# `_`-named because no inlet reaches it: only calls enter it.

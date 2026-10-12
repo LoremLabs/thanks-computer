@@ -1,0 +1,9 @@
+# GET /order — step 1b, beside the quote in the same scope: a capability
+# this chassis declares is answered here, on the same engine, in cap://'s
+# own answer shape — the output under `into`, the facts at `cap.*`, every
+# failure at `cap.error`. The two calls run concurrently; each has its own
+# frame, and their results cannot collide.
+WHEN @src == "http" && @web.req.url.path == "/order"
+  WITH input = &object("sku", @web.req.url.query.sku.0),
+       into  = "_stock"
+  EXEC "cap://stock.check"

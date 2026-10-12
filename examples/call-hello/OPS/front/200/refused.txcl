@@ -1,0 +1,7 @@
+# The call did not get a quote: the callee's own refusal (code_expired), or
+# the engine's (txco_call_invalid_input, txco_call_no_entry, …). Either is
+# data under `_quote.error`; the request goes on and answers 422.
+WHEN ._quote.ok == false
+  EMIT .error = ._quote.error,
+       @web.res.status = 422,
+       @halt = true

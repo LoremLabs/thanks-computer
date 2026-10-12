@@ -156,7 +156,7 @@ WHEN ._race.ok == true
 - **What is in it.** When one of a stack's ops names `$TXCO_STACK_DIR`,
   `txco apply` packs the stack's directory, `OPS/<stack>/`, keeping its
   layout. It leaves out dotfiles, the directories the chassis already takes
-  by kind (`FILES/`, `CAPS/`, `OUTLETS/`, `SANDBOXES/`, `DATASETS/`,
+  by kind (`FILES/`, `CAPS/`, `CALLS/`, `OUTLETS/`, `SANDBOXES/`, `DATASETS/`,
   `SOURCES/` and the data packs) and any nested stack, which has its own. A
   stack that never names it carries no tree. The caps are 1 MiB a file and
   32 MiB and 10,000 files a tree; apply refuses a tree over them and names

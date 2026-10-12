@@ -1,0 +1,12 @@
+# GET /order?amount=40&code=FRIEND&sku=abc — step 1a: ask `_pricing` for a
+# quote, in process, at its declared entry. The callee sees only `input`;
+# the result lands as ONE object under `into`: {ok, output, error, stack,
+# version, ms}. Nothing else of the callee's envelope comes back.
+#
+# A query without `amount` resolves to null, which the entry's declaration
+# refuses before the callee runs: ok false, error.code txco_call_invalid_input.
+WHEN @src == "http" && @web.req.url.path == "/order"
+  WITH input = &object("amount", @web.req.url.query.amount.0, "code", @web.req.url.query.code.0),
+       entry = "quote",
+       into  = "_quote"
+  EXEC "call://_pricing"

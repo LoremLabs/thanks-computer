@@ -1,0 +1,13 @@
+# A capability: the same contract shape, for callers OUTSIDE the tenant
+# (a node's `cap://stock.check` over HTTP) and, since it is declared on this
+# chassis, for a rule here too — answered in process on the same engine.
+description: Say whether a SKU is in stock.
+entry: 300
+input:
+  sku:
+    description: the SKU to check
+    required: true
+output:
+  in_stock:
+    description: whether it can be sold now
+    required: true

@@ -1,0 +1,6 @@
+# Capability `stock.check`: entered at 300 (its declared entry), so the
+# quote scopes above never run for it, and its `@src == "cap"` gate keeps
+# a quote from running into it.
+WHEN @src == "cap" && @cap.name == "stock.check"
+  EMIT ._cap.output.in_stock = true,
+       ._cap.output.sku = @cap.input.sku

@@ -26,7 +26,7 @@ is a shorthand for `_txc.` Note that this shorthand is for chassis `txcl`, opera
 
 | Field | Meaning |
 |---|---|
-| `@src` | The inlet that started the run: `http`, `lmtp`, `cron`, `tcp`, `scheduled`, `source`, `ipp`, `state`, … |
+| `@src` | The inlet that started the run: `http`, `lmtp`, `cron`, `tcp`, `scheduled`, `source`, `ipp`, `state`, `grant`, `cap`, … — or `call` for a stack another stack [called](./calls.md) |
 | `@rid` | Request id (trace correlation) |
 | `@client.ip` | The client's address, on every run a network head starts (web, websocket, the DAV heads, IPP, IMAP lanes). The socket peer — or, behind [`--web-trusted-proxies`](./serve.md#behind-a-reverse-proxy-whose-address-is-it), the client your proxies recorded. Read-only and chassis-stamped: key a rate limit on this, never on `@web.req.headers.X-Forwarded-For`, which is whatever the client sent |
 | `@tenant` / `@stack` | Resolved by [ingress](../routing.md); pinned per request |
@@ -43,6 +43,8 @@ is a shorthand for `_txc.` Note that this shorthand is for chassis `txcl`, opera
 | cron | `@cron.job`, `@cron.tenant` |
 | scheduled | `@scheduled.payload.*`, `@scheduled.idempotency_key`, `@scheduled.event_id`, `@scheduled.fired_at` — a due event from `txco://schedule` |
 | grant | `@grant.{kind,name,verb,sandbox,env,run,generation,grant,via}`, `@grant.principal.{id,kind}`, `@grant.node.class`, `@grant.secret.{pull,version,scope}`, `@grant.checks.{exists,allowlist,standing,pull,budget}`, `@grant.proposed.{allow,reason}` — a request made with a run grant, read-only; the stack answers in `@grant.res.{allow,reason,hold}`; see [the grant inlet](./protocols/grant.md) |
+| call | `@call.input` (what the caller gave), `@call.entry` (the declared entry named, if any), `@call.caller.{stack,stage,op}`, `@call.depth` — a stack another stack called with `call://`, on a fresh envelope, read-only; the callee answers at `._call.output` / `._call.error`; see [calls](./calls.md#answering) |
+| cap | `@cap.name`, `@cap.input`, `@cap.impl.{stack,to}`, and — from a node, over the inlet — `@cap.{run,generation,grant,stack,workspace,trace}`, `@cap.principal.{id,kind}`, `@cap.caller.rid`; or — [answered here](./capabilities.md#answered-here), from a rule on this chassis — `@cap.tenant`, `@cap.caller.{stack,stage,op}`, `@cap.depth`, `@cap.principal.id` when one is pinned. Read-only; the stack answers at `._cap.output` / `._cap.error`; see [the capability inlet](./protocols/cap.md) |
 | state | `@state.{machine,id,from,to,version,event_id,attempt}`, `@state.cause.{source,stack,trace,run}` — a committed state transition, read-only; see [state](./protocols/state.md) |
 | source | `@source.msg.*` (same shape as `@lmtp.msg.*`), `@source.id`, `@source.key`, `@source.stack`, `@source.meta.{uid,flags}` — a message pulled from a watched remote mailbox |
 | ipp | `@ipp.printer` (the label after `/p/` — the operation selector), `@ipp.job_id`, `@ipp.job_number`, `@ipp.job_name`, `@ipp.requesting_user` (client-claimed, untrusted), `@ipp.document.{sha256,size,format,name}`, `@ipp.host`, `@ipp.printer_uri`, `@ipp.submitted_at`, `@ipp.attempt`, `@ipp.node` — all read-only; the document is a blob reference (`txco://blob/put from_sha` / `txco://blob/get sha256`), never bytes, and there is no `@ipp.res` |

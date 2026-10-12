@@ -1,0 +1,36 @@
+{
+  "note": "call:// with a declared entry (CALLS/quote.yaml) and a capability answered in process (CAPS/stock.check.yaml): /order calls both from one scope and answers with both. Binds localhost → front (the single non-underscore stack, which bare `txco dev` also binds).",
+  "bind": [
+    { "host": "localhost", "stack": "front" }
+  ],
+  "checks": [
+    {
+      "name": "a quote with a FRIEND code, and stock, in one answer",
+      "method": "GET",
+      "path": "/order?amount=40&code=FRIEND&sku=abc",
+      "status": 200,
+      "contains": "\"total\":30"
+    },
+    {
+      "name": "the capability answered here, in cap://'s shape",
+      "method": "GET",
+      "path": "/order?amount=40&code=FRIEND&sku=abc",
+      "status": 200,
+      "contains": "\"in_stock\":true"
+    },
+    {
+      "name": "the callee's own refusal is the caller's data",
+      "method": "GET",
+      "path": "/order?amount=40&code=EXPIRED&sku=abc",
+      "status": 422,
+      "contains": "\"code\":\"code_expired\""
+    },
+    {
+      "name": "a required input the entry declares is checked before the callee runs",
+      "method": "GET",
+      "path": "/order?code=FRIEND&sku=abc",
+      "status": 422,
+      "contains": "txco_call_invalid_input"
+    }
+  ]
+}

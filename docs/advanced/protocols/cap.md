@@ -70,12 +70,23 @@ Only `@cap.input` is the caller's.
 
 The envelope never holds the grant's token.
 
+**Answered here.** A rule on this chassis that calls a capability its own
+tenant declares (`EXEC "cap://<name>"`, [capabilities](../capabilities.md#answered-here))
+gets the same stack, the same entry and the same answer shape — in process,
+on the same engine a [call](../calls.md) uses, with no grant and no second
+run. The envelope then carries `@cap.name`, `@cap.input`, `@cap.impl.*`,
+`@cap.tenant`, `@cap.caller.{stack,stage,op}`, `@cap.depth` and, when one is
+pinned on the request, `@cap.principal.id`; the grant facts (`@cap.run`,
+`@cap.grant`, `@cap.generation`, `@cap.workspace`, `@cap.trace`) are absent.
+A rule that needs them is being called from a node.
+
 The stack answers at the top level of the envelope:
 
 | the run leaves | the answer is |
 |---|---|
 | `._cap.output` | `{"ok": true, "output": <that value>}` |
 | `._cap.error = {code, message}` | `{"ok": false, "error": {code, message, status: 422}}`. It wins over an output. |
+| `._cap.output` without an output the declaration marks `required` | `{"ok": false, "output": <as written>, "error": {"code": "invalid_output", "status": 502}}`, naming the missing fields |
 | neither | `{"ok": false, "error": {"code": "no_capability", "status": 404}}` |
 
 ## The answers
@@ -106,6 +117,7 @@ is in the body, with the status it would have carried:
 | `{"ok":true,"output":…}` | The stack answered |
 | `{"ok":false,"error":{"code":…,"message":…,"status":422}}` | The stack's own error |
 | `{"ok":false,"error":{"code":"no_capability","status":404}}` | No rule answered |
+| `{"ok":false,"output":…,"error":{"code":"invalid_output","status":502}}` | The stack answered without an output its declaration requires |
 | `{"ok":false,"error":{"code":"timeout","status":504}}` | The run passed its ceiling: the declaration's `timeout`, or `--op-timeout-max` |
 | `{"ok":false,"error":{"code":"unavailable","status":503}}` | The run failed, or the tenant was refused admission |
 

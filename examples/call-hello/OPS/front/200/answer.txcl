@@ -1,0 +1,11 @@
+# Step 2: both answers in hand, respond. `_quote` and `_stock` are
+# `_`-prefixed and never reach the body on their own, so copy what the
+# reader should see onto plain keys. `_quote.version` is the callee's
+# active version: the answer says which code quoted.
+WHEN ._quote.ok == true && ._stock.in_stock != null
+  EMIT .quote = ._quote.output,
+       .quoted_by = ._quote.stack,
+       .quoted_by_version = ._quote.version,
+       .stock = ._stock,
+       @web.res.status = 200,
+       @halt = true

@@ -1,0 +1,6 @@
+# Entry `quote`, step 1: the total starts as the amount, as a number (the
+# query string arrives as text; `&add` coerces). The callee runs on a fresh
+# envelope — nothing of the caller's but `@call.input` — so it gates on how
+# it was entered, as a capability gates on `@cap.name`.
+WHEN @src == "call" && @call.entry == "quote"
+  EMIT ._call.output.total = &add(@call.input.amount, 0)

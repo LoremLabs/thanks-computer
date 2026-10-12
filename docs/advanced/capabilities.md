@@ -248,6 +248,7 @@ WITH a run grant, at the inlet; a rule of the tenant's own code presents
 none. What a call isolates is data, not authority ([calls](./calls.md)).
 The whole run shares the request's fuel and deadline and appends to its
 trace, with `call.enter` / `call.return` events marked `via: cap`.
+`examples/call-hello` calls one this way beside a `call://`.
 
 ## The catalogue
 

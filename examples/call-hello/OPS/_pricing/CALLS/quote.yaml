@@ -1,0 +1,19 @@
+# The entry a call names: `EXEC "call://_pricing" WITH entry = "quote"`.
+# The call enters at scope 100, must carry `amount`, and gets back `total`.
+# `txco calls list` shows this contract; `txco apply` refuses an entry
+# that names no scope of the stack.
+description: Quote a total for an amount, with a discount code applied.
+entry: 100
+timeout: 5000
+input:
+  amount:
+    description: the amount to quote, in whole units
+    required: true
+  code:
+    description: a discount code (FRIEND takes 10 off; EXPIRED is refused)
+output:
+  total:
+    description: the amount after any discount
+    required: true
+  discount:
+    description: what was taken off, when a code applied

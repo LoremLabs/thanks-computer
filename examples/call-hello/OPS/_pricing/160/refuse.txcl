@@ -1,0 +1,6 @@
+# Entry `quote`, step 3: an EXPIRED code is refused. `._call.error` makes
+# the call `ok: false` with this code and message; the caller decides what
+# that means for its own answer. `@halt` ends the callee, never the caller.
+WHEN @src == "call" && @call.entry == "quote" && @call.input.code == "EXPIRED"
+  EMIT ._call.error = &object("code", "code_expired", "message", "that code has expired"),
+       @halt = true

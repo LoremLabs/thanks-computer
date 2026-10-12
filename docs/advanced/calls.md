@@ -168,6 +168,10 @@ EXEC "call://app/_orient"
 active stacks declare, with what each takes and answers, so a stack that
 composes others reads the contracts instead of carrying a copy.
 
+`examples/call-hello` is all of this in two stacks: a declared entry, a
+capability answered here, both called from one scope, and a refusal
+answered as data.
+
 ## The result
 
 When the call ends, the caller finds **one object under `into`, and nothing
