@@ -1,6 +1,7 @@
-// A trace step's name links to the op it ran (#ops/<stack>/<scope>/<name>),
-// for the tenant's own stacks only; clicking it navigates without toggling
-// the step's in/out row.
+// A trace step's name and its operation link to the op it ran
+// (#ops/<stack>/<scope>/<name>), for the tenant's own stacks only; a
+// compute's operation opens its source instead. Clicking a link navigates
+// without toggling the step's in/out row.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/svelte'
@@ -46,17 +47,25 @@ describe('TraceDetail step links', () => {
         )
     })
 
+    it("links a tenant step's operation to its op definition", () => {
+        render(TraceDetail, { props: { rid: RID, onBack: vi.fn() } })
+        expect(screen.getByRole('link', { name: 'txco://route' })).toHaveAttribute('href', '#ops/_inspect/396/route')
+    })
+
     it('leaves boot and other non-tenant steps as plain text', () => {
         render(TraceDetail, { props: { rid: RID, onBack: vi.fn() } })
         expect(screen.getByText('0000-detect')).toBeInTheDocument()
         expect(screen.queryByRole('link', { name: '0000-detect' })).toBeNull()
+        expect(screen.getByText('txco://detect-tenant')).toBeInTheDocument()
+        expect(screen.queryByRole('link', { name: 'txco://detect-tenant' })).toBeNull()
     })
 
-    it('clicking the link does not expand the step', async () => {
+    it('clicking a link does not expand the step', async () => {
         render(TraceDetail, { props: { rid: RID, onBack: vi.fn() } })
         await userEvent.click(screen.getByRole('link', { name: '0396-route' }))
+        await userEvent.click(screen.getByRole('link', { name: 'txco://route' }))
         expect(screen.queryByText('in')).toBeNull()
-        await userEvent.click(screen.getByText('txco://route'))
+        await userEvent.click(screen.getByRole('link', { name: 'txco://route' }).closest('td')!)
         expect(screen.getByText('in')).toBeInTheDocument()
     })
 })

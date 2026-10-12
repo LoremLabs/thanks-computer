@@ -116,8 +116,10 @@
     }
 
     // The op a step ran, as an #ops deep link to its definition (the
-    // stack's active version). Only the tenant's own stacks link —
-    // boot and other system steps have no op to open here.
+    // stack's active version). The step's name and its operation both link
+    // there, except a compute's operation, which opens its source. Only the
+    // tenant's own stacks link — boot and other system steps have no op to
+    // open here.
     const tenantStacks = $derived(new Set(store.state.stacks.map((st) => st.name)))
     function stepOpHref(s: TraceStep): string {
         const stack = stripScope(s.stack ?? '')
@@ -352,6 +354,11 @@
                                         href={computeHref}
                                         class="underline-offset-2 hover:text-neutral-900 hover:underline"
                                         title="open this compute's source"
+                                        onclick={(e) => e.stopPropagation()}
+                                    >{s.operation}</a>{:else if opHref && s.operation}<a
+                                        href={opHref}
+                                        class="underline-offset-2 hover:text-neutral-900 hover:underline"
+                                        title="open {opHref.slice('#ops/'.length)}"
                                         onclick={(e) => e.stopPropagation()}
                                     >{s.operation}</a>{:else}{s.operation ?? '—'}{/if}
                                 </td>
