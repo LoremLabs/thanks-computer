@@ -1,0 +1,14 @@
+{
+  "final": "{\"after\":true,\"_txc\":{\"_seen\":[\"flow/100-\\u003eflow/200\"],\"ttl\":-2,\"fuel_used\":45,\"stack\":\"flow\",\"src\":\"http\"},\"q\":\"hi\",\"noise\":true}",
+  "events": [
+    "stage.enter fuel_used=10 stage=flow/0 ttl=-1",
+    "stage.merge resp_bytes=60 stage=flow/100",
+    "stage.enter fuel_used=45 stage=flow/200 ttl=-2",
+    "stage.merge resp_bytes=108 stage=flow/200",
+    "stage.merge resp_bytes=108 stage=flow/200"
+  ],
+  "steps": [
+    "flow/100/cap txco ok ",
+    "flow/200/after noop ok "
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "final": "{\"mail100\":true,\"_txc\":{\"_seen\":[],\"ttl\":-1,\"fuel_used\":10,\"stack\":\"web/_mail\",\"src\":\"lmtp\"}}",
+  "events": [
+    "stage.enter fuel_used=10 stage=web/_mail/0 ttl=-1",
+    "stage.merge resp_bytes=58 stage=web/_mail/100",
+    "stage.merge resp_bytes=58 stage=web/_mail/100"
+  ],
+  "steps": [
+    "web/_mail/100/m100 noop ok "
+  ]
+}

@@ -77,7 +77,10 @@ func loopTransportAdmitted(exec string) bool {
 		_, op, err := outlet.ParseRef(exec)
 		return err == nil && op == outlet.OpQuery
 	}
-	for _, prefix := range []string{"txco://", "http://", "https://", "mcp+http://", "mcp+https://", "workspace://"} {
+	// call:// is admitted: every failure is data in its result object, each
+	// pass pays the dispatch fuel plus whatever the callee's scopes cost, and
+	// the callee runs under the op's deadline (call.go).
+	for _, prefix := range []string{"txco://", "http://", "https://", "mcp+http://", "mcp+https://", "workspace://", "call://"} {
 		if strings.HasPrefix(exec, prefix) {
 			return true
 		}

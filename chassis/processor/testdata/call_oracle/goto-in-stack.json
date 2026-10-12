@@ -1,0 +1,15 @@
+{
+  "final": "{\"landed\":true,\"_txc\":{\"_seen\":[\"flow/100-\\u003eflow/300\"],\"ttl\":-2,\"fuel_used\":45,\"src\":\"http\",\"stack\":\"flow\"}}",
+  "events": [
+    "stage.enter fuel_used=10 stage=flow/0 ttl=-1",
+    "stage.merge resp_bytes=56 stage=flow/100",
+    "stage.jump from=flow/100 to=flow/300",
+    "stage.enter fuel_used=45 stage=flow/300 ttl=-2",
+    "stage.merge resp_bytes=87 stage=flow/300",
+    "stage.merge resp_bytes=87 stage=flow/300"
+  ],
+  "steps": [
+    "flow/100/jump noop ok ",
+    "flow/300/landed noop ok "
+  ]
+}

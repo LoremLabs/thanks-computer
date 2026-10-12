@@ -1480,3 +1480,27 @@ func TestParseGotoTarget(t *testing.T) {
 		}
 	}
 }
+
+// TestParseCallTarget: `EXEC "call://…"` takes a stack, or a stage in one,
+// and a bad target is a parse error in both modes, so `txco apply` refuses
+// it rather than the call being dropped at dispatch.
+func TestParseCallTarget(t *testing.T) {
+	for _, exec := range []string{"call://billing", "call://app/_orient", "call://app/onboard/150"} {
+		for _, strict := range []bool{false, true} {
+			p := parser.New(lexer.New(`EXEC "` + exec + `"`))
+			p.SetStrict(strict)
+			res := p.ParseEvent()
+			test.Equals(t, 0, len(p.Errors()))
+			test.Equals(t, exec, res.Exec)
+		}
+	}
+	for _, exec := range []string{"call://", "call://bad name", "call://a//b", "call:///100"} {
+		for _, strict := range []bool{false, true} {
+			p := parser.New(lexer.New(`EXEC "` + exec + `"`))
+			p.SetStrict(strict)
+			p.ParseEvent()
+			test.Equals(t, 1, len(p.Errors()))
+			test.Assert(t, strings.Contains(p.Errors()[0], exec), "error should quote the EXEC, got %q", p.Errors()[0])
+		}
+	}
+}

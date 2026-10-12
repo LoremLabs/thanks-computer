@@ -17,6 +17,7 @@
 | `outlet://<name>/<op>` | A declared external service, such as Postgres, through a pool the chassis holds | [outlets](../outlets.md) |
 | `mcp+http(s)://…` | A tool on an external MCP server | [mcp](./protocols/mcp.md) |
 | `cap://NAME` | On a node: a capability of its parent chassis, decided there under the run's grant | [capabilities](./capabilities.md#cap) |
+| `call://<stack>`, `call://<stack>/<scope>` | Another stack of this tenant, run in process inside this request on a fresh envelope; answers one result object under `WITH into` | [calls](./calls.md) |
 | `goto://<stack>/<scope>`, `goto://<scope>` | Stage jump, the same as `EMIT @goto`; a bare scope is in the current stack | [txcl](./txcl/txcl.md#control-flow-via-_txc) |
 | `<stack>/<scope>` | Unschemed stage jump (synthesized into `@goto`) | [resonators](../resonators.md) |
 

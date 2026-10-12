@@ -1,0 +1,23 @@
+{
+  "final": "{\"k2\":true,\"_txc\":{\"_seen\":[\"pp/100-\\u003epp/150\",\"pp/150-\\u003epp/100\"],\"fuel_used\":165,\"src\":\"http\",\"stack\":\"pp\",\"ttl\":-4}}",
+  "events": [
+    "stage.enter fuel_used=10 stage=pp/0 ttl=-1",
+    "stage.merge resp_bytes=49 stage=pp/100",
+    "stage.jump from=pp/100 to=pp/150",
+    "stage.enter fuel_used=45 stage=pp/150 ttl=-2",
+    "stage.merge resp_bytes=94 stage=pp/150",
+    "stage.jump from=pp/150 to=pp/100",
+    "stage.enter fuel_used=80 stage=pp/100 ttl=-3",
+    "stage.merge resp_bytes=115 stage=pp/100",
+    "stage.jump from=pp/100 to=pp/150",
+    "stage.enter fuel_used=165 stage=pp/150 ttl=-4",
+    "stage.fastforward from=pp/150 fuel_used=165 ops_evaluated=0 scopes=0 to=pp/150 ttl=-4",
+    "stage.merge resp_bytes=125 stage=pp/150",
+    "stage.merge resp_bytes=125 stage=pp/150"
+  ],
+  "steps": [
+    "pp/100/to150 noop ok ",
+    "pp/150/back noop ok ",
+    "pp/100/to150 noop ok "
+  ]
+}

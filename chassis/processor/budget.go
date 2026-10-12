@@ -356,15 +356,27 @@ func decrementTTL(ctx context.Context, stage string) error {
 // fuelCostRepeatTransition and returns the configured repeat penalty for
 // the caller to sleep on (context-cancelable). Either way, appends to the
 // recent ring and adds to the seen-set.
+//
+// The seen-set is the request's, except inside a call: a call frame keeps
+// its own (frame.go), so a sub-flow called twice in one request pays no
+// repeat penalty for being the same sub-flow, while a tight loop inside one
+// call still does. The recent ring stays the request's: it is diagnostic,
+// and an exhaustion wants the last hops wherever they were.
 func chargeTransition(ctx context.Context, from, to string) (time.Duration, error) {
 	s := budgetFromCtx(ctx)
 	if s == nil {
 		return 0, nil
 	}
 	key := from + "->" + to
+	fr := frameFrom(ctx)
 	s.mu.Lock()
-	repeat := s.seen[key]
-	s.seen[key] = true
+	var repeat bool
+	if fr.isCall() {
+		repeat = fr.sawTransition(key)
+	} else {
+		repeat = s.seen[key]
+		s.seen[key] = true
+	}
 	s.recent = append(s.recent, key)
 	if len(s.recent) > 3 {
 		s.recent = s.recent[len(s.recent)-3:]

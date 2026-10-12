@@ -487,3 +487,64 @@ func canonCycleKey(a, b stageRef) string {
 	}
 	return bk + "|" + ak
 }
+
+// lintCalls warns about what an `EXEC "call://…"` cannot know until it
+// runs, where the bundle being applied can tell in advance:
+//
+//   - the callee is not in this apply. It deploys separately, so a missing
+//     one is a result error (txco_call_no_stack) at the call, not an apply
+//     error; the warning is the reminder that the two trees are versioned
+//     apart.
+//   - the callee is in this apply and holds a rule that cannot run inside a
+//     call: `WITH mode = "async"` or `"continuable"` (the chassis refuses it
+//     with txco_call_unsupported). Only a literal mode is knowable here.
+//
+// Only literal targets are checked; a stack chosen at run time (`WITH
+// stack = ._next`) is not knowable statically. Warnings only, like the other
+// lints: a bare call to another tree is the common shape.
+func lintCalls(ops []bundle.Op) []string {
+	var warnings []string
+
+	inBundle := map[string]bool{}
+	for _, op := range ops {
+		inBundle[op.Stack] = true
+	}
+	// A callee's refused rules, found once per stack.
+	refused := map[string][]string{}
+	for _, op := range ops {
+		r, perr := txcl.Resonator(op.Txcl)
+		if perr != nil || r == nil {
+			continue
+		}
+		if mode, ok := literalString(r.With["mode"]); ok && (mode == "async" || mode == "continuable") {
+			refused[op.Stack] = append(refused[op.Stack],
+				fmt.Sprintf("%s/%d/%s (WITH mode = %q)", op.Stack, op.Scope, op.Name, mode))
+		}
+	}
+
+	for _, op := range ops {
+		r, perr := txcl.Resonator(op.Txcl)
+		if perr != nil || r == nil || !strings.HasPrefix(r.Exec, opname.CallScheme) {
+			continue
+		}
+		stack, _, err := opname.CallTarget(r.Exec)
+		if err != nil {
+			continue // the parser reported it
+		}
+		if !inBundle[stack] {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s (%s/%d/%s) calls stack %q, which is not in this apply; it deploys "+
+					"separately, and a call to a stack the chassis does not have answers txco_call_no_stack",
+				op.SourcePath, op.Stack, op.Scope, op.Name, stack))
+			continue
+		}
+		for _, rule := range refused[stack] {
+			warnings = append(warnings, fmt.Sprintf(
+				"lint: %s (%s/%d/%s) calls stack %q, whose rule %s cannot run inside a call; "+
+					"the call ends with txco_call_unsupported when that rule fires",
+				op.SourcePath, op.Stack, op.Scope, op.Name, stack, rule))
+		}
+	}
+
+	return warnings
+}

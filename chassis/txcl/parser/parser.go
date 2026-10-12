@@ -135,7 +135,24 @@ func (p *Parser) ParseEvent() *resonator.Resonator {
 
 	p.checkLoop(r)
 	p.checkGoto(r)
+	p.checkCall(r)
 	return r
+}
+
+// checkCall refuses an `EXEC "call://…"` whose target is not a stack
+// (`call://<stack>`) or a stage in one (`call://<stack>/<scope>`), in BOTH
+// parse modes, for the reason checkGoto gives: no deployed rule used call://
+// before it had a meaning, so the error only ever reaches a rule at apply
+// time, which beats a call that is dropped at dispatch. Whether the stack
+// exists is not checked here: a callee deploys separately, and a missing one
+// is a result error (txco_call_no_stack) when the call is made.
+func (p *Parser) checkCall(r *resonator.Resonator) {
+	if !strings.HasPrefix(r.Exec, opname.CallScheme) {
+		return
+	}
+	if _, _, err := opname.CallTarget(r.Exec); err != nil {
+		p.errors = append(p.errors, err.Error())
+	}
 }
 
 // checkGoto refuses an `EXEC "goto://…"` whose target is not a stage

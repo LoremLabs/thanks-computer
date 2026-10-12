@@ -501,7 +501,7 @@ EXEC "mcp+https://mcp.example.com"  # a tool on an external MCP server
 EXEC "workspace://pony/paris/exec"  # a command in a persistent workspace
 ```
 
-Six schemes are supported:
+The schemes:
 
 | Scheme | Dispatch path |
 | --- | --- |
@@ -511,6 +511,11 @@ Six schemes are supported:
 | `ai://chat` | A chat model via the chassis's AI registry — see [ai](../../ai.md). |
 | `mcp+http://` / `mcp+https://` | Calls a tool on an external [MCP](../protocols/mcp.md) server (egress). |
 | `workspace://NAME/VERB` | A command in an owned, stateful [workspace](../../workspaces.md) — files persist between calls; exit codes are data, not errors. The verb is the last segment (`exec`, `destroy`, `sleep`). |
+| `outlet://NAME/OP` | A declared external service, such as Postgres, through a pool the chassis holds — see [outlets](../../outlets.md). |
+| `cap://NAME` | On a node: a [capability](../capabilities.md#cap) of its parent chassis, decided there under the run's grant. |
+| `call://STACK`, `call://STACK/SCOPE` | Runs another stack in process, inside this request, and answers with one result object under `WITH into` — see [calls](../calls.md). |
+| `goto://STACK/SCOPE`, `goto://SCOPE` | A stage jump, the same as `EMIT @goto`; a bare scope is in the current stack — see [control flow](#control-flow-via-_txc). |
+| `STACK/SCOPE` | The unschemed stage jump, used for the boot → service handoff. |
 
 
 ## EMIT — response overlay
@@ -655,6 +660,18 @@ EXEC "billing/100"                # the unschemed form, used for the boot → se
 stage but not the run's stack identity (`_txc.stack`), so kv, read-file and dataset defaults in the target still resolve against the
 stack the run entered; `txco apply` warns on a cross-stack target. To move the identity too, re-pin with `txco://route`. All three
 cost the same [fuel](../fuel.md): one `EXEC` dispatch for the jump, plus the scope it enters.
+
+A jump hands the request over and nothing comes back. To run another stack and **get an answer**, call it:
+
+```txcl
+WITH input = &object("job", ._job), into = "_orient"
+EXEC "call://app/_orient"           # app/_orient runs here, now, on a fresh envelope, and returns
+WHEN ._orient.ok == true …          # the next scope reads the result object
+```
+
+A call runs the named stack and only it (never a parent's scopes), gives it `@call.input` and nothing else of the caller's
+envelope, and writes one object — `{ok, output, error, stack, version, ms}` — under `into`. A `@halt` in the callee ends the
+callee, not the request. It is not a security boundary: the callee runs with the request's authority. See [calls](../calls.md).
 
 Other `_txc.*` fields exist for things like setting the HTTP response status (`_txc.web.res.status`) — those are read by the inlet, not the pipeline. New control verbs slot in under the same namespace as needs arise. Each inlet stamps its own read-only facts there too (`@web.req.*`, `@lmtp.*`, `@imap.*`, `@dns.*`, `@websocket.*`); see [protocols](../protocols/README.md).
 

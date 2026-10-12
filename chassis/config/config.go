@@ -163,6 +163,9 @@ type Config struct {
 	OpRepeatPenaltyMs            int      `id:"op-repeat-penalty-ms" default:"20" desc:"Sleep penalty in milliseconds when a request repeats a (from_stage, to_stage) transition. Throttles CPU consumption inside the TTL window. Set to 0 to disable. (20)"`
 	AIChatEnvFallback            bool     `id:"ai-chat-env-fallback" default:"true" desc:"When an ai://chat backend's required secret (e.g., OPENROUTER_KEY) is not found in the per-tenant secret store, fall back to a chassis-wide environment-variable lookup of the same name. Default true for developer convenience ('export OPENROUTER_KEY=...' just works); set false on shared deployments to enforce per-tenant isolation — tenants must provision their own keys. (true)"`
 	AIDefaultTimeout             string   `id:"ai-default-timeout" default:"60s" desc:"Default per-op timeout for ai://* EXEC dispatches when WITH timeout is absent. Replaces the chassis-wide op-timeout (default 5s) which is too tight for LLM round-trips. Still capped by op-timeout-max. (60s)"`
+	CallDefaultTimeout           string   `id:"call-default-timeout" default:"60s" desc:"Default timeout for an EXEC \"call://<stack>\" when WITH timeout is absent: a whole sub-flow, so the chassis-wide op-timeout is too tight. A call's deadline is the least of its caller's remaining deadline, this (or WITH timeout) and op-timeout-max; a call asking for more than the maximum is clamped to it, not dropped. (60s)"`
+	CallDepthMax                 int      `id:"call-depth-max" default:"8" desc:"How deep call:// may nest. The chassis limit is 8; this can lower it, never raise it. A call over the limit answers txco_call_depth. (8)"`
+	CallStopGrace                string   `id:"call-stop-grace" default:"2s" desc:"How long a cancelled or timed-out call waits for the callee's ops to return before answering with stopped: false and the ops still running. Ops that honour their context stop well inside it; one that ignores cancellation (a write already handed to a database, a command already running) may outlive it, and its effects may land after the call has returned. (2s)"`
 	EmbedOllamaBaseURL           string   `id:"embed-ollama-base-url" default:"http://localhost:11434" desc:"Base URL for the ai://embed ollama backend (local, keyless). nomic-embed-text and other local embedding models are reached at <base>/api/embed. Point this at a reachable Ollama on shared deployments, or use the OpenAI-direct backend instead. (http://localhost:11434)"`
 	DecideZeroDataRetention      bool     `id:"decide-zero-data-retention" default:"true" desc:"Ask the ai://decide provider not to retain request data. (true)"`
 	VectorDBPath                 string   `id:"vector-db-path" default:"./chassis/data/vector.db" desc:"Path to the bundled vector store (SQLite + sqlite-vec) backing the txco://vector/* ops. Its parent dir is created on boot. A separate file from the runtime DB so large, independently-changing vectors never bloat the config-reload dump. (./chassis/data/vector.db)"`
@@ -634,6 +637,19 @@ func Load() (Config, error) {
 	}
 	if _, err = time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceReap)); err != nil {
 		log.Fatalf("unable to parse workspace-reap %s", config.WorkspaceReap)
+	}
+
+	// call-default-timeout and call-stop-grace must parse. The default
+	// timeout need not fit under op-timeout-max: a call over the ceiling is
+	// clamped to it at dispatch, never dropped.
+	if _, err = time.ParseDuration(fmt.Sprintf("%v", config.CallDefaultTimeout)); err != nil {
+		log.Fatalf("unable to parse call-default-timeout %s", config.CallDefaultTimeout)
+	}
+	if _, err = time.ParseDuration(fmt.Sprintf("%v", config.CallStopGrace)); err != nil {
+		log.Fatalf("unable to parse call-stop-grace %s", config.CallStopGrace)
+	}
+	if config.CallDepthMax < 0 {
+		log.Fatalf("call-depth-max (%d) must be 0 (the chassis limit) or a positive depth", config.CallDepthMax)
 	}
 	if d, err := time.ParseDuration(fmt.Sprintf("%v", config.WorkspaceAttachMaxDuration)); err != nil || d <= 0 {
 		log.Fatalf("unable to parse workspace-attach-max-duration %s (want a positive duration)", config.WorkspaceAttachMaxDuration)

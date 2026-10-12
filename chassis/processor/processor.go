@@ -642,6 +642,12 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			gjson.Get(raw, "_txc.src").String() == "http" {
 			ctx = withStreamSink(ctx, &streamSink{resCh: resCh})
 		}
+
+		// The request's root frame (frame.go): the one the inlet's run
+		// executes in, with every policy as it was before frames existed.
+		// A call pushes a frame of its own (call.go); nothing here reads
+		// the frame except where a call differs.
+		ctx = withFrame(ctx, rootFrame(gjson.Get(raw, "_txc.src").String()))
 	}
 
 	pu.Logger.Debug("RUN!", zap.String("stage", stage), zap.String("in", raw))
@@ -780,6 +786,23 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			if ffStopped {
 				// Budget exhausted mid-walk; the terminal response was
 				// already emitted (same contract as the entry checks).
+				return nil
+			}
+		}
+	}
+
+	// Inside a call, a scope that would suspend ends the call instead
+	// (call.go; design §2.7): the continuation model is tail-call only, so
+	// nothing could return into the caller's op afterwards. Decided here on
+	// the op's resolved mode, before either classification below and apart
+	// from whether this chassis has a continuation store, so a call behaves
+	// the same on every chassis. The root frame refuses nothing.
+	if fr := frameFrom(ctx); fr.isCall() && !fr.mayContinue {
+		for _, o := range ops {
+			if isAsyncOp(o) || isContinuableOp(o) {
+				fr.failWith("txco_call_unsupported", fmt.Sprintf("%s/%d/%s: WITH mode = %q cannot run inside a call",
+					o.Stack, o.Scope, o.Name, gjson.Get(o.Meta, "mode").String()))
+				span.End()
 				return nil
 			}
 		}
@@ -957,6 +980,35 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 		stage = op.Stack + "/" + strconv.Itoa(op.Scope)
 
 		go func(op operation.Operation) {
+			// A call frame counts its ops in flight so a cancelled call can
+			// wait for them (frame.go, call.go); the root frame counts
+			// nothing, and for it `deliver` and `dropped` are the plain
+			// hand-off and release they replace. The count closes right
+			// after the op's work, before the hand-off, because the
+			// hand-off blocks for as long as this Run is reading, which it
+			// no longer is once the call has been cancelled; in that case
+			// the op's answer is dropped and the stage released, as the
+			// request path drops an abandoned op's answer.
+			fr := frameFrom(ctx)
+			opLabel := op.Stack + "/" + strconv.Itoa(op.Scope) + "/" + op.Name
+			fr.opStarted(opLabel)
+			deliver := func() {
+				if fr.isCall() {
+					fr.opDone(opLabel)
+					select {
+					case responses <- &op:
+					case <-fr.ctx.Done():
+						wg.Done()
+					}
+					return
+				}
+				responses <- &op
+			}
+			dropped := func() {
+				fr.opDone(opLabel)
+				wg.Done()
+			}
+
 			// op.Meta is the chassis-directives channel about this op (populated
 			// from the rule's WITH clause). Read per-op timeout from there.
 			// Number → milliseconds (matches "WITH timeout = 1000"). String →
@@ -1000,6 +1052,19 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					timeout = loopTimeout
 				}
 			}
+			// call:// runs a whole sub-flow (call.go): its own default,
+			// --call-default-timeout. WITH timeout still wins, and the
+			// ceiling below CLAMPS a call instead of dropping it, because a
+			// call's deadline is the least of the caller's, its own and the
+			// chassis maximum (design §2.9).
+			isCall := op.Resonator != nil && strings.HasPrefix(op.Resonator.Exec, opname.CallScheme)
+			if isCall {
+				if callTimeout, err := time.ParseDuration(pu.Conf.CallDefaultTimeout); err == nil {
+					timeout = callTimeout
+				} else {
+					timeout = callDefaultTimeout
+				}
+			}
 			if val := gjson.Get(op.Meta, "timeout"); val.Exists() {
 				switch val.Type {
 				case gjson.Number:
@@ -1018,14 +1083,18 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 			// exec-error path). Config validation guarantees OpTimeoutMax
 			// itself parses.
 			if maxDur, err := time.ParseDuration(pu.Conf.OpTimeoutMax); err == nil && timeout > maxDur {
-				pu.Logger.Error("op timeout exceeds op-timeout-max; rejecting op",
-					zap.String("stack", op.Stack),
-					zap.Int("scope", op.Scope),
-					zap.String("name", op.Name),
-					zap.Duration("requested", timeout),
-					zap.Duration("max", maxDur))
-				wg.Done()
-				return
+				if isCall {
+					timeout = maxDur
+				} else {
+					pu.Logger.Error("op timeout exceeds op-timeout-max; rejecting op",
+						zap.String("stack", op.Stack),
+						zap.Int("scope", op.Scope),
+						zap.String("name", op.Name),
+						zap.Duration("requested", timeout),
+						zap.Duration("max", maxDur))
+					dropped()
+					return
+				}
 			}
 
 			ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -1042,7 +1111,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					pu.Logger.Error("secret materialization failed",
 						zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
 						zap.String("op_name", op.Name), zap.Error(merr))
-					wg.Done()
+					dropped()
 					return
 				}
 				// Wipe cleartext on every exit path. Cache cleanup
@@ -1061,11 +1130,11 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 				if op.Resonator.Loop != nil {
 					max, ok := pu.loopAdmit(op)
 					if !ok {
-						wg.Done()
+						dropped()
 						return
 					}
 					pu.runLoop(ctx, &op, max, loopHalt)
-					responses <- &op
+					deliver()
 					return
 				}
 
@@ -1102,7 +1171,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					// op-debug strip, author-output sanitize, Null → {},
 					// EMIT overlay: the shared post-exec tail.
 					pu.finishOutput(ctx, &op, output, transport)
-					responses <- &op
+					deliver()
 				} else if strings.HasPrefix(op.Resonator.Exec, "compute://") {
 					// A compute throwing is a bug, not best-effort: be loud and
 					// halt the request (the main loop drains errCh and emits an
@@ -1115,7 +1184,7 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					case errCh <- err:
 					default:
 					}
-					wg.Done()
+					dropped()
 				} else if strings.HasPrefix(op.Resonator.Exec, "workspace://") {
 					// A workspace:// error is an AUTHORING error (no provider
 					// configured, bad name, malformed ref, untenanted) — every
@@ -1126,12 +1195,12 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 					pu.Logger.Error("workspace op dropped",
 						zap.String("stack", op.Stack), zap.Int("scope", op.Scope),
 						zap.String("op_name", op.Name), zap.String("err", err.Error()))
-					wg.Done()
+					dropped()
 				} else {
 					// Other transports stay best-effort: drop this op's output
 					// and continue (legacy behavior).
 					pu.Logger.Debug("exec-err", zap.String("err", err.Error()))
-					wg.Done()
+					dropped()
 				}
 			}
 		}(op)
@@ -1516,6 +1585,35 @@ func (pu *Unit) advanceAfterScope(
 	sf := gjson.GetMany(resp, "_txc.flag_breakpoint", "_txc.runtime.http_stream_open", "_txc.web.res.body")
 	streamingAllowed := !sf[0].Bool()
 	streamOpen := sf[1].Bool()
+
+	// A call runs its named stack and only it (call.go; design §2.2). A jump
+	// to a stage outside the frame's stack — a cross-stack @goto, an
+	// unschemed EXEC "<stack>/<scope>", a txco://route — ends the call with
+	// txco_call_boundary; a bare-scope jump was resolved into the callee
+	// above and stays. And a call may not stream (§2.7): a body written in
+	// a non-terminal scope, the explicit streaming idiom, ends it with
+	// txco_call_unsupported rather than riding along unflushed. Outside a
+	// call every stage is inside the root frame and this block is skipped.
+	if fr := frameFrom(ctx); fr.isCall() {
+		continuing := !(halt || breakHere) && ((len(gotoStage) > 0) || (len(nextOps) > 0))
+		switch {
+		case gotoStage != "" && !halt && !breakHere && !fr.confines(gotoStage):
+			fr.failWith("txco_call_boundary", fmt.Sprintf("%s jumped to %s, outside the called stack %s", stage, gotoStage, fr.stack))
+			tr.Event(trace.TimelineEvent{
+				Ts: time.Now(), Event: "call.boundary",
+				Fields: map[string]any{"from": stage, "to": gotoStage, "stack": fr.stack},
+			})
+			endSpan()
+			return true, nil
+		case !fr.mayStream && continuing && sf[2].String() != "":
+			fr.failWith("txco_call_unsupported", fmt.Sprintf("%s wrote @web.res.body before its last scope; a call cannot stream a body", stage))
+			endSpan()
+			return true, nil
+		}
+		if !fr.mayStream {
+			streamingAllowed = false
+		}
+	}
 	// An op may have opened the stream itself mid-dispatch (stream.go): a
 	// `workspace://` exec forwarding stdout as the command produces it.
 	// From here on that is indistinguishable from a scope-flushed body —
@@ -3145,6 +3243,15 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// `WITH into`. See chassis/outlet and processor/outlet.go.
 		payload, err = pu.ExecOutlet(ctx, op)
 		transport = "outlet"
+	case strings.HasPrefix(opName, opname.CallScheme):
+		// `EXEC "call://<stack>[/<scope>]"` runs another stack in process,
+		// inside this request, and answers one result object under `WITH
+		// into` (processor/call.go). Every failure is data in that object;
+		// only a malformed target is an authoring error that drops the op.
+		// Before `StagePartsRE`: "call://x/100" is a call, not a jump to a
+		// stack named "call://x".
+		payload, err = pu.ExecCall(ctx, op)
+		transport = "call"
 	case strings.HasPrefix(opName, opname.GotoScheme):
 		// `EXEC "goto://<stack>/<scope>"` or `"goto://<scope>"` is the
 		// stage jump written as a scheme. It is `EMIT @goto` exactly: it
@@ -3174,7 +3281,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// gRPC was removed in this revision. Any non-recognized scheme is a
 		// rule authoring error — fail loudly so it's spotted at first match
 		// rather than silently dispatched somewhere.
-		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", "outlet://<name>/<op>", "cap://<name>", or a stage like "goto://stack/scope" or "stack/scope"`)
+		err = errors.New(`unsupported EXEC value; use "txco://...", "http(s)://...", "mcp+http(s)://host/path#tool", "workspace://<name>/<verb>", "outlet://<name>/<op>", "cap://<name>", "call://<stack>", or a stage like "goto://stack/scope" or "stack/scope"`)
 		payload = pu.MakeMockResponse(op, "unsupported-scheme")
 		transport = "unsupported"
 	}
@@ -4066,6 +4173,10 @@ func (pu *Unit) OpsForStage(ctx context.Context, stage string) ([]operation.Oper
 		}
 	}
 
+	// A call frame's lookups never peel (call.go; design §2.2): the callee's
+	// own stack, exactly, and when it has no scope left the call ends. The
+	// root frame walks as it always has.
+	peel := frameFrom(ctx).mayPeel()
 	prefix := stack
 	for {
 		rows, err := pu.lookupOpsExact(ctx, prefix, scope, tenant)
@@ -4083,7 +4194,7 @@ func (pu *Unit) OpsForStage(ctx context.Context, stage string) ([]operation.Oper
 			}
 			return rows, nil
 		}
-		if wildcard {
+		if wildcard || !peel {
 			return ops, nil
 		}
 		next, ok := peelParent(prefix)

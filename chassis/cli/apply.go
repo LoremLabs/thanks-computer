@@ -536,6 +536,12 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
 	}
 
+	// Apply-time lint for `call://` targets: a callee outside this apply,
+	// and a callee in it with a rule the call engine refuses. Warnings only.
+	for _, w := range lintCalls(ops) {
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
+	}
+
 	// Apply-time lint for LOOP clauses: the shapes the chassis would
 	// drop at dispatch or that never iterate. Warnings only, same as
 	// above (the parser already refused the shapes that are errors).

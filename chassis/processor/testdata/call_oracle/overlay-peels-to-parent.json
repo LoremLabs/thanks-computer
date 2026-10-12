@@ -1,0 +1,14 @@
+{
+  "final": "{\"web200\":true,\"canary100\":true,\"_txc\":{\"_seen\":[\"web/canary/100-\\u003eweb/canary/200\"],\"ttl\":-2,\"fuel_used\":20,\"stack\":\"web/canary\",\"src\":\"http\"}}",
+  "events": [
+    "stage.enter fuel_used=10 stage=web/canary/0 ttl=-1",
+    "stage.merge resp_bytes=61 stage=web/canary/100",
+    "stage.enter fuel_used=20 stage=web/canary/200 ttl=-2",
+    "stage.merge resp_bytes=110 stage=web/200",
+    "stage.merge resp_bytes=110 stage=web/200"
+  ],
+  "steps": [
+    "web/canary/100/c100 noop ok ",
+    "web/200/w200 noop ok "
+  ]
+}

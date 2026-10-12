@@ -337,3 +337,34 @@ func TestLintLoopIgnoresOrdinaryOps(t *testing.T) {
 		t.Errorf("expected no warnings for ordinary ops, got: %v", got)
 	}
 }
+
+// TestLintCalls: a call to a stack outside this apply is a warning (it
+// deploys separately); a call to a stack in this apply whose rule cannot
+// run inside a call names that rule; a plain call in the same apply is
+// silent, and so is a stack chosen at run time.
+func TestLintCalls(t *testing.T) {
+	ops := []bundle.Op{
+		{Stack: "app", Scope: 100, Name: "orient", SourcePath: "/tmp/orient.txcl",
+			Txcl: `WITH input = &object("job", ._job) EXEC "call://app/_orient"`},
+		{Stack: "app", Scope: 200, Name: "elsewhere", SourcePath: "/tmp/elsewhere.txcl",
+			Txcl: `EXEC "call://billing"`},
+		{Stack: "app", Scope: 300, Name: "picked", SourcePath: "/tmp/picked.txcl",
+			Txcl: `WITH stack = ._next EXEC "call://app/_orient"`},
+		{Stack: "app", Scope: 400, Name: "slow", SourcePath: "/tmp/slow.txcl",
+			Txcl: `EXEC "call://app/_slow"`},
+		{Stack: "app/_orient", Scope: 100, Name: "compile", SourcePath: "/tmp/compile.txcl",
+			Txcl: `WHEN @src == "call" EMIT ._call.output.prompt = "p"`},
+		{Stack: "app/_slow", Scope: 100, Name: "job", SourcePath: "/tmp/job.txcl",
+			Txcl: `EXEC "https://worker.example/x" WITH mode = "async", join_at_scope = 200`},
+	}
+	got := lintCalls(ops)
+	if len(got) != 2 {
+		t.Fatalf("want two warnings, got %d: %v", len(got), got)
+	}
+	if !containsSubstring(got, `calls stack "billing", which is not in this apply`) {
+		t.Errorf("missing the outside-this-apply warning: %v", got)
+	}
+	if !containsSubstring(got, `app/_slow/100/job (WITH mode = "async")`) || !containsSubstring(got, "txco_call_unsupported") {
+		t.Errorf("missing the refused-rule warning: %v", got)
+	}
+}

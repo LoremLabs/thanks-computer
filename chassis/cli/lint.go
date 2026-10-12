@@ -108,6 +108,7 @@ Flags:
 	// apply (see loop_lint.go) — they don't flip the exit code.
 	loopWarns := lintStackLoops(ops)
 	loopWarns = append(loopWarns, lintLoopClause(ops)...)
+	loopWarns = append(loopWarns, lintCalls(ops)...)
 	// Web ABI builds: their own warnings, and author ops in the producer band.
 	all := map[string]bool{}
 	for _, n := range ws.StackNames() {

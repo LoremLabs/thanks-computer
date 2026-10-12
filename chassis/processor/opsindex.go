@@ -52,6 +52,11 @@ type opsIndex struct {
 
 	mu      sync.RWMutex
 	ladders map[string]*stackLadder // key: tenant + "\x00" + stack pattern
+
+	// versions remembers each (tenant, stack)'s active version number for
+	// this snapshot, read once by a call that records which code answered
+	// (call.go stackVersion). Same key as ladders.
+	versions sync.Map
 }
 
 // stackLadder holds one (tenant, stack)'s ops grouped by scope, with
@@ -100,6 +105,8 @@ func (pu *Unit) currentOpsIndex(snap *sql.DB) *opsIndex {
 // the ladder cache. Wildcard patterns never reach here (OpsForStage
 // gates on them); they keep the SQL path.
 func (idx *opsIndex) opsForStage(ctx context.Context, pu *Unit, tenant, stack string, scope int) ([]operation.Operation, error) {
+	// Same boundary as the SQL path: a call frame's lookups never peel.
+	peel := frameFrom(ctx).mayPeel()
 	prefix := stack
 	for {
 		ladder, err := idx.ladderFor(ctx, pu, tenant, prefix)
@@ -111,6 +118,9 @@ func (idx *opsIndex) opsForStage(ctx context.Context, pu *Unit, tenant, stack st
 				pu.Logger.Debug("ops-for-stage fallback", zap.String("stack", stack), zap.String("matched", prefix), zap.Int("scope", scope))
 			}
 			return rows, nil
+		}
+		if !peel {
+			return make([]operation.Operation, 0), nil
 		}
 		next, ok := peelParent(prefix)
 		if !ok {

@@ -38,6 +38,7 @@ the chassis-wide cap.
 | `EXEC` dispatch              | 25          |
 | A jump written by a rule with no `EXEC` (`EMIT @goto`, or `SET @goto` after `SELECT`) | 25 (the jump is its dispatch, so it costs what `EXEC "goto://…"` does) |
 | `LOOP` pass                  | 25 (the EXEC cost, once per pass) |
+| `call://` | 25 for the dispatch; then the callee's scopes and ops at these rates, on the same ledger ([calls](./calls.md)) |
 | Nano-op compute, per ms      | 10          |
 | `workspace://` wall clock, per started 100 ms | 1 (10 a second) |
 | Secret materialization       | 100         |
@@ -104,6 +105,14 @@ continuations, and deferred-join fan-out the same way `_txc.tenant`
 does — a flow can't shed its budget by jumping stacks. They are
 stripped from the response before it reaches the inlet client (after
 the fuel value is captured for usage accounting).
+
+A [call](./calls.md) spends the same budget: the callee's scopes and ops
+charge the request's ledger, and exhaustion inside the callee ends the
+callee (its result says so) and then the request at its next charge. The
+repeat-transition history is the one thing a call keeps to itself — each
+call starts with an empty one — so a sub-flow called twice in one request
+pays no repeat penalty for being the same sub-flow, while a tight loop
+inside one call still does.
 
 ## Reading an exhaustion
 
