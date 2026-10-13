@@ -534,6 +534,47 @@ func TestComputeSourceRowKeepsItsHash(t *testing.T) {
 	}
 }
 
+// A CALLS/ declaration lands on the node as a CAPS/ one does: hash-only,
+// even when the artifact also carries its bytes (the CAS has them; the node's
+// runtime DB keeps no declaration bytes), its hash intact, no ops row. The
+// call-entry source resolves it from the CAS by that hash.
+func TestCallDeclarationRowKeepsItsHash(t *testing.T) {
+	h := newHarness(t)
+	decl := "entry: 100\n"
+	declHash := sha256Hex([]byte(decl))
+	art := StackActivatedArtifact{
+		TenantID: "tnt_a", Stack: "web", Version: 1,
+		Files: []StackArtifactFile{
+			{Path: "100/hello.txcl", Content: `EXEC "https://example.test/x"`},
+			{Path: "CALLS/greet.yaml", Content: decl, ContentHash: declHash},
+		},
+	}
+	data, _ := json.Marshal(art)
+	if err := h.astore.Put(context.Background(), "stacks/tnt_a/web/1", data, []byte(`{}`)); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	h.putEvent(t, "e1.json", controlevent.Event{
+		EventID: "evt-call-1",
+		Type:    controlevent.TypeStackActivated, TenantID: "tnt_a", StackID: "web",
+		Version: 1, ArtifactRef: "stacks/tnt_a/web/1",
+		Checksum: "sha256:" + sha256Hex(data), ControlVersion: 5,
+	})
+	h.c.pollOnce(context.Background())
+
+	var content, hash string
+	if err := h.db.QueryRow(`SELECT content, content_hash FROM stack_files WHERE path = ?`, "CALLS/greet.yaml").Scan(&content, &hash); err != nil {
+		t.Fatalf("row not applied: %v", err)
+	}
+	if content != "" || hash != declHash {
+		t.Fatalf("node row content=%q hash=%q, want empty content and %s", content, hash, declHash)
+	}
+	var n int
+	_ = h.db.QueryRow(`SELECT COUNT(*) FROM ops WHERE tenant_id='tnt_a' AND stack='web'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("ops rows = %d, want only the rule", n)
+	}
+}
+
 // A run.abort event ends the run on the node that holds it and is a no-op
 // that still advances the cursor on one that does not.
 func TestRunAbortEndsTheRunHere(t *testing.T) {

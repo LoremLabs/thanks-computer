@@ -31,6 +31,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/loremlabs/thanks-computer/chassis/calldecl"
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/computesrc"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
@@ -111,7 +112,15 @@ func (c *Controller) readStackFilesForArtifact(
 		// them lazily (and never inline them into the in-memory runtime DB).
 		// Rule/fixture files stay inline. Single-node deployments never call
 		// this (gated on FeedSink != nop), so the file/disk CAS is fine there.
-		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) || computesrc.IsPath(path) || stackdir.IsPath(path) {
+		//
+		// The declaration dirs (OUTLETS/, SANDBOXES/, CAPS/, CALLS/) belong
+		// here because their readers resolve them from the dbcache snapshot,
+		// and a fleet node's snapshot is the Postgres mirror, which strips
+		// every stack_files row's content: the bytes must be in the CAS.
+		// CALLS/ was missing, so on the fleet every `WITH entry` call failed
+		// "filecas: hash not found" (single-node keeps content inline, so dev
+		// never showed it).
+		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) || calldecl.IsCallPath(path) || computesrc.IsPath(path) || stackdir.IsPath(path) {
 			if hash == "" {
 				hash = sha256Hex(content)
 			}
@@ -187,7 +196,9 @@ func (c *Controller) readStackFilesForArtifact(
 // active_version, so this is the prior version's set — and a new version's file
 // whose hash is in it is provably already in the CAS, so it needs no CAS
 // round-trip at all. Best-effort: an empty/nil set just routes everything
-// through Exists-then-Put.
+// through Exists-then-Put. CALLS/ is deliberately NOT in the list: a CALLS/
+// row activated before the producer put its bytes (above) is active with
+// nothing in the CAS, so its hash proves nothing; it costs one Exists.
 func (c *Controller) priorActiveFileHashes(
 	ctx context.Context, tenantID, stackName string,
 ) map[string]struct{} {

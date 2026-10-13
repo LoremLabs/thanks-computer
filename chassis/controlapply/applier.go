@@ -28,6 +28,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
+	"github.com/loremlabs/thanks-computer/chassis/calldecl"
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/computesrc"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
@@ -534,7 +535,7 @@ func (c *Controller) applyStackActivated(ctx context.Context, ev controlevent.Ev
 	for _, f := range art.Files {
 		content := f.Content
 		hash := f.ContentHash
-		if (strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) || capdecl.IsCapPath(f.Path) || computesrc.IsPath(f.Path) || stackdir.IsPath(f.Path)) && hash != "" {
+		if (strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) || capdecl.IsCapPath(f.Path) || calldecl.IsCallPath(f.Path) || computesrc.IsPath(f.Path) || stackdir.IsPath(f.Path)) && hash != "" {
 			// Fingerprint-only CAS-backed asset (FILES/ static asset, a
 			// VECTORS//KV/ store-seed pack, or a DATASETS/ member): the bytes
 			// live in the shared content-addressed store, so don't inline them

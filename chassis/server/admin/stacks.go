@@ -1784,6 +1784,7 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			!outlet.IsOutletPath(f.Path) &&
 			!sandbox.IsSandboxPath(f.Path) &&
 			!capdecl.IsCapPath(f.Path) &&
+			!calldecl.IsCallPath(f.Path) &&
 			!computesrc.IsPath(f.Path) &&
 			!stackdir.IsPath(f.Path) {
 			writeJSONError(w, http.StatusBadRequest, "encoding_not_allowed",
@@ -2251,7 +2252,7 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 			// this materialises nothing for them; an inline-pushed member (a
 			// small artifact via the raw API, or the .yaml manifest) gets the
 			// same CAS treatment as FILES/.
-			if (strings.HasPrefix(rf.path, "FILES/") || dataset.IsDatasetPath(rf.path) || outlet.IsOutletPath(rf.path) || sandbox.IsSandboxPath(rf.path) || capdecl.IsCapPath(rf.path)) && rf.content != "" {
+			if (strings.HasPrefix(rf.path, "FILES/") || dataset.IsDatasetPath(rf.path) || outlet.IsOutletPath(rf.path) || sandbox.IsSandboxPath(rf.path) || capdecl.IsCapPath(rf.path) || calldecl.IsCallPath(rf.path)) && rf.content != "" {
 				assets[rf.path] = rf.content
 			}
 		}
@@ -2294,6 +2295,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		}
 		if capdecl.IsCapPath(rf.path) {
 			continue // capability declaration → read by the capability inlet at run time, not an ops row
+		}
+		if calldecl.IsCallPath(rf.path) {
+			continue // call-entry declaration → read by `WITH entry` at run time, not an ops row
 		}
 		if computesrc.IsPath(rf.path) {
 			continue // compute source → read by the admin's compute-source view, not an ops row
@@ -2628,7 +2632,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		// activate is never published. Mirrors the in-tx loop's coverage
 		// exactly: rule bodies only — not FILES/, packs, datasets, mocks.
 		for _, f := range files {
-			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) || capdecl.IsCapPath(f.Path) {
+			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) || capdecl.IsCapPath(f.Path) || calldecl.IsCallPath(f.Path) {
 				continue
 			}
 			pf, ok := parseStackPath(f.Path)
