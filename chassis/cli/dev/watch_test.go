@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+// testPoll is the poll the timing tests run at; the default (500ms) would
+// stretch every wait below.
+const testPoll = 100 * time.Millisecond
+
 // TestWatchOpsDebounces verifies that bursty saves coalesce into one
 // onChange call. Five touches inside a 200ms window debounced at 250ms
 // should yield exactly one event.
@@ -25,11 +29,11 @@ func TestWatchOpsDebounces(t *testing.T) {
 
 	var fired int32
 	go func() {
-		_ = WatchOps(ctx, dir, Options{Debounce: 250 * time.Millisecond}, func() {
+		_ = WatchOps(ctx, dir, Options{Poll: testPoll, Debounce: 250 * time.Millisecond}, func() {
 			atomic.AddInt32(&fired, 1)
 		})
 	}()
-	// Give the watcher a beat to start polling (it has a 100ms tick).
+	// Give the watcher a beat to start polling (testPoll ticks).
 	time.Sleep(200 * time.Millisecond)
 
 	for i := 0; i < 5; i++ {
@@ -64,7 +68,7 @@ func TestWatchOpsIgnoresUnrelated(t *testing.T) {
 
 	var fired int32
 	go func() {
-		_ = WatchOps(ctx, dir, Options{Debounce: 200 * time.Millisecond}, func() {
+		_ = WatchOps(ctx, dir, Options{Poll: testPoll, Debounce: 200 * time.Millisecond}, func() {
 			atomic.AddInt32(&fired, 1)
 		})
 	}()
@@ -97,7 +101,7 @@ func TestWatchOpsFiresOnIncludedFiles(t *testing.T) {
 	t.Cleanup(cancel)
 
 	var fired int32
-	opts := Options{Debounce: 200 * time.Millisecond, Included: func(p string) bool { return p == script }}
+	opts := Options{Poll: testPoll, Debounce: 200 * time.Millisecond, Included: func(p string) bool { return p == script }}
 	go func() {
 		_ = WatchOps(ctx, dir, opts, func() { atomic.AddInt32(&fired, 1) })
 	}()
@@ -185,7 +189,7 @@ func TestWatchExcludesFilesByDefault(t *testing.T) {
 	t.Cleanup(cancel)
 	var fired int32
 	go func() {
-		_ = WatchOps(ctx, dir, Options{Debounce: 200 * time.Millisecond}, func() { atomic.AddInt32(&fired, 1) })
+		_ = WatchOps(ctx, dir, Options{Poll: testPoll, Debounce: 200 * time.Millisecond}, func() { atomic.AddInt32(&fired, 1) })
 	}()
 	time.Sleep(250 * time.Millisecond)
 
@@ -241,7 +245,7 @@ func TestWatchColocatedComputes(t *testing.T) {
 	t.Cleanup(cancel)
 	var fired int32
 	go func() {
-		_ = WatchColocatedComputes(ctx, dir, Options{Debounce: 250 * time.Millisecond}, func() { atomic.AddInt32(&fired, 1) })
+		_ = WatchColocatedComputes(ctx, dir, Options{Poll: testPoll, Debounce: 250 * time.Millisecond}, func() { atomic.AddInt32(&fired, 1) })
 	}()
 	time.Sleep(200 * time.Millisecond)
 
@@ -260,5 +264,71 @@ func TestWatchColocatedComputes(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	if got := atomic.LoadInt32(&fired); got < 1 {
 		t.Fatalf("got %d fires for .js edit; want >= 1", got)
+	}
+}
+
+// TestWatchOpsAndComputesRoutes: one walk feeds both callbacks. A .txcl edit
+// fires only the ops callback, a .js edit only the compute one, and a .js an
+// op ships (Included) fires both.
+func TestWatchOpsAndComputesRoutes(t *testing.T) {
+	dir := t.TempDir()
+	rule := filepath.Join(dir, "OPS/site/100/hello.txcl")
+	js := filepath.Join(dir, "OPS/site/100/hello.js")
+	shipped := filepath.Join(dir, "OPS/site/bin/tool.js")
+	for _, p := range []string{rule, js, shipped} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("v0"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var ops, computes int32
+	opts := Options{Poll: testPoll, Debounce: 150 * time.Millisecond, Included: func(p string) bool { return p == shipped }}
+	go func() {
+		_ = WatchOpsAndComputes(ctx, dir, opts,
+			func() { atomic.AddInt32(&ops, 1) },
+			func() { atomic.AddInt32(&computes, 1) })
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	step := func(p string, wantOps, wantComputes int32) {
+		t.Helper()
+		_ = os.WriteFile(p, []byte(time.Now().String()), 0o644)
+		time.Sleep(450 * time.Millisecond)
+		if o, c := atomic.LoadInt32(&ops), atomic.LoadInt32(&computes); o != wantOps || c != wantComputes {
+			t.Fatalf("after writing %s: ops=%d computes=%d, want %d/%d", filepath.Base(p), o, c, wantOps, wantComputes)
+		}
+	}
+	step(rule, 1, 0)
+	step(js, 1, 1)
+	step(shipped, 2, 2)
+}
+
+// TestWatchDefaultPoll: with no Poll set the watcher still sees an edit, at
+// its slower default cadence.
+func TestWatchDefaultPoll(t *testing.T) {
+	dir := t.TempDir()
+	rule := filepath.Join(dir, "rule.txcl")
+	if err := os.WriteFile(rule, []byte("v0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var fired int32
+	go func() {
+		_ = WatchOps(ctx, dir, Options{Debounce: 100 * time.Millisecond}, func() { atomic.AddInt32(&fired, 1) })
+	}()
+	time.Sleep(200 * time.Millisecond)
+	_ = os.WriteFile(rule, []byte("v1"), 0o644)
+	deadline := time.Now().Add(3 * time.Second)
+	for atomic.LoadInt32(&fired) == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&fired) == 0 {
+		t.Fatal("an edit never fired with the default poll")
 	}
 }

@@ -431,7 +431,7 @@ Flags:
 
 		if _, err := os.Stat(opsDir); err == nil {
 			// Watcher tuning: prune big/irrelevant subtrees so the polling
-			// watcher doesn't lstat tens of thousands of built assets 10×/sec.
+			// watcher doesn't lstat tens of thousands of built assets every poll.
 			// FILES/ asset trees are excluded by default (see Options.IncludeFiles);
 			// txco.yaml `dev.watch.ignore` + --watch-ignore add more.
 			// Files the ops pull in with &include: editing one re-applies like
@@ -485,9 +485,14 @@ Flags:
 			}
 			fmt.Fprintf(stdout, "[watch] watching %s (.txcl/.json/&include and stack-tree files → draft; colocated .js → rebuild + activate; %s)\n", opsDir, filesNote)
 			state := newDevWatchState()
-			// .txcl/.json → sticky draft (no auto-activation; activate to publish).
+			// One walk of OPS/ feeds both: .txcl/.json → sticky draft (no
+			// auto-activation; activate to publish), and colocated <name>.js →
+			// rebuild + upload + ACTIVATE. A compute artifact has no admin-UI
+			// edit to clobber, so it activates live (unlike the draft-only
+			// .txcl/.json watch). devApply is manifest-aware, so only the stack
+			// whose digest changed re-versions.
 			go func() {
-				err := devpkg.WatchOps(ctx, opsDir, watchOpts, func() {
+				err := devpkg.WatchOpsAndComputes(ctx, opsDir, watchOpts, func() {
 					applyMu.Lock()
 					defer applyMu.Unlock()
 					fresh, err := readWorkspace(dir)
@@ -499,18 +504,7 @@ Flags:
 					if err := devApplyToDraft(ctx, fresh, resolved, *staticOnly, state, stdout, stderr); err != nil {
 						fmt.Fprintf(stderr, "[watch] push to draft: %v\n", err)
 					}
-				})
-				if err != nil && ctx.Err() == nil {
-					fmt.Fprintf(stderr, "[watch] %v\n", err)
-				}
-			}()
-
-			// Colocated <name>.js → rebuild + upload + ACTIVATE. A compute
-			// artifact has no admin-UI edit to clobber, so it activates live
-			// (unlike the draft-only .txcl/.json watch). devApply is
-			// manifest-aware, so only the stack whose digest changed re-versions.
-			go func() {
-				err := devpkg.WatchColocatedComputes(ctx, opsDir, watchOpts, func() {
+				}, func() {
 					applyMu.Lock()
 					defer applyMu.Unlock()
 					fmt.Fprintln(stdout, "[watch] compute source changed — rebuilding")
@@ -525,7 +519,7 @@ Flags:
 					}
 				})
 				if err != nil && ctx.Err() == nil {
-					fmt.Fprintf(stderr, "[watch] compute: %v\n", err)
+					fmt.Fprintf(stderr, "[watch] %v\n", err)
 				}
 			}()
 		}

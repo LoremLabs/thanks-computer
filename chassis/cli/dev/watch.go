@@ -13,10 +13,15 @@ import (
 )
 
 // Options configures the dev watchers. The zero value is valid (500ms
-// debounce, FILES/ excluded, no extra ignores).
+// debounce, a 500ms poll, FILES/ excluded, no extra ignores).
 type Options struct {
 	// Debounce coalesces a flurry of saves into a single onChange. <=0 → 500ms.
 	Debounce time.Duration
+
+	// Poll is how often the polling watcher walks the tree. <=0 → 500ms. Each
+	// poll lstats every file under the root, and a change already waits out
+	// the debounce, so polling faster costs CPU and buys little latency.
+	Poll time.Duration
 
 	// Ignore is a list of glob patterns whose matching directories (and their
 	// subtrees) are pruned from the watch. A pattern with a "/" is matched with
@@ -28,7 +33,7 @@ type Options struct {
 	// IncludeFiles, when false (the default), also prunes every per-stack
 	// FILES/ asset tree. FILES/ holds built assets — not editable source — and
 	// can be tens of thousands of files; a POLLING watcher lstat'ing them
-	// 10×/sec is the main idle-CPU cost in a large workspace. Set true to watch
+	// every poll is the main idle-CPU cost in a large workspace. Set true to watch
 	// FILES/ too (e.g. when hand-editing static assets you want hot-reloaded).
 	IncludeFiles bool
 
@@ -46,11 +51,7 @@ type Options struct {
 // Blocks until ctx is canceled. Returns the watcher's exit error (or
 // nil on clean shutdown).
 func WatchOps(ctx context.Context, dir string, opts Options, onChange func()) error {
-	match := relevantExt
-	if opts.Included != nil {
-		match = func(p string) bool { return relevantExt(p) || opts.Included(p) }
-	}
-	return watchDir(ctx, dir, opts, match, onChange)
+	return watchDir(ctx, dir, opts, route{opsMatch(opts), onChange})
 }
 
 // WatchColocatedComputes watches the OPS/ tree for colocated compute source
@@ -58,15 +59,73 @@ func WatchOps(ctx context.Context, dir string, opts Options, onChange func()) er
 // .txcl/.json, which the OPS draft watcher handles — so a compute edit
 // triggers a rebuild+activate without double-firing on resonator/mock edits.
 func WatchColocatedComputes(ctx context.Context, dir string, opts Options, onChange func()) error {
-	return watchDir(ctx, dir, opts, isComputeSource, onChange)
+	return watchDir(ctx, dir, opts, route{isComputeSource, onChange})
 }
 
-// watchDir is the shared recursive-watch loop. match decides which changed
-// paths fire onChange.
-func watchDir(ctx context.Context, dir string, opts Options, match func(string) bool, onChange func()) error {
+// WatchOpsAndComputes is WatchOps and WatchColocatedComputes over one walk of
+// dir: what `txco dev` runs. Two watchers would walk the same tree twice
+// every poll. A changed file fires each callback whose files it is (a .js in
+// a stack tree an op ships fires both); each callback debounces on its own.
+func WatchOpsAndComputes(ctx context.Context, dir string, opts Options, onOps, onCompute func()) error {
+	return watchDir(ctx, dir, opts, route{opsMatch(opts), onOps}, route{isComputeSource, onCompute})
+}
+
+// opsMatch is WatchOps's file set: the op text and its declarations, plus
+// the files opts.Included names.
+func opsMatch(opts Options) func(string) bool {
+	if opts.Included == nil {
+		return relevantExt
+	}
+	return func(p string) bool { return relevantExt(p) || opts.Included(p) }
+}
+
+// route is one consumer of a watch: the changed files match picks fire
+// onChange, debounced.
+type route struct {
+	match    func(string) bool
+	onChange func()
+}
+
+// debouncer collapses a flurry of schedule calls within the window into one
+// call of fn after the window quiets.
+type debouncer struct {
+	window  time.Duration
+	fn      func()
+	mu      sync.Mutex
+	pending bool
+}
+
+func (d *debouncer) schedule() {
+	d.mu.Lock()
+	alreadyPending := d.pending
+	d.pending = true
+	d.mu.Unlock()
+	if alreadyPending {
+		return
+	}
+	go func() {
+		time.Sleep(d.window)
+		d.mu.Lock()
+		if !d.pending {
+			d.mu.Unlock()
+			return
+		}
+		d.pending = false
+		d.mu.Unlock()
+		d.fn()
+	}()
+}
+
+// watchDir is the shared recursive-watch loop: one polling walk of dir,
+// each changed file handed to every route whose match accepts it.
+func watchDir(ctx context.Context, dir string, opts Options, routes ...route) error {
 	debounce := opts.Debounce
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
+	}
+	poll := opts.Poll
+	if poll <= 0 {
+		poll = 500 * time.Millisecond
 	}
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -80,7 +139,7 @@ func watchDir(ctx context.Context, dir string, opts Options, match func(string) 
 	// radovskyb/watcher is a POLLING watcher: every cycle it filepath.Walks
 	// (lstats) the whole tree. Pruning a directory makes that walk SkipDir it —
 	// the only way to keep tens of thousands of built-asset files from being
-	// lstat'd 10×/sec. (A file-level filter hook doesn't help: a skipped file
+	// lstat'd every poll. (A file-level filter hook doesn't help: a skipped file
 	// is still walked.) Ignore the matched dirs BEFORE AddRecursive so the
 	// initial walk skips them too.
 	ignoreDirs, err := pruneDirs(absDir, opts.Ignore, opts.IncludeFiles)
@@ -97,32 +156,11 @@ func watchDir(ctx context.Context, dir string, opts Options, match func(string) 
 		return err
 	}
 
-	// Debounce: a flurry of saves within the window collapses into a
-	// single onChange after the window quiets.
-	var mu sync.Mutex
-	var pending bool
-	fire := func() {
-		mu.Lock()
-		if !pending {
-			mu.Unlock()
-			return
-		}
-		pending = false
-		mu.Unlock()
-		onChange()
-	}
-	schedule := func() {
-		mu.Lock()
-		alreadyPending := pending
-		pending = true
-		mu.Unlock()
-		if alreadyPending {
-			return
-		}
-		go func() {
-			time.Sleep(debounce)
-			fire()
-		}()
+	// Debounce per route: a flurry of saves within the window collapses
+	// into a single onChange after the window quiets.
+	debs := make([]*debouncer, len(routes))
+	for i, r := range routes {
+		debs[i] = &debouncer{window: debounce, fn: r.onChange}
 	}
 
 	go func() {
@@ -132,11 +170,11 @@ func watchDir(ctx context.Context, dir string, opts Options, match func(string) 
 				if ev.IsDir() {
 					continue
 				}
-				name := ev.Path
-				if !match(name) {
-					continue
+				for i, r := range routes {
+					if r.match(ev.Path) {
+						debs[i].schedule()
+					}
 				}
-				schedule()
 			case <-w.Error:
 				// transient errors from the watcher are non-fatal; ignore
 			case <-ctx.Done():
@@ -148,7 +186,7 @@ func watchDir(ctx context.Context, dir string, opts Options, match func(string) 
 		}
 	}()
 
-	if err := w.Start(100 * time.Millisecond); err != nil {
+	if err := w.Start(poll); err != nil {
 		return err
 	}
 	return nil
