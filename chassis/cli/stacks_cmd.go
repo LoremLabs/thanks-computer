@@ -197,8 +197,9 @@ Flags:
 					stackDir, saved.VersionNumber)
 			} else if dirty, why := stackDirty(stackDir); dirty {
 				fmt.Fprintf(stderr,
-					"pull: workspace %s has %s and no prior pull recorded; rerun with --force to overwrite\n",
-					stackDir, why)
+					"pull: workspace %s has %s and no prior pull recorded; rerun with --force to overwrite\n"+
+						"  if this tree came from git, `txco sync --stack %s` records its baseline without touching files (a pull writes the deployed form: numeric step dirs, includes expanded)\n",
+					stackDir, why, stack)
 			} else {
 				fmt.Fprintf(stderr,
 					"pull: workspace %s flagged dirty unexpectedly; rerun with --force\n",

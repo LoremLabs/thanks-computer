@@ -49,10 +49,17 @@ type State struct {
 	// version; `activate`/`draft` never write state (they don't establish
 	// local==version).
 	ParentVersionNumber int64 `json:"parent_version_number"`
-	// ManifestHash is what the server reported at pull time. Used by
-	// `txco push` to short-circuit "no changes locally" before walking
-	// the tree (Phase 2; harmless to record now).
+	// ManifestHash is the manifest of VersionNumber's code: the one the
+	// server reported at pull time, or the local build's when push, apply
+	// or sync found the tree to be that version. `apply --changed` and
+	// pull's dirty check key on it.
 	ManifestHash string `json:"manifest_hash"`
+	// TreeHash is the hash of the local tree as `txco status` builds it
+	// (ops as written, no derived rows), taken when the tree was known to
+	// be this version — so status can say "(clean)" without compiling.
+	// Empty when unknown (a pull, an older CLI): status compares
+	// ManifestHash instead.
+	TreeHash string `json:"tree_hash,omitempty"`
 }
 
 // Key canonicalises a target identity (chassis addr + tenant slug) into

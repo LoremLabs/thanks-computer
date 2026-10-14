@@ -88,6 +88,10 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return jsonErrWrap(rest, stdout, stderr, runStatus), true
 	case "pull":
 		return jsonErrWrap(rest, stdout, stderr, runPull), true
+	case "sync":
+		// Record which chassis version each local stack is, from content —
+		// a new machine's way back to pushing. See sync.go.
+		return jsonErrWrap(rest, stdout, stderr, runSync), true
 	case "cat":
 		// Resolve + print a deployed stack's FILES/ asset the way read-file
 		// does (manifest → CAS) — an ops/debugging probe. See stacks_cmd.go.
@@ -360,6 +364,7 @@ func printUsage(w io.Writer) {
 			{"apply [<dir>]", muted("Deploy the OPS/ tree — code (operations + FILES); data is opt-in via ") + hint("`txco data`")},
 			{"push <stack> [<dir>]", muted("Deploy one stack — create + activate (inverse of pull)")},
 			{"pull <stack> [<dir>]", muted("Materialise a stack's active version into local OPS/")},
+			{"sync [<dir>]", muted("Record which chassis version each local stack is, from content (a new machine's first step; writes only .txco/)")},
 			{"data <command>", muted("Deploy + inspect VECTORS/+KV/ store-seed packs (apply/pull/ls/show/diff/rm)")},
 			{"activate <stack>", muted("Flip a stack's active version (defaults to most recent draft)")},
 			{"diff [<dir>]", muted("Compare local OPS/ tree against a chassis admin endpoint")},

@@ -19,7 +19,7 @@ type stackDrift struct {
 	Stack     string
 	Remote    string // "v12" or "—" if no active
 	Local     string // "v14 (clean)" / "v14 (edited since pull)" / "untracked"
-	Note      string // "in sync" / "chassis ahead by 2 …" / "chassis rolled back N …" / "no local state recorded — run `txco pull <stack>`"
+	Note      string // "in sync" / "chassis ahead by 2 …" / "chassis rolled back N …" / "no local state recorded — `txco sync` …"
 	URL       string // reachable stack URL, e.g. "https://app.acme.com" (empty when none/unknown)
 	DevURL    string // reachable URL on the local `txco dev` chassis (empty when no dev run is known)
 	MailPath  string // inbound mail pattern for _mail stacks, e.g. "*@acme.com" (empty otherwise)
@@ -76,8 +76,14 @@ func buildDrifts(ctx context.Context, c *client.Client, ws *localWorkspace, remo
 			// (Any part failing to collect leaves the row unannotated.)
 			if ws.Broken[name] != nil {
 				d.Local += " (web build missing)"
-			} else if build, berr := buildStackFiles(dir, name, opsForStack(localOps, name), ws.withABI(name, collectOpts{})); berr == nil && saved.ManifestHash != "" {
-				if build.Hash() == saved.ManifestHash {
+			} else if build, berr := buildStackFiles(dir, name, opsForStack(localOps, name), ws.withABI(name, collectOpts{})); berr == nil && (saved.TreeHash != "" || saved.ManifestHash != "") {
+				// TreeHash is this basis exactly (push and sync record it);
+				// ManifestHash is what an older record has.
+				want := saved.TreeHash
+				if want == "" {
+					want = saved.ManifestHash
+				}
+				if build.Hash() == want {
 					d.Local += " (clean)"
 				} else {
 					d.Local += " (edited since pull)"
@@ -88,7 +94,7 @@ func buildDrifts(ctx context.Context, c *client.Client, ws *localWorkspace, remo
 		// Categorize.
 		switch {
 		case saved == nil && remoteN >= 0:
-			d.Note = fmt.Sprintf("no local state recorded — run `txco pull %s`", name)
+			d.Note = fmt.Sprintf("no local state recorded — `txco sync --stack %s` checks this tree against the chassis and records it (writes no files)", name)
 			d.Divergent = true
 		case saved == nil && remoteN < 0:
 			d.Note = "no local state, no remote active"
@@ -99,12 +105,12 @@ func buildDrifts(ctx context.Context, c *client.Client, ws *localWorkspace, remo
 		case remoteN == saved.VersionNumber:
 			d.Note = "in sync"
 		case remoteN > saved.VersionNumber:
-			d.Note = fmt.Sprintf("chassis ahead by %d — `txco pull %s --force` to sync local",
+			d.Note = fmt.Sprintf("chassis ahead by %d — `txco sync --stack %s` fast-forwards if this tree has those changes (git pull first)",
 				remoteN-saved.VersionNumber, name)
 			d.Divergent = true
 		default: // remoteN < saved.VersionNumber
-			d.Note = fmt.Sprintf("chassis rolled back %d versions — local mirrors a newer version",
-				saved.VersionNumber-remoteN)
+			d.Note = fmt.Sprintf("chassis rolled back %d versions — local mirrors a newer version; `txco sync --stack %s` checks this tree against it",
+				saved.VersionNumber-remoteN, name)
 			d.Divergent = true
 		}
 

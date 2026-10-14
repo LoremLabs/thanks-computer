@@ -101,10 +101,11 @@ The CLI verbs map onto that flow:
 
 | Command | What it does |
 |---|---|
-| `txco apply [dir]` | Deploy the whole `OPS/` tree: draft + activate per changed stack; expands [`&include`](./txcl/txcl.md#including-files--include) files, resolves `op://` refs; uploads computes. Refuses a stack the chassis moved since this workspace last synced (see below); `--force` overwrites |
-| `txco push <stack>` | Like `apply`, one stack |
+| `txco apply [dir]` | Deploy the whole `OPS/` tree: draft + activate per changed stack; expands [`&include`](./txcl/txcl.md#including-files--include) files, resolves `op://` refs; uploads computes. Refuses a stack the chassis moved since this workspace last synced, unless the tree already has that change (see below); `--force` overwrites |
+| `txco push <stack>` | Like `apply`, one stack; `--force` deploys over a chassis that moved |
 | `stacks:` in `txco.yaml` | Binds a stack to a [Web ABI](./web-abi.md) build: `apply`, `push`, `dev`, `status` and `lint` lay the build over the stack's tree. `--static-only` deploys a build's static half when it has a server entry |
-| `txco pull <stack>` | Materialize a stack's active version (or `--version N`) into local `OPS/<stack>/` — the inverse of `push`, as deployed: `op://` refs come back resolved and `&include`s come back as the included text |
+| `txco pull <stack>` | Materialize a stack's active version (or `--version N`) into local `OPS/<stack>/` — the inverse of `push`, as deployed: `op://` refs come back resolved, `&include`s come back as the included text, step directories come back numeric (`100/`, not `0100_GREET/`), and `OPS/<stack>/` is replaced, so files the chassis doesn't hold are gone. For a tree that lives in git, use `sync` |
+| `txco sync [dir]` | Record which chassis version each local stack is, from content, without touching the tree or the chassis: what a new machine runs before its first push (see below). `--stack` checks one; `--adopt` records the active version for a stack it finds no baseline for |
 | `txco draft <stack>` | Upload a draft *without* activating (stage for review); `--activate` flips it too |
 | `txco activate <stack>` | Flip the active-version pointer (defaults to newest draft). Activating an older version = rollback |
 | `txco deactivate <stack>` | Retire a stack: activates an empty version, so it stops serving (HTTP 404, mail 550) and keeps its history. Use it for a stack you removed from `OPS/` — `apply` leaves a stack it no longer finds serving its last version |
@@ -126,22 +127,58 @@ The CLI verbs map onto that flow:
 ### Fast-forward rule
 
 A workspace records the version it last synced (`.txco/<stack>.state.json`,
-written by `pull`, `apply`/`push`, `dev`, and kept current by `data apply`
-and `activate`). If the chassis's active version is no longer that one —
-a teammate deployed, someone edited in the admin UI, or the stack was
-rolled back — `apply`, `push` and `data apply` **refuse** rather than
-silently supersede their change (git's `! [rejected] non-fast-forward`):
+one entry per chassis and tenant, written by `pull`, `apply`/`push`, `sync`
+and `dev`, and kept current by `data apply` and `activate`). If the chassis's
+active version is no longer that one — a teammate deployed, someone edited in
+the admin UI, or the stack was rolled back — `apply` and `push` look at the
+content before they decide. The chassis keeps every version's per-file
+hashes, so with B the recorded version and A the active one:
 
-```
-apply: web: refused — chassis active is v7 but this workspace last synced v5 — someone deployed (or edited in the admin UI) since.
-  `txco diff web` shows what changed; `txco pull web --force` takes the chassis version (discards local edits); `apply --force` overwrites the chassis.
-```
+- if this tree already has every change the chassis made since B (a `git pull`
+  brought them in) and its own edits touch none of those files, the baseline
+  fast-forwards to A and the deploy goes ahead:
+
+  ```
+  push: web: baseline v5 → v7 — this tree already has the chassis's changes since v5; deploying 2 local edits
+  ```
+
+- otherwise it **refuses**, naming the files, rather than silently drop their
+  change (git's `! [rejected] non-fast-forward`):
+
+  ```
+  push: web: refused — the chassis moved from v5 (this workspace's baseline) to v7 and changed 1 file this tree also differs on:
+      OPS/web/0100_GREET/hello.txcl
+    Bring those changes in first (git pull; `txco diff web` shows them), or `txco push web --force` overwrites the chassis.
+  ```
 
 The chassis enforces the same rule under its lock (the activate carries the
 version the client expects; a mismatch is `409 stack_moved`), so two applies
-racing can't both win. A workspace with no baseline — a fresh checkout, CI —
-cannot detect a move and applies unconditionally; `txco pull` first to
-establish one.
+racing can't both win. `data apply` keeps the plain version check.
+
+A workspace with no baseline — a fresh checkout, CI — records one the first
+time a push finds its tree is the active version, and refuses a tree that is
+exactly an *older* version (pushing it would undo the newer one). A tree with
+changes and no baseline deploys unconditionally, as before.
+
+#### From a new machine
+
+`.txco/` is not committed, so a new checkout starts with no baselines.
+`txco pull` is the wrong way back for a tree that lives in git: it rewrites
+`OPS/<stack>/` in the deployed form. Instead:
+
+```sh
+git pull
+txco sync --target prod      # compares each stack with the chassis; writes only .txco/
+# … edit …
+txco push web --target prod
+```
+
+`sync` reports each stack as `in sync`, `v5 → v7` (fast-forwarded), `conflict`
+(with the files), `behind` (the tree is an older version exactly), or `no
+baseline` (it differs from the active version and matches no recent one). A
+`no baseline` stack is usually your own unpushed work: `txco sync --adopt
+--stack web` records the active version as its base. `sync` exits 1 while
+any stack is in conflict, behind or without a baseline.
 
 ## Nano-ops
 

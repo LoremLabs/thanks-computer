@@ -80,17 +80,25 @@ txco diff
 ```
 
 ```sh
-# pull in changes
-txco pull
-```
-```sh
-# push your changes
-txco push
+# on a new machine (or after someone deployed from elsewhere): record which
+# version each stack is, from content — writes only .txco/
+txco sync
 ```
 
 ```sh
-# activate the current 
-txco activate
+# take a stack's deployed version into OPS/<stack>/ (replaces the directory
+# with the deployed form; for a tree in git, prefer sync)
+txco pull <stack>
+```
+```sh
+# push your changes to one stack, or every changed stack
+txco push <stack>
+txco apply
+```
+
+```sh
+# activate a version (the newest draft, or --version N to roll back)
+txco activate <stack>
 ```
 
 ```sh

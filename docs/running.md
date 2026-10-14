@@ -59,8 +59,9 @@ txco trace last     # what the last request did, step by step
 
 Every apply makes a new version of each stack it changes; `txco versions <stack>` lists
 them and `txco activate <stack> --version N` rolls back to one. If someone else deployed since your last sync,
-`apply` refuses rather than overwrite them
-([the fast-forward rule](./advanced/cli.md#fast-forward-rule)).
+`apply` refuses rather than overwrite them, unless your tree already has their change
+([the fast-forward rule](./advanced/cli.md#fast-forward-rule)); on a new machine, `txco sync`
+records where each stack stands before the first push.
 
 ## Where to go next
 

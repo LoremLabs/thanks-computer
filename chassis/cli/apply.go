@@ -59,6 +59,11 @@ type applyOpts struct {
 	// uploads, so the admin can't show what a compute:// op does. The new
 	// version drops any source rows the previous one carried.
 	noSource bool
+	// sync runs the pipeline up to each stack's build and stops there: the
+	// content check records the workspace's baseline, and nothing is
+	// uploaded, drafted or activated (`txco sync`). adopt also records the
+	// active version for a stack the check finds no baseline for.
+	sync, adopt bool
 }
 
 // spin animates a braille spinner on a TTY while fn runs, then clears the line.
@@ -303,6 +308,7 @@ func runPush(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&opts.retries, "retries", 3, "retry a transient failure (gateway 5xx, `database is locked`) this many times with backoff before giving up")
 	fs.BoolVar(&opts.noSource, "no-source", false, "don't store compute sources (each op://NAME .js/.ts) for the admin to show; the new version carries none")
 	fs.BoolVar(&opts.staticOnly, "static-only", false, "deploy a bound Web ABI build's static half even though it has a server entry (no chassis runs server/ yet)")
+	fs.BoolVar(&opts.force, "force", false, "deploy even if the chassis moved since this workspace last synced (overwrites their change), or if nothing changed")
 	verbose := fs.Bool("verbose", false, "trace every HTTP request/response to stderr (TXCO_VERBOSE=1)")
 	fs.Usage = func() {
 		banner.PrintLogo(stderr)
@@ -601,10 +607,13 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 	clientTarget.Tenant = resolveTenant(opts.Tenant, effectiveProfile(opts.Target, opts.Profile))
 
 	// Show the target and (for a non-local chassis) confirm before any write —
-	// dry-run already returned above, so this only gates real pushes.
-	if err := confirmMutation(resolveTargetLabel(dir, opts.Target, opts.Addr, opts.Profile), clientTarget.Addr, clientTarget.Tenant, opts.Yes, opts.jsonOut, stderr); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
-		return 1
+	// dry-run already returned above, so this only gates real pushes. A sync
+	// writes nothing on the chassis.
+	if !opts.sync {
+		if err := confirmMutation(resolveTargetLabel(dir, opts.Target, opts.Addr, opts.Profile), clientTarget.Addr, clientTarget.Tenant, opts.Yes, opts.jsonOut, stderr); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
+			return 1
+		}
 	}
 
 	c := client.NewWithTimeout(clientTarget, opts.timeout)
@@ -613,9 +622,11 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 	// A Web ABI build's markers (public "_" roots, immutable prefixes) only
 	// work on a chassis that reads them; an older one would store them as
 	// private files and 404 every "_" asset. Confirm before writing.
-	if err := checkMarkerSupport(ctx, ws, selected, clientTarget.Addr); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
-		return 1
+	if !opts.sync {
+		if err := checkMarkerSupport(ctx, ws, selected, clientTarget.Addr); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
+			return 1
+		}
 	}
 
 	// In --json mode stdout must carry only the result object, so route
@@ -628,9 +639,11 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 	// Upload built compute artifacts before activating any resonator that
 	// references them — activation verifies their presence and rolls back if
 	// missing.
-	if err := uploadComputes(ctx, c, builtComputes, progress, stderr); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
-		return 1
+	if !opts.sync {
+		if err := uploadComputes(ctx, c, builtComputes, progress, stderr); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
+			return 1
+		}
 	}
 	// Each stack also records its computes' source (COMPUTES/<digest>.json,
 	// bytes in the file store) so the admin can show it — when the chassis
@@ -647,12 +660,17 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		}
 	}
 	results := make([]deployResult, 0, len(stacks))
+	var synced []syncRow
 	green, red, dim, reset := statusColors(stdout)
 	// failures collects stacks that exhausted their retries so one bad stack
 	// no longer aborts the whole run: we record it, keep going, and report the
 	// set at the end. apply is idempotent (unchanged stacks short-circuit), so
 	// simply re-running resumes where this run left off.
 	var failures []string
+	// refused collects stacks the fast-forward guard (or the chassis, at
+	// activate) turned away: not failures to retry, but a move to look at.
+	var refused []string
+	key := stateKeyFor(c)
 
 	// Default fast-skip: one bulk GET /stacks up front instead of a GetStack probe
 	// per stack. We match each stack's local code digest against the SERVER's active
@@ -665,7 +683,7 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 	// and --force (re-version all), and for single-stack `push` (one probe is cheap).
 	// Best-effort: a list failure just falls back to per-stack checks.
 	serverByName := map[string]client.StackRecord{}
-	if onlyStack == "" && !opts.changed && !opts.force {
+	if onlyStack == "" && !opts.changed && !opts.force && !opts.sync {
 		var recs []client.StackRecord
 		var lerr error
 		_ = spin(progress, "listing stacks…", func() error {
@@ -702,6 +720,11 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		files := build.Files
 		localHash := build.Hash()
 
+		if opts.sync {
+			synced = append(synced, syncStack(ctx, c, ws, key, stack, build, stacks[stack], opts.adopt))
+			continue
+		}
+
 		// Fast-skip an unchanged stack with no per-stack round-trip. --force skips
 		// nothing (re-version all). --changed trusts the local last-applied digest
 		// (zero network). Default matches against the SERVER hash from the one bulk
@@ -718,6 +741,11 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 				skip, skipVersion = true, *rec.ActiveVersion
 			}
 			if skip {
+				// The tree is the active version: that is a baseline, whatever
+				// this workspace recorded (a fresh checkout, a stale one).
+				if !opts.changed {
+					recordInSync(ws, key, stack, skipVersion, localHash)
+				}
 				// Unchanged stacks are recorded (for --json and the end-of-run recap)
 				// but NOT printed per-stack — an in-sync stack is noise; only what
 				// actually deployed (or failed) is worth a line.
@@ -766,6 +794,7 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		if !opts.force && !opts.changed {
 			if rec != nil && rec.ActiveVersion != nil && rec.CodeManifestHash != "" &&
 				rec.CodeManifestHash == localHash {
+				recordInSync(ws, key, stack, *rec.ActiveVersion, localHash)
 				results = append(results, deployResult{
 					Stack: stack, Version: *rec.ActiveVersion,
 					Files: len(files), Activated: false, Unchanged: true,
@@ -774,15 +803,49 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 			}
 		}
 		// Fast-forward guard (see fastforward.go): refuse to supersede a
-		// version this workspace never saw, unless --force.
+		// version this workspace never saw, unless --force. When the numbers
+		// disagree, or there is no baseline to compare, the content decides.
 		var expectedActive *int64
 		if !opts.force {
-			saved, _ := state.Load(dir, stack, stateKeyFor(c))
-			if m := remoteMoved(saved, rec); m != nil {
-				scan.clear()
-				fmt.Fprint(stderr, refusedMovedMessage(cmd, stack, m))
-				failures = append(failures, stack)
-				continue
+			saved, _ := state.Load(dir, stack, key)
+			m := remoteMoved(saved, rec)
+			if m != nil || (saved == nil && rec != nil && rec.ActiveVersion != nil) {
+				refusal := ""
+				ff, ferr := fastForward(ctx, c, dir, stack, saved, rec, build)
+				switch {
+				case ferr != nil || ff.Kind == ffNoBase:
+					// No usable baseline: a recorded one that moved still refuses;
+					// none at all deploys, as it always has (a fresh checkout, CI).
+					if m != nil {
+						refusal = refusedMovedMessage(cmd, stack, m)
+					}
+				case ff.Kind == ffInSync:
+					// A chassis that reports no code manifest: the check found the
+					// tree is the active version, so there is nothing to deploy.
+					recordInSync(ws, key, stack, ff.Active, localHash)
+					results = append(results, deployResult{
+						Stack: stack, Version: ff.Active,
+						Files: len(files), Activated: false, Unchanged: true,
+					})
+					continue
+				case ff.Kind == ffForward:
+					scan.clear()
+					fmt.Fprintf(progress, "%s: %s: baseline v%d → v%d — this tree already has the chassis's changes since v%d; deploying %d local edit%s\n",
+						cmd, stack, ff.Base, ff.Active, ff.Base, len(ff.Edits), pluralS(len(ff.Edits)))
+				case ff.Kind == ffConflict:
+					refusal = refusedConflictMessage(cmd, stack, ff, stacks[stack])
+				case ff.Kind == ffBehind:
+					// The tree IS that older version: record it, so the guard
+					// keeps refusing until the newer changes are brought in.
+					recordInSync(ws, key, stack, ff.Base, localHash)
+					refusal = refusedBehindMessage(cmd, stack, ff, stacks[stack])
+				}
+				if refusal != "" {
+					scan.clear()
+					fmt.Fprint(stderr, refusal)
+					refused = append(refused, stack)
+					continue
+				}
 			}
 			if rec != nil {
 				expectedActive = expectedActiveFor(rec)
@@ -893,6 +956,14 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		})
 		phase("activate", tPhase) // time even on the 502 — this is the one we care about
 		if err != nil {
+			if isStackMovedErr(err) {
+				// The race the guard can't see: someone activated between its
+				// look and this activate.
+				fmt.Fprintf(stderr, "%s: %s: refused — the chassis's active version changed while this ran; draft v%d is left on the chassis. Re-run to check again.\n",
+					cmd, stack, versionNumber)
+				refused = append(refused, stack)
+				continue
+			}
 			fmt.Fprintf(stderr, "%s: %s: activate v%d: %v\n", cmd, stack, versionNumber, err)
 			failures = append(failures, stack)
 			continue
@@ -915,10 +986,11 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		// recomputes (localManifestHash), so the stack reads "(clean)" right
 		// after. Best-effort: the deploy already succeeded, so a state-write
 		// failure only warns — it must not fail the push.
-		if serr := state.Save(dir, stack, stateKeyFor(c), state.State{
+		if serr := state.Save(dir, stack, key, state.State{
 			VersionNumber:       act.VersionNumber,
 			ParentVersionNumber: act.VersionNumber,
 			ManifestHash:        localHash,
+			TreeHash:            localTreeHash(ws, stack),
 		}); serr != nil {
 			fmt.Fprintf(stderr, "%s: %s: warning: could not record local state: %v\n", cmd, stack, serr)
 		}
@@ -941,6 +1013,10 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		}
 	}
 	scan.clear() // wipe any residual counter before the recap
+
+	if opts.sync {
+		return reportSync(cmd, synced, opts.jsonOut, stdout, stderr)
+	}
 
 	if opts.jsonOut {
 		// `push` deploys exactly one stack → emit a single object; `apply`
@@ -968,6 +1044,9 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 			}
 		}
 		recap := fmt.Sprintf("%s✓ %d deployed%s · %s%d unchanged%s", green, nAct, reset, dim, nUnch, reset)
+		if len(refused) > 0 {
+			recap += fmt.Sprintf(" · %s✗ %d refused%s", red, len(refused), reset)
+		}
 		if len(failures) > 0 {
 			recap += fmt.Sprintf(" · %s✗ %d failed%s", red, len(failures), reset)
 		}
@@ -977,10 +1056,16 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 	// Stacks that exhausted their retries don't abort the run, but they do make
 	// it a non-zero exit and a re-runnable resume point. The "applied stacks are
 	// skipped" promise holds because apply short-circuits unchanged stacks.
+	if len(refused) > 0 {
+		fmt.Fprintf(stderr, "\n%s✗%s %s: %d of %d stack%s refused (the chassis moved): %s\n",
+			red, reset, cmd, len(refused), len(stacks), pluralS(len(stacks)), strings.Join(refused, ", "))
+	}
 	if len(failures) > 0 {
 		fmt.Fprintf(stderr, "\n%s✗%s %s: %d of %d stack%s failed after retries: %s\n",
 			red, reset, cmd, len(failures), len(stacks), pluralS(len(stacks)), strings.Join(failures, ", "))
 		fmt.Fprintf(stderr, "%s: re-run to resume — already-applied stacks are skipped as unchanged.\n", cmd)
+	}
+	if len(refused) > 0 || len(failures) > 0 {
 		return 1
 	}
 	return 0
@@ -1195,12 +1280,7 @@ func localManifestHash(files []client.StackFile) string {
 		// Hash the RAW bytes so it matches the server (which hashes raw, after
 		// base64-decoding binary). collectFileAssets set ContentHash over raw; prefer
 		// it. Ops carry no hash, but their Content is UTF-8 text (== raw) → recompute.
-		hash := f.ContentHash
-		if hash == "" {
-			ch := sha256.Sum256([]byte(f.Content))
-			hash = hex.EncodeToString(ch[:])
-		}
-		pairs = append(pairs, pair{f.Path, hash})
+		pairs = append(pairs, pair{f.Path, fileHash(f)})
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].path < pairs[j].path })
 	h := sha256.New()

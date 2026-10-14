@@ -278,6 +278,7 @@ var cliCommandTree = []node{
 	}},
 	{Name: "status", Desc: "Show local workspace + chassis status"},
 	{Name: "pull", Desc: "Fetch a stack's rules from the chassis"},
+	{Name: "sync", Desc: "Record which chassis version each local stack is (writes only .txco/)", Flags: append([]string{"stack", "skip", "adopt", "json", "timeout", "no-source", "verbose"}, targetFlagNames...)},
 	{Name: "cat", Desc: "Print a deployed stack's file (manifest → CAS); debugging probe", Flags: append([]string{"json"}, targetFlagNames...)},
 	{Name: "push", Desc: "Deploy one stack (create + activate; inverse of pull)"},
 	{Name: "draft", Desc: "Stage a draft version of a stack (no activate)"},
