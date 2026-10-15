@@ -17,8 +17,8 @@ import (
 // only read.
 //
 // A policy is not a security boundary between principals. One account is
-// bound to one collection, so the client is always the same person; what the
-// policy divides is LABOUR, not privilege.
+// bound to one collection (and what it links), so the client is always the
+// same person; what the policy divides is LABOUR, not privilege.
 
 // errPolicy is what a refused verb looks like to the client: 403, with a
 // sentence a person can act on rather than a code.
@@ -52,19 +52,25 @@ func clientArtifact(rel string) bool {
 	return strings.HasPrefix(chdrive.BaseOf(rel), ".")
 }
 
-// allows reports whether the principal's collection lets a client apply
-// verb at rel, exempting client artifacts from `write`.
-func (c *Controller) allows(pr principal, rel, verb string) bool {
-	if verb == chdrive.VerbWrite && clientArtifact(rel) {
+// allows reports whether the collection a path lands in (the principal's
+// own, or one it links: links.go) lets a client apply verb at the path
+// inside it, exempting client artifacts from `write`. A linked collection
+// keeps its own policy: a folder it keeps for its stack is kept here too.
+func (c *Controller) allows(t target, verb string) bool {
+	if verb == chdrive.VerbWrite && clientArtifact(t.rel) {
 		return true
 	}
-	return pr.coll.Policy.Allows(rel, verb)
+	return t.coll.Policy.Allows(t.rel, verb)
 }
 
 // check is the fs adapter's form: nil when allowed, a 403 otherwise.
-func (f *fs) check(rel, verb string) error {
-	if f.c.allows(f.pr, rel, verb) {
+func (f *fs) check(t target, verb string) error {
+	if f.c.allows(t, verb) {
 		return nil
 	}
-	return errPolicy(verb, rel)
+	where := t.rel
+	if t.via != "" {
+		where = strings.TrimSuffix(t.via+"/"+t.rel, "/")
+	}
+	return errPolicy(verb, where)
 }

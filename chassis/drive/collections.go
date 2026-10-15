@@ -31,18 +31,21 @@ type Collection struct {
 	ResourceCount int64
 	// Policy is what a WebDAV CLIENT may do, by subtree (policy.go). The
 	// stack's own txco://drive/* ops are never subject to it.
-	Policy    Policy
+	Policy Policy
+	// Links are other collections shown inside this one, each at a folder
+	// path (links.go). The WebDAV head follows them; the ops never do.
+	Links     Links
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
-const collectionCols = `id, tenant, name, sync_token, bytes_used, resource_count, created_at, updated_at, policy`
+const collectionCols = `id, tenant, name, sync_token, bytes_used, resource_count, created_at, updated_at, policy, links`
 
 func scanCollection(r rowScanner) (Collection, error) {
 	var c Collection
 	var created, updated string
-	var policy sql.NullString
-	if err := r.Scan(&c.ID, &c.Tenant, &c.Name, &c.SyncToken, &c.BytesUsed, &c.ResourceCount, &created, &updated, &policy); err != nil {
+	var policy, links sql.NullString
+	if err := r.Scan(&c.ID, &c.Tenant, &c.Name, &c.SyncToken, &c.BytesUsed, &c.ResourceCount, &created, &updated, &policy, &links); err != nil {
 		return Collection{}, err
 	}
 	c.CreatedAt = parseTime(created)
@@ -51,6 +54,8 @@ func scanCollection(r rowScanner) (Collection, error) {
 	// the head then allows, which is every collection's default. Validate()
 	// at the write door is what keeps a bad policy from landing.
 	c.Policy, _ = ParsePolicy(policy.String)
+	// The same for links: one that no longer parses shows nothing linked.
+	c.Links, _ = ParseLinks(links.String)
 	return c, nil
 }
 
@@ -66,6 +71,32 @@ func (s *Store) SetCollectionPolicy(ctx context.Context, tenant, name string, p 
 		p.String(), fmtTime(s.now()), tenant, strings.TrimSpace(name))
 	if err != nil {
 		return Collection{}, fmt.Errorf("drive: set collection policy: %w", err)
+	}
+	if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
+		return Collection{}, ErrNotFound
+	}
+	c, found, err := s.GetCollection(ctx, tenant, name)
+	if err != nil {
+		return Collection{}, err
+	}
+	if !found {
+		return Collection{}, ErrNotFound
+	}
+	return c, nil
+}
+
+// SetCollectionLinks replaces a collection's links (links.go); empty links
+// clear them.
+func (s *Store) SetCollectionLinks(ctx context.Context, tenant, name string, l Links) (Collection, error) {
+	if err := l.Validate(); err != nil {
+		return Collection{}, err
+	}
+	res, err := s.db.ExecContext(ctx, s.rb(`
+		UPDATE drive_collections SET links = ?, updated_at = ?
+		 WHERE tenant = ? AND name = ? AND deleted_at IS NULL`),
+		l.String(), fmtTime(s.now()), tenant, strings.TrimSpace(name))
+	if err != nil {
+		return Collection{}, fmt.Errorf("drive: set collection links: %w", err)
 	}
 	if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
 		return Collection{}, ErrNotFound
@@ -125,7 +156,7 @@ func (s *Store) ensureCollectionOnce(ctx context.Context, tenant, name string) (
 		id := "dc_" + hxid.NewTimeSort().String()
 		if _, err := tx.ExecContext(ctx, s.rb(`
 			INSERT INTO drive_collections (`+collectionCols+`, deleted_at)
-			VALUES (?, ?, ?, 0, 0, 0, ?, ?, '', NULL)`),
+			VALUES (?, ?, ?, 0, 0, 0, ?, ?, '', '', NULL)`),
 			id, tenant, name, now, now); err != nil {
 			if s.dialect.IsUniqueViolationGeneric(err) {
 				return Collection{}, false, err // caller retries

@@ -20,7 +20,7 @@ import (
 
 // driveCollection ensures (creates) or removes one collection of the
 // pinned tenant. Result at `into`: {id, name, sync_token, bytes_used,
-// resource_count, created, policy?} or {name, removed}. A remove refuses a
+// resource_count, created, policy?, links?} or {name, removed}. A remove refuses a
 // non-empty collection unless `force`.
 //
 // `policy` (optional) sets what a WebDAV CLIENT may do, by subtree — path
@@ -32,6 +32,17 @@ import (
 // stack keeps curating a tree its clients may only read. Passing it again
 // REPLACES the whole policy; `&object()` clears it. Absent leaves it alone,
 // so an ensure that does not mention policy never disturbs one.
+//
+// `links` (optional) shows other collections of the tenant inside this one,
+// each at a folder path — link path → collection name (drive/links.go):
+//
+//	links = &object("teams/red", "red", "teams/blue", "blue")
+//
+// The WebDAV head follows them (a login to this collection sees and writes
+// the linked ones, each still itself: its policy, quota and events); these
+// ops never do. Like policy: passing it REPLACES all of them, `&object()`
+// clears them, absent leaves them alone. A link names a collection that
+// need not exist yet (the head shows nothing there until it does).
 func driveCollection(ctx context.Context, d driveDeps, in []byte) (event.Payload, error) {
 	tenant, meta, into, ep, ok := drivePrelude(ctx, d)
 	if !ok {
@@ -72,6 +83,23 @@ func driveCollection(ctx context.Context, d driveDeps, in []byte) (event.Payload
 		}
 		c = updated
 	}
+	if lr := gjson.GetBytes(meta, "links"); lr.Exists() {
+		if !lr.IsObject() {
+			return driveErr(into, "txco_drive_invalid_arg", "`links` must be an object of link path → collection name"), nil
+		}
+		var l chdrive.Links
+		if uerr := json.Unmarshal([]byte(lr.Raw), &l); uerr != nil {
+			return driveErr(into, "txco_drive_invalid_arg", "`links`: "+uerr.Error()), nil
+		}
+		updated, lerr := d.store.SetCollectionLinks(ctx, tenant, name, l)
+		if lerr != nil {
+			if errors.Is(lerr, chdrive.ErrNotFound) {
+				return driveStoreErr(into, lerr), nil
+			}
+			return driveErr(into, "txco_drive_invalid_arg", lerr.Error()), nil
+		}
+		c = updated
+	}
 	out.Set(into+".id", c.ID)
 	out.Set(into+".name", c.Name)
 	out.Set(into+".sync_token", c.SyncToken)
@@ -80,6 +108,9 @@ func driveCollection(ctx context.Context, d driveDeps, in []byte) (event.Payload
 	out.Set(into+".created", created)
 	if s := c.Policy.String(); s != "" {
 		out.SetRaw(into+".policy", s)
+	}
+	if s := c.Links.String(); s != "" {
+		out.SetRaw(into+".links", s)
 	}
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
 }

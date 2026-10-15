@@ -59,7 +59,14 @@ type lockInfo struct {
 const maxLockBody = 64 << 10
 
 func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr principal) {
-	rel := c.rel(pr, r.URL.Path)
+	// Through a link, the lock is on the linked collection's path, under its
+	// policy (links.go).
+	t, err := c.resolve(r.Context(), pr, r.URL.Path)
+	if err != nil {
+		serveStoreError(w, err)
+		return
+	}
+	rel := t.rel
 	// A lock is a WRITE lock (`<D:locktype><D:write/>` below), and on an
 	// unmapped URL it CREATES the file. Both are writes, so a subtree whose
 	// policy refuses `write` refuses the lock too.
@@ -70,7 +77,7 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 	// write, got a 403 and then retried until the whole volume stalled
 	// (prod, 2026-09-17). A client that cannot take a write lock stops
 	// asking.
-	if !c.allows(pr, rel, chdrive.VerbWrite) {
+	if !c.allows(t, chdrive.VerbWrite) {
 		http.Error(w, "forbidden by the collection's policy", http.StatusForbidden)
 		return
 	}
@@ -104,7 +111,7 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 			}
 		}
 	}
-	res, found, err := c.store.Stat(r.Context(), pr.coll.ID, rel)
+	res, found, err := c.store.Stat(r.Context(), t.coll.ID, rel)
 	if err != nil {
 		serveStoreError(w, err)
 		return
@@ -125,7 +132,7 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 			return
 		}
 		if parent := chdrive.ParentOf(norm); parent != "" {
-			dir, ok, perr := c.store.Stat(r.Context(), pr.coll.ID, parent)
+			dir, ok, perr := c.store.Stat(r.Context(), t.coll.ID, parent)
 			if perr != nil {
 				serveStoreError(w, perr)
 				return
@@ -164,7 +171,7 @@ func (c *Controller) serveLock(w http.ResponseWriter, r *http.Request, pr princi
 	}
 	fmt.Fprintf(&b, `<D:timeout>%s</D:timeout>`, timeout)
 	fmt.Fprintf(&b, `<D:locktoken><D:href>%s</D:href></D:locktoken>`, xmlEscape(token))
-	fmt.Fprintf(&b, `<D:lockroot><D:href>%s</D:href></D:lockroot>`, xmlEscape(c.href(pr, res)))
+	fmt.Fprintf(&b, `<D:lockroot><D:href>%s</D:href></D:lockroot>`, xmlEscape(c.hrefVia(pr, t.via, res)))
 	b.WriteString(`</D:activelock></D:lockdiscovery></D:prop>`)
 
 	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)

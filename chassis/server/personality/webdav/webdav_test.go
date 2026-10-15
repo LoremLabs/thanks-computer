@@ -1079,3 +1079,157 @@ func TestLoginOpensOnlyTheCredentialsCollection(t *testing.T) {
 	resp, _ = h.do(t, "PROPFIND", "/drive/", nil, auth("paris@pony.example.com", "bcdj-mail-only"))
 	want(t, resp, http.StatusUnauthorized, "a credential for another head")
 }
+
+// A collection's links (chassis/drive/links.go) are followed by the head:
+// one login sees the linked collections as folders of its own tree, and
+// every request below a link is the linked collection's — its bytes, its
+// policy, its counters — while the links themselves can't be rearranged.
+func TestCollectionLinks(t *testing.T) {
+	var conf config.Config
+	insecure(&conf)
+	h := newHarness(t, conf)
+	ctx := context.Background()
+	red, _, err := h.store.EnsureCollection(ctx, "acme", "red")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blue, _, _ := h.store.EnsureCollection(ctx, "acme", "blue")
+	for _, p := range []string{"Input", "Sources"} {
+		if _, err := h.store.Mkdir(ctx, red.ID, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.store.Put(ctx, red.ID, "Sources/a.txt", strings.NewReader("filed"), 5, chdrive.PutOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.SetCollectionPolicy(ctx, "acme", "red", chdrive.Policy{"Sources": {chdrive.VerbWrite: chdrive.ModeDeny}}); err != nil {
+		t.Fatal(err)
+	}
+	// The root's own tree: a page, and an old real folder where a link goes
+	// (the link hides it).
+	h.store.Mkdir(ctx, h.coll.ID, "Wiki")
+	h.store.Put(ctx, h.coll.ID, "Wiki/page.md", strings.NewReader("# Page"), 6, chdrive.PutOpts{})
+	h.store.Mkdir(ctx, h.coll.ID, "teams")
+	h.store.Mkdir(ctx, h.coll.ID, "teams/red")
+	h.store.Put(ctx, h.coll.ID, "teams/red/old.txt", strings.NewReader("hidden"), 6, chdrive.PutOpts{})
+	if _, err := h.store.SetCollectionLinks(ctx, "acme", "paris", chdrive.Links{"teams/red": "red", "teams/blue": "blue", "teams/gone": "gone"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The tree: the root's own, the links' folder, each linked drive.
+	resp, out := h.do(t, "PROPFIND", "/drive/", nil, hdr("Depth", "1"))
+	want(t, resp, http.StatusMultiStatus, "PROPFIND root")
+	if !strings.Contains(out, "/drive/Wiki/") || !strings.Contains(out, "/drive/teams/") {
+		t.Fatalf("root listing: %s", out)
+	}
+	resp, out = h.do(t, "PROPFIND", "/drive/teams/", nil, hdr("Depth", "1"))
+	want(t, resp, http.StatusMultiStatus, "PROPFIND the links' folder")
+	if !strings.Contains(out, "/drive/teams/red/") || !strings.Contains(out, "/drive/teams/blue/") {
+		t.Fatalf("links listing: %s", out)
+	}
+	if strings.Count(out, "<href>/drive/teams/red/</href>") != 1 || strings.Contains(out, "old.txt") || strings.Contains(out, "/teams/gone/") {
+		t.Fatalf("links listing shows the hidden folder, a duplicate or a missing link: %s", out)
+	}
+	resp, out = h.do(t, "PROPFIND", "/drive/teams/red/", nil, hdr("Depth", "1"))
+	want(t, resp, http.StatusMultiStatus, "PROPFIND a linked drive")
+	if !strings.Contains(out, "/drive/teams/red/Input/") || !strings.Contains(out, "/drive/teams/red/Sources/") || strings.Contains(out, "old.txt") {
+		t.Fatalf("linked listing: %s", out)
+	}
+	resp, got := h.do(t, http.MethodGet, "/drive/teams/red/Sources/a.txt", nil)
+	want(t, resp, http.StatusOK, "GET through a link")
+	if got != "filed" {
+		t.Fatalf("GET through a link = %q", got)
+	}
+	resp, _ = h.do(t, http.MethodGet, "/drive/teams/gone/x.txt", nil)
+	want(t, resp, http.StatusNotFound, "GET through a link to nothing")
+
+	// A drop through the link is the linked drive's: its bytes, its count.
+	before, _, _ := h.store.GetCollection(ctx, "acme", "red")
+	resp, _ = h.do(t, http.MethodPut, "/drive/teams/red/Input/drop.txt", body("dropped"))
+	want(t, resp, http.StatusCreated, "PUT through a link")
+	if _, ok, _ := h.store.Stat(ctx, red.ID, "Input/drop.txt"); !ok {
+		t.Fatal("the drop did not land in the linked collection")
+	}
+	if _, ok, _ := h.store.Stat(ctx, h.coll.ID, "teams/red/Input/drop.txt"); ok {
+		t.Fatal("the drop landed in the linking collection")
+	}
+	after, _, _ := h.store.GetCollection(ctx, "acme", "red")
+	if after.SyncToken <= before.SyncToken {
+		t.Fatal("the linked collection's sync token did not move")
+	}
+	// The linked drive's policy holds through the link.
+	resp, _ = h.do(t, http.MethodPut, "/drive/teams/red/Sources/x.txt", body("spliced"))
+	want(t, resp, http.StatusForbidden, "PUT into a linked drive's reserved tree")
+	resp, _ = h.do(t, "LOCK", "/drive/teams/red/Sources/a.txt", nil)
+	want(t, resp, http.StatusForbidden, "LOCK in a linked drive's reserved tree")
+	resp, _ = h.do(t, "LOCK", "/drive/teams/red/Input/drop.txt", nil)
+	want(t, resp, http.StatusOK, "LOCK through a link")
+
+	// Within one drive, everything as ever; across two, a copy, never a move.
+	resp, _ = h.do(t, "MOVE", "/drive/teams/red/Input/drop.txt", nil, hdr("Destination", h.srv.URL+"/drive/teams/red/Input/renamed.txt"))
+	want(t, resp, http.StatusCreated, "MOVE within a linked drive")
+	resp, _ = h.do(t, "MOVE", "/drive/teams/red/Input/renamed.txt", nil, hdr("Destination", h.srv.URL+"/drive/Wiki/renamed.txt"))
+	want(t, resp, http.StatusBadGateway, "MOVE across drives")
+	resp, _ = h.do(t, "COPY", "/drive/teams/red/Input/renamed.txt", nil, hdr("Destination", h.srv.URL+"/drive/Wiki/copied.txt"))
+	want(t, resp, http.StatusCreated, "COPY into the root")
+	if _, ok, _ := h.store.Stat(ctx, h.coll.ID, "Wiki/copied.txt"); !ok {
+		t.Fatal("the copy is not in the root")
+	}
+	if _, ok, _ := h.store.Stat(ctx, red.ID, "Input/renamed.txt"); !ok {
+		t.Fatal("the copy's source went")
+	}
+	resp, _ = h.do(t, "COPY", "/drive/Wiki/page.md", nil, hdr("Destination", h.srv.URL+"/drive/teams/blue/page.md"))
+	want(t, resp, http.StatusCreated, "COPY into a linked drive")
+	if _, ok, _ := h.store.Stat(ctx, blue.ID, "page.md"); !ok {
+		t.Fatal("the copy is not in the linked collection")
+	}
+
+	// The links themselves are not the client's to rearrange.
+	resp, _ = h.do(t, http.MethodDelete, "/drive/teams/red", nil)
+	want(t, resp, http.StatusForbidden, "DELETE a link")
+	resp, _ = h.do(t, http.MethodDelete, "/drive/teams", nil)
+	want(t, resp, http.StatusForbidden, "DELETE a folder holding links")
+	resp, _ = h.do(t, "MOVE", "/drive/teams/red", nil, hdr("Destination", h.srv.URL+"/drive/elsewhere"))
+	want(t, resp, http.StatusForbidden, "MOVE a link")
+	resp, _ = h.do(t, "COPY", "/drive/Wiki/page.md", nil, hdr("Destination", h.srv.URL+"/drive/teams/red"))
+	want(t, resp, http.StatusForbidden, "COPY onto a link")
+	resp, _ = h.do(t, "MKCOL", "/drive/teams/red", nil)
+	want(t, resp, http.StatusMethodNotAllowed, "MKCOL on a link")
+	resp, _ = h.do(t, http.MethodPut, "/drive/teams/red", body("x"))
+	want(t, resp, http.StatusMethodNotAllowed, "PUT on a link")
+	if _, ok, _ := h.store.Stat(ctx, red.ID, "Sources/a.txt"); !ok {
+		t.Fatal("a refused request touched the linked drive")
+	}
+	// And the root's own tree works as it always has.
+	resp, _ = h.do(t, http.MethodPut, "/drive/Wiki/new.md", body("# New"))
+	want(t, resp, http.StatusCreated, "PUT in the root's own tree")
+}
+
+// A folder shown only on the way to a link (none of the collection's own)
+// lists, and can't be made or removed.
+func TestCollectionLinksLeadFolder(t *testing.T) {
+	var conf config.Config
+	insecure(&conf)
+	h := newHarness(t, conf)
+	ctx := context.Background()
+	if _, _, err := h.store.EnsureCollection(ctx, "acme", "red"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.SetCollectionLinks(ctx, "acme", "paris", chdrive.Links{"a/b/red": "red"}); err != nil {
+		t.Fatal(err)
+	}
+	resp, out := h.do(t, "PROPFIND", "/drive/", nil, hdr("Depth", "1"))
+	want(t, resp, http.StatusMultiStatus, "PROPFIND root")
+	if !strings.Contains(out, "/drive/a/") {
+		t.Fatalf("root listing lacks the lead folder: %s", out)
+	}
+	resp, out = h.do(t, "PROPFIND", "/drive/a/b/", nil, hdr("Depth", "1"))
+	want(t, resp, http.StatusMultiStatus, "PROPFIND a lead folder")
+	if !strings.Contains(out, "/drive/a/b/red/") {
+		t.Fatalf("lead listing lacks the link: %s", out)
+	}
+	resp, _ = h.do(t, "MKCOL", "/drive/a", nil)
+	want(t, resp, http.StatusMethodNotAllowed, "MKCOL a lead folder")
+	resp, _ = h.do(t, http.MethodDelete, "/drive/a", nil)
+	want(t, resp, http.StatusForbidden, "DELETE a lead folder")
+}

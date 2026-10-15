@@ -1100,9 +1100,34 @@ type copied struct {
 // ErrNoParent / ErrExists as Move. Events: the replaced destination's
 // (if any), then created for the copied root, then created per copied file.
 func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite bool) (Resource, error) {
-	from, to, err := checkMoveCopyPaths(from, to)
-	if err != nil {
-		return Resource{}, err
+	return s.copyBetween(ctx, collID, from, collID, to, overwrite)
+}
+
+// CopyAcross is Copy from one collection into another of the same tenant
+// (the WebDAV head's COPY across a link, links.go): the copies are the
+// destination's — its ids, its objects, its quota, its events — and the
+// source is untouched. There is no cycle across two collections, so a
+// destination below the source's own path is fine.
+func (s *Store) CopyAcross(ctx context.Context, srcID, from, dstID, to string, overwrite bool) (Resource, error) {
+	return s.copyBetween(ctx, srcID, from, dstID, to, overwrite)
+}
+
+func (s *Store) copyBetween(ctx context.Context, srcID, from, collID, to string, overwrite bool) (Resource, error) {
+	var err error
+	if srcID == collID {
+		if from, to, err = checkMoveCopyPaths(from, to); err != nil {
+			return Resource{}, err
+		}
+	} else {
+		if from, err = NormalizePath(from); err != nil {
+			return Resource{}, err
+		}
+		if to, err = NormalizePath(to); err != nil {
+			return Resource{}, err
+		}
+		if from == "" || to == "" {
+			return Resource{}, fmt.Errorf("%w: the root cannot be moved or copied", ErrBadPath)
+		}
 	}
 	coll, ok, err := s.GetCollectionByID(ctx, collID)
 	if err != nil {
@@ -1111,8 +1136,17 @@ func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite boo
 	if !ok {
 		return Resource{}, ErrNotFound
 	}
+	if srcID != collID {
+		srcColl, ok, err := s.GetCollectionByID(ctx, srcID)
+		if err != nil {
+			return Resource{}, err
+		}
+		if !ok || srcColl.Tenant != coll.Tenant {
+			return Resource{}, ErrNotFound
+		}
+	}
 	// Snapshot + object copies, outside the tx.
-	root, live, err := s.getResourceQ(ctx, s.db, collID, from, false, false)
+	root, live, err := s.getResourceQ(ctx, s.db, srcID, from, false, false)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -1124,7 +1158,7 @@ func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite boo
 	}
 	snapshot := []Resource{root}
 	if root.Kind == KindDir {
-		desc, err := s.List(ctx, collID, ListOpts{Path: from, Recursive: true})
+		desc, err := s.List(ctx, srcID, ListOpts{Path: from, Recursive: true})
 		if err != nil {
 			return Resource{}, err
 		}
@@ -1170,7 +1204,7 @@ func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite boo
 	if err != nil {
 		return fail(err)
 	}
-	src, live, err := s.getResourceQ(ctx, tx, collID, from, false, true)
+	src, live, err := s.getResourceQ(ctx, tx, srcID, from, false, true)
 	if err != nil {
 		return fail(err)
 	}
@@ -1182,7 +1216,7 @@ func (s *Store) Copy(ctx context.Context, collID, from, to string, overwrite boo
 	}
 	rows := []Resource{src}
 	if src.Kind == KindDir {
-		desc, err := s.listQ(ctx, tx, collID, from)
+		desc, err := s.listQ(ctx, tx, srcID, from)
 		if err != nil {
 			return fail(err)
 		}

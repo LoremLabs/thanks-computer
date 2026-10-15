@@ -95,8 +95,10 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Escape the web listener's global write timeout for a large body:
 		// budget the deadline from the file's size before the library
 		// streams it.
-		if res, found, err := c.store.Stat(ctx, pr.coll.ID, c.rel(pr, r.URL.Path)); err == nil && found && !res.IsDir() {
-			_ = http.NewResponseController(w).SetWriteDeadline(c.now().Add(bodyBudget(res.Size)))
+		if t, err := c.resolve(ctx, pr, r.URL.Path); err == nil {
+			if res, found, err := c.store.Stat(ctx, t.coll.ID, t.rel); err == nil && found && !res.IsDir() {
+				_ = http.NewResponseController(w).SetWriteDeadline(c.now().Add(bodyBudget(res.Size)))
+			}
 		}
 	case "PROPFIND":
 		// RFC 4918 lets a server refuse Depth: infinity (it is the whole
@@ -319,8 +321,19 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 	// The collection's policy decides BEFORE a byte is read: a refused write
 	// must not spend the upload, and the client must not be left half-sent
 	// wondering why.
-	rel := c.rel(pr, r.URL.Path)
-	if !c.allows(pr, rel, chdrive.VerbWrite) {
+	// Through a link, the write is the linked collection's: its policy, its
+	// quota, its events (links.go). A link itself, or a folder shown on the
+	// way to one, takes no bytes.
+	t, err := c.resolve(r.Context(), pr, r.URL.Path)
+	if err != nil {
+		serveStoreError(w, err)
+		return
+	}
+	if t.held(pr) || t.lead(pr) {
+		http.Error(w, errLinkHeld.Error(), http.StatusMethodNotAllowed)
+		return
+	}
+	if !c.allows(t, chdrive.VerbWrite) {
 		http.Error(w, "forbidden by the collection's policy", http.StatusForbidden)
 		return
 	}
@@ -350,7 +363,7 @@ func (c *Controller) servePut(w http.ResponseWriter, r *http.Request, pr princip
 	if ct == "application/octet-stream" {
 		ct = "" // the generic default: let the extension decide
 	}
-	res, err := c.store.Put(r.Context(), pr.coll.ID, c.rel(pr, r.URL.Path), body, size, chdrive.PutOpts{
+	res, err := c.store.Put(r.Context(), t.coll.ID, t.rel, body, size, chdrive.PutOpts{
 		IfMatch:     r.Header.Get("If-Match"),
 		IfNoneMatch: r.Header.Get("If-None-Match"),
 		ContentType: ct,

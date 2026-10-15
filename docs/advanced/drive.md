@@ -73,7 +73,7 @@ collection is always addressed by `collection` (its name); a resource by
 
 | op | WITH | result |
 |---|---|---|
-| `drive/collection` | `name`; `remove` (+ `force` to remove a non-empty one); `policy` (what a CLIENT may do, by subtree — see below) | `{id, name, sync_token, bytes_used, resource_count, created, policy?}` or `{name, removed}` |
+| `drive/collection` | `name`; `remove` (+ `force` to remove a non-empty one); `policy` (what a CLIENT may do, by subtree — see below); `links` (other collections shown inside this one, each at a folder — see below) | `{id, name, sync_token, bytes_used, resource_count, created, policy?, links?}` or `{name, removed}` |
 | `drive/account` | `username`, `collection` (on create), `principal` (on create); `status` `active` \| `disabled` | `{username, created, principal, collection_id, collection, mount}` |
 | `drive/put` | `collection`, `path`; `from` XOR `value` XOR `from_sha` (a sha256 the tenant already holds in the blob store — streamed, not buffered, so the op cap does not apply); `encoding` `base64` (default) \| `utf8`; `content_type`; `if_match`, `if_none_match` (an etag, an RFC 7232 list of them, or `*`); `parents` (create missing ancestors) | `{resource_id, path, etag, size, created, noop, modseq}` — `noop` when the bytes were already there |
 | `drive/get` | `collection`; `path` XOR `resource_id`; `encoding` `base64` (default) \| `utf8` \| `auto`; `max_bytes` | `{resource_id, path, name, etag, size, content_type, modseq, content, encoding}` |
@@ -192,6 +192,45 @@ Client bookkeeping is exempt from `write`: a dot-file (`.DS_Store`, and the
 `._name` AppleDouble sidecars macOS writes into every folder it merely
 displays) is always allowed, or browsing a reserved folder in Finder would
 be a stream of error dialogs.
+
+## Linking collections: one login, several drives
+
+An account sees ONE collection. When one person should reach several — a
+collection of their own beside the ones it gathers — the collection they
+sign in to can **link** the others, each at a folder of its tree:
+
+```txcl
+EXEC "txco://drive/collection"
+  WITH name  = "home",
+       links = &object("teams/red", "red", "teams/blue", "blue")
+```
+
+A login bound to `home` then sees `teams/red/` as collection `red`'s root
+and `teams/blue/` as `blue`'s; `teams/` itself is shown as a folder holding
+them (it need not exist in `home`). Every request below a link is the
+LINKED collection's, exactly as if its own account had made it:
+
+- the bytes land in it, its quota counts them, and its mutation events are
+  the ones a `_scheduled` stack sees — so whatever files or indexes what
+  arrives in `red` does so for a drop through `home` too;
+- its policy holds there: a subtree `red` refuses its clients is refused
+  through the link;
+- a COPY from one collection to another is a copy into the destination (new
+  ids, its quota, its events); a MOVE between two is refused with `502` (RFC
+  4918's cross-repository case) — a client copies instead;
+- the link itself, and a folder of `home` that holds one, can't be deleted,
+  moved, replaced or written to (`403`/`405`): that would take a whole
+  collection with it.
+
+A real resource of `home` at or below a link's path is hidden by the link. A
+link may name a collection that doesn't exist yet: nothing is shown there
+until it does. Links don't nest, and there are at most 1000.
+
+Like a policy, **links bind the head, never the ops**: `txco://drive/*`
+addresses each collection by its own name and never follows a link. Passing
+`links` replaces them all, `&object()` clears them, leaving it out never
+disturbs them. A link is a grant — whoever signs in to `home` reaches `red`
+and `blue` — so a stack links only what that login may see.
 
 ## Mutation events
 

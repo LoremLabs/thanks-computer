@@ -106,6 +106,16 @@ boundary, and the server stored it faithfully because a WebDAV PUT carries
 no end-to-end checksum. Denying `write` on that tree is what makes the
 question moot.
 
+### One login, several drives
+
+An account is bound to one collection, but that collection can **link**
+others, each at a folder (`links` on `txco://drive/collection`;
+[drive](../drive.md#linking-collections-one-login-several-drives)). The head
+follows them: one mount shows every linked collection under its folder, and
+a request there is the linked collection's own — its bytes, policy, quota and
+events. Copying from one to another works; a move between two answers `502`
+(Finder then copies); the links themselves can't be deleted or moved.
+
 ### Locks are a courtesy, not a guarantee
 
 LOCK mints a fresh token and UNLOCK answers 204; nothing is stored and

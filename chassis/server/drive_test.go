@@ -457,3 +457,45 @@ func TestDriveCollectionPolicyOp(t *testing.T) {
 		t.Fatalf("an empty policy did not clear: %s", out)
 	}
 }
+
+// The `links` argument shows other collections inside this one (the WebDAV
+// head follows them; these ops never do): set, read back, kept by a plain
+// ensure, refused when malformed, cleared by an empty object.
+func TestDriveCollectionLinksOp(t *testing.T) {
+	d := newDriveDeps(t, map[string]string{"pony.example.com": "acme"})
+	out := callDrive(t, driveCollection, d, "acme", `{"name":"home"}`)
+	if gjson.Get(out, "_drive.links").Exists() {
+		t.Fatalf("a new collection carries links: %s", out)
+	}
+	out = callDrive(t, driveCollection, d, "acme", `{"name":"home","links":{"teams/red":"red","teams/blue":"blue"}}`)
+	if gjson.Get(out, "_drive.error").Exists() || gjson.Get(out, "_drive.links.teams/red").String() != "red" {
+		t.Fatalf("set links = %s", out)
+	}
+	c, found, err := d.store.GetCollection(context.Background(), "acme", "home")
+	if err != nil || !found || c.Links["teams/blue"] != "blue" {
+		t.Fatalf("stored links = %v %v %v", c.Links, found, err)
+	}
+	out = callDrive(t, driveCollection, d, "acme", `{"name":"home"}`)
+	if gjson.Get(out, "_drive.links.teams/red").String() != "red" {
+		t.Fatalf("a plain ensure cleared the links: %s", out)
+	}
+	// Links and a policy side by side.
+	out = callDrive(t, driveCollection, d, "acme", `{"name":"home","policy":{"Wiki/index.md":{"write":"deny"}},"links":{"teams/red":"red"}}`)
+	if gjson.Get(out, "_drive.policy.Wiki/index\\.md.write").String() != "deny" || gjson.Get(out, "_drive.links.teams/blue").Exists() {
+		t.Fatalf("policy + links = %s", out)
+	}
+	for _, meta := range []string{
+		`{"name":"home","links":{"":"red"}}`,
+		`{"name":"home","links":{"teams":"all","teams/red":"red"}}`,
+		`{"name":"home","links":{"teams/red":"no/slash"}}`,
+		`{"name":"home","links":"red"}`,
+	} {
+		if got := gjson.Get(callDrive(t, driveCollection, d, "acme", meta), "_drive.error.code").String(); got != "txco_drive_invalid_arg" {
+			t.Errorf("%s → %s, want txco_drive_invalid_arg", meta, got)
+		}
+	}
+	out = callDrive(t, driveCollection, d, "acme", `{"name":"home","links":{}}`)
+	if gjson.Get(out, "_drive.links").Exists() {
+		t.Fatalf("empty links did not clear: %s", out)
+	}
+}

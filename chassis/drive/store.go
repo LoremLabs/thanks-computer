@@ -196,6 +196,7 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 			created_at     TEXT NOT NULL,
 			updated_at     TEXT NOT NULL,
 			policy         TEXT NOT NULL DEFAULT '',
+			links          TEXT NOT NULL DEFAULT '',
 			deleted_at     TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS drive_collections_name_idx
@@ -248,6 +249,7 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 	// database.
 	for _, c := range []struct{ table, column, ddl string }{
 		{"drive_collections", "policy", `ALTER TABLE drive_collections ADD COLUMN policy TEXT NOT NULL DEFAULT ''`},
+		{"drive_collections", "links", `ALTER TABLE drive_collections ADD COLUMN links TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.ExecContext(ctx, `SELECT `+c.column+` FROM `+c.table+` WHERE 1 = 0`); err == nil {
 			continue
