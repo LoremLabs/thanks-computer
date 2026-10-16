@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onDestroy, onMount } from 'svelte'
+    import { flushSync, onMount } from 'svelte'
     import { store } from '../lib/store.svelte'
     import { groupOps, type StackGroup } from '../lib/tree'
     import { opId, type Op } from '../lib/types'
@@ -121,7 +121,22 @@
     // stack (www ≈ 5584×17328 CSS px) stays sharp without a single
     // backing bitmap that would blow WebKit's canvas size limits.
     let containerEl: HTMLDivElement | undefined = $state()
-    let containerW = $state(800)
+    let innerEl: HTMLDivElement | undefined = $state()
+    let svgEl: SVGSVGElement | undefined = $state()
+    // Width available to the diagram: the padded wrapper's content box.
+    let viewW = $state(800)
+
+    // Zoom. Geometry stays in natural CSS pixels (the SVG viewBox);
+    // zoom only scales the rendered size, so text and lines stay sharp
+    // at any level. While `autoFit` is on, zoom tracks fitZoom — the
+    // widest row fits the pane, never above 100% — so a wide parallel
+    // row can't push the spine off-screen and leave a blank-looking
+    // first view. Any manual zoom turns it off; Fit or switching
+    // stacks turns it back on.
+    const MAX_ZOOM = 3
+    const ZOOM_STEP = 1.25
+    let autoFit = $state(true)
+    let manualZoom = $state(1)
 
     function diagramHeight(L: Layout): number {
         const rows = myGroup?.scopes.length ?? 0
@@ -143,6 +158,26 @@
             if (w > max) max = w
         }
         return max
+    }
+
+    const layout = $derived(layoutFor(viewW))
+    // Narrowest natural width that holds the widest row (or one box).
+    const contentW = $derived(
+        Math.max(layout.LABEL_W + layout.BOX_W + 32, layout.LABEL_W + maxRowWidth(layout) + 32)
+    )
+    const fitZoom = $derived(viewW > 0 ? Math.min(1, viewW / contentW) : 1)
+    const minZoom = $derived(Math.min(0.1, fitZoom))
+    const zoom = $derived(autoFit ? fitZoom : manualZoom)
+
+    // Natural width at zoom z: at least the pane, so a diagram narrower
+    // than the pane keeps its spine centered in it at every zoom; the
+    // outer `overflow-auto` div scrolls anything wider.
+    function naturalWidth(z: number): number {
+        return Math.max(viewW / z, contentW)
+    }
+
+    function spineXAt(z: number): number {
+        return (layout.LABEL_X + layout.LABEL_W + naturalWidth(z)) / 2
     }
 
     interface BoxGeom {
@@ -189,18 +224,10 @@
     // arriving, or stack total updating).
     const diagram = $derived.by<Diagram | undefined>(() => {
         if (!myGroup) return undefined
-        const L = layoutFor(containerW)
-        // Width = max(container, single-box min, widest row). The
-        // widest-row term means a parallel multi-op row that wouldn't
-        // otherwise fit grows the diagram; the outer `overflow-auto`
-        // div then provides horizontal scroll.
-        const width = Math.max(
-            containerW,
-            L.LABEL_W + L.BOX_W + 32,
-            L.LABEL_W + maxRowWidth(L) + 32
-        )
+        const L = layout
+        const width = naturalWidth(zoom)
         const height = diagramHeight(L)
-        const spineX = (L.LABEL_X + L.LABEL_W + width) / 2
+        const spineX = spineXAt(zoom)
 
         const rows: RowGeom[] = myGroup.scopes.map((row, idx) => {
             const y = L.TOP_PAD + idx * (L.BOX_H + L.ROW_GAP)
@@ -269,18 +296,114 @@
         onSelectOp?.(op)
     }
 
-    let ro: ResizeObserver | undefined
+    // Change zoom via `apply`, keeping the diagram point under the
+    // anchor (the pointer, or the middle of the pane) where it was.
+    function rezoom(apply: () => void, clientX?: number, clientY?: number) {
+        if (!containerEl || !svgEl) {
+            apply()
+            return
+        }
+        const z0 = zoom
+        const pane = containerEl.getBoundingClientRect()
+        const svg = svgEl.getBoundingClientRect()
+        const ax = (clientX ?? pane.left + pane.width / 2) - pane.left
+        const ay = (clientY ?? pane.top + pane.height / 2) - pane.top
+        // SVG origin in scroll-content coordinates; fixed across zooms.
+        const ox = svg.left - pane.left + containerEl.scrollLeft
+        const oy = svg.top - pane.top + containerEl.scrollTop
+        // Anchored point in natural coords. x is spine-relative: while
+        // the diagram is narrower than the pane its natural width (and
+        // so its spine) moves with zoom.
+        const u = (containerEl.scrollLeft + ax - ox) / z0 - spineXAt(z0)
+        const v = (containerEl.scrollTop + ay - oy) / z0
+        apply()
+        // Synchronous, so each event in a burst of wheel/gesture events
+        // measures the layout and scroll the previous one left.
+        flushSync()
+        const z1 = zoom
+        containerEl.scrollLeft = ox + (u + spineXAt(z1)) * z1 - ax
+        containerEl.scrollTop = oy + v * z1 - ay
+    }
+
+    function zoomBy(factor: number, clientX?: number, clientY?: number) {
+        const z1 = Math.min(MAX_ZOOM, Math.max(minZoom, zoom * factor))
+        if (z1 === zoom) return
+        rezoom(
+            () => {
+                autoFit = false
+                manualZoom = z1
+            },
+            clientX,
+            clientY
+        )
+    }
+
+    // A different stack opens fitted again.
+    $effect(() => {
+        stack
+        autoFit = true
+    })
+
+    // Plain wheel scrolls as usual. Ctrl+wheel zooms at the pointer —
+    // that is also what Chrome and Firefox send for a trackpad pinch.
+    function onWheel(e: WheelEvent) {
+        if (!e.ctrlKey || !diagram || gesturing) return
+        e.preventDefault()
+        const px = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1
+        const dy = Math.max(-50, Math.min(50, e.deltaY * px))
+        zoomBy(2 ** (-dy / 100), e.clientX, e.clientY)
+    }
+
+    // Safari reports a trackpad pinch as non-standard gesture events
+    // (scale relative to the gesture's start) rather than ctrl+wheel.
+    type GestureEvt = UIEvent & { scale: number; clientX: number; clientY: number }
+    let gesturing = false
+    let gestureStartZoom = 1
+    function onGestureStart(e: Event) {
+        if (!diagram) return
+        e.preventDefault()
+        gesturing = true
+        gestureStartZoom = zoom
+    }
+    function onGestureChange(e: Event) {
+        if (!gesturing) return
+        e.preventDefault()
+        const g = e as GestureEvt
+        zoomBy((gestureStartZoom * g.scale) / zoom, g.clientX, g.clientY)
+    }
+    function onGestureEnd(e: Event) {
+        if (!gesturing) return
+        e.preventDefault()
+        gesturing = false
+    }
+
     onMount(() => {
-        if (!containerEl) return
-        ro = new ResizeObserver((entries) => {
+        const pane = containerEl
+        const inner = innerEl
+        if (!pane || !inner) return
+        const ro = new ResizeObserver((entries) => {
             for (const e of entries) {
-                containerW = e.contentRect.width
+                viewW = e.contentRect.width
             }
         })
-        ro.observe(containerEl)
-        containerW = containerEl.getBoundingClientRect().width
+        ro.observe(inner)
+        const cs = getComputedStyle(inner)
+        viewW =
+            inner.clientWidth -
+            (parseFloat(cs.paddingLeft) || 0) -
+            (parseFloat(cs.paddingRight) || 0)
+        pane.addEventListener('wheel', onWheel, { passive: false })
+        pane.addEventListener('gesturestart', onGestureStart)
+        pane.addEventListener('gesturechange', onGestureChange)
+        pane.addEventListener('gestureend', onGestureEnd)
+        return () => {
+            ro.disconnect()
+            pane.removeEventListener('wheel', onWheel)
+            pane.removeEventListener('gesturestart', onGestureStart)
+            pane.removeEventListener('gesturechange', onGestureChange)
+            pane.removeEventListener('gestureend', onGestureEnd)
+        }
     })
-    onDestroy(() => ro?.disconnect())
 </script>
 
 <!-- One op box: rounded card, name, and (when trace data exists) the
@@ -335,118 +458,162 @@
     {/if}
 {/snippet}
 
-<div bind:this={containerEl} class="h-full w-full overflow-auto">
-    <div class="px-1 py-2 sm:px-2 sm:py-3">
-        <header class="mb-2 flex items-center justify-between gap-2 px-1 sm:px-2">
-            <h2 class="font-mono text-sm font-semibold text-neutral-900 sm:text-base">
-                {stack}
-            </h2>
-            {#if showInlineNewOp}
-                <button
-                    type="button"
-                    class="rounded border border-brand-cyan/40 bg-brand-cyan/10 px-2 py-0.5 text-xs text-neutral-900 hover:bg-brand-cyan/20"
-                    onclick={() => (adding = !adding)}
-                >
-                    {adding ? 'Cancel' : '+ Add op'}
-                </button>
-            {/if}
-        </header>
-        {#if adding && showInlineNewOp}
-            <div class="mb-2 px-1 sm:px-2">
-                <NewOpForm
+<div class="relative h-full w-full">
+    <!-- Stable gutter: with classic scrollbars, fitting could otherwise
+         toggle the vertical scrollbar and oscillate the pane width. -->
+    <div bind:this={containerEl} class="h-full w-full overflow-auto [scrollbar-gutter:stable]">
+        <div bind:this={innerEl} class="px-1 py-2 sm:px-2 sm:py-3">
+            <header class="mb-2 flex items-center justify-between gap-2 px-1 sm:px-2">
+                <h2 class="font-mono text-sm font-semibold text-neutral-900 sm:text-base">
                     {stack}
-                    {isDraft}
-                    existingOps={ops}
-                    onSubmit={async (scope, name, content) => {
-                        if (typeof version !== 'number') {
-                            throw new Error('no focused version')
-                        }
-                        await store.createOp(stack, version, scope, name, content)
-                        adding = false
-                    }}
-                    onCancel={() => (adding = false)}
-                />
-            </div>
-        {/if}
-        {#if diagram}
-            {@const L = diagram.L}
-            <svg
-                width={diagram.width}
-                height={diagram.height}
-                viewBox="0 0 {diagram.width} {diagram.height}"
-                class="block"
-                role="group"
-                aria-label="op stack diagram for {stack}"
-            >
-                <path d={diagram.spineD} fill="none" class="stroke-neutral-300" />
-                <!-- "input" label — sits just above the spine's upper end. -->
-                <text
-                    x={diagram.spineX}
-                    y={diagram.spineTop - 8}
-                    text-anchor="middle"
-                    font-size="12"
-                    class="fill-neutral-500 font-sans">input</text
+                </h2>
+                {#if showInlineNewOp}
+                    <button
+                        type="button"
+                        class="rounded border border-brand-cyan/40 bg-brand-cyan/10 px-2 py-0.5 text-xs text-neutral-900 hover:bg-brand-cyan/20"
+                        onclick={() => (adding = !adding)}
+                    >
+                        {adding ? 'Cancel' : '+ Add op'}
+                    </button>
+                {/if}
+            </header>
+            {#if adding && showInlineNewOp}
+                <div class="mb-2 px-1 sm:px-2">
+                    <NewOpForm
+                        {stack}
+                        {isDraft}
+                        existingOps={ops}
+                        onSubmit={async (scope, name, content) => {
+                            if (typeof version !== 'number') {
+                                throw new Error('no focused version')
+                            }
+                            await store.createOp(stack, version, scope, name, content)
+                            adding = false
+                        }}
+                        onCancel={() => (adding = false)}
+                    />
+                </div>
+            {/if}
+            {#if diagram}
+                {@const L = diagram.L}
+                <svg
+                    bind:this={svgEl}
+                    width={diagram.width * zoom}
+                    height={diagram.height * zoom}
+                    viewBox="0 0 {diagram.width} {diagram.height}"
+                    class="block"
+                    role="group"
+                    aria-label="op stack diagram for {stack}"
                 >
-                {#each diagram.rows as row (row.scope)}
-                    <!-- Scope label (left, lighter grey, mono). Skipped
-                         in compact mode to reclaim that column. -->
-                    {#if L.SHOW_LABELS}
-                        <text
-                            x={L.LABEL_X}
-                            y={row.y + L.BOX_H / 2}
-                            dominant-baseline="central"
-                            font-size="13"
-                            class="fill-neutral-400 font-mono font-semibold">{row.scope}</text
-                        >
-                    {/if}
-                    {#if row.branchD}
-                        <path d={row.branchD} fill="none" class="stroke-neutral-300" />
-                    {/if}
-                    <!-- Boxes after the bars so their white fill masks
-                         any line beneath. -->
-                    {#each row.boxes as b (b.id)}
-                        {#if onSelectOp}
-                            <g
-                                role="button"
-                                tabindex="0"
-                                aria-label={b.op.name}
-                                class="group cursor-pointer outline-none"
-                                onclick={() => onSelectOp?.(b.op)}
-                                onkeydown={(e) => handleBoxKey(e, b.op)}
-                            >
-                                {@render boxBody(b, row.y, L)}
-                            </g>
-                        {:else}
-                            <g>{@render boxBody(b, row.y, L)}</g>
-                        {/if}
-                    {/each}
-                {/each}
-                <!-- "output" label — just below the spine's lower end
-                     (12 px text, top edge 8 px below), plus the last-run
-                     total in the lighter mono style when we have one. -->
-                <text
-                    x={diagram.spineX}
-                    y={diagram.spineBottom + 8 + 6}
-                    text-anchor="middle"
-                    dominant-baseline="central"
-                    font-size="12"
-                    class="fill-neutral-500 font-sans">output</text
-                >
-                {#if typeof stackTotalMs === 'number'}
+                    <path d={diagram.spineD} fill="none" class="stroke-neutral-300" />
+                    <!-- "input" label — sits just above the spine's upper end. -->
                     <text
                         x={diagram.spineX}
-                        y={diagram.spineBottom + 8 + 16 + 5.5}
+                        y={diagram.spineTop - 8}
+                        text-anchor="middle"
+                        font-size="12"
+                        class="fill-neutral-500 font-sans">input</text
+                    >
+                    {#each diagram.rows as row (row.scope)}
+                        <!-- Scope label (left, lighter grey, mono). Skipped
+                             in compact mode to reclaim that column. -->
+                        {#if L.SHOW_LABELS}
+                            <text
+                                x={L.LABEL_X}
+                                y={row.y + L.BOX_H / 2}
+                                dominant-baseline="central"
+                                font-size="13"
+                                class="fill-neutral-400 font-mono font-semibold">{row.scope}</text
+                            >
+                        {/if}
+                        {#if row.branchD}
+                            <path d={row.branchD} fill="none" class="stroke-neutral-300" />
+                        {/if}
+                        <!-- Boxes after the bars so their white fill masks
+                             any line beneath. -->
+                        {#each row.boxes as b (b.id)}
+                            {#if onSelectOp}
+                                <g
+                                    role="button"
+                                    tabindex="0"
+                                    aria-label={b.op.name}
+                                    class="group cursor-pointer outline-none"
+                                    onclick={() => onSelectOp?.(b.op)}
+                                    onkeydown={(e) => handleBoxKey(e, b.op)}
+                                >
+                                    {@render boxBody(b, row.y, L)}
+                                </g>
+                            {:else}
+                                <g>{@render boxBody(b, row.y, L)}</g>
+                            {/if}
+                        {/each}
+                    {/each}
+                    <!-- "output" label — just below the spine's lower end
+                         (12 px text, top edge 8 px below), plus the last-run
+                         total in the lighter mono style when we have one. -->
+                    <text
+                        x={diagram.spineX}
+                        y={diagram.spineBottom + 8 + 6}
                         text-anchor="middle"
                         dominant-baseline="central"
-                        font-size="11"
-                        class="fill-neutral-400 font-mono">{formatMs(stackTotalMs)}</text
+                        font-size="12"
+                        class="fill-neutral-500 font-sans">output</text
                     >
-                {/if}
-            </svg>
-        {:else}
-            <p class="mt-2 px-1 text-sm italic text-neutral-400 sm:px-2">
-                no ops yet — use + Add op
-            </p>
-        {/if}
+                    {#if typeof stackTotalMs === 'number'}
+                        <text
+                            x={diagram.spineX}
+                            y={diagram.spineBottom + 8 + 16 + 5.5}
+                            text-anchor="middle"
+                            dominant-baseline="central"
+                            font-size="11"
+                            class="fill-neutral-400 font-mono">{formatMs(stackTotalMs)}</text
+                        >
+                    {/if}
+                </svg>
+            {:else}
+                <p class="mt-2 px-1 text-sm italic text-neutral-400 sm:px-2">
+                    no ops yet — use + Add op
+                </p>
+            {/if}
+        </div>
     </div>
+    {#if diagram}
+        <!-- Zoom control, pinned to the pane corner outside the scroller. -->
+        <div
+            class="absolute bottom-3 right-4 z-10 flex items-center overflow-hidden rounded border border-neutral-200 bg-white/90 text-xs text-neutral-700 shadow-sm"
+        >
+            <button
+                type="button"
+                class="px-2 py-1 hover:bg-neutral-100 disabled:text-neutral-300 disabled:hover:bg-transparent"
+                aria-label="Zoom out"
+                disabled={zoom <= minZoom}
+                onclick={() => zoomBy(1 / ZOOM_STEP)}>−</button
+            >
+            <button
+                type="button"
+                class="min-w-12 border-x border-neutral-200 px-1 py-1 font-mono tabular-nums hover:bg-neutral-100"
+                aria-label="Reset zoom to 100%"
+                title="Reset to 100%"
+                onclick={() =>
+                    rezoom(() => {
+                        autoFit = false
+                        manualZoom = 1
+                    })}>{Math.round(zoom * 100)}%</button
+            >
+            <button
+                type="button"
+                class="px-2 py-1 hover:bg-neutral-100 disabled:text-neutral-300 disabled:hover:bg-transparent"
+                aria-label="Zoom in"
+                disabled={zoom >= MAX_ZOOM}
+                onclick={() => zoomBy(ZOOM_STEP)}>+</button
+            >
+            <button
+                type="button"
+                class="border-l border-neutral-200 px-2 py-1 hover:bg-neutral-100 disabled:text-neutral-300 disabled:hover:bg-transparent"
+                title="Fit the widest row to the pane"
+                disabled={autoFit}
+                onclick={() => rezoom(() => (autoFit = true))}>Fit</button
+            >
+        </div>
+    {/if}
 </div>
