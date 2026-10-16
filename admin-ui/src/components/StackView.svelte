@@ -116,24 +116,23 @@
         }
     }
 
-    let canvasEl: HTMLCanvasElement | undefined = $state()
+    // Rendered as SVG rather than one canvas: the browser rasterizes
+    // SVG in tiles near the viewport at device resolution, so a huge
+    // stack (www ≈ 5584×17328 CSS px) stays sharp without a single
+    // backing bitmap that would blow WebKit's canvas size limits.
     let containerEl: HTMLDivElement | undefined = $state()
     let containerW = $state(800)
 
-    // Hit boxes computed during render; consumed by the click handler.
-    // Not reactive — read on click, written on render.
-    let hits: Array<{ op: Op; x: number; y: number; w: number; h: number }> = []
-
-    function canvasHeight(L: Layout): number {
+    function diagramHeight(L: Layout): number {
         const rows = myGroup?.scopes.length ?? 0
         if (rows === 0) return 200
         // Reserve a little extra height when we'll be drawing the
-        // total-ms line under "output" so it doesn't clip the canvas.
+        // total-ms line under "output" so it doesn't clip the diagram.
         const extra = typeof stackTotalMs === 'number' ? 20 : 0
         return L.TOP_PAD + rows * (L.BOX_H + L.ROW_GAP) - L.ROW_GAP + L.BOTTOM_PAD + extra
     }
 
-    // Widest row in CSS pixels. Used so the canvas can grow to fit a
+    // Widest row in CSS pixels. Used so the diagram can grow to fit a
     // wide parallel-op row even when the container is narrower (the
     // outer div has overflow-auto so it'll scroll horizontally).
     function maxRowWidth(L: Layout): number {
@@ -146,255 +145,128 @@
         return max
     }
 
-    function render() {
-        if (!canvasEl || !containerEl || !myGroup) return
+    interface BoxGeom {
+        op: Op
+        id: string
+        x: number
+        // Log-scale bar fill fraction + label; undefined when no
+        // trace data is available for this op.
+        dur?: { frac: number; label: string }
+    }
+
+    interface RowGeom {
+        scope: number
+        y: number
+        // Branch/merge bars + legs for parallel rows; '' for single-op
+        // rows, which sit on the spine instead.
+        branchD: string
+        boxes: BoxGeom[]
+    }
+
+    interface Diagram {
+        L: Layout
+        width: number
+        height: number
+        spineX: number
+        spineTop: number
+        spineBottom: number
+        spineD: string
+        rows: RowGeom[]
+    }
+
+    // Log-scale bar fill — log(ms+1) / log(MAX+1) — so each ~10× jump
+    // in ms produces roughly equal growth in bar width. That keeps
+    // single-millisecond ops visible while still letting a 1-second op
+    // fill the whole bar. The +1 shift makes ms=0 map to 0 cleanly
+    // without log(0) = -∞.
+    function barFrac(ms: number, L: Layout): number {
+        const raw = Math.log(Math.max(ms, 0) + 1) / Math.log(L.BAR_FULL_SCALE_MS + 1)
+        return Math.min(1, Math.max(0, raw))
+    }
+
+    // All geometry, in CSS pixels. Re-derives on any reactive read
+    // change (stack, ops, container width, last-durations data
+    // arriving, or stack total updating).
+    const diagram = $derived.by<Diagram | undefined>(() => {
+        if (!myGroup) return undefined
         const L = layoutFor(containerW)
-        // Canvas width = max(container, single-box min, widest row).
-        // The widest-row term means a parallel multi-op row that
-        // wouldn't otherwise fit grows the canvas; the outer
-        // `overflow-auto` div then provides horizontal scroll.
-        const widestRow = maxRowWidth(L)
-        const cssW = Math.max(
+        // Width = max(container, single-box min, widest row). The
+        // widest-row term means a parallel multi-op row that wouldn't
+        // otherwise fit grows the diagram; the outer `overflow-auto`
+        // div then provides horizontal scroll.
+        const width = Math.max(
             containerW,
             L.LABEL_W + L.BOX_W + 32,
-            L.LABEL_W + widestRow + 32
+            L.LABEL_W + maxRowWidth(L) + 32
         )
-        const cssH = canvasHeight(L)
-        // Clamp the backing bitmap to what the browser can actually allocate.
-        // WebKit caps a canvas at ~8k–16k px per side AND a total area (~16 MP
-        // on Safari); exceed either and the canvas silently renders blank. A
-        // tall stack (www ≈ 5584×17328 CSS px) at 2× dpr = 11168×34656 ≈ 387 MP,
-        // far over the limit. Scale the resolution down (below dpr, even below 1
-        // for very tall stacks) so it always renders — trading sharpness on huge
-        // diagrams for a non-blank canvas. The SAME scale drives setTransform, so
-        // every draw + the hit rects below stay in CSS-pixel coordinates.
-        const MAX_SIDE = 8192
-        const MAX_AREA = 16_777_216 // 16 MP; conservative for Safari
-        const dpr = window.devicePixelRatio || 1
-        const scale = Math.max(
-            0.01,
-            Math.min(dpr, MAX_SIDE / cssW, MAX_SIDE / cssH, Math.sqrt(MAX_AREA / (cssW * cssH)))
-        )
-        canvasEl.width = Math.max(1, Math.floor(cssW * scale))
-        canvasEl.height = Math.max(1, Math.floor(cssH * scale))
-        canvasEl.style.width = cssW + 'px'
-        canvasEl.style.height = cssH + 'px'
+        const height = diagramHeight(L)
+        const spineX = (L.LABEL_X + L.LABEL_W + width) / 2
 
-        const ctx = canvasEl.getContext('2d')
-        if (!ctx) return
-        ctx.setTransform(scale, 0, 0, scale, 0, 0)
-        ctx.clearRect(0, 0, cssW, cssH)
-
-        const spineX = (L.LABEL_X + L.LABEL_W + cssW) / 2
-
-        // Pre-compute row geometry so the spine can be drawn in
-        // segments that *skip* multi-op rows — the branch/merge bars
-        // around those rows take over the visual flow there, and a
-        // through-line would lie inside an empty gap between siblings.
-        const rowInfo = myGroup.scopes.map((row, idx) => ({
-            row,
-            y: L.TOP_PAD + idx * (L.BOX_H + L.ROW_GAP),
-            multi: row.ops.length > 1,
-        }))
-        // Spine extents — derived from the row stack, NOT from cssH,
-        // so adding label room below the canvas doesn't stretch the
-        // spine's bottom neck.
-        const rowsEndY =
-            rowInfo.length === 0
-                ? L.TOP_PAD
-                : L.TOP_PAD + rowInfo.length * (L.BOX_H + L.ROW_GAP) - L.ROW_GAP
-        const spineTop = L.TOP_PAD - L.SPINE_EXTRA
-        const spineBottom = rowsEndY + L.SPINE_EXTRA
-
-        // Spine: segmented around multi-op rows.
-        ctx.strokeStyle = '#d4d4d4'
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        let cursor = spineTop
-        for (const ri of rowInfo) {
-            if (!ri.multi) continue
-            ctx.moveTo(spineX, cursor)
-            ctx.lineTo(spineX, ri.y - L.BRANCH_OFFSET)
-            cursor = ri.y + L.BOX_H + L.BRANCH_OFFSET
-        }
-        ctx.moveTo(spineX, cursor)
-        ctx.lineTo(spineX, spineBottom)
-        ctx.stroke()
-
-        // "input" label — sits just above the spine's upper end.
-        ctx.fillStyle = '#737373'
-        ctx.font = '12px ui-sans-serif, system-ui, sans-serif'
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'alphabetic'
-        ctx.fillText('input', spineX, spineTop - 8)
-
-        // Rows + boxes
-        hits = []
-        let y = L.TOP_PAD
-        for (const row of myGroup.scopes) {
-            // Scope label (left, lighter grey, Roboto Mono via font-mono
-            // token). Skipped in compact mode to reclaim that column.
-            if (L.SHOW_LABELS) {
-                ctx.fillStyle = '#a3a3a3'
-                ctx.font = '600 13px "Roboto Mono", ui-monospace, monospace'
-                ctx.textAlign = 'left'
-                ctx.textBaseline = 'middle'
-                ctx.fillText(String(row.scope), L.LABEL_X, y + L.BOX_H / 2)
-            }
-
-            // Compute box centers up-front so the branch/merge bars can
-            // span them and each box gets a vertical leg drawn.
+        const rows: RowGeom[] = myGroup.scopes.map((row, idx) => {
+            const y = L.TOP_PAD + idx * (L.BOX_H + L.ROW_GAP)
             const n = row.ops.length
             const totalW = n * L.BOX_W + (n - 1) * L.BOX_GAP_X
             const startX = spineX - totalW / 2
-            const boxCenters: number[] = []
-            for (let i = 0; i < n; i++) {
-                boxCenters.push(startX + i * (L.BOX_W + L.BOX_GAP_X) + L.BOX_W / 2)
-            }
+            const boxes: BoxGeom[] = row.ops.map((op, i) => {
+                const ms = lastDurations[opId(op)]
+                return {
+                    op,
+                    id: opId(op),
+                    x: startX + i * (L.BOX_W + L.BOX_GAP_X),
+                    dur:
+                        typeof ms === 'number'
+                            ? { frac: barFrac(ms, L), label: formatMs(ms) }
+                            : undefined,
+                }
+            })
 
-            // Branching / merging bars for parallel rows. Single-op
-            // rows sit on the spine and don't need the extra fan-out —
-            // the continuous spine line already plays the same role.
+            // Branching / merging bars for parallel rows: a top bar
+            // across the box centers with a leg down to each box, and
+            // the mirror image below.
+            let branchD = ''
             if (n > 1) {
                 const branchY = y - L.BRANCH_OFFSET
                 const mergeY = y + L.BOX_H + L.BRANCH_OFFSET
-                ctx.strokeStyle = '#d4d4d4'
-                ctx.lineWidth = 1
-                ctx.beginPath()
-                // Top horizontal bar
-                ctx.moveTo(boxCenters[0], branchY)
-                ctx.lineTo(boxCenters[n - 1], branchY)
-                // Vertical legs from bar down to each box top
-                for (const cx of boxCenters) {
-                    ctx.moveTo(cx, branchY)
-                    ctx.lineTo(cx, y)
+                const centers = boxes.map((b) => b.x + L.BOX_W / 2)
+                branchD = `M${centers[0]} ${branchY}H${centers[n - 1]}`
+                for (const cx of centers) {
+                    branchD += `M${cx} ${branchY}V${y}M${cx} ${y + L.BOX_H}V${mergeY}`
                 }
-                // Vertical legs from each box bottom down to the merge bar
-                for (const cx of boxCenters) {
-                    ctx.moveTo(cx, y + L.BOX_H)
-                    ctx.lineTo(cx, mergeY)
-                }
-                // Bottom horizontal bar
-                ctx.moveTo(boxCenters[0], mergeY)
-                ctx.lineTo(boxCenters[n - 1], mergeY)
-                ctx.stroke()
+                branchD += `M${centers[0]} ${mergeY}H${centers[n - 1]}`
             }
+            return { scope: row.scope, y, branchD, boxes }
+        })
 
-            // Boxes (drawn last so their white fill masks any line beneath).
-            for (let i = 0; i < n; i++) {
-                const op = row.ops[i]
-                const bx = startX + i * (L.BOX_W + L.BOX_GAP_X)
-                ctx.fillStyle = '#ffffff'
-                ctx.strokeStyle = '#a3a3a3'
-                ctx.lineWidth = 1
-                roundRect(ctx, bx, y, L.BOX_W, L.BOX_H, 8)
-                ctx.fill()
-                ctx.stroke()
+        // Spine extents — derived from the row stack, NOT from the
+        // height, so adding label room below doesn't stretch the
+        // spine's bottom neck.
+        const rowsEndY =
+            rows.length === 0
+                ? L.TOP_PAD
+                : L.TOP_PAD + rows.length * (L.BOX_H + L.ROW_GAP) - L.ROW_GAP
+        const spineTop = L.TOP_PAD - L.SPINE_EXTRA
+        const spineBottom = rowsEndY + L.SPINE_EXTRA
 
-                // Op name. Centered when we have no duration to show;
-                // otherwise nudged up so the ms can sit beneath it.
-                const dur = lastDurations[opId(op)]
-                const hasDur = typeof dur === 'number'
-                ctx.fillStyle = '#262626'
-                ctx.font = `${L.NAME_FONT_PX}px ui-sans-serif, system-ui, sans-serif`
-                ctx.textAlign = 'center'
-                ctx.textBaseline = 'middle'
-                ctx.fillText(op.name, bx + L.BOX_W / 2, hasDur ? y + L.BOX_H * 0.34 : y + L.BOX_H / 2)
-
-                if (hasDur) drawDurationBar(ctx, bx, y, dur, L)
-
-                hits.push({ op, x: bx, y, w: L.BOX_W, h: L.BOX_H })
-            }
-            y += L.BOX_H + L.ROW_GAP
+        // Spine: segmented so it *skips* multi-op rows — the branch/
+        // merge bars around those rows take over the visual flow there,
+        // and a through-line would lie inside an empty gap between
+        // siblings.
+        let spineD = ''
+        let cursor = spineTop
+        for (const r of rows) {
+            if (r.boxes.length < 2) continue
+            spineD += `M${spineX} ${cursor}V${r.y - L.BRANCH_OFFSET}`
+            cursor = r.y + L.BOX_H + L.BRANCH_OFFSET
         }
+        spineD += `M${spineX} ${cursor}V${spineBottom}`
 
-        // "output" label — sits just below the spine's lower end.
-        // When we have a "last run total" for this stack, append it
-        // in the same lighter mono style used on op-box bars. No
-        // visual bar here — just the number.
-        ctx.fillStyle = '#737373'
-        ctx.font = '12px ui-sans-serif, system-ui, sans-serif'
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'top'
-        const outputLabelY = spineBottom + 8
-        ctx.fillText('output', spineX, outputLabelY)
-        if (typeof stackTotalMs === 'number') {
-            ctx.fillStyle = '#a3a3a3'
-            ctx.font = '11px "Roboto Mono", ui-monospace, monospace'
-            ctx.fillText(formatMs(stackTotalMs), spineX, outputLabelY + 16)
-        }
-    }
+        return { L, width, height, spineX, spineTop, spineBottom, spineD, rows }
+    })
 
-    // drawDurationBar renders the bottom strip of an op box: a left-
-    // aligned track + cyan fill, with the formatted ms label flush
-    // right at the same vertical center.
-    //
-    // Scale is logarithmic — log(ms+1) / log(MAX+1) — so each ~10×
-    // jump in ms produces roughly equal growth in bar width. That
-    // keeps single-millisecond ops visible while still letting a
-    // 1-second op fill the whole bar. The +1 shift makes ms=0 map to
-    // 0 cleanly without log(0) = -∞.
-    function drawDurationBar(
-        ctx: CanvasRenderingContext2D,
-        bx: number,
-        boxTopY: number,
-        ms: number,
-        L: Layout
-    ) {
-        const barX = bx + L.BAR_PAD
-        const barY = boxTopY + L.BOX_H - 14
-        const raw = Math.log(Math.max(ms, 0) + 1) / Math.log(L.BAR_FULL_SCALE_MS + 1)
-        const frac = Math.min(1, Math.max(0, raw))
-
-        // Track (full extent — visual reference for the 1s scale).
-        ctx.fillStyle = '#e5e5e5'
-        ctx.fillRect(barX, barY, L.BAR_W, L.BAR_H)
-
-        // Fill — brand cyan to tie back to the chassis banner colors.
-        if (frac > 0) {
-            ctx.fillStyle = '#22d3ee'
-            ctx.fillRect(barX, barY, L.BAR_W * frac, L.BAR_H)
-        }
-
-        // Label, right-aligned to the box inner edge.
-        ctx.fillStyle = '#525252'
-        ctx.font = '10px "Roboto Mono", ui-monospace, monospace'
-        ctx.textAlign = 'right'
-        ctx.textBaseline = 'middle'
-        ctx.fillText(formatMs(ms), bx + L.BOX_W - L.BAR_PAD, barY + L.BAR_H / 2)
-    }
-
-    function roundRect(
-        ctx: CanvasRenderingContext2D,
-        x: number,
-        y: number,
-        w: number,
-        h: number,
-        r: number
-    ) {
-        ctx.beginPath()
-        ctx.moveTo(x + r, y)
-        ctx.lineTo(x + w - r, y)
-        ctx.quadraticCurveTo(x + w, y, x + w, y + r)
-        ctx.lineTo(x + w, y + h - r)
-        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
-        ctx.lineTo(x + r, y + h)
-        ctx.quadraticCurveTo(x, y + h, x, y + h - r)
-        ctx.lineTo(x, y + r)
-        ctx.quadraticCurveTo(x, y, x + r, y)
-    }
-
-    function handleClick(e: MouseEvent) {
-        if (!canvasEl) return
-        const rect = canvasEl.getBoundingClientRect()
-        const px = e.clientX - rect.left
-        const py = e.clientY - rect.top
-        for (const h of hits) {
-            if (px >= h.x && px <= h.x + h.w && py >= h.y && py <= h.y + h.h) {
-                if (onSelectOp) onSelectOp(h.op)
-                return
-            }
-        }
+    function handleBoxKey(e: KeyboardEvent, op: Op) {
+        if (e.key !== 'Enter' && e.key !== ' ') return
+        e.preventDefault()
+        onSelectOp?.(op)
     }
 
     let ro: ResizeObserver | undefined
@@ -409,20 +281,59 @@
         containerW = containerEl.getBoundingClientRect().width
     })
     onDestroy(() => ro?.disconnect())
-
-    // Re-render on any reactive read change (stack, ops, container
-    // width, last-durations data arriving, or stack total updating).
-    $effect(() => {
-        // Touch reactive sources so the effect re-runs when they change.
-        stack
-        ops
-        containerW
-        myGroup
-        lastDurations
-        stackTotalMs
-        if (canvasEl && containerEl) render()
-    })
 </script>
+
+<!-- One op box: rounded card, name, and (when trace data exists) the
+     duration strip — a left-aligned track + cyan fill with the
+     formatted ms flush right at the same vertical center. -->
+{#snippet boxBody(b: BoxGeom, y: number, L: Layout)}
+    <rect
+        x={b.x}
+        {y}
+        width={L.BOX_W}
+        height={L.BOX_H}
+        rx="8"
+        class="fill-white stroke-neutral-400 group-focus-visible:stroke-brand-cyan group-focus-visible:stroke-2"
+    />
+    <!-- Op name. Centered when we have no duration to show; otherwise
+         nudged up so the ms can sit beneath it. -->
+    <text
+        x={b.x + L.BOX_W / 2}
+        y={b.dur ? y + L.BOX_H * 0.34 : y + L.BOX_H / 2}
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-size={L.NAME_FONT_PX}
+        class="fill-neutral-800 font-sans">{b.op.name}</text
+    >
+    {#if b.dur}
+        {@const barY = y + L.BOX_H - 14}
+        <rect
+            x={b.x + L.BAR_PAD}
+            y={barY}
+            width={L.BAR_W}
+            height={L.BAR_H}
+            class="fill-neutral-200"
+        />
+        {#if b.dur.frac > 0}
+            <!-- Fill — brand cyan to tie back to the chassis banner colors. -->
+            <rect
+                x={b.x + L.BAR_PAD}
+                y={barY}
+                width={L.BAR_W * b.dur.frac}
+                height={L.BAR_H}
+                class="fill-cyan-400"
+            />
+        {/if}
+        <text
+            x={b.x + L.BOX_W - L.BAR_PAD}
+            y={barY + L.BAR_H / 2}
+            text-anchor="end"
+            dominant-baseline="central"
+            font-size="10"
+            class="fill-neutral-600 font-mono">{b.dur.label}</text
+        >
+    {/if}
+{/snippet}
 
 <div bind:this={containerEl} class="h-full w-full overflow-auto">
     <div class="px-1 py-2 sm:px-2 sm:py-3">
@@ -457,13 +368,81 @@
                 />
             </div>
         {/if}
-        {#if myGroup}
-            <canvas
-                bind:this={canvasEl}
-                onclick={handleClick}
-                class="block cursor-pointer"
+        {#if diagram}
+            {@const L = diagram.L}
+            <svg
+                width={diagram.width}
+                height={diagram.height}
+                viewBox="0 0 {diagram.width} {diagram.height}"
+                class="block"
+                role="group"
                 aria-label="op stack diagram for {stack}"
-            ></canvas>
+            >
+                <path d={diagram.spineD} fill="none" class="stroke-neutral-300" />
+                <!-- "input" label — sits just above the spine's upper end. -->
+                <text
+                    x={diagram.spineX}
+                    y={diagram.spineTop - 8}
+                    text-anchor="middle"
+                    font-size="12"
+                    class="fill-neutral-500 font-sans">input</text
+                >
+                {#each diagram.rows as row (row.scope)}
+                    <!-- Scope label (left, lighter grey, mono). Skipped
+                         in compact mode to reclaim that column. -->
+                    {#if L.SHOW_LABELS}
+                        <text
+                            x={L.LABEL_X}
+                            y={row.y + L.BOX_H / 2}
+                            dominant-baseline="central"
+                            font-size="13"
+                            class="fill-neutral-400 font-mono font-semibold">{row.scope}</text
+                        >
+                    {/if}
+                    {#if row.branchD}
+                        <path d={row.branchD} fill="none" class="stroke-neutral-300" />
+                    {/if}
+                    <!-- Boxes after the bars so their white fill masks
+                         any line beneath. -->
+                    {#each row.boxes as b (b.id)}
+                        {#if onSelectOp}
+                            <g
+                                role="button"
+                                tabindex="0"
+                                aria-label={b.op.name}
+                                class="group cursor-pointer outline-none"
+                                onclick={() => onSelectOp?.(b.op)}
+                                onkeydown={(e) => handleBoxKey(e, b.op)}
+                            >
+                                {@render boxBody(b, row.y, L)}
+                            </g>
+                        {:else}
+                            <g>{@render boxBody(b, row.y, L)}</g>
+                        {/if}
+                    {/each}
+                {/each}
+                <!-- "output" label — just below the spine's lower end
+                     (12 px text, top edge 8 px below), plus the last-run
+                     total in the lighter mono style when we have one. -->
+                <text
+                    x={diagram.spineX}
+                    y={diagram.spineBottom + 8 + 6}
+                    text-anchor="middle"
+                    dominant-baseline="central"
+                    font-size="12"
+                    class="fill-neutral-500 font-sans">output</text
+                >
+                {#if typeof stackTotalMs === 'number'}
+                    <text
+                        x={diagram.spineX}
+                        y={diagram.spineBottom + 8 + 16 + 5.5}
+                        text-anchor="middle"
+                        dominant-baseline="central"
+                        font-size="11"
+                        class="fill-neutral-400 font-mono">{formatMs(stackTotalMs)}</text
+                    >
+                {/if}
+            </svg>
         {:else}
             <p class="mt-2 px-1 text-sm italic text-neutral-400 sm:px-2">
                 no ops yet — use + Add op

@@ -223,7 +223,7 @@
     }
 
     // Log-scale fill fraction so 1ms is still visible while 1s fills
-    // the bar. Mirrors StackView.svelte's drawDurationBar exactly so
+    // the bar. Mirrors StackView.svelte's barFrac exactly so
     // the two views read as the same chart.
     const BAR_FULL_SCALE_MS = 1000
     function barFrac(ms?: number): number {
