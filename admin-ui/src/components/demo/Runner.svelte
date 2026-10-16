@@ -578,6 +578,7 @@
                                 lastDurations={durations}
                                 stackTotalMs={d.total}
                                 showInlineNewOp={false}
+                                defaultView="all"
                                 onSelectOp={d.stack === currentStack
                                     ? (op) => (selectedName = op.name)
                                     : undefined}

@@ -30,6 +30,14 @@
         // admin's normal ops view stays unchanged; the demo's Runner
         // passes `false` to hide author-only affordances.
         showInlineNewOp?: boolean
+        // Which ops the diagram opens on. 'fired' shows only ops with
+        // timing in `lastDurations` — ones that ran in recent traces (an
+        // op whose WHEN didn't match is never dispatched, so never
+        // traced) — and falls back to all ops while this stack has no
+        // timing. A Fired/All toggle switches either way. The demo's
+        // Runner passes 'all' so a learner can still click an op that
+        // didn't fire.
+        defaultView?: 'fired' | 'all'
         // Accepted for parity with the demo-ui port (visual selection
         // indicator). Currently unused in this canvas renderer; click
         // semantics drive selection via `onSelectOp` instead.
@@ -45,6 +53,7 @@
         isDraft = false,
         onSelectOp,
         showInlineNewOp = true,
+        defaultView = 'fired',
         selected: _selected,
     }: Props = $props()
 
@@ -62,8 +71,18 @@
         return Math.round(n) + ' ms'
     }
 
+    // Fired/All view. `viewChoice` is the user's toggle; until they
+    // touch it the diagram follows `defaultView`.
+    let viewChoice = $state<'fired' | 'all' | undefined>(undefined)
+    const view = $derived(viewChoice ?? defaultView)
+    const stackOps = $derived(ops.filter((o) => o.stack === stack))
+    const firedOps = $derived(
+        stackOps.filter((o) => typeof lastDurations[opId(o)] === 'number')
+    )
+    const showingFired = $derived(view === 'fired' && firedOps.length > 0)
+
     const myGroup = $derived<StackGroup | undefined>(
-        groupOps(ops).find((g) => g.stack === stack)
+        groupOps(showingFired ? firedOps : stackOps)[0]
     )
 
     // Layout dimensions flex with container width: a single "compact"
@@ -344,6 +363,13 @@
         autoFit = true
     })
 
+    // Switching views changes the diagram's shape (a 30-wide row can
+    // collapse to one box), so refit rather than keep a stale zoom.
+    function setView(v: 'fired' | 'all') {
+        viewChoice = v
+        autoFit = true
+    }
+
     // Plain wheel scrolls as usual. Ctrl+wheel zooms at the pointer —
     // that is also what Chrome and Firefox send for a trackpad pinch.
     function onWheel(e: WheelEvent) {
@@ -467,15 +493,48 @@
                 <h2 class="font-mono text-sm font-semibold text-neutral-900 sm:text-base">
                     {stack}
                 </h2>
-                {#if showInlineNewOp}
-                    <button
-                        type="button"
-                        class="rounded border border-brand-cyan/40 bg-brand-cyan/10 px-2 py-0.5 text-xs text-neutral-900 hover:bg-brand-cyan/20"
-                        onclick={() => (adding = !adding)}
-                    >
-                        {adding ? 'Cancel' : '+ Add op'}
-                    </button>
-                {/if}
+                <div class="flex items-center gap-2">
+                    <!-- Only offered once there's timing to filter by. -->
+                    {#if firedOps.length > 0}
+                        <div
+                            role="group"
+                            aria-label="Ops to show"
+                            class="inline-flex overflow-hidden rounded border border-neutral-200 text-xs"
+                        >
+                            <button
+                                type="button"
+                                aria-pressed={showingFired}
+                                title="Only ops that ran in recent traces"
+                                class="px-2 py-0.5 {showingFired
+                                    ? 'bg-neutral-100 text-neutral-900'
+                                    : 'text-neutral-500 hover:bg-neutral-50'}"
+                                onclick={() => setView('fired')}
+                                >Fired <span class="font-mono text-neutral-400">{firedOps.length}</span
+                                ></button
+                            >
+                            <button
+                                type="button"
+                                aria-pressed={!showingFired}
+                                title="Every op in this stack"
+                                class="border-l border-neutral-200 px-2 py-0.5 {showingFired
+                                    ? 'text-neutral-500 hover:bg-neutral-50'
+                                    : 'bg-neutral-100 text-neutral-900'}"
+                                onclick={() => setView('all')}
+                                >All <span class="font-mono text-neutral-400">{stackOps.length}</span
+                                ></button
+                            >
+                        </div>
+                    {/if}
+                    {#if showInlineNewOp}
+                        <button
+                            type="button"
+                            class="rounded border border-brand-cyan/40 bg-brand-cyan/10 px-2 py-0.5 text-xs text-neutral-900 hover:bg-brand-cyan/20"
+                            onclick={() => (adding = !adding)}
+                        >
+                            {adding ? 'Cancel' : '+ Add op'}
+                        </button>
+                    {/if}
+                </div>
             </header>
             {#if adding && showInlineNewOp}
                 <div class="mb-2 px-1 sm:px-2">

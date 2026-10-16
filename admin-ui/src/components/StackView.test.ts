@@ -50,6 +50,7 @@ describe('StackView', () => {
                 ops: OPS,
                 lastDurations: { [opId(OPS[1])]: 42 },
                 showInlineNewOp: false,
+                defaultView: 'all',
                 onSelectOp: vi.fn(),
             },
         })
@@ -164,5 +165,81 @@ describe('StackView zoom', () => {
         // −50 px → 2^(50/100) ≈ ×1.41
         await fireEvent.wheel(pane, { deltaY: -50, ctrlKey: true })
         expect(renderedWidth(svg)).toBeCloseTo(PANE * 2 ** 0.5)
+    })
+})
+
+describe('StackView fired view', () => {
+    // fetch-a and respond ran; auth and fetch-b didn't. An op from
+    // another stack with timing must not count toward this one.
+    const DUR = {
+        [opId(OPS[1])]: 12,
+        [opId(OPS[3])]: 3,
+        [opId(op(0, 'elsewhere', 'other'))]: 5,
+    }
+    const ALL_OPS = [...OPS, op(0, 'elsewhere', 'other')]
+
+    function boxNames(): string[] {
+        return within(diagramOf('web'))
+            .getAllByRole('button')
+            .map((b) => b.getAttribute('aria-label') ?? '')
+    }
+
+    it('opens on the ops that fired, and All shows the rest', async () => {
+        render(StackView, {
+            props: { stack: 'web', ops: ALL_OPS, lastDurations: DUR, showInlineNewOp: false, onSelectOp: vi.fn() },
+        })
+        expect(boxNames()).toEqual(['fetch-a', 'respond'])
+
+        const fired = screen.getByRole('button', { name: /^fired 2$/i })
+        const all = screen.getByRole('button', { name: /^all 4$/i })
+        expect(fired).toHaveAttribute('aria-pressed', 'true')
+
+        await userEvent.click(all)
+        expect(boxNames()).toEqual(['auth', 'fetch-a', 'fetch-b', 'respond'])
+        expect(all).toHaveAttribute('aria-pressed', 'true')
+
+        await userEvent.click(fired)
+        expect(boxNames()).toEqual(['fetch-a', 'respond'])
+    })
+
+    it('falls back to every op, with no toggle, when there is no timing', () => {
+        render(StackView, {
+            props: { stack: 'web', ops: OPS, lastDurations: {}, showInlineNewOp: false, onSelectOp: vi.fn() },
+        })
+        expect(boxNames()).toHaveLength(OPS.length)
+        expect(screen.queryByRole('group', { name: 'Ops to show' })).toBeNull()
+    })
+
+    it("defaultView 'all' opens on every op but still offers Fired", () => {
+        render(StackView, {
+            props: {
+                stack: 'web',
+                ops: OPS,
+                lastDurations: DUR,
+                showInlineNewOp: false,
+                defaultView: 'all',
+                onSelectOp: vi.fn(),
+            },
+        })
+        expect(boxNames()).toHaveLength(OPS.length)
+        expect(screen.getByRole('button', { name: /^all 4$/i })).toHaveAttribute('aria-pressed', 'true')
+    })
+
+    it('collapses wide rows to what fired and refits', async () => {
+        vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(900)
+        const big = bigStack()
+        // One op per scope fired — the 30-wide rows included.
+        const dur = Object.fromEntries(
+            big.filter((o) => o.name.endsWith('-0')).map((o) => [opId(o), 1])
+        )
+        render(StackView, {
+            props: { stack: 'www', ops: big, lastDurations: dur, showInlineNewOp: false, onSelectOp: vi.fn() },
+        })
+        expect(within(diagramOf('www')).getAllByRole('button')).toHaveLength(200)
+        expect(screen.getByText('100%')).toBeInTheDocument()
+
+        await userEvent.click(screen.getByRole('button', { name: /^all /i }))
+        expect(within(diagramOf('www')).getAllByRole('button')).toHaveLength(big.length)
+        expect(screen.getByText('16%')).toBeInTheDocument()
     })
 })
