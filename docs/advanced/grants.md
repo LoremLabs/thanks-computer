@@ -362,6 +362,14 @@ The command also gets what it needs to present itself at run time:
   error before anything reaches the envelope or the trace.
 - **Only `exec` takes a grant.** `attach`, `connect` and the other verbs
   refuse it, and so does `exec` with `stream`.
+- **A call takes one too.** `call://<stack> WITH grant` runs a stack of
+  this tenant, in process, under the grant: the gateway signs the callee a
+  token of its own, held in its run's context and in no envelope, and the
+  callee's `cap://` calls are decided by `_grant` as a node's are
+  ([calls](./calls.md), [capabilities](./capabilities.md#answered-here)).
+  No sandbox is opened and nothing is handed over but the standing to ask;
+  the grant must be this stack's and live, or the call answers
+  `txco_call_grant` and the callee never runs.
 - **The grant must be this stack's, and for this workspace.** A rule cannot
   hand a command another stack's grant, or carry a grant to a workspace it
   was not minted for.

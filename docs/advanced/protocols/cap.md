@@ -73,12 +73,16 @@ The envelope never holds the grant's token.
 **Answered here.** A rule on this chassis that calls a capability its own
 tenant declares (`EXEC "cap://<name>"`, [capabilities](../capabilities.md#answered-here))
 gets the same stack, the same entry and the same answer shape — in process,
-on the same engine a [call](../calls.md) uses, with no grant and no second
-run. The envelope then carries `@cap.name`, `@cap.input`, `@cap.impl.*`,
-`@cap.tenant`, `@cap.caller.{stack,stage,op}`, `@cap.depth` and, when one is
-pinned on the request, `@cap.principal.id`; the grant facts (`@cap.run`,
-`@cap.grant`, `@cap.generation`, `@cap.workspace`, `@cap.trace`) are absent.
-A rule that needs them is being called from a node.
+on the same engine a [call](../calls.md) uses, with no second run. From a
+rule of the tenant's own code there is no grant: the envelope carries
+`@cap.name`, `@cap.input`, `@cap.impl.*`, `@cap.tenant`,
+`@cap.caller.{stack,stage,op}`, `@cap.depth` and, when one is pinned on the
+request, `@cap.principal.id`; the grant facts (`@cap.run`, `@cap.grant`,
+`@cap.generation`, `@cap.workspace`, `@cap.trace`) are absent. From a run
+**under a run grant** (a token in its context: a node's request, or a
+callee under `call://… WITH grant`) the call is decided by `_grant` first,
+as here, and the grant facts are stamped as here
+([capabilities](../capabilities.md#answered-here)).
 
 The stack answers at the top level of the envelope:
 

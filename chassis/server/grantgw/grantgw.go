@@ -60,6 +60,7 @@ const (
 	ViaExec     = "exec"     // the rule that starts the command: `WITH grant, sandbox`
 	ViaLauncher = "launcher" // the program itself: `txco sandbox`
 	ViaHTTP     = "http"     // a capability call: POST /v1/cap/<name> with the token
+	ViaCall     = "call"     // a capability call made in process by a run under a grant (cap:// on the chassis that declares the name)
 )
 
 // Open is one request to open a sandbox. Exactly one of Token and GrantID

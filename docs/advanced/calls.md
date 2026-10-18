@@ -60,6 +60,7 @@ WHEN ._job.id =~ /./
 | **`WITH into`** | Where the result object lands (default `_call`). |
 | **`WITH timeout`** | The call's own limit, in ms or as a duration (default `--call-default-timeout`, 60 s). See [the deadline](#deadline-and-cancellation). |
 | **`WITH stack`** | Replaces the ref's stack from data, as `WITH name` does for `cap://`. A value that is not a stack name answers `txco_call_target`. |
+| **`WITH grant`** | A run grant id (`rgr_…`) this stack minted. The callee runs **under it**: the gateway signs it a token of its own, the callee's run holds the token in its context (as a node's web head would have put it there, never in an envelope), and every `cap://` the callee makes is decided at the gateway first — the hard checks, the proposal, `_grant`, the verdict, the budget — before a name declared here answers it in process ([capabilities](./capabilities.md#answered-here)). A grant that is not this stack's, not live, or that no gateway here can sign for answers `txco_call_grant` as data, and the callee never runs. |
 
 A literal target is checked at `txco apply`, like `goto://`. Whether the
 callee **exists** is not: it deploys separately, and a call to a stack the
@@ -301,10 +302,17 @@ side effects may land after the call has returned.
 - **Depth.** Calls nest to **8**; `--call-depth-max` can lower that, never
   raise it. Over the limit, the result is `txco_call_depth`. Recursion is
   allowed within the limit.
-- **Fuel and TTL** are the request's: the call pays the `EXEC` dispatch
-  (25), and the callee's scopes and ops charge the same ledger at the usual
-  rates ([fuel](./fuel.md)). Exhaustion inside the callee ends the callee
-  with the exhaustion as its error, and the request at its next charge.
+- **Fuel** is the request's: the call pays the `EXEC` dispatch (25), and
+  the callee's scopes and ops charge the same ledger at the usual rates
+  ([fuel](./fuel.md)). Exhaustion inside the callee ends the callee with
+  the exhaustion as its error, and the request at its next charge.
+- **The hop countdown is the call's own.** Each call starts at
+  `--op-scope-ttl-max`, as the request did, so a sub-flow pays for its own
+  loops and the request never for the sub-flow's hops — a capability
+  answered in process walks its whole declaring stack each time. A callee
+  that uses its countdown up ends with `txcl_scope_ttl_exhausted` as the
+  call's error; the caller's own countdown is untouched and it goes on.
+  Depth bounds the total.
 - **The transition history is the call's own.** Each call starts with an
   empty one, so a sub-flow called twice in one request pays no repeat
   penalty; a tight loop inside one call still does.
@@ -346,14 +354,22 @@ the wait on cancellation, the depth, the shared budget, the per-frame
 history, the trace events (marked `via: cap`). A capability may call a
 capability, or a stack, and the depth counts across both.
 
+A run **under a run grant** — a request that arrived with the grant's token
+at the web head, or a callee under `WITH grant` — is one difference: its
+`cap://` call to a name declared here is decided at the grant gateway
+before the declaring stack runs, and that stack is stamped with the run
+that asked (`@cap.run`, `@cap.grant`, …), as it would be at the inlet. A
+rule of the tenant's own code presents no grant and runs the declaring
+stack with the request's authority, as before.
+
 ## A call, a jump, a capability
 
 | | Moves the stage | Moves the identity (`@stack`) | Returns | Runs the parent's scopes | Isolation | Authority |
 |---|---|---|---|---|---|---|
 | `@goto`, `goto://`, `EXEC "<stack>/<scope>"` | yes | no | no | yes (overlay) | none | the request's |
 | `txco://route` | yes | yes | no | yes (overlay) | none | the request's |
-| `call://` | for the callee | for the callee | **yes** | **no** | envelope only | the request's |
-| `cap://`, declared here | for the callee | for the callee | **yes** | **no** | envelope only | the request's ([above](#capabilities-answered-here)) |
+| `call://` | for the callee | for the callee | **yes** | **no** | envelope only | the request's; `WITH grant`: the named run grant, for the callee's `cap://` calls |
+| `cap://`, declared here | for the callee | for the callee | **yes** | **no** | envelope only | the request's ([above](#capabilities-answered-here)); a run under a run grant is decided by `_grant` first ([capabilities](./capabilities.md#answered-here)) |
 | `cap://` (up to a parent) | another chassis | — | yes | — | envelope | the run grant, decided by `_grant` ([capabilities](./capabilities.md)) |
 
 Use a jump to hand a request over for good (the boot → service handoff, a

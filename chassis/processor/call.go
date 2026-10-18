@@ -184,6 +184,29 @@ func (pu *Unit) ExecCall(ctx context.Context, op operation.Operation) (event.Pay
 		input: input, what: stack,
 	}
 
+	// `WITH grant` runs the callee under a run grant this rule's stack
+	// minted: the gateway signs a token for it, the callee's run holds the
+	// token in its context as a node's web head would have put it there,
+	// and every cap:// call inside is decided at the gateway first (cap.go
+	// ExecCap) — the hard checks, the proposal, `_grant`, the verdict, the
+	// budget. The id is all the envelope ever holds; the token goes into
+	// the context and nowhere else. A grant that is not this stack's, not
+	// live, or that no gateway can sign for is a failure as data.
+	if v := gjson.Get(op.Meta, "grant"); v.Exists() && v.Type != gjson.Null {
+		grantID := strings.TrimSpace(v.String())
+		if grantID == "" || v.Type != gjson.String {
+			return fail("txco_call_grant", "WITH grant is a run grant id (rgr_…)")
+		}
+		if pu.Grants == nil {
+			return fail("txco_call_grant", "this node opened no identity store: no run grant can be handed to a call")
+		}
+		token, gerr := pu.Grants.ForCall(ctx, tenantScope(ctx), op.Stack, grantID)
+		if gerr != nil {
+			return fail("txco_call_grant", scrubToken(gerr.Error(), token))
+		}
+		spec.runGrant = token
+	}
+
 	// `WITH entry` names a declared entry of the callee: where the call
 	// enters, what it must carry, what it will answer, and a timeout that
 	// can only shorten the call's. A missing required input fails before
@@ -266,6 +289,9 @@ type frameSpec struct {
 	facts   map[string]any // more facts under `_txc.<source>.*`, beside input, caller and depth
 	timeout time.Duration  // > 0: bounds the frame further than the op's deadline does
 	what    string         // the thing called, for messages: "app/_orient", "mail.send"
+	// runGrant, set, is the token the callee's run holds in its context
+	// (`WITH grant`): what its cap:// calls present. Never in an envelope.
+	runGrant string
 }
 
 // frameOutcome is what the engine answers: its own verdict ("" when it has
@@ -299,6 +325,7 @@ func (pu *Unit) runFrame(ctx context.Context, op operation.Operation, spec frame
 	fr := newCallFrame(parent, spec.stack, spec.source, spec.input, frameCaller{
 		Stack: op.Stack, Stage: op.Stack + "/" + strconv.Itoa(op.Scope), Op: op.Name,
 	})
+	fr.ttl.Store(int64(pu.Conf.OpScopeTTLMax)) // the frame's own hop countdown (frame.go)
 
 	// The callee's context: the caller's — same deadline, tenant, budget,
 	// tracer, secrets — with the frame's own facts in place of the caller's.
@@ -315,6 +342,9 @@ func (pu *Unit) runFrame(ctx context.Context, op operation.Operation, spec frame
 	fr.ctx = cctx
 	cctx = withFrame(cctx, fr)
 	cctx = WithSource(cctx, spec.source)
+	if spec.runGrant != "" {
+		cctx = WithRunGrant(cctx, spec.runGrant)
+	}
 	cctx = context.WithValue(cctx, ctxKeyParentStage, "")
 	cctx = withStreamSink(cctx, nil)
 	cctx = withResumeRun(cctx, resumeIdent{})
@@ -385,7 +415,7 @@ func (pu *Unit) runFrame(ctx context.Context, op operation.Operation, spec frame
 		out.stopped, out.running = &stopped, running
 	}
 	if out.verdict == "" {
-		if code, msg := budgetExhaustedInCall(ctx, entry); code != "" {
+		if code, msg := budgetExhaustedInCall(ctx, fr, entry); code != "" {
 			out.verdict, out.budget, out.message = verdictBudget, code, msg
 		}
 	}
@@ -472,11 +502,12 @@ func (pu *Unit) frameEnvelope(ctx context.Context, op operation.Operation, fr *f
 	return stampPrincipal(ctx, raw)
 }
 
-// budgetExhaustedInCall reports the request's budget state after a callee
-// ran, as the budget's own code and message: the callee that spent the last
-// of the fuel or the last hop ended on the exhaustion, and the caller learns
-// it here before its own next charge refuses it too.
-func budgetExhaustedInCall(ctx context.Context, stage string) (code, message string) {
+// budgetExhaustedInCall reports the budget's state after a callee ran, as
+// the budget's own code and message: the callee that spent the last of the
+// request's fuel, or the last hop of its own countdown, ended on the
+// exhaustion. Fuel is the request's, so the caller's next charge refuses it
+// too; the hops were the frame's, so the caller goes on.
+func budgetExhaustedInCall(ctx context.Context, fr *frame, stage string) (code, message string) {
 	s := budgetFromCtx(ctx)
 	if s == nil {
 		return "", ""
@@ -490,9 +521,9 @@ func budgetExhaustedInCall(ctx context.Context, stage string) (code, message str
 	default:
 		return "txco_fuel_exhausted", e.Error()
 	}
-	if s.maxTTL > 0 && s.ttl.Load() <= 0 {
+	if s.maxTTL > 0 && fr.ttl.Load() <= 0 {
 		return "txcl_scope_ttl_exhausted",
-			fmt.Sprintf("the request's %d stage hops were used up inside the call", s.maxTTL)
+			fmt.Sprintf("the call's %d stage hops were used up inside it", s.maxTTL)
 	}
 	return "", ""
 }

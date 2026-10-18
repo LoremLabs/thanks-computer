@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -403,6 +404,35 @@ type GrantHandoff interface {
 	// stack are the dispatching rule's own; workspaceID is the workspace the
 	// command is about to run in.
 	ForExec(ctx context.Context, tenant, stack, workspaceID, grantID string, sandboxes []string) (env map[string]string, scrub [][]byte, err error)
+	// ForCall signs a token for run grant grantID, for a stack called in
+	// process under it (`call://<stack> WITH grant`): the callee's run
+	// holds it in its context, as a node's web head would have put it
+	// there, and never in an envelope. tenant and stack are the calling
+	// rule's own; the grant must be live and minted by that stack. No
+	// sandbox is opened: a callee gets no secret, only the standing to ask.
+	ForCall(ctx context.Context, tenant, stack, grantID string) (token string, err error)
+	// Decide decides one capability call made in process under a run grant
+	// — the hard checks, the proposal, the tenant's `_grant` stack, the
+	// verdict and the budget charge, exactly as at the capability inlet —
+	// and names the run that asked, for the declaring stack's envelope.
+	Decide(ctx context.Context, token, name string, input json.RawMessage) CapDecision
+}
+
+// CapDecision is the grant gateway's answer to Decide: whether the call may
+// run, and, when the token named a live grant, whose run it is.
+type CapDecision struct {
+	Allowed     bool
+	Held        bool // a rule held it for a person: txco_cap_held
+	Unavailable bool // the chassis could not decide: txco_cap_unavailable
+	Identified  bool // the token named a live grant (the hard checks passed)
+	Reason      string
+	Tenant      string // the grant's tenant, by slug
+	Run, Grant  string
+	Generation  int64
+	Principal   struct{ ID, Kind string }
+	Stack       string // the stack that minted the grant
+	Workspace   string
+	Trace       string
 }
 
 // handGrant resolves `WITH grant` and `WITH sandbox` for an exec: the

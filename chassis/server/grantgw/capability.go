@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/loremlabs/thanks-computer/chassis/processor"
 
 	"go.uber.org/zap"
 
@@ -38,6 +39,10 @@ type Call struct {
 	Token string
 	Name  string          // the capability, by its bare name
 	Input json.RawMessage // what the caller sent, presented to the rules as data
+	// Via is how the call came: ViaHTTP (the inlet; the default) or ViaCall
+	// (in process, on the chassis that declares the name). The rules see it
+	// as `@grant.via`.
+	Via string
 }
 
 // Verdict is what the inlet gets back: allowed, and then who is asking, or
@@ -79,7 +84,11 @@ func (v Verdict) Identified() bool { return v.Grant.ID != "" }
 func (g *Gateway) Invoke(ctx context.Context, c Call) Verdict {
 	now := g.now()
 	var v Verdict
-	grant, ans, ok := g.identify(ctx, Open{Token: c.Token, Via: ViaHTTP}, now)
+	via := c.Via
+	if via == "" {
+		via = ViaHTTP
+	}
+	grant, ans, ok := g.identify(ctx, Open{Token: c.Token, Via: via}, now)
 	if !ok {
 		g.log.Info("grant: capability refused before any rule ran",
 			zap.String("reason", ans.Reason), zap.Bool("unavailable", ans.Unavailable),
@@ -92,7 +101,7 @@ func (g *Gateway) Invoke(ctx context.Context, c Call) Verdict {
 	v.Grant = grant
 	fields := []zap.Field{
 		zap.String("grant", grant.ID), zap.String("run", grant.Run),
-		zap.String("principal", grant.Principal.ID), zap.String("via", ViaHTTP),
+		zap.String("principal", grant.Principal.ID), zap.String("via", via),
 		zap.String("capability", c.Name),
 	}
 	hard := func(v Verdict) Verdict {
@@ -144,7 +153,7 @@ func (g *Gateway) Invoke(ctx context.Context, c Call) Verdict {
 	}
 	f := facts{
 		rid: hxid.NewTimeSort().String(), tenant: tenant, grant: grant, res: res,
-		rq: request{via: ViaHTTP}, input: c.Input, checks: ch, prop: propose(ch), at: now,
+		rq: request{via: via}, input: c.Input, checks: ch, prop: propose(ch), at: now,
 	}
 	fields = append(fields, zap.String("rid", f.rid), zap.Bool("proposed", f.prop.allow))
 
@@ -199,4 +208,23 @@ func (g *Gateway) Invoke(ctx context.Context, c Call) Verdict {
 	g.log.Info("grant: capability allowed", fields...)
 	v.Allowed = true
 	return v
+}
+
+// Decide is Invoke for a call made in process (processor.GrantHandoff): a
+// run under a run grant, on the chassis that declares the capability, is
+// decided here exactly as a node's call is at the inlet, and the declaring
+// stack is told whose run asked. The processor cannot import this package,
+// so the answer is its own shape.
+func (g *Gateway) Decide(ctx context.Context, token, name string, input json.RawMessage) processor.CapDecision {
+	v := g.Invoke(ctx, Call{Token: token, Name: name, Input: input, Via: ViaCall})
+	d := processor.CapDecision{
+		Allowed: v.Allowed, Held: v.Held, Unavailable: v.Unavailable, Identified: v.Identified(),
+		Reason: v.Reason, Tenant: v.Tenant,
+	}
+	if v.Identified() {
+		d.Run, d.Grant, d.Generation = v.Grant.Run, v.Grant.ID, v.Grant.Generation
+		d.Principal.ID, d.Principal.Kind = v.Grant.Principal.ID, string(v.Grant.Principal.Kind)
+		d.Stack, d.Workspace, d.Trace = v.Grant.Stack, v.Grant.Workspace, v.Grant.TraceID
+	}
+	return d
 }

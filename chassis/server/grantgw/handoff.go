@@ -145,6 +145,43 @@ func (g *Gateway) ForExec(ctx context.Context, tenant, stack, workspaceID, grant
 	return env, scrub, nil
 }
 
+// ForCall signs a token for a stack called in process under run grant
+// grantID (`call://<stack> WITH grant`; processor.GrantHandoff). The grant
+// must be live and minted by the calling rule's stack — a rule cannot hand
+// a callee another stack's grant — but it need not name a workspace: no
+// command runs, nothing is handed over but the standing to ask. The callee's
+// run holds the token in its context and presents it on every cap:// call,
+// which the gateway then decides (Decide); the token is in no envelope.
+func (g *Gateway) ForCall(ctx context.Context, tenant, stack, grantID string) (string, error) {
+	if g.signer == nil {
+		return "", handoffErr("this node has no master key to sign a run grant with (--secret-master-key)")
+	}
+	tenantID, err := g.tenantID(ctx, tenant)
+	if err != nil {
+		return "", handoffErr("tenant %q not found", tenant)
+	}
+	grant, err := g.ids.GetRunGrant(ctx, tenantID, stack, grantID)
+	switch {
+	case errors.Is(err, authn.ErrNotFound):
+		return "", handoffErr("no run grant %q", grantID)
+	case errors.Is(err, authn.ErrNotOwner):
+		return "", handoffErr("run grant %s was minted by another stack", grantID)
+	case err != nil:
+		return "", handoffErr("reading run grant %s: %v", grantID, err)
+	case !grant.Live(g.now()):
+		return "", handoffErr("run grant %s has expired, ended or been revoked", grantID)
+	}
+	token, err := g.signer.Sign(rungrant.Claims{
+		Grant: grant.ID, Tenant: grant.TenantID, Principal: grant.Principal.ID,
+		Run: grant.Run, Generation: grant.Generation, Depth: grant.Depth,
+		Trace: grant.TraceID, Expires: grant.ExpiresAt.Unix(),
+	})
+	if err != nil {
+		return "", handoffErr("signing run grant %s: %v", grantID, err)
+	}
+	return token, nil
+}
+
 func names(in []string) string {
 	if len(in) == 0 {
 		return "none"

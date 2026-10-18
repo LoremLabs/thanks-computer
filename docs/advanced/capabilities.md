@@ -242,12 +242,30 @@ implementation serves both ways in. The answer takes the same shape, with no
 name declared here is answered here even when a parent is configured and
 the run carries a grant; any other name goes up.
 
-Such a call runs with the request's authority, as a jump to the declaring
-stack's entry already would: the `_grant` stack decides calls that arrive
-WITH a run grant, at the inlet; a rule of the tenant's own code presents
-none. What a call isolates is data, not authority ([calls](./calls.md)).
+Who decides it depends on who is asking:
+
+- **A rule of the tenant's own code** presents no grant. The call runs
+  with the request's authority, as a jump to the declaring stack's entry
+  already would, and the `_grant` stack is not consulted. What a call
+  isolates is data, not authority ([calls](./calls.md)).
+- **A run under a run grant** — the token in its context, because the
+  request carried it at the web head or because the run is a callee under
+  `call://… WITH grant` ([calls](./calls.md#calling)) — is decided at the
+  gateway **first**, exactly as at the inlet: the hard checks, the
+  proposal, the `_grant` stack (which sees `@grant.via == "call"`), the
+  verdict, the budget charge. Only an allowed call runs the declaring
+  stack, stamped with the grant's facts (`@cap.run`, `@cap.grant`,
+  `@cap.generation`, `@cap.principal`, `@cap.stack`, `@cap.workspace`,
+  `@cap.trace`). Denied, held and unavailable are the inlet's answers, as
+  data (`txco_cap_denied`, `txco_cap_held`, `txco_cap_unavailable`), and
+  the stack never runs. A grant of another tenant than the request's is
+  denied. On a chassis that opened no identity store (a node), the token is
+  its parent's and only the parent can check it: a name declared there is
+  answered as a rule's would be.
+
 The whole run shares the request's fuel and deadline and appends to its
-trace, with `call.enter` / `call.return` events marked `via: cap`.
+trace, with `call.enter` / `call.return` events marked `via: cap` and, for
+a decided call, a `cap.decided` event.
 `examples/call-hello` calls one this way beside a `call://`.
 
 ## The catalogue

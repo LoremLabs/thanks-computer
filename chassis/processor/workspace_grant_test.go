@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -35,6 +36,14 @@ const (
 	stubToken  = "rg1.eyJnIjoicmdyXzEifQ.c2lnbmF0dXJlLXNpZ25hdHVyZQ"
 	stubSecret = "ghp_secret-value-of-the-sandbox"
 )
+
+// ForCall and Decide: the exec tests never call them.
+func (h *stubHandoff) ForCall(_ context.Context, tenant, stack, grantID string) (string, error) {
+	return "", errors.New("not in these tests")
+}
+func (h *stubHandoff) Decide(_ context.Context, token, name string, input json.RawMessage) CapDecision {
+	return CapDecision{Unavailable: true, Reason: "not in these tests"}
+}
 
 func (h *stubHandoff) ForExec(_ context.Context, tenant, stack, workspaceID, grantID string, sandboxes []string) (map[string]string, [][]byte, error) {
 	h.mu.Lock()

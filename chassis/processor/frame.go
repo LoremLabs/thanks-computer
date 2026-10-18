@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -16,9 +17,10 @@ import (
 // envelope, and a call (`EXEC "call://…"`, call.go) pushes a frame of its own
 // onto the same request. What belongs to the REQUEST is shared by every frame:
 // the tenant and principal, the rid and tracer, the opstack snapshot, the
-// fuel and TTL ledger, the deadline, the secrets, the run grant. What belongs
-// to a FRAME is its own: the stack it is boxed to, its source, its input, its
-// depth, its transition history, and the policies below.
+// fuel ledger, the deadline, the secrets, the run grant (unless the call
+// names one). What belongs to a FRAME is its own: the stack it is boxed to,
+// its source, its input, its depth, its transition history, its hop
+// countdown, and the policies below.
 //
 // The frame decides only where a call differs. The root frame's every policy
 // says "as before", and each check that reads a frame treats nil and root
@@ -49,6 +51,14 @@ type frame struct {
 	// the root frame, which keeps using the budget's.
 	seenMu sync.Mutex
 	seen   map[string]bool
+	// ttl is the frame's own hop countdown (budget.go decrementTTL): a
+	// call frame starts at --op-scope-ttl-max, as the request did, so a
+	// sub-flow pays for its own loops and the request never for the
+	// sub-flow's hops — a capability answered in process walks its whole
+	// declaring stack, which would otherwise spend the request's. Depth
+	// bounds the total. Unused on the root frame, which counts on the
+	// budget's.
+	ttl atomic.Int64
 
 	// Ops in flight, so a call can wait for its callee's ops to stop on
 	// cancellation (§2.9). Counted on call frames only.

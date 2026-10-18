@@ -46,7 +46,7 @@ own row. It is read-only, except `@grant.res`.
 | `@grant.grant`, `@grant.depth` | The run grant's id, and how many times it was narrowed |
 | `@grant.stack`, `@grant.workspace` | The stack that minted it, and the workspace it was minted for |
 | `@grant.node.class` | `reviewed` or `unreviewed` |
-| `@grant.via` | Who opened the sandbox: `exec` (the rule that started the command) or `launcher` (`txco sandbox`, the program itself). `http` for a capability call. |
+| `@grant.via` | Who opened the sandbox: `exec` (the rule that started the command) or `launcher` (`txco sandbox`, the program itself). For a capability call, `http` (the inlet) or `call` (made in process by a run under a grant, on the chassis that declares the name). |
 | `@grant.input` | A capability call's input, as the caller sent it: data for a rule to decide on. Absent for a secret. |
 | `@grant.secret.pull` | The secret's pull policy |
 | `@grant.secret.version`, `.scope` | Its version, and `tenant` or `stack` |

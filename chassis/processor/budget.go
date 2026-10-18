@@ -319,7 +319,8 @@ func fuelExceeded(ctx context.Context, stage string) error {
 	return s.overBudget(s.fuel.Load(), stage)
 }
 
-// decrementTTL decrements the request's hop counter by 1. Returns a
+// decrementTTL decrements the hop counter — the request's, or inside a call
+// the frame's own — by 1. Returns a
 // *TTLExhaustedError if the result <= 0 and the cap is enabled (> 0).
 // A cap of 0 means "disabled"; loadBudget stored 0 in that case, so this
 // would fire immediately — we explicitly skip the check.
@@ -330,7 +331,14 @@ func decrementTTL(ctx context.Context, stage string) error {
 	}
 	// 0 from config = disabled. The store at load time also wrote 0; we
 	// keep counting down (informational) but never raise.
-	current := s.ttl.Add(-1)
+	// Inside a call the hop is the frame's own (frame.go ttl): the request's
+	// countdown is not touched by a sub-flow's hops.
+	var current int64
+	if fr := frameFrom(ctx); fr.isCall() {
+		current = fr.ttl.Add(-1)
+	} else {
+		current = s.ttl.Add(-1)
+	}
 	original := current + 1
 	// If the original (pre-decrement) was 0 OR negative, the cap is disabled
 	// (or this request was seeded that way from a chained system).

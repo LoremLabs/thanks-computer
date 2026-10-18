@@ -21,6 +21,12 @@ from costly-but-legitimate work at a glance. Implementation:
 scope advance, `@goto`, or stage-jump `EXEC`, `goto://` or unschemed). It starts at
 `--op-scope-ttl-max` (default `500`); `0` disables the guard.
 
+A [call](./calls.md#depth-and-fuel) (`call://`, or a capability answered in
+process) counts on a countdown of its own, started at the same ceiling: the
+guard is for the shape of one flow, and a sub-flow is one. The request's
+countdown is not touched by the frames it calls; depth (8) bounds the
+total.
+
 A rule may voluntarily *lower* its remaining budget —
 `EMIT @ttl = 20` before entering a polling loop — but can never raise
 it (the IP-TTL idiom: writes are clamped to the current value). Use

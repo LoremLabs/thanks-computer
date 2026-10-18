@@ -129,7 +129,20 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 	if tenant := tenantScope(ctx); tenant != "" && pu.Caps != nil {
 		switch stack, d, lerr := pu.Caps.Lookup(ctx, tenant, name); {
 		case lerr == nil:
-			return pu.execCapLocal(ctx, op, name, into, stack, d), nil
+			// A run under a run grant (a token in its context: a node's
+			// request at the web head, or a callee under `WITH grant`) is
+			// decided at the gateway BEFORE a name declared here answers
+			// it — the hard checks, the proposal, the tenant's `_grant`
+			// stack, the verdict, the budget — exactly as at the inlet; the
+			// declaring stack then runs in process, stamped with the run
+			// that asked. A rule of the tenant's own code presents no
+			// grant, and is answered with the request's authority as
+			// before; so is a run on a node that opened no identity store
+			// (its token is its parent's, which only the parent can check).
+			if token := RunGrantFrom(ctx); token != "" && pu.Grants != nil {
+				return pu.execCapDecided(ctx, op, name, into, stack, d, tenant, token), nil
+			}
+			return pu.execCapLocal(ctx, op, name, into, stack, d, nil), nil
 		case errors.Is(lerr, capdecl.ErrNotDeclared):
 			// Not here: the parent, below.
 		default:
@@ -321,14 +334,15 @@ type CapLookup interface {
 // beside it at `cap.*`, every failure as data at `cap.error` with the status
 // it would have carried from the inlet.
 //
-// The call runs with the request's authority, as a jump to the declaring
-// stack's entry already would: the `_grant` stack decides calls that arrive
-// WITH a run grant, at the inlet; a rule of the tenant's own code on the
-// declaring chassis presents none. What the callee sees is the capability
+// A call from a rule of the tenant's own code runs with the request's
+// authority, as a jump to the declaring stack's entry already would: it
+// presents no grant. A call from a run UNDER a run grant (a token in its
+// context) has been decided at the gateway first (execCapDecided), and
+// `grant` carries the run's facts to stamp. What the callee sees is the capability
 // envelope — `@src == "cap"`, `@cap.name`, `@cap.input`, `@cap.caller`,
 // `@cap.depth`, `@cap.impl` — so one implementation serves both ways in,
 // and nothing of the caller's envelope but the input.
-func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, into, stack string, d *capdecl.Decl) event.Payload {
+func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, into, stack string, d *capdecl.Decl, grant map[string]any) event.Payload {
 	spec := frameSpec{
 		stack: stack, scope: d.Entry, source: "cap", channel: capDefaultInto,
 		input: metaInput(op.Meta), what: name,
@@ -341,6 +355,12 @@ func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, 
 	}
 	if p := PrincipalScope(ctx); p != "" {
 		spec.facts["principal"] = map[string]string{"id": p}
+	}
+	// Decided at the gateway: the grant's facts, as the inlet stamps them
+	// (run, grant, generation, principal, stack, workspace, trace), so the
+	// declaring stack reads `@cap.run` whichever way the call came in.
+	for k, v := range grant {
+		spec.facts[k] = v
 	}
 	out := pu.runFrame(ctx, op, spec)
 
@@ -408,4 +428,58 @@ func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, 
 		Fields: map[string]any{"capability": name, "stack": stack, "here": true, "ms": out.ms},
 	})
 	return event.Payload{Raw: raw, Type: event.JSON}
+}
+
+// execCapDecided is a name declared here, called by a run under a run grant:
+// the gateway decides it first, as it decides a node's call at the inlet,
+// and only an allowed call runs the declaring stack — stamped with the run
+// the grant names. Every other answer is the inlet's, as data: denied (the
+// token, the allowlist, the standing grant, the budget or a rule said no),
+// held (a rule kept it for a person), unavailable (the chassis could not
+// decide). A grant of another tenant than the request's is denied: a name
+// declared here is this tenant's.
+func (pu *Unit) execCapDecided(ctx context.Context, op operation.Operation, name, into, stack string, d *capdecl.Decl, tenant, token string) event.Payload {
+	start := time.Now()
+	input := json.RawMessage(metaInput(op.Meta))
+	dec := pu.Grants.Decide(ctx, token, name, input)
+	refuse := func(code string, status int, why string) event.Payload {
+		pu.Logger.Info("cap: decided here, not run",
+			zap.String("capability", name), zap.String("stack", stack), zap.String("code", code),
+			zap.String("reason", dec.Reason), zap.Int64("ms", time.Since(start).Milliseconds()))
+		trace.FromContext(ctx).Event(trace.TimelineEvent{
+			Ts: time.Now(), Event: "cap.decided",
+			Fields: map[string]any{"capability": name, "stack": stack, "here": true, "code": code, "run": dec.Run},
+		})
+		p := capFailure(into, name, code, why, status, "")
+		p.Raw, _ = sjson.Set(p.Raw, "cap.ms", time.Since(start).Milliseconds())
+		return p
+	}
+	switch {
+	case dec.Unavailable:
+		return refuse("txco_cap_unavailable", http.StatusServiceUnavailable, "the chassis could not decide the call")
+	case !dec.Identified:
+		return refuse("txco_cap_denied", http.StatusUnauthorized, "the run grant was not accepted")
+	case dec.Held:
+		return refuse("txco_cap_held", http.StatusConflict, "a rule held the call for a person to decide")
+	case !dec.Allowed:
+		return refuse("txco_cap_denied", http.StatusForbidden, "the call was refused")
+	case dec.Tenant != tenant:
+		return refuse("txco_cap_denied", http.StatusForbidden, "the run grant is another tenant's")
+	}
+	facts := map[string]any{
+		"run": dec.Run, "grant": dec.Grant, "generation": dec.Generation,
+		"principal": map[string]string{"id": dec.Principal.ID, "kind": dec.Principal.Kind},
+		"stack":     dec.Stack,
+	}
+	if dec.Workspace != "" {
+		facts["workspace"] = dec.Workspace
+	}
+	if dec.Trace != "" {
+		facts["trace"] = dec.Trace
+	}
+	trace.FromContext(ctx).Event(trace.TimelineEvent{
+		Ts: time.Now(), Event: "cap.decided",
+		Fields: map[string]any{"capability": name, "stack": stack, "here": true, "allowed": true, "run": dec.Run},
+	})
+	return pu.execCapLocal(ctx, op, name, into, stack, d, facts)
 }

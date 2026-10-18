@@ -2,6 +2,7 @@ package grantgw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -133,6 +134,55 @@ func TestHandingAGrantToACommand(t *testing.T) {
 	}
 	if _, _, err := r.g.ForExec(ctx, tenantSlug, "web", "ws_bench", g.ID, []string{"postgres"}); err == nil || !strings.Contains(err.Error(), "expired, ended or been revoked") {
 		t.Errorf("a revoked grant: %v", err)
+	}
+}
+
+// A grant handed to a CALL (`call://<stack> WITH grant`): a token of its
+// own, this grant's, good for as long as it; minted by this stack only;
+// no workspace needed, nothing opened, nothing charged.
+func TestHandingAGrantToACall(t *testing.T) {
+	r := newRig(t)
+	r.holdCap("card.note")
+	g := r.mint("task-1", func(n *authn.NewRunGrant) {
+		n.Allow = []string{"card.note"}
+		n.Sandboxes = map[string]map[string]string{"prairie": {}}
+	})
+	ctx := context.Background()
+	token, err := r.g.ForCall(ctx, tenantSlug, "web/_mail", g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := r.signer.Verify(token, r.now)
+	if err != nil || claims.Grant != g.ID || claims.Tenant != tenantID || claims.Principal != "service:research" ||
+		claims.Run != "task-1" || claims.Generation != 1 || claims.Expires != g.ExpiresAt.Unix() {
+		t.Errorf("claims = %+v err=%v", claims, err)
+	}
+	if r.runs != 0 || r.spent(g) != 0 {
+		t.Errorf("%d runs, %d spent, want none: a handoff to a call opens nothing", r.runs, r.spent(g))
+	}
+	if _, err := r.g.ForCall(ctx, tenantSlug, "other", g.ID); err == nil || !strings.Contains(err.Error(), "minted by another stack") {
+		t.Errorf("another stack's grant: err = %v", err)
+	}
+	if _, err := r.g.ForCall(ctx, tenantSlug, "web", "rgr_nothing"); err == nil || !strings.Contains(err.Error(), "no run grant") {
+		t.Errorf("no such grant: err = %v", err)
+	}
+
+	// …and the gateway takes that token in process: Decide is Invoke, via
+	// "call", charged, with the run named for the declaring stack.
+	d := r.g.Decide(ctx, token, "card.note", json.RawMessage(`{"text":"hi"}`))
+	if !d.Allowed || !d.Identified || d.Held || d.Unavailable || d.Tenant != tenantSlug || d.Run != "task-1" ||
+		d.Grant != g.ID || d.Generation != 1 || d.Principal.ID != "service:research" {
+		t.Errorf("Decide = %+v", d)
+	}
+	if r.runs != 1 || r.spent(g) != 1 {
+		t.Errorf("%d runs, %d spent, want 1 and 1", r.runs, r.spent(g))
+	}
+	if got := gjson.Get(r.seen[0], "_txc.grant.via").String(); got != "call" {
+		t.Errorf("_txc.grant.via = %q, want call: %s", got, gjson.Get(r.seen[0], "_txc.grant").Raw)
+	}
+	bad := r.g.Decide(ctx, "rg1.not.a.token", "card.note", json.RawMessage(`{}`))
+	if bad.Allowed || bad.Identified || bad.Run != "" {
+		t.Errorf("a bad token: Decide = %+v", bad)
 	}
 }
 
