@@ -42,6 +42,7 @@ const (
 	AttrTenantSlug          = "txco.tenant.slug"
 	AttrSecretName          = "txco.secret.name"
 	AttrTelemetryDropReason = "txco.telemetry.drop_reason"
+	AttrWebSearchOutcome    = "txco.websearch.outcome"
 )
 
 // Metrics holds the chassis tracer, meter, and pre-built instruments.
@@ -69,6 +70,11 @@ type Metrics struct {
 	// is the chassis-side diagnostic for "my metrics aren't arriving".
 	// NEVER record metric names or values here — only counts + reason.
 	TelemetryDropped metric.Int64Counter
+
+	// WebSearchRequests counts txco://web/search calls, tagged tenant slug
+	// + outcome (`ok` or the error code without its txco_web_ prefix).
+	// NEVER record the query or a result here.
+	WebSearchRequests metric.Int64Counter
 
 	shutdown []func(context.Context) error
 }
@@ -172,6 +178,15 @@ func New(ctx context.Context, conf config.Config, logger *zap.Logger) *Metrics {
 		logger.Fatal("create telemetry.dropped counter", zap.Error(err))
 	}
 
+	webSearchRequests, err := meter.Int64Counter(
+		"chassis.websearch.requests",
+		metric.WithDescription("Count of txco://web/search calls by outcome"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		logger.Fatal("create websearch.requests counter", zap.Error(err))
+	}
+
 	return &Metrics{
 		Tracer:               tracer,
 		Meter:                meter,
@@ -181,6 +196,7 @@ func New(ctx context.Context, conf config.Config, logger *zap.Logger) *Metrics {
 		OpDurationMs:         opDurationMs,
 		SecretMaterialized:   secretMaterialized,
 		TelemetryDropped:     telemetryDropped,
+		WebSearchRequests:    webSearchRequests,
 		shutdown:             shutdownFns,
 	}
 }
@@ -225,6 +241,19 @@ func (m *Metrics) RecordSecretMaterialize(ctx context.Context, tenantSlug, secre
 	m.SecretMaterialized.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(AttrTenantSlug, tenantSlug),
 		attribute.String(AttrSecretName, secretName),
+	))
+}
+
+// RecordWebSearch increments the websearch.requests counter tagged with
+// tenant slug + outcome. Nil-safe like RecordSecretMaterialize. The
+// outcome is a fixed vocabulary (ok, or an error code): never the query.
+func (m *Metrics) RecordWebSearch(ctx context.Context, tenantSlug, outcome string) {
+	if m == nil || m.WebSearchRequests == nil {
+		return
+	}
+	m.WebSearchRequests.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(AttrTenantSlug, tenantSlug),
+		attribute.String(AttrWebSearchOutcome, outcome),
 	))
 }
 

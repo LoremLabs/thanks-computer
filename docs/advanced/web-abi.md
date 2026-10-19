@@ -115,6 +115,12 @@ Nothing is installed into `_sys`.
 - **Static answers first, so:**
   - an op can't shadow a file in `public/`;
   - an op can't add headers to a static response.
+- **A file static has is never the stack's 404.** If the file store doesn't
+  give back a `public/` file's bytes within `--static-read-timeout` (2 s), static
+  tries once more inside the op's deadline, then answers 503 with
+  `Retry-After: 1` and `Cache-Control: no-store`. A miss under a directory
+  static owns (`app/x.js` when `app/` exists) is static's own 404, also
+  `no-store`.
 
 ### Every build ends in a terminal op
 
@@ -139,11 +145,15 @@ WHEN @src == "http" && (@web.req.method == "GET" || @web.req.method == "HEAD")
 WHEN @src == "http"
   EMIT @web.res.status = 404,
        @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.headers.cache-control.0 = "no-store",
        @web.res.body = b64"404 not found\n",
        @halt = true
 ```
 
 The catch-all sits at a later scope because ops in one scope run concurrently.
+Its 404 is `no-store`: an asset missing now may be there on the next try, and
+a browser that keeps a 404 for a script breaks the page until its cache is
+cleared.
 A multi-page build serves `404.html` with 404 instead of a shell. A framework
 with a reliable route table may give unknown routes the shell with 404, as the
 SvelteKit adapter does.

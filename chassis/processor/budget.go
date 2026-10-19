@@ -116,6 +116,16 @@ const (
 	FuelCostHTMLExtract      int64 = 50
 	FuelCostHTMLPerMiB       int64 = 100
 	FuelCostHTMLExtractPerMs int64 = 10
+	// FuelCostWebSearch is txco://web/search's charge per request it
+	// sends, on top of the flat dispatch fuel and the secret charge for
+	// the tenant's key: the html/extract fetch rate, for the same reason.
+	// A search is 25 + 100 + 50 = 175. Exported because the handler lives
+	// in package server.
+	FuelCostWebSearch int64 = 50
+	// FuelCostSecretMaterialize is fuelCostSecretMaterialize for handlers
+	// outside the processor that read a tenant secret the way the ai://
+	// ops do (txco://web/search).
+	FuelCostSecretMaterialize = fuelCostSecretMaterialize
 )
 
 // AddFuel is the exported charge point for core op handlers that do

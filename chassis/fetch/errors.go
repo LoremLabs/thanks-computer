@@ -1,6 +1,9 @@
 package fetch
 
-import "fmt"
+import (
+	"fmt"
+	"net/http"
+)
 
 // Error codes. Callers prefix them with their op family (txco_html_…).
 const (
@@ -27,6 +30,9 @@ type Error struct {
 	// Bytes is how many body bytes were read before the failure (for
 	// metering a refused oversize body).
 	Bytes int64
+	// Header is the response's, when one arrived: a caller reading a
+	// provider's rate-limit headers off a 429 finds them here.
+	Header http.Header
 }
 
 func (e *Error) Error() string { return fmt.Sprintf("fetch: %s: %s", e.Code, e.Message) }

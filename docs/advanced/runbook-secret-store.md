@@ -311,6 +311,7 @@ Some subsystems read a fixed secret name rather than one a rule names:
 | Name | Used by | Env fallback |
 | --- | --- | --- |
 | `OPENROUTER_KEY` | `ai://chat` — see [ai.md](../ai.md#set-the-api-key) | yes, `--ai-chat-env-fallback` |
+| `BRAVE_SEARCH_KEY` | `txco://web/search` — see [web-search](./web-search.md#set-the-key) | yes, `--ai-chat-env-fallback` |
 | `OPENAI_KEY` | `ai://embed` and the OpenAI chat backend | yes, same flag |
 | `VERCEL_AI_KEY` | `ai://decide` — see [ai.md](../ai.md#decisions--exec-aidecide) | yes, same flag |
 | `ANTHROPIC_KEY` | [AI gateway](./protocols/llm-gateway.md) swap mode — the real upstream key | **no** |

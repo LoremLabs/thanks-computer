@@ -53,6 +53,7 @@ the chassis-wide cap.
 | Notebook read / export, per MiB returned | 100 |
 | KV mget / list with values, per MiB returned; mset, per MiB written | 100 |
 | `txco://html/extract`: the fetch, on top of the dispatch; per started MiB downloaded; per started ms parsing and matching | 50; 100; 10 |
+| `txco://web/search`: the request, on top of the dispatch and the 100 for reading the tenant's key (175 a search) | 50 |
 | TCP connection accepted (`--tcp-conn-fuel`) | 100 |
 | TCP bytes through a connection, per MiB (exact, not rounded up) | 100 |
 

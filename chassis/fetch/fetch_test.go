@@ -702,3 +702,89 @@ func TestErrorMessagesNameNoAddress(t *testing.T) {
 		}
 	}
 }
+
+// An op's fixed headers reach the server on the first request and on no
+// redirect, whether or not the host changes.
+func TestOpHeadersTravelOnceOnly(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]http.Header{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Host+r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/same":
+			http.Redirect(w, r, "/landed", http.StatusFound)
+		case "/other":
+			http.Redirect(w, r, "http://public.test/landed", http.StatusFound)
+		default:
+			w.Header().Set("Content-Type", "text/html")
+		}
+	}))
+	t.Cleanup(srv.Close)
+	h := newHarness(t, srv, nil)
+	h.res.set("start.test", []string{pubA})
+	h.res.set("public.test", []string{pubB})
+	hdr := http.Header{}
+	hdr.Set("X-Subscription-Token", "sk-key")
+	hdr.Set("X-Other", "o")
+	for _, path := range []string{"/same", "/other"} {
+		if _, err := h.f.Get(context.Background(), Request{URL: "http://start.test" + path, UserAgent: "txco-test", Header: hdr}); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, first := range []string{"start.test/same", "start.test/other"} {
+		if got := seen[first]; got.Get("X-Subscription-Token") != "sk-key" || got.Get("X-Other") != "o" || got.Get("User-Agent") != "txco-test" {
+			t.Fatalf("%s: headers = %v", first, got)
+		}
+	}
+	for _, landed := range []string{"start.test/landed", "public.test/landed"} {
+		got := seen[landed]
+		if got == nil {
+			t.Fatalf("%s: never reached", landed)
+		}
+		if got.Get("X-Subscription-Token") != "" || got.Get("X-Other") != "" {
+			t.Fatalf("%s: an op header travelled on the redirect: %v", landed, got)
+		}
+		if got.Get("User-Agent") != "txco-test" || got.Get("Accept") != "text/html" {
+			t.Fatalf("%s: the fetcher's own headers were lost: %v", landed, got)
+		}
+	}
+}
+
+// MaxRedirects -1 refuses the first redirect, so an op's headers can't
+// follow one anywhere.
+func TestNoRedirects(t *testing.T) {
+	srv := redirectServer(t, func(r *http.Request) string {
+		if r.URL.Path == "/hop" {
+			return "/landed"
+		}
+		return ""
+	})
+	h := newHarness(t, srv, func(o *Options) { o.MaxRedirects = -1 })
+	h.res.set("hops.test", []string{pubA})
+	if _, err := get(h, "http://hops.test/landed"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := get(h, "http://hops.test/hop")
+	wantCode(t, err, CodeRedirectLimit)
+}
+
+// A non-2xx answer carries its headers, so a caller can read a
+// provider's rate-limit headers off a 429.
+func TestHTTPErrorCarriesHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Reset", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+	h := newHarness(t, srv, nil)
+	h.res.set("limit.test", []string{pubA})
+	_, err := get(h, "http://limit.test/")
+	fe := wantCode(t, err, CodeHTTPError)
+	if fe.Status != 429 || fe.Header.Get("X-RateLimit-Reset") != "7" {
+		t.Fatalf("status %d headers %v", fe.Status, fe.Header)
+	}
+}

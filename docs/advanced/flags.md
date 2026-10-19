@@ -180,6 +180,7 @@ the same list. What the main ones mean, together: [the runtime reference](./serv
 | `--filecas-store-s3-bucket` | — | Reserved: S3-compatible filecas bucket (fleet overlay; unused in open core) |
 | `--filecas-store-s3-prefix` | — | Reserved: S3-compatible filecas key prefix (fleet overlay; unused in open core) |
 | `--filecas-cache-bytes` | `67108864` | In-memory LRU budget (bytes) fronting filecas Get (64MiB). 0 disables the cache. |
+| `--static-read-timeout` | `2s` | Budget for one read of a FILES/ asset's bytes from the file store by txco://static. A read that fails or runs past it is tried once more while the op has time; then the request answers 503 with Retry-After, never a 404 (2s). |
 | `--filecas-max-file-bytes` | `10485760` | Largest FILES/ asset the file store's memory cache keeps (10MiB); a larger one is still served, read from the store each time. |
 | `--dataset-cache-dir` | `./chassis/data/datasets` | Node-local materialise cache for DATASETS/ artifacts (one <hash>.sqlite per content hash) fronting the filecas backend. Fleet nodes point this at persistent disk (e.g. /data/datasets). |
 | `--dataset-cache-bytes` | `4294967296` | Disk budget (bytes) for the dataset materialise cache; LRU eviction closes the read handle and removes the cached file (4GiB). 0 = unbounded. |
@@ -200,6 +201,12 @@ the same list. What the main ones mean, together: [the runtime reference](./serv
 | `--html-extract-parse-concurrency` | `2` | txco://html/extract parses running at once on this node; each can hold about 70 MB and a second of CPU on a 3 MiB page, so keep it near the node's CPU count (2). |
 | `--html-extract-tenant-concurrency` | `4` | txco://html/extract calls one tenant may have in flight on this node; one more fails at once with txco_html_busy (4). |
 | `--html-extract-rate-per-min` | `60` | txco://html/extract calls one tenant may start per minute on this node; more fail with txco_html_rate_limited. 0 = unlimited (60). |
+| `--web-search` | `true` | Serve txco://web/search. Off, the op answers txco_web_disabled and sends nothing; the tenant's key is untouched. (true) |
+| `--web-search-brave-url` | `https://api.search.brave.com/res/v1/web/search` | Endpoint txco://web/search sends Brave queries to, with the tenant's BRAVE_SEARCH_KEY. The operator points it at a stand-in for tests; a rule never chooses it. (https://api.search.brave.com/res/v1/web/search) |
+| `--web-search-timeout` | `5s` | Ceiling on one txco://web/search call: the provider request and its answer; the op's own deadline can only shorten it (5s). |
+| `--web-search-concurrency` | `16` | txco://web/search requests in flight on this node, across tenants; a call waits for a slot until its deadline (16). |
+| `--web-search-tenant-concurrency` | `4` | txco://web/search calls one tenant may have in flight on this node; one more fails at once with txco_web_busy (4). |
+| `--web-search-rate-per-min` | `60` | txco://web/search calls one tenant may start per minute on this node; more fail with txco_web_rate_limited. 0 = unlimited (60). |
 | `--snapshot-bootstrap-ref` | — | If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap. |
 | `--feed-source` | `nop` | Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged. |
 | `--feed-source-file-dir` | `./chassis/data/feed` | Root directory for the file feed source (./chassis/data/feed) |

@@ -775,9 +775,14 @@ func awaitTerminalState(ctx context.Context, runs *continuation.Runs, runID, sta
 //
 //   - exact file → 200 (+ strong ETag, or 304 on If-None-Match match),
 //     halt;
+//   - an indexed file whose bytes the store did not give back in time, or
+//     at all (anything but "not found") → 503 + Retry-After, no-store,
+//     halt. The file exists, so the request must not fall through to the
+//     app's not-found: a 404 for an asset that is there breaks the page,
+//     and a browser may keep it (2026-10-18, a hung R2 read);
 //   - no file but under a static-owned directory prefix (e.g. an
-//     `assets/` dir exists) → 404, halt — static owns that subtree, the
-//     request must NOT fall through to the app;
+//     `assets/` dir exists) → 404, no-store, halt — static owns that
+//     subtree, the request must NOT fall through to the app;
 //   - otherwise → "{}" (no _txc.web.res, no halt) so the request keeps
 //     flowing through scope 100 (route) / 1000 (404) as before.
 //
@@ -857,30 +862,69 @@ func staticResultBody(ctx context.Context, ix *static.Index, fcas filecas.Store,
 	switch {
 	case r.Found && r.Hash != "":
 		// Tenant CAS entry: resolve bytes lazily by content hash. A nil store
-		// or a missing/errored object falls through "{}" rather than hard-
-		// failing the page — the metadata index can briefly lead the CAS.
+		// or an object the store doesn't have falls through "{}" rather than
+		// hard-failing the page — the metadata index can briefly lead the
+		// CAS. Any other failure (a timeout, the store down) is the store's,
+		// not the file's: 503, which nothing should keep.
 		if fcas == nil {
 			return "{}"
 		}
+		start := time.Now()
 		body, err := fcas.Get(ctx, r.Hash)
-		if err != nil {
+		switch {
+		case err == nil:
+			return serve(body)
+		case errors.Is(err, filecas.ErrNotFound):
 			return "{}"
 		}
-		return serve(body)
+		emitStaticUnavailable(ctx, stack, r.Hash, err, time.Since(start))
+		env := "{}"
+		env, _ = sjson.Set(env, "_txc.web.res.status", 503)
+		env, _ = sjson.Set(env, "_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
+		env, _ = sjson.Set(env, "_txc.web.res.headers.cache-control.0", "no-store")
+		env, _ = sjson.Set(env, "_txc.web.res.headers.retry-after.0", "1")
+		env, _ = sjson.Set(env, "_txc.web.res.body",
+			base64.StdEncoding.EncodeToString([]byte("503 the file could not be read in time; try again\n")))
+		return halt(env)
 	case r.Found:
 		// Inline (operator) layer — bytes are already in the index.
 		return serve(r.Body)
 	case r.Owned:
-		// The directory prefix is static's; don't let the app see it.
+		// The directory prefix is static's; don't let the app see it. Never
+		// kept: an asset that is missing now may be there on the next try
+		// (a deploy in flight), and a remembered 404 breaks the page.
 		env := "{}"
 		env, _ = sjson.Set(env, "_txc.web.res.status", 404)
 		env, _ = sjson.Set(env, "_txc.web.res.headers.content-type.0", "text/plain; charset=utf-8")
+		env, _ = sjson.Set(env, "_txc.web.res.headers.cache-control.0", "no-store")
 		env, _ = sjson.Set(env, "_txc.web.res.body",
 			base64.StdEncoding.EncodeToString([]byte("404 not found\n")))
 		return halt(env)
 	default:
 		return "{}"
 	}
+}
+
+// emitStaticUnavailable records a static read that did not come back on the
+// trace timeline: the stack, a short content hash, whether it ran out of
+// time, how many attempts and how long. Never the path's query or the bytes.
+func emitStaticUnavailable(ctx context.Context, stack, hash string, err error, took time.Duration) {
+	tr := trace.FromContext(ctx)
+	if tr == nil {
+		return
+	}
+	fields := map[string]any{
+		"stack":       stack,
+		"hash":        shortHash(hash),
+		"attempts":    1,
+		"timeout":     errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled),
+		"duration_ms": took.Milliseconds(),
+	}
+	var re *staticReadError
+	if errors.As(err, &re) {
+		fields["attempts"], fields["timeout"] = re.Attempts, re.Timeout
+	}
+	tr.Event(trace.TimelineEvent{Ts: time.Now(), Event: "static.unavailable", Fields: fields})
 }
 
 // ifNoneMatches reports whether the request's If-None-Match names etag (a
@@ -1855,9 +1899,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			return err
 		}
 	}
+	// Static reads its bytes through a bounded store: a budget per attempt
+	// and one retry inside the op's deadline (static_read.go). A nil store
+	// stays nil (tenant assets fall through).
+	var staticStore filecas.Store
+	if fcas != nil {
+		readBudget, _ := time.ParseDuration(conf.StaticReadTimeout) // validated at config load
+		staticStore = boundedReads{Store: fcas, budget: readBudget, log: logger}
+	}
 	pu.Handle([]byte("txco://static"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
-			return event.Payload{Raw: staticResultBody(ctx, staticIndex, fcas, in), Type: event.JSON}, nil
+			return event.Payload{Raw: staticResultBody(ctx, staticIndex, staticStore, in), Type: event.JSON}, nil
 		}))
 
 	// `txco://read-file` reads the routed stack's static FILES/ assets into
@@ -2389,6 +2441,24 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	pu.Handle([]byte("txco://html/extract"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return htmlExtract(ctx, hxDeps, in)
+		}))
+
+	// `txco://web/search`: one question to a public search engine under
+	// the tenant's own key (BRAVE_SEARCH_KEY, found the way the ai:// ops
+	// find theirs), answered with titles, addresses and snippets. The
+	// request goes through the same safe fetcher as html/extract, with no
+	// redirects, and is bounded the same way (the --web-search-* flags).
+	// Never register a bare `txco://web`: builtins resolve by longest
+	// prefix, and it would catch every unregistered txco://web/… name.
+	// See chassis/server/web_search.go.
+	wsDeps, wsErr := newWebSearchDeps(conf, guard, secretsResolver, mc)
+	if wsErr != nil {
+		cancel()
+		return ctx, nil, wsErr
+	}
+	pu.Handle([]byte("txco://web/search"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return webSearch(ctx, wsDeps, opName, in)
 		}))
 
 	// `txco://sendmail`: render + submit an outbound email from the

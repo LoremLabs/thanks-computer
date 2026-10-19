@@ -223,6 +223,9 @@ func TestStaticResultBodyOwnedDir404(t *testing.T) {
 	if !gjson.Get(env, "_txc.halt").Bool() {
 		t.Fatalf("owned 404 must halt; env=%s", env)
 	}
+	if cc := gjson.Get(env, "_txc.web.res.headers.cache-control.0").String(); cc != "no-store" {
+		t.Fatalf("owned 404 must not be kept: cache-control %q; env=%s", cc, env)
+	}
 }
 
 // Embedded favicon with no workspace.

@@ -6,12 +6,14 @@
 // address goes through the chassis egress guard before it is dialed, so
 // the address checked is the address connected (no second lookup for DNS
 // rebinding to exploit), and every redirect hop is checked the same way.
-// There is no proxy, no cookie jar, no authentication, no request body;
-// redirects, header bytes, body bytes and the total time are capped.
+// There is no proxy, no cookie jar, no request body; the only headers are
+// the fetcher's own and the fixed ones a calling op sets (a provider's key
+// header, say), and none of the op's travel on a redirect. Redirects,
+// header bytes, body bytes and the total time are capped.
 //
 // It knows nothing about what the body is for: callers (txco://html/
-// extract) parse it. Errors are *Error values with a stable Code and a
-// message that never names an address.
+// extract, txco://web/search) parse it. Errors are *Error values with a
+// stable Code and a message that never names an address.
 package fetch
 
 import (
@@ -42,7 +44,7 @@ const (
 type Options struct {
 	Guard        egress.Guard
 	MaxBytes     int64         // body bytes; one more fails the fetch
-	MaxRedirects int           // hops followed; one more fails the fetch
+	MaxRedirects int           // hops followed; one more fails the fetch. 0 = the default; negative = none
 	Timeout      time.Duration // the whole fetch: dial, TLS, headers, body
 	// MediaTypes are the Content-Type media types accepted (lowercase,
 	// no parameters). Empty accepts any.
@@ -61,6 +63,10 @@ type Options struct {
 type Request struct {
 	URL       string
 	UserAgent string
+	// Header holds fixed headers the calling op sets, such as the header
+	// a search provider reads its key from. They are the op's, never a
+	// rule's, and none of them is sent on a redirect.
+	Header http.Header
 }
 
 // Result is a successful fetch: a 2xx response of an accepted media type
@@ -137,9 +143,16 @@ func New(opts Options) (*Fetcher, error) {
 			if checkParsed(req.URL) != nil {
 				return errRedirectTarget
 			}
-			// Nothing of the caller's travels: no cookies, no auth.
-			req.Header.Del("Authorization")
-			req.Header.Del("Cookie")
+			// Nothing of the caller's travels: no cookie, no auth, no header
+			// the op set on the first request. Only what the fetcher itself
+			// sends.
+			kept := http.Header{}
+			for _, k := range []string{"User-Agent", "Accept", "Accept-Encoding"} {
+				if v := req.Header.Get(k); v != "" {
+					kept.Set(k, v)
+				}
+			}
+			req.Header = kept
 			return nil
 		},
 	}
@@ -167,6 +180,12 @@ func (f *Fetcher) Get(ctx context.Context, r Request) (*Result, error) {
 		req.Header.Set("Accept", f.opts.Accept)
 	}
 	req.Header.Set("Accept-Encoding", "identity")
+	for k, vs := range r.Header {
+		req.Header.Del(k)
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -182,7 +201,7 @@ func (f *Fetcher) Get(ctx context.Context, r Request) (*Result, error) {
 		Redirects:   redirects(resp),
 	}
 	fail := func(e *Error) (*Result, error) {
-		e.Status, e.ContentType = res.Status, res.ContentType
+		e.Status, e.ContentType, e.Header = res.Status, res.ContentType, resp.Header.Clone()
 		return nil, e
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

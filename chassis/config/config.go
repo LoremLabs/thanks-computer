@@ -223,6 +223,7 @@ type Config struct {
 	FileCASStoreS3Bucket         string   `id:"filecas-store-s3-bucket" default:"" desc:"Reserved: S3-compatible filecas bucket (fleet overlay; unused in open core)"`
 	FileCASStoreS3Prefix         string   `id:"filecas-store-s3-prefix" default:"" desc:"Reserved: S3-compatible filecas key prefix (fleet overlay; unused in open core)"`
 	FileCASCacheBytes            int      `id:"filecas-cache-bytes" default:"67108864" desc:"In-memory LRU budget (bytes) fronting filecas Get (64MiB). 0 disables the cache."`
+	StaticReadTimeout            string   `id:"static-read-timeout" default:"2s" desc:"Budget for one read of a FILES/ asset's bytes from the file store by txco://static. A read that fails or runs past it is tried once more while the op has time; then the request answers 503 with Retry-After, never a 404 (2s)."`
 	FileCASMaxFileBytes          int      `id:"filecas-max-file-bytes" default:"10485760" desc:"Largest FILES/ asset the file store's memory cache keeps (10MiB); a larger one is still served, read from the store each time."`
 	DatasetCacheDir              string   `id:"dataset-cache-dir" default:"./chassis/data/datasets" desc:"Node-local materialise cache for DATASETS/ artifacts (one <hash>.sqlite per content hash) fronting the filecas backend. Fleet nodes point this at persistent disk (e.g. /data/datasets)."`
 	DatasetCacheBytes            int      `id:"dataset-cache-bytes" default:"4294967296" desc:"Disk budget (bytes) for the dataset materialise cache; LRU eviction closes the read handle and removes the cached file (4GiB). 0 = unbounded."`
@@ -243,6 +244,12 @@ type Config struct {
 	HTMLExtractParseConcurrency  int      `id:"html-extract-parse-concurrency" default:"2" desc:"txco://html/extract parses running at once on this node; each can hold about 70 MB and a second of CPU on a 3 MiB page, so keep it near the node's CPU count (2)."`
 	HTMLExtractTenantConcurrency int      `id:"html-extract-tenant-concurrency" default:"4" desc:"txco://html/extract calls one tenant may have in flight on this node; one more fails at once with txco_html_busy (4)."`
 	HTMLExtractRatePerMin        int      `id:"html-extract-rate-per-min" default:"60" desc:"txco://html/extract calls one tenant may start per minute on this node; more fail with txco_html_rate_limited. 0 = unlimited (60)."`
+	WebSearch                    bool     `id:"web-search" default:"true" desc:"Serve txco://web/search. Off, the op answers txco_web_disabled and sends nothing; the tenant's key is untouched. (true)"`
+	WebSearchBraveURL            string   `id:"web-search-brave-url" default:"https://api.search.brave.com/res/v1/web/search" desc:"Endpoint txco://web/search sends Brave queries to, with the tenant's BRAVE_SEARCH_KEY. The operator points it at a stand-in for tests; a rule never chooses it. (https://api.search.brave.com/res/v1/web/search)"`
+	WebSearchTimeout             string   `id:"web-search-timeout" default:"5s" desc:"Ceiling on one txco://web/search call: the provider request and its answer; the op's own deadline can only shorten it (5s)."`
+	WebSearchConcurrency         int      `id:"web-search-concurrency" default:"16" desc:"txco://web/search requests in flight on this node, across tenants; a call waits for a slot until its deadline (16)."`
+	WebSearchTenantConcurrency   int      `id:"web-search-tenant-concurrency" default:"4" desc:"txco://web/search calls one tenant may have in flight on this node; one more fails at once with txco_web_busy (4)."`
+	WebSearchRatePerMin          int      `id:"web-search-rate-per-min" default:"60" desc:"txco://web/search calls one tenant may start per minute on this node; more fail with txco_web_rate_limited. 0 = unlimited (60)."`
 	SnapshotBootstrapRef         string   `id:"snapshot-bootstrap-ref" default:"" desc:"If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap."`
 	FeedSource                   string   `id:"feed-source" default:"nop" desc:"Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged."`
 	FeedSourceFileDir            string   `id:"feed-source-file-dir" default:"./chassis/data/feed" desc:"Root directory for the file feed source (./chassis/data/feed)"`
@@ -769,6 +776,19 @@ func Load() (Config, error) {
 	if config.HTMLExtractMaxBytes <= 0 || config.HTMLExtractConcurrency <= 0 || config.HTMLExtractParseConcurrency <= 0 ||
 		config.HTMLExtractTenantConcurrency <= 0 || config.HTMLExtractRatePerMin < 0 {
 		log.Fatalf("--html-extract-max-bytes, -concurrency, -parse-concurrency and -tenant-concurrency must be positive, and -rate-per-min not negative")
+	}
+	if d, err := time.ParseDuration(config.StaticReadTimeout); err != nil || d <= 0 {
+		log.Fatalf("unable to parse --static-read-timeout %q (want a positive duration)", config.StaticReadTimeout)
+	} else if d > opTimeoutMaxDur {
+		log.Fatalf("static-read-timeout (%s) must be <= op-timeout-max (%s)", config.StaticReadTimeout, config.OpTimeoutMax)
+	}
+	if d, err := time.ParseDuration(config.WebSearchTimeout); err != nil || d <= 0 {
+		log.Fatalf("unable to parse --web-search-timeout %q (want a positive duration)", config.WebSearchTimeout)
+	} else if d > opTimeoutMaxDur {
+		log.Fatalf("web-search-timeout (%s) must be <= op-timeout-max (%s)", config.WebSearchTimeout, config.OpTimeoutMax)
+	}
+	if config.WebSearchConcurrency <= 0 || config.WebSearchTenantConcurrency <= 0 || config.WebSearchRatePerMin < 0 {
+		log.Fatalf("--web-search-concurrency and -tenant-concurrency must be positive, and -rate-per-min not negative")
 	}
 	switch config.OutletEgress {
 	case "direct", "relay":
