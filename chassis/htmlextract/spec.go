@@ -28,6 +28,11 @@ const (
 	CodeDocumentTooComplex = "document_too_complex"
 	CodeOutputLimit        = "output_limit_exceeded"
 	CodeTimeout            = "timeout"
+	// Read's own (read.go): the root selector matched nothing; the part
+	// asked for is past the page's last; a request field is malformed.
+	CodeRootNotFound   = "root_not_found"
+	CodeNoSuchPart     = "no_such_part"
+	CodeInvalidRequest = "invalid_request"
 )
 
 // Error is a refused spec or document. Field names the selector field a
@@ -64,6 +69,9 @@ type Limits struct {
 	MaxAttrs         int   // attributes on one element
 	MaxWork          int64 // estimated selector work: nodes × per-field weight
 	MaxTextVisits    int   // nodes walked collecting text, across all fields
+	// MaxReadBytes caps the Markdown Read renders from a page; past it the
+	// rendering stops and the result is truncated.
+	MaxReadBytes int
 	// MaxTime is the CPU budget for parsing and matching; a document that
 	// takes longer is document_too_complex. 0 means only ctx bounds it.
 	MaxTime time.Duration
@@ -89,8 +97,36 @@ func DefaultLimits() Limits {
 		MaxAttrs:         256,
 		MaxWork:          200_000_000,
 		MaxTextVisits:    1_000_000,
+		MaxReadBytes:     1 << 20,
 		MaxTime:          time.Second,
 	}
+}
+
+// ParseRootSelector reads Read's optional root selector under the same
+// grammar as a field's (one descendant space, no :has(), …). An empty
+// selector is nil: the reader picks main, article or body itself.
+func ParseRootSelector(sel string, lim Limits) (cascadia.SelectorGroup, error) {
+	sel = strings.TrimSpace(sel)
+	if sel == "" {
+		return nil, nil
+	}
+	if len(sel) > lim.MaxSelectorBytes {
+		return nil, specErr("root", "the selector is longer than %d bytes", lim.MaxSelectorBytes)
+	}
+	group, perr := cascadia.ParseGroup(sel)
+	if perr != nil {
+		return nil, specErr("root", "the selector does not parse: %s", perr.Error())
+	}
+	for _, s := range group {
+		d, cerr := checkSel(reflect.ValueOf(s))
+		if cerr != "" {
+			return nil, specErr("root", "%s", cerr)
+		}
+		if d > 1 {
+			return nil, specErr("root", "use at most one descendant combinator (a space) per selector; use `>` for the others")
+		}
+	}
+	return group, nil
 }
 
 // Spec is one named field to extract.

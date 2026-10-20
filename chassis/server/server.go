@@ -2442,6 +2442,14 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return htmlExtract(ctx, hxDeps, in)
 		}))
+	// `txco://html/read`: the same page, as Markdown, a part at a time —
+	// the page's text rather than values picked out of it. It shares
+	// html/extract's fetcher, document bounds, slots and per-tenant limits
+	// (the one tenant allowance covers both). See chassis/server/html_read.go.
+	pu.Handle([]byte("txco://html/read"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return htmlRead(ctx, hxDeps, in)
+		}))
 
 	// `txco://web/search`: one question to a public search engine under
 	// the tenant's own key (BRAVE_SEARCH_KEY, found the way the ai:// ops

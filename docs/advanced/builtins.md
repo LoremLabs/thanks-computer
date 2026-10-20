@@ -30,6 +30,7 @@
 | `txco://read-file` | Read a stack's `FILES/` asset(s) into the document as data (templates, fixtures, config) — the read-into-the-tree counterpart to `static`. See [read-file](./read-file.md). |
 | `txco://web-render` | Read a source path, optionally render Markdown→HTML, set `@web.res.*`, halt. Pages without a backend. |
 | `txco://html/extract` | Fetch one public HTML page and return the values CSS selectors pick out of it, as JSON; never the page. The fetch is http(s) on 80/443 through the egress policy, bounded in redirects, bytes and time. See [html-extract](./html-extract.md). |
+| `txco://html/read` | Fetch one public HTML page and return its text as Markdown, a part of a few thousand characters at a time (`part`, `parts`); the page's `<main>`, `<article>` or `<body>`, or the element a `root` selector names. The same fetch and bounds as `html/extract`. See [html-read](./html-read.md). |
 | `txco://web/search` | Ask a public search engine (Brave) one question under the tenant's own key, `BRAVE_SEARCH_KEY`, of its web or its news index, and return titles, addresses and snippets as JSON; never the engine's raw answer. One request through the egress policy, no redirects, bounded in bytes and time. See [web-search](./web-search.md). |
 | `txco://sendmail` | Render + submit outbound email from the `_sendmail` contract — see [sendmail](./protocols/sendmail.md). |
 | `txco://relay` | Forward an inbound message VERBATIM (the `.forward` primitive) — see [relay](./protocols/relay.md). Only fires from the inbound-mail path (LMTP). |

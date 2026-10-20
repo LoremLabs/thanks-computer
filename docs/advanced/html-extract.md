@@ -9,7 +9,9 @@ more._
 
 A web page can't be merged into a flow: an `EXEC "https://…"` answer must
 be JSON. This op does the reading for you, with the fetch and the parse both
-bounded by the chassis.
+bounded by the chassis. To read the page itself, as Markdown in parts, see
+[html-read](./html-read.md): the same fetch and bounds, and they share one
+tenant allowance.
 
 ## Read a page
 

@@ -40,61 +40,15 @@ func Extract(ctx context.Context, body []byte, contentType string, specs []Spec,
 		ctx, cancel = context.WithTimeout(ctx, lim.MaxTime)
 		defer cancel()
 	}
-	spent := func() *Error {
-		if parent.Err() != nil {
-			return &Error{Code: CodeTimeout, Message: "the extraction did not finish before the op's deadline"}
-		}
-		return &Error{Code: CodeDocumentTooComplex, Message: fmt.Sprintf("the document took more than %s to process", lim.MaxTime)}
-	}
+	spent := spentError(parent, lim, "the extraction")
 
 	res := &Result{}
-	_, name, certain := charset.DetermineEncoding(body, contentType)
-	if !certain && name == "windows-1252" && utf8.Valid(body) {
-		// Nothing declared, and the first KiB was plain ASCII: the
-		// spec's windows-1252 fallback would garble a UTF-8 page.
-		name = "utf-8"
-	}
-	if name != "" && name != "utf-8" {
-		enc, _ := charset.Lookup(name)
-		if enc != nil {
-			decoded, err := enc.NewDecoder().Bytes(body)
-			if err != nil {
-				return nil, &Error{Code: CodeParseFailed, Message: "the document does not decode as " + name}
-			}
-			body = decoded
-		}
-		res.Charset = name
-	} else {
-		res.Charset = "utf-8"
-	}
-
-	_, clean, perr := prescan(ctx, body, lim)
+	doc, elems, perr := parseDocument(ctx, parent, body, contentType, lim, "the extraction")
 	if perr != nil {
-		if ctx.Err() != nil {
-			return nil, spent()
-		}
 		return nil, perr
 	}
-	doc, err := html.Parse(&budgetReader{ctx: ctx, r: bytes.NewReader(clean)})
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, spent()
-		}
-		// The parser refuses more than 512 open elements with an error
-		// of its own; that is a complexity limit, not a broken document.
-		if strings.Contains(err.Error(), "open stack of elements") {
-			return nil, &Error{Code: CodeDocumentTooComplex, Message: "the document nests deeper than the parser allows (512)"}
-		}
-		return nil, &Error{Code: CodeParseFailed, Message: "the document could not be parsed"}
-	}
-	elems, nodes, depth, cerr := collect(ctx, doc, lim)
-	if cerr != nil {
-		if ctx.Err() != nil {
-			return nil, spent()
-		}
-		return nil, cerr
-	}
-	res.Nodes, res.Depth = nodes, depth
+	res.Nodes, res.Depth, res.Charset = doc.Nodes, doc.Depth, doc.Charset
+	depth := doc.Depth
 
 	// The selector work is bounded before any of it runs: each field
 	// costs one match per element per alternative, and a descendant
@@ -172,6 +126,86 @@ func Extract(ctx context.Context, body []byte, contentType string, specs []Spec,
 	}
 	res.Data = out.Bytes()
 	return res, nil
+}
+
+// Document is a parsed page: the tree, every element in document order,
+// and the counts the caps were checked against. One bounded parse serves
+// Extract and Read.
+type Document struct {
+	Root    *html.Node
+	Elems   []*html.Node
+	Nodes   int
+	Depth   int
+	Charset string
+}
+
+// spentError says why a phase ran out of time: the op's own deadline, or
+// the document's CPU budget.
+func spentError(parent context.Context, lim Limits, what string) func() *Error {
+	return func() *Error {
+		if parent.Err() != nil {
+			return &Error{Code: CodeTimeout, Message: what + " did not finish before the op's deadline"}
+		}
+		return &Error{Code: CodeDocumentTooComplex, Message: fmt.Sprintf("the document took more than %s to process", lim.MaxTime)}
+	}
+}
+
+// parseDocument decodes body (from the charset the header or the document
+// declares), prescans it against the token and node caps, parses it within
+// ctx's budget and walks it once, against the node and depth caps. ctx is
+// the budgeted context, parent the caller's (to tell a spent budget from
+// the op's deadline).
+func parseDocument(ctx, parent context.Context, body []byte, contentType string, lim Limits, what string) (*Document, []*html.Node, *Error) {
+	spent := spentError(parent, lim, what)
+	d := &Document{}
+	_, name, certain := charset.DetermineEncoding(body, contentType)
+	if !certain && name == "windows-1252" && utf8.Valid(body) {
+		// Nothing declared, and the first KiB was plain ASCII: the
+		// spec's windows-1252 fallback would garble a UTF-8 page.
+		name = "utf-8"
+	}
+	if name != "" && name != "utf-8" {
+		enc, _ := charset.Lookup(name)
+		if enc != nil {
+			decoded, err := enc.NewDecoder().Bytes(body)
+			if err != nil {
+				return nil, nil, &Error{Code: CodeParseFailed, Message: "the document does not decode as " + name}
+			}
+			body = decoded
+		}
+		d.Charset = name
+	} else {
+		d.Charset = "utf-8"
+	}
+
+	_, clean, perr := prescan(ctx, body, lim)
+	if perr != nil {
+		if ctx.Err() != nil {
+			return nil, nil, spent()
+		}
+		return nil, nil, perr
+	}
+	doc, err := html.Parse(&budgetReader{ctx: ctx, r: bytes.NewReader(clean)})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, spent()
+		}
+		// The parser refuses more than 512 open elements with an error
+		// of its own; that is a complexity limit, not a broken document.
+		if strings.Contains(err.Error(), "open stack of elements") {
+			return nil, nil, &Error{Code: CodeDocumentTooComplex, Message: "the document nests deeper than the parser allows (512)"}
+		}
+		return nil, nil, &Error{Code: CodeParseFailed, Message: "the document could not be parsed"}
+	}
+	elems, nodes, depth, cerr := collect(ctx, doc, lim)
+	if cerr != nil {
+		if ctx.Err() != nil {
+			return nil, nil, spent()
+		}
+		return nil, nil, cerr
+	}
+	d.Root, d.Elems, d.Nodes, d.Depth = doc, elems, nodes, depth
+	return d, elems, nil
 }
 
 // budgetReader feeds the parser 4 KiB at a time and stops it once ctx is
