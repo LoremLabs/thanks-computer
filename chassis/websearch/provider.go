@@ -38,7 +38,7 @@ type Provider interface {
 
 // Config carries what a provider needs from the chassis configuration.
 type Config struct {
-	// BraveURL is the Brave endpoint (--web-search-brave-url); "" is the
+	// BraveURL is the Brave API root (--web-search-brave-url); "" is the
 	// public one.
 	BraveURL string
 }

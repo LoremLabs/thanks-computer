@@ -1,5 +1,7 @@
 // Package brave is the Brave Search adapter for txco://web/search: the
-// Web Search API, one GET with the tenant's key in X-Subscription-Token.
+// Web Search API for kind web and the News Search API for kind news, one
+// GET with the tenant's key in X-Subscription-Token. Both are on the
+// same plan and key.
 //
 // Brave's own parameter list is the authority on which countries and
 // languages it serves. The adapter carries only the spellings where
@@ -25,8 +27,14 @@ import (
 // Name is the registered provider name.
 const Name = "brave"
 
-// DefaultURL is the public Web Search endpoint.
-const DefaultURL = "https://api.search.brave.com/res/v1/web/search"
+// DefaultURL is the public API root. A search goes to webPath or
+// newsPath under it.
+const DefaultURL = "https://api.search.brave.com/res/v1"
+
+const (
+	webPath  = "/web/search"
+	newsPath = "/news/search"
+)
 
 // SecretName is the tenant secret that holds the key.
 const SecretName = "BRAVE_SEARCH_KEY"
@@ -39,7 +47,7 @@ type provider struct {
 	base string
 }
 
-// New builds the adapter. The endpoint is the operator's to set
+// New builds the adapter. The API root is the operator's to set
 // (--web-search-brave-url); a rule never chooses it.
 func New(cfg websearch.Config) (websearch.Provider, error) {
 	base := cfg.BraveURL
@@ -50,7 +58,7 @@ func New(cfg websearch.Config) (websearch.Provider, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" {
 		return nil, errors.New("brave: the endpoint must be an http(s) URL with no query")
 	}
-	return &provider{base: base}, nil
+	return &provider{base: strings.TrimRight(base, "/")}, nil
 }
 
 func (p *provider) Name() string              { return Name }
@@ -63,9 +71,11 @@ var freshness = map[string]string{"day": "pd", "week": "pw", "month": "pm", "yea
 // differ. Everything else goes through as written.
 var languages = map[string]string{"ja": "jp", "zh": "zh-hans", "pt": "pt-br"}
 
-// Build makes the request. Always `result_filter=web` (only web results
-// are read) and `text_decorations=false` (plain snippets; Brave's default
-// marks them up).
+// Build makes the request. A web search always sends `result_filter=web`
+// (only web results are read) and `text_decorations=false` (plain
+// snippets; Brave's default marks them up). A news search goes to the
+// News Search API, which takes the same parameters but neither of those;
+// Normalize strips any markup it sends.
 func (p *provider) Build(req websearch.Request, key []byte) (fetch.Request, error) {
 	q := url.Values{}
 	q.Set("q", req.Query)
@@ -86,15 +96,22 @@ func (p *provider) Build(req websearch.Request, key []byte) (fetch.Request, erro
 	if req.SafeSearch != "" {
 		q.Set("safesearch", req.SafeSearch)
 	}
-	q.Set("result_filter", "web")
-	q.Set("text_decorations", "false")
+	path := webPath
+	if req.Kind == "news" {
+		path = newsPath
+	} else {
+		q.Set("result_filter", "web")
+		q.Set("text_decorations", "false")
+	}
 	h := http.Header{}
 	h.Set("X-Subscription-Token", string(key))
-	return fetch.Request{URL: p.base + "?" + q.Encode(), Header: h}, nil
+	return fetch.Request{URL: p.base + path + "?" + q.Encode(), Header: h}, nil
 }
 
-// Parse reads web.results[]. Everything else Brave sends (deep results,
-// profiles, thumbnails, schemas) is ignored.
+// Parse reads web.results[] from a web answer, or results[] from a news
+// answer (`"type": "news"`). Everything else Brave sends (deep results,
+// profiles, thumbnails, schemas, a web answer's own news block) is
+// ignored.
 func (p *provider) Parse(body []byte) ([]websearch.Result, error) {
 	if !gjson.ValidBytes(body) {
 		return nil, errors.New("brave: the answer is not JSON")
@@ -104,12 +121,15 @@ func (p *provider) Parse(body []byte) ([]websearch.Result, error) {
 		return nil, errors.New("brave: the answer is not an object")
 	}
 	hits := doc.Get("web.results")
+	if doc.Get("type").String() == "news" {
+		hits = doc.Get("results")
+	}
 	if !hits.Exists() {
-		// No web results at all: an empty answer, not a broken one.
+		// No results at all: an empty answer, not a broken one.
 		return nil, nil
 	}
 	if !hits.IsArray() {
-		return nil, errors.New("brave: web.results is not an array")
+		return nil, errors.New("brave: the results are not an array")
 	}
 	var out []websearch.Result
 	hits.ForEach(func(_, r gjson.Result) bool {

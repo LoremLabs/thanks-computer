@@ -93,13 +93,13 @@ const braveBody = `{"type": "search", "query": {"original": "french employment l
 ]}}`
 
 func braveAnswer(body string) *fetch.Result {
-	return &fetch.Result{URL: "https://brave.test/search", FinalURL: "https://brave.test/search", Status: 200,
+	return &fetch.Result{URL: "https://brave.test/res/v1/web/search", FinalURL: "https://brave.test/res/v1/web/search", Status: 200,
 		ContentType: "application/json", Body: []byte(body), Bytes: int64(len(body))}
 }
 
 func newWSDeps(t *testing.T, f *wsFetch, mod func(*webSearchDeps)) *webSearchDeps {
 	t.Helper()
-	p, err := websearch.Open(brave.Name, websearch.Config{BraveURL: "https://brave.test/search"})
+	p, err := websearch.Open(brave.Name, websearch.Config{BraveURL: "https://brave.test/res/v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +148,7 @@ func TestWebSearchAnswers(t *testing.T) {
 	want := map[string]string{
 		"_websearch.ok":                    "true",
 		"_websearch.query":                 "french employment law",
+		"_websearch.kind":                  "web",
 		"_websearch.provider":              "brave",
 		"_websearch.count":                 "2",
 		"_websearch.truncated":             "false",
@@ -172,7 +173,7 @@ func TestWebSearchAnswers(t *testing.T) {
 	}
 	// The key went into the one header, and nowhere into the answer.
 	req := f.last()
-	if req.Header.Get("X-Subscription-Token") != "sk-acme" || !strings.HasPrefix(req.URL, "https://brave.test/search?") || !strings.Contains(req.URL, "country=FR") || !strings.Contains(req.URL, "search_lang=fr") || !strings.Contains(req.URL, "freshness=pm") || !strings.Contains(req.URL, "count=5") {
+	if req.Header.Get("X-Subscription-Token") != "sk-acme" || !strings.HasPrefix(req.URL, "https://brave.test/res/v1/web/search?") || !strings.Contains(req.URL, "country=FR") || !strings.Contains(req.URL, "search_lang=fr") || !strings.Contains(req.URL, "freshness=pm") || !strings.Contains(req.URL, "count=5") {
 		t.Fatalf("request = %+v", req)
 	}
 	if !strings.HasPrefix(req.UserAgent, "txco-search/") {
@@ -180,6 +181,33 @@ func TestWebSearchAnswers(t *testing.T) {
 	}
 	if strings.Contains(out, "sk-acme") {
 		t.Fatalf("the key is in the answer: %s", out)
+	}
+}
+
+// kind news asks the news index and answers in the same shape, saying so.
+func TestWebSearchNews(t *testing.T) {
+	f := &wsFetch{res: braveAnswer(`{"type": "news", "query": {"original": "site:nytimes.com"}, "results": [
+		{"title": "Trump Rallies Red States", "url": "https://www.nytimes.com/2026/10/19/us/politics/trump.html", "description": "d", "age": "3 hours ago", "page_age": "2026-10-19T19:05:00"}
+	]}`)}
+	out, tr := callWSCtx(t, context.Background(), newWSDeps(t, f, nil), webSearchName, "acme", `{"query": "site:nytimes.com", "kind": "news", "freshness": "day", "count": 5}`)
+	want := map[string]string{
+		"_websearch.ok":                  "true",
+		"_websearch.kind":                "news",
+		"_websearch.count":               "1",
+		"_websearch.results.0.title":     "Trump Rallies Red States",
+		"_websearch.results.0.source":    "www.nytimes.com",
+		"_websearch.results.0.page_date": "2026-10-19T19:05:00Z",
+	}
+	for path, v := range want {
+		if got := gjson.Get(out, path).String(); got != v {
+			t.Fatalf("%s = %q, want %q: %s", path, got, v, out)
+		}
+	}
+	if req := f.last(); !strings.HasPrefix(req.URL, "https://brave.test/res/v1/news/search?") || !strings.Contains(req.URL, "freshness=pd") || strings.Contains(req.URL, "result_filter") {
+		t.Fatalf("request = %s", req.URL)
+	}
+	if ev := tr.last(); ev.Fields["kind"] != "news" || ev.Fields["results"] != 1 {
+		t.Fatalf("event = %v", ev.Fields)
 	}
 }
 
@@ -383,7 +411,7 @@ func TestWebSearchCompletionEventCarriesNoQuery(t *testing.T) {
 	if ev.Event != "web.search.completion" {
 		t.Fatalf("event = %s", ev.Event)
 	}
-	if ev.Fields["provider"] != "brave" || ev.Fields["status"] != 200 || ev.Fields["results"] != 2 || ev.Fields["query_sha256"] == "" {
+	if ev.Fields["provider"] != "brave" || ev.Fields["status"] != 200 || ev.Fields["results"] != 2 || ev.Fields["query_sha256"] == "" || ev.Fields["kind"] != "web" {
 		t.Fatalf("fields = %v", ev.Fields)
 	}
 	for k, v := range ev.Fields {

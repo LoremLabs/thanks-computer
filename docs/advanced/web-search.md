@@ -47,6 +47,7 @@ The answer lands at `into` (default `_websearch`):
 {
   "ok": true,
   "query": "French employment law changes October",
+  "kind": "web",
   "provider": "brave",
   "results": [
     {
@@ -88,11 +89,32 @@ A failure is an answer too, never a dropped op:
 
 Branch on `._found.ok` in a later scope.
 
+## News
+
+`kind = "news"` asks the engine's news index instead of its web index: recent
+articles, each a headline, its address and a short description. It answers
+"what has this outlet published today" without fetching the outlet's pages,
+which many news sites refuse to a program:
+
+```txcl
+WITH query     = "site:nytimes.com",
+     kind      = "news",
+     freshness = "day",
+     count     = 10,
+     into      = "_news"
+EXEC "txco://web/search"
+```
+
+The answer has the same shape, with `"kind": "news"`. A result's
+`page_date` is the article's date as the engine reports it. The other
+fields work as for a web search, and the price is the same.
+
 ## The request
 
 | Field | Required | Default | Constraints |
 |---|---|---|---|
 | `query` | yes | | 1 to 500 characters after trimming, at most 75 words |
+| `kind` | no | `web` | `web` (pages) or `news` (articles from the news index) |
 | `count` | no | 10 | 1 to 20, a whole number or one written as a string |
 | `country` | no | the engine's (Brave: `US`) | two letters, or `ALL` |
 | `language` | no | the engine's (Brave: `en`) | a two-letter ISO 639-1 code |
@@ -116,11 +138,11 @@ Branch on `._found.ok` in a later scope.
 
 ## How the engine is called
 
-- **The request:** one `GET` to Brave's Web Search API with the key in the
-  header Brave reads it from, and nothing else of the tenant's: no
-  tenant id, no address, no context. The query is the rule's; what a rule
-  puts in it is the rule's choice.
-- **Destinations:** the endpoint is the operator's (`--web-search-brave-url`),
+- **The request:** one `GET` to Brave's Web Search API (`kind` web) or News
+  Search API (`kind` news) with the key in the header Brave reads it from,
+  and nothing else of the tenant's: no tenant id, no address, no context.
+  The query is the rule's; what a rule puts in it is the rule's choice.
+- **Destinations:** the API root is the operator's (`--web-search-brave-url`),
   and the fetch goes through the same egress guard as every op dial, with
   no redirects at all: a redirect from the engine is an error, and the key
   never travels past the first hop.
@@ -207,7 +229,7 @@ the work. Brave's own price is the tenant's subscription, not fuel. See
 ## Known limits
 
 - **One engine.** Brave, through the tenant's own subscription. Other
-  engines, news and image search, paging past the first results and date
+  engines, image and video search, paging past the first results and date
   ranges are not offered.
 - **No spelling correction is reported.** Brave may search for a corrected
   query; the op returns the results and your query as you sent it.

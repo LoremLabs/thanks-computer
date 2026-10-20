@@ -10,19 +10,19 @@ func TestParseDefaultsAndTrim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Request{Query: "French employment law", Count: DefaultCount, Freshness: "any", SafeSearch: "moderate"}
+	want := Request{Query: "French employment law", Kind: "web", Count: DefaultCount, Freshness: "any", SafeSearch: "moderate"}
 	if req != want {
 		t.Fatalf("req = %+v, want %+v", req, want)
 	}
 }
 
 func TestParseEveryField(t *testing.T) {
-	req, err := Parse([]byte(`{"query": "q", "count": 8, "country": "fr", "language": "FR", "freshness": "Month", "safesearch": "strict",
+	req, err := Parse([]byte(`{"query": "q", "kind": "News", "count": 8, "country": "fr", "language": "FR", "freshness": "Month", "safesearch": "strict",
 		"into": "_found", "timeout": "3s", "mode": "sync", "redact": "_found.results", "omit": "x", "secrets": {"a": {"secret": "B"}}, "grant": "g"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Request{Query: "q", Count: 8, Country: "FR", Language: "fr", Freshness: "month", SafeSearch: "strict"}
+	want := Request{Query: "q", Kind: "news", Count: 8, Country: "FR", Language: "fr", Freshness: "month", SafeSearch: "strict"}
 	if req != want {
 		t.Fatalf("req = %+v, want %+v", req, want)
 	}
@@ -31,11 +31,11 @@ func TestParseEveryField(t *testing.T) {
 	}
 	// A whole number written as a string is a whole number; an optional
 	// field set to null is one not given.
-	req, err = Parse([]byte(`{"query": "q", "count": "3", "country": null, "language": null, "freshness": null, "safesearch": null}`))
+	req, err = Parse([]byte(`{"query": "q", "kind": null, "count": "3", "country": null, "language": null, "freshness": null, "safesearch": null}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if (req != Request{Query: "q", Count: 3, Freshness: "any", SafeSearch: "moderate"}) {
+	if (req != Request{Query: "q", Kind: "web", Count: 3, Freshness: "any", SafeSearch: "moderate"}) {
 		t.Fatalf("req = %+v", req)
 	}
 }
@@ -49,6 +49,8 @@ func TestParseRefusals(t *testing.T) {
 		`{"query": "   "}`:                   "`query` is empty",
 		`{"query": "` + long + `"}`:          "characters; at most 500",
 		`{"query": "` + words + `"}`:         "words; at most 75",
+		`{"query": "q", "kind": "images"}`:   "`kind` must be web or news",
+		`{"query": "q", "kind": true}`:       "`kind` must be web or news",
 		`{"query": "q", "count": 0}`:         "`count` must be from 1 to 20",
 		`{"query": "q", "count": 21}`:        "`count` must be from 1 to 20",
 		`{"query": "q", "count": 2.5}`:       "`count` must be a whole number",

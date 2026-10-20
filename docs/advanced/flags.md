@@ -202,7 +202,7 @@ the same list. What the main ones mean, together: [the runtime reference](./serv
 | `--html-extract-tenant-concurrency` | `4` | txco://html/extract calls one tenant may have in flight on this node; one more fails at once with txco_html_busy (4). |
 | `--html-extract-rate-per-min` | `60` | txco://html/extract calls one tenant may start per minute on this node; more fail with txco_html_rate_limited. 0 = unlimited (60). |
 | `--web-search` | `true` | Serve txco://web/search. Off, the op answers txco_web_disabled and sends nothing; the tenant's key is untouched. (true) |
-| `--web-search-brave-url` | `https://api.search.brave.com/res/v1/web/search` | Endpoint txco://web/search sends Brave queries to, with the tenant's BRAVE_SEARCH_KEY. The operator points it at a stand-in for tests; a rule never chooses it. (https://api.search.brave.com/res/v1/web/search) |
+| `--web-search-brave-url` | `https://api.search.brave.com/res/v1` | Brave Search API root txco://web/search sends queries under, with the tenant's BRAVE_SEARCH_KEY: /web/search for kind web, /news/search for kind news. The operator points it at a stand-in for tests; a rule never chooses it. (https://api.search.brave.com/res/v1) |
 | `--web-search-timeout` | `5s` | Ceiling on one txco://web/search call: the provider request and its answer; the op's own deadline can only shorten it (5s). |
 | `--web-search-concurrency` | `16` | txco://web/search requests in flight on this node, across tenants; a call waits for a slot until its deadline (16). |
 | `--web-search-tenant-concurrency` | `4` | txco://web/search calls one tenant may have in flight on this node; one more fails at once with txco_web_busy (4). |

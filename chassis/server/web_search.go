@@ -32,7 +32,7 @@ import (
 // tenant's own key and returns titles, addresses and snippets
 // (docs/advanced/web-search.md).
 //
-//	WITH query, count?, country?, language?, freshness?, safesearch?, into? (default _websearch)
+//	WITH query, kind? (web | news), count?, country?, language?, freshness?, safesearch?, into? (default _websearch)
 //
 // The key is the tenant's, found the way the ai:// ops find theirs: the
 // provider's RequiredSecrets() (BRAVE_SEARCH_KEY) in the tenant's secret
@@ -46,7 +46,7 @@ import (
 //
 // The answer is in-band at `into`, with a nil Go error either way:
 //
-//	{ok: true, query, provider, results: [{title, url, description, page_date, source}…], count, truncated}
+//	{ok: true, query, kind, provider, results: [{title, url, description, page_date, source}…], count, truncated}
 //	{ok: false, query?, provider?, error: {code: "txco_web_<code>", message, status?, retry_after?}}
 type webSearchDeps struct {
 	enabled  bool
@@ -136,7 +136,7 @@ func webSearch(ctx context.Context, d *webSearchDeps, opName string, in []byte) 
 	fail := func(e *websearch.Error) (event.Payload, error) {
 		e.Code = "txco_web_" + e.Code
 		run.status = e.Status
-		emitWebSearchEvent(ctx, d, tenant, req.Query, run, false, e.Code)
+		emitWebSearchEvent(ctx, d, tenant, req, run, false, e.Code)
 		return webSearchPayload(into, websearch.Failure{Query: req.Query, Provider: d.provider.Name(), Error: e})
 	}
 	failf := func(code, format string, args ...any) (event.Payload, error) {
@@ -205,8 +205,8 @@ func webSearch(ctx context.Context, d *webSearchDeps, opName string, in []byte) 
 	}
 	results, truncated := websearch.Normalize(raw)
 	run.results = len(results)
-	ans := websearch.Answer{OK: true, Query: req.Query, Provider: d.provider.Name(), Results: results, Count: len(results), Truncated: truncated}
-	emitWebSearchEvent(ctx, d, tenant, req.Query, run, truncated, "")
+	ans := websearch.Answer{OK: true, Query: req.Query, Kind: req.Kind, Provider: d.provider.Name(), Results: results, Count: len(results), Truncated: truncated}
+	emitWebSearchEvent(ctx, d, tenant, req, run, truncated, "")
 	return webSearchPayload(into, ans)
 }
 
@@ -305,7 +305,7 @@ func webSearchUserAgent(ctx context.Context) string {
 // emitWebSearchEvent records one call on the trace timeline and the
 // websearch.requests counter. Timeline events are not redacted, so the
 // event carries a short hash of the query, never the query or a result.
-func emitWebSearchEvent(ctx context.Context, d *webSearchDeps, tenant, query string, run *webSearchRun, truncated bool, errCode string) {
+func emitWebSearchEvent(ctx context.Context, d *webSearchDeps, tenant string, req websearch.Request, run *webSearchRun, truncated bool, errCode string) {
 	outcome := "ok"
 	if errCode != "" {
 		outcome = errCode[len("txco_web_"):]
@@ -319,9 +319,12 @@ func emitWebSearchEvent(ctx context.Context, d *webSearchDeps, tenant, query str
 		"provider":    d.provider.Name(),
 		"duration_ms": time.Since(run.start).Milliseconds(),
 	}
-	if query != "" {
-		sum := sha256.Sum256([]byte(query))
+	if req.Query != "" {
+		sum := sha256.Sum256([]byte(req.Query))
 		fields["query_sha256"] = hex.EncodeToString(sum[:8])
+	}
+	if req.Kind != "" {
+		fields["kind"] = req.Kind
 	}
 	if run.status != 0 {
 		fields["status"] = run.status

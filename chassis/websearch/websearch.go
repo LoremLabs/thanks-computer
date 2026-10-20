@@ -6,7 +6,8 @@
 //
 // A search is one question to a public search engine, under the tenant's
 // own key, answered with titles, addresses and snippets, never the
-// provider's raw body. Results are external text: the stack that reads
+// provider's raw body. Its kind is web (pages) or news (articles, from the
+// engine's news index). Results are external text: the stack that reads
 // them decides what they may do.
 package websearch
 
@@ -41,6 +42,9 @@ const DefaultInto = "_websearch"
 // Request is one validated search.
 type Request struct {
 	Query string
+	// Kind is web (pages, the default) or news (recent articles from the
+	// engine's news index: an outlet's headlines without reading its pages).
+	Kind  string
 	Count int
 	// Country is two upper-case letters, ALL, or "" for the provider's
 	// default. Language is a lower-case ISO 639-1 code, or "" for the
@@ -67,6 +71,7 @@ type Result struct {
 type Answer struct {
 	OK        bool     `json:"ok"`
 	Query     string   `json:"query"`
+	Kind      string   `json:"kind"`
 	Provider  string   `json:"provider"`
 	Results   []Result `json:"results"`
 	Count     int      `json:"count"`
@@ -88,7 +93,7 @@ type Failure struct {
 // a typo such as `freshnes` fails instead of being ignored.
 var (
 	opKeys = map[string]bool{
-		"query": true, "count": true, "country": true, "language": true,
+		"query": true, "kind": true, "count": true, "country": true, "language": true,
 		"freshness": true, "safesearch": true,
 	}
 	chassisKeys = map[string]bool{
@@ -97,6 +102,7 @@ var (
 		"stream": true, "max_duration": true, "continue_after": true,
 		"checkpoint": true, "join_at_scope": true,
 	}
+	kindValues       = map[string]bool{"web": true, "news": true}
 	freshnessValues  = map[string]bool{"any": true, "day": true, "week": true, "month": true, "year": true}
 	safeSearchValues = map[string]bool{"off": true, "moderate": true, "strict": true}
 	countryShape     = regexp.MustCompile(`^[A-Za-z]{2}$`)
@@ -106,7 +112,7 @@ var (
 // Parse reads and checks the op's WITH object. An *Error names the first
 // field at fault; it is the whole of what a rule author sees.
 func Parse(meta []byte) (Request, *Error) {
-	req := Request{Count: DefaultCount, Freshness: "any", SafeSearch: "moderate"}
+	req := Request{Kind: "web", Count: DefaultCount, Freshness: "any", SafeSearch: "moderate"}
 	if len(meta) > 0 && !gjson.ValidBytes(meta) {
 		return req, invalid("the request does not parse")
 	}
@@ -149,6 +155,13 @@ func Parse(meta []byte) (Request, *Error) {
 		return req, invalid("`query` is %d words; at most %d", n, MaxQueryWords)
 	}
 
+	if v, ok := given("kind"); ok {
+		k := strings.ToLower(strings.TrimSpace(v.String()))
+		if v.Type != gjson.String || !kindValues[k] {
+			return req, invalid("`kind` must be web or news")
+		}
+		req.Kind = k
+	}
 	if v, ok := given("count"); ok {
 		// A whole number, or one written as a string: query parameters
 		// and a model's tool parameters often arrive that way.
