@@ -122,6 +122,12 @@ const (
 	// A search is 25 + 100 + 50 = 175. Exported because the handler lives
 	// in package server.
 	FuelCostWebSearch int64 = 50
+	// FuelCostWebFeed is txco://web/feed's charge per fetch it starts, on
+	// top of the flat dispatch fuel: the html/extract fetch rate, for the
+	// same reason. The bytes pay FuelCostHTMLPerMiB and the read pays
+	// FuelCostHTMLExtractPerMs, as html/extract's do. Exported because the
+	// handler lives in package server.
+	FuelCostWebFeed int64 = 50
 	// FuelCostSecretMaterialize is fuelCostSecretMaterialize for handlers
 	// outside the processor that read a tenant secret the way the ai://
 	// ops do (txco://web/search).

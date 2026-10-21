@@ -207,6 +207,12 @@ the same list. What the main ones mean, together: [the runtime reference](./serv
 | `--web-search-concurrency` | `16` | txco://web/search requests in flight on this node, across tenants; a call waits for a slot until its deadline (16). |
 | `--web-search-tenant-concurrency` | `4` | txco://web/search calls one tenant may have in flight on this node; one more fails at once with txco_web_busy (4). |
 | `--web-search-rate-per-min` | `60` | txco://web/search calls one tenant may start per minute on this node; more fail with txco_web_rate_limited. 0 = unlimited (60). |
+| `--web-feed` | `true` | Serve txco://web/feed. Off, the op answers txco_feed_disabled and fetches nothing. (true) |
+| `--web-feed-timeout` | `5s` | Ceiling on one txco://web/feed call: the fetch (dial, TLS, redirects, headers, body) and the read together; the op's own deadline can only shorten it (5s). |
+| `--web-feed-max-bytes` | `3145728` | Largest document txco://web/feed downloads; a longer body fails with txco_feed_response_too_large and nothing is read (3145728, 3MiB). |
+| `--web-feed-concurrency` | `16` | txco://web/feed fetches in flight on this node, across tenants; a call waits for a slot until its deadline (16). |
+| `--web-feed-tenant-concurrency` | `4` | txco://web/feed calls one tenant may have in flight on this node; one more fails at once with txco_feed_busy (4). |
+| `--web-feed-rate-per-min` | `60` | txco://web/feed calls one tenant may start per minute on this node; more fail with txco_feed_rate_limited. 0 = unlimited (60). |
 | `--snapshot-bootstrap-ref` | — | If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap. |
 | `--feed-source` | `nop` | Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged. |
 | `--feed-source-file-dir` | `./chassis/data/feed` | Root directory for the file feed source (./chassis/data/feed) |

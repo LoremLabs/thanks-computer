@@ -2469,6 +2469,20 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			return webSearch(ctx, wsDeps, opName, in)
 		}))
 
+	// `txco://web/feed`: one public feed (RSS, Atom, JSON Feed) in, its
+	// newest items as JSON. The same safe fetcher as html/extract, any
+	// media type (the reader decides from the bytes), bounded by the
+	// --web-feed-* flags. See chassis/server/web_feed.go.
+	wfDeps, wfErr := newWebFeedDeps(conf, guard)
+	if wfErr != nil {
+		cancel()
+		return ctx, nil, wfErr
+	}
+	pu.Handle([]byte("txco://web/feed"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return webFeed(ctx, wfDeps, opName, in)
+		}))
+
 	// `txco://sendmail`: render + submit an outbound email from the
 	// `_sendmail` envelope contract a rule assembled. Struct-based op (needs
 	// the real runtime DB for the campaign guard, the mirror snapshot for the

@@ -250,6 +250,12 @@ type Config struct {
 	WebSearchConcurrency         int      `id:"web-search-concurrency" default:"16" desc:"txco://web/search requests in flight on this node, across tenants; a call waits for a slot until its deadline (16)."`
 	WebSearchTenantConcurrency   int      `id:"web-search-tenant-concurrency" default:"4" desc:"txco://web/search calls one tenant may have in flight on this node; one more fails at once with txco_web_busy (4)."`
 	WebSearchRatePerMin          int      `id:"web-search-rate-per-min" default:"60" desc:"txco://web/search calls one tenant may start per minute on this node; more fail with txco_web_rate_limited. 0 = unlimited (60)."`
+	WebFeed                      bool     `id:"web-feed" default:"true" desc:"Serve txco://web/feed. Off, the op answers txco_feed_disabled and fetches nothing. (true)"`
+	WebFeedTimeout               string   `id:"web-feed-timeout" default:"5s" desc:"Ceiling on one txco://web/feed call: the fetch (dial, TLS, redirects, headers, body) and the read together; the op's own deadline can only shorten it (5s)."`
+	WebFeedMaxBytes              int      `id:"web-feed-max-bytes" default:"3145728" desc:"Largest document txco://web/feed downloads; a longer body fails with txco_feed_response_too_large and nothing is read (3145728, 3MiB)."`
+	WebFeedConcurrency           int      `id:"web-feed-concurrency" default:"16" desc:"txco://web/feed fetches in flight on this node, across tenants; a call waits for a slot until its deadline (16)."`
+	WebFeedTenantConcurrency     int      `id:"web-feed-tenant-concurrency" default:"4" desc:"txco://web/feed calls one tenant may have in flight on this node; one more fails at once with txco_feed_busy (4)."`
+	WebFeedRatePerMin            int      `id:"web-feed-rate-per-min" default:"60" desc:"txco://web/feed calls one tenant may start per minute on this node; more fail with txco_feed_rate_limited. 0 = unlimited (60)."`
 	SnapshotBootstrapRef         string   `id:"snapshot-bootstrap-ref" default:"" desc:"If set AND the runtime DB is fresh, fetch this artifact ref and bootstrap-restore it before serving. Empty (default) = no bootstrap."`
 	FeedSource                   string   `id:"feed-source" default:"nop" desc:"Control-event feed source: {nop, file}. nop (default) disables the applier; single-node unchanged."`
 	FeedSourceFileDir            string   `id:"feed-source-file-dir" default:"./chassis/data/feed" desc:"Root directory for the file feed source (./chassis/data/feed)"`
@@ -789,6 +795,14 @@ func Load() (Config, error) {
 	}
 	if config.WebSearchConcurrency <= 0 || config.WebSearchTenantConcurrency <= 0 || config.WebSearchRatePerMin < 0 {
 		log.Fatalf("--web-search-concurrency and -tenant-concurrency must be positive, and -rate-per-min not negative")
+	}
+	if d, err := time.ParseDuration(config.WebFeedTimeout); err != nil || d <= 0 {
+		log.Fatalf("unable to parse --web-feed-timeout %q (want a positive duration)", config.WebFeedTimeout)
+	} else if d > opTimeoutMaxDur {
+		log.Fatalf("web-feed-timeout (%s) must be <= op-timeout-max (%s)", config.WebFeedTimeout, config.OpTimeoutMax)
+	}
+	if config.WebFeedMaxBytes <= 0 || config.WebFeedConcurrency <= 0 || config.WebFeedTenantConcurrency <= 0 || config.WebFeedRatePerMin < 0 {
+		log.Fatalf("--web-feed-max-bytes, -concurrency and -tenant-concurrency must be positive, and -rate-per-min not negative")
 	}
 	switch config.OutletEgress {
 	case "direct", "relay":
