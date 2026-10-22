@@ -55,6 +55,7 @@ the chassis-wide cap.
 | `txco://html/extract`: the fetch, on top of the dispatch; per started MiB downloaded; per started ms parsing and matching | 50; 100; 10 |
 | `txco://html/read`: the same three charges, the last per started ms parsing and rendering | 50; 100; 10 |
 | `txco://web/search`: the request, on top of the dispatch and the 100 for reading the tenant's key (175 a search) | 50 |
+| `txco://web/feed`: the same three charges as `html/extract`, the last per started ms reading the feed | 50; 100; 10 |
 | TCP connection accepted (`--tcp-conn-fuel`) | 100 |
 | TCP bytes through a connection, per MiB (exact, not rounded up) | 100 |
 

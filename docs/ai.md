@@ -59,6 +59,12 @@ merges the validated object as `.schema_validated_payload`. On
 failure — or any provider error — the op contributes `.chat.error`
 instead, and your next step's rules can resonate on that.
 
+With `provider = "openai"`, a schema whose top level is an object also
+turns on OpenAI's JSON mode, so the reply is always well-formed JSON
+(the schema itself is still checked by the chassis). OpenAI allows JSON
+mode only when the messages mention JSON, so say so in the system text
+("Respond with JSON only"); without it the call goes out as before.
+
 ## Embeddings — `EXEC "ai://embed"`
 
 Where `ai://chat` returns prose, `ai://embed` returns a **vector** — the numeric

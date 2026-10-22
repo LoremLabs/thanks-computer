@@ -6,8 +6,8 @@
 // OpenAI can also chat with OpenAI under one key/account, instead of routing
 // chat through a second provider. Mirror of chassis/chat/openrouter (the API is
 // the same OpenAI-compatible shape); the only differences are the endpoint, the
-// secret name, the default model, and the absence of OpenRouter's accounting
-// headers.
+// secret name, the default model, the absence of OpenRouter's accounting
+// headers, and JSON mode for a schema call (see jsonMode).
 //
 // The backend self-registers in init() under the name "openai"; the chassis
 // activates it with a blank import in the main package.
@@ -62,9 +62,10 @@ func (b *backend) Capabilities() []string    { return []string{"public_execution
 func (b *backend) RequiredSecrets() []string { return []string{secretName} }
 
 // Run executes one chat completion against OpenAI. Retries once on transient
-// errors (HTTP 5xx + network/timeout); does not retry on 4xx. Schema is NOT sent
-// as response_format — ExecAI post-validates Response.Text against req.Schema, so
-// the backend stays dumb and provider-swappable (mirrors openrouter).
+// errors (HTTP 5xx + network/timeout); does not retry on 4xx. The schema itself
+// is NOT sent — ExecAI post-validates Response.Text against req.Schema, so the
+// backend stays dumb and provider-swappable (mirrors openrouter). A schema call
+// asks only for JSON mode (jsonMode), which makes the text well-formed JSON.
 func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.SecretBag) (chat.Response, error) {
 	if bag == nil {
 		return chat.Response{}, errors.New("openai: nil secret bag")
@@ -82,6 +83,9 @@ func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.Secret
 	outbound := map[string]any{
 		"model":    model,
 		"messages": req.Messages,
+	}
+	if jsonMode(req) {
+		outbound["response_format"] = map[string]string{"type": "json_object"}
 	}
 	bodyBytes, err := json.Marshal(outbound)
 	if err != nil {
@@ -108,6 +112,30 @@ func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.Secret
 	}
 
 	return parseOpenAICompatResponse(respBody, b.Name(), model, latencyMS, retries)
+}
+
+// jsonMode reports whether a call asks OpenAI for JSON mode (response_format
+// json_object), under which the reply is always well-formed JSON. Without it a
+// model can break the syntax (on 2026-10-20 a schema call answered invalid JSON
+// twice running), and the schema check can only refuse the answer. Only for a
+// schema whose top level is an object, since JSON mode answers nothing else, and
+// only when a message mentions JSON: OpenAI refuses JSON mode (400) otherwise.
+func jsonMode(req chat.Request) bool {
+	if len(req.Schema) == 0 {
+		return false
+	}
+	var top struct {
+		Type any `json:"type"`
+	}
+	if json.Unmarshal(req.Schema, &top) != nil || top.Type != "object" {
+		return false
+	}
+	for _, m := range req.Messages {
+		if strings.Contains(strings.ToLower(m.Content), "json") {
+			return true
+		}
+	}
+	return false
 }
 
 // doWithSimpleRetry runs the request once and retries once on HTTP 5xx or
