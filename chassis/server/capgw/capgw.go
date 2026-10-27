@@ -329,6 +329,10 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	// caller's rid; it ends when the caller goes away and at the ceiling.
 	rctx, cancel := context.WithTimeout(g.ctx, wait)
 	rctx = context.WithValue(rctx, config.CtxKeyRid, rid)
+	// The authority the run acts under, pinned for the ops that must check
+	// it (a connection's token: processor/connection.go) — the same pin an
+	// in-process cap:// call gets.
+	rctx = processor.WithCapAuthority(rctx, v.Grant.Principal.ID, name)
 	stop := context.AfterFunc(r.Context(), cancel)
 	final, runErr := g.run(rctx, pb.String())
 	timedOut := errors.Is(rctx.Err(), context.DeadlineExceeded)

@@ -2390,3 +2390,81 @@ func (c *Client) RevokeSecret(ctx context.Context, name, stack string) error {
 	}
 	return nil
 }
+
+// Connection is one of a tenant's connections (chassis/connection): a
+// principal's identity at an outside service. Metadata only; no endpoint
+// returns material.
+type Connection struct {
+	ID               string   `json:"id"`
+	Principal        string   `json:"principal"`
+	Provider         string   `json:"provider"`
+	Label            string   `json:"label,omitempty"`
+	Kind             string   `json:"kind"`
+	Subject          string   `json:"subject,omitempty"`
+	Account          string   `json:"account,omitempty"`
+	Status           string   `json:"status"`
+	Scopes           []string `json:"scopes"`
+	Generation       int64    `json:"generation"`
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	RefreshExpiresAt string   `json:"refresh_expires_at,omitempty"`
+	CreatedBy        string   `json:"created_by"`
+	CreatedAt        string   `json:"created_at"`
+	UpdatedAt        string   `json:"updated_at"`
+}
+
+type listConnectionsResponse struct {
+	Connections []Connection `json:"connections"`
+}
+
+// ListConnections lists a principal's connections, or a provider's: pass
+// one of them.
+func (c *Client) ListConnections(ctx context.Context, principal, provider string) ([]Connection, error) {
+	q := url.Values{}
+	if principal != "" {
+		q.Set("principal", principal)
+	}
+	if provider != "" {
+		q.Set("provider", provider)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.scopedURL("/connections?"+q.Encode()), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeError(resp)
+	}
+	var out listConnectionsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode list connections: %w", err)
+	}
+	return out.Connections, nil
+}
+
+// RevokeConnection removes a principal's connection at a provider.
+func (c *Client) RevokeConnection(ctx context.Context, principal, provider string) error {
+	q := url.Values{"principal": {principal}, "provider": {provider}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.scopedURL("/connections?"+q.Encode()), nil)
+	if err != nil {
+		return err
+	}
+	if err := c.applyAuth(req, nil); err != nil {
+		return err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return decodeError(resp)
+	}
+	return nil
+}

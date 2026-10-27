@@ -25,6 +25,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/auth/signature"
 	"github.com/loremlabs/thanks-computer/chassis/auth/throttle"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	chnotebook "github.com/loremlabs/thanks-computer/chassis/notebook"
@@ -94,6 +95,11 @@ type Controller struct {
 	// notebookStore backs the read-only notebook endpoints (`txco notebook
 	// list/read/tail/export`). Set by SetNotebookStore; nil ⇒ 503.
 	notebookStore *chnotebook.Store
+
+	// connections backs the connection endpoints (`txco auth tenant
+	// connections list/revoke`): metadata only. Set by SetConnections;
+	// nil ⇒ 503.
+	connections *connection.Service
 
 	// dsCache materialises + opens DATASETS/ artifacts (chassis/dataset):
 	// the deep activation gate validates through it and the fleet applier
@@ -619,6 +625,10 @@ func (c *Controller) Start() {
 	tenantR.HandleFunc("/secrets/{name}/policy", c.handleSetSecretPolicy).Methods(http.MethodPut)
 	tenantR.HandleFunc("/secrets/{name}/rotate", c.handleRotateSecret).Methods(http.MethodPost)
 	tenantR.HandleFunc("/secrets/{name}/rotate-generated", c.handleRotateSecretGenerated).Methods(http.MethodPost)
+	// Connections (chassis/connection): a tenant's principals' identities
+	// at outside services, metadata only (connection_endpoints.go).
+	tenantR.HandleFunc("/connections", c.handleListConnections).Methods(http.MethodGet)
+	tenantR.HandleFunc("/connections", c.handleRevokeConnection).Methods(http.MethodDelete)
 
 	// Read-only listing of the op-writable KV store, keyed by namespace. Lets an
 	// operator see/export the set an op accumulates (e.g. blog_subscribers).

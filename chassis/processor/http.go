@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
@@ -63,6 +64,10 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	// after pu.HTTPClient.Do returns.
 	bodyForWire := in
 	headerOverlays := map[string]string{}
+	// A request that carries a connection's token is made with the
+	// connection service's client: guarded at the dial whatever the node's
+	// policy, following no redirect.
+	client := pu.HTTPClient
 	if refs, perr := secrets.ParseRefs(op.Meta); perr != nil {
 		return event.Payload{
 			Raw:  `{}`,
@@ -70,15 +75,59 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 			Meta: `{"error":["secrets-parse-err"]}`,
 		}, perr
 	} else if len(refs) > 0 {
-		var aerr error
-		bodyForWire, aerr = applySecretOverlays(refs, op.Secrets, bodyForWire, headerOverlays)
-		if aerr != nil {
-			pu.Logger.Warn("HttpExec secrets overlay err", zap.String("err", aerr.Error()))
-			return event.Payload{
-				Raw:  `{}`,
-				Type: event.Null,
-				Meta: `{"error":["secrets-overlay-err"]}`,
-			}, aerr
+		secretRefs, connRefs := secrets.ConnectionRefs(refs)
+		if len(secretRefs) > 0 {
+			var aerr error
+			bodyForWire, aerr = applySecretOverlays(secretRefs, op.Secrets, bodyForWire, headerOverlays)
+			if aerr != nil {
+				pu.Logger.Warn("HttpExec secrets overlay err", zap.String("err", aerr.Error()))
+				return event.Payload{
+					Raw:  `{}`,
+					Type: event.Null,
+					Meta: `{"error":["secrets-overlay-err"]}`,
+				}, aerr
+			}
+		}
+		if len(connRefs) > 0 {
+			// A connection ref the chassis will not honour is data, not a
+			// failed op: the rule reads `<into>.error.code` and says what to
+			// do ("connect GitHub first"). Nothing is sent in that case.
+			into := boundedInto(metaFields[4].String())
+			target, uerr := url.Parse(opName)
+			if uerr != nil {
+				return connectionFailure(into, connRefs[0].Connection, &connection.Error{Code: connection.CodeDestination, Message: uerr.Error()}), nil
+			}
+			if pu.Connections == nil {
+				return connectionFailure(into, connRefs[0].Connection, &connection.Error{
+					Code: connection.CodeUnavailable, Message: "connections are not configured on this node (no identity store, or no master key)"}), nil
+			}
+			principal, capability := CapAuthorityFrom(ctx)
+			for _, r := range connRefs {
+				name := strings.TrimPrefix(r.Path, "headers.")
+				if !strings.HasPrefix(r.Path, "headers.") || name == "" {
+					return connectionFailure(into, r.Connection, &connection.Error{
+						Code: connection.CodeInvalidArg, Message: fmt.Sprintf("secrets.%s.connection: a connection's token goes on a header (secrets.headers.<name>.connection)", r.Path)}), nil
+				}
+				res, cerr := pu.Connections.Use(ctx, connection.UseInput{
+					Tenant: tenantScope(ctx), Stack: op.Stack, Provider: r.Connection,
+					Principal: principal, Capability: capability, URL: target,
+				})
+				if cerr != nil {
+					pu.Logger.Info("HttpExec connection not used", zap.String("stack", op.Stack), zap.String("provider", r.Connection), zap.String("code", cerr.Code))
+					return connectionFailure(into, r.Connection, cerr), nil
+				}
+				value := res.Value
+				if r.Format != "" {
+					// The op's own format wins over the consumer's declared one.
+					v, ferr := secrets.Substitute(r.Format, []byte(res.Token))
+					if ferr != nil {
+						return connectionFailure(into, r.Connection, &connection.Error{Code: connection.CodeInvalidArg, Message: ferr.Error()}), nil
+					}
+					value = v
+				}
+				headerOverlays[name] = value
+			}
+			client = pu.Connections.HTTPClient(target)
 		}
 	}
 
@@ -152,7 +201,7 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 		req.Header.Set(k, v)
 	}
 
-	resp, err := pu.HTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		pu.Logger.Warn("HttpExec err2", zap.String("err", err.Error()))
 

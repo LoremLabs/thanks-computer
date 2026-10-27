@@ -35,6 +35,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/compute/storeresolver"
 	_ "github.com/loremlabs/thanks-computer/chassis/compute/wazero" // registers the "wazero" engine
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	chcon "github.com/loremlabs/thanks-computer/chassis/contacts"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	_ "github.com/loremlabs/thanks-computer/chassis/continuation/filestore" // registers the "file" backend
@@ -2091,6 +2092,61 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			}))
 	}
 
+	// Connections (txco://connection/{start,finish,list,revoke}): a
+	// principal's identities at outside services (chassis/connection), in
+	// the identity store, sealed under the secret store's master key; the
+	// state signer is keyed from it like the drive's and the run grants'.
+	// Both are needed: without either, the ops answer
+	// txco_connection_disabled and an https op naming a connection answers
+	// txco_connection_unavailable, as data. See chassis/server/connection.go.
+	var connSvc *connection.Service
+	if identityStore != nil && secretsResolver != nil && secretsResolver.Store() != nil {
+		if key, ver, kerr := secrets.DeriveKey(secretsResolver.Store().MK, connection.KeyLabel); kerr != nil {
+			pu.Logger.Warn("connections disabled: " + kerr.Error())
+		} else if signer, serr := connection.NewSigner(key, ver); serr != nil {
+			pu.Logger.Warn("connections disabled: " + serr.Error())
+		} else {
+			store := connection.NewStore(identityStore.DB, identityStore.Dialect, secretsResolver.Store().MK)
+			svc, cerr := connection.New(store, &connectionDeclSource{dbc: dbc, fcas: fcas}, connectionSecrets{secretsResolver}, signer, connection.Config{
+				Node: guard, Open: conf.EgressPolicy == "open",
+				SlugToID:  func(ctx context.Context, slug string) (string, error) { return lookupTenantID(ctx, dbc.Snapshot, slug) },
+				UserAgent: "txco", Logger: pu.Logger,
+			})
+			if cerr != nil {
+				pu.Logger.Warn("connections disabled: " + cerr.Error())
+			} else {
+				connSvc = svc
+				pu.Connections = svc
+				// Flows past expiry are deleted; every node may sweep.
+				go func() {
+					t := time.NewTicker(10 * time.Minute)
+					defer t.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-t.C:
+							_, _ = svc.SweepFlows(ctx)
+						}
+					}
+				}()
+			}
+		}
+	}
+	connD := connectionDeps{identityDeps: identityD, svc: connSvc}
+	for name, fn := range map[string]func(context.Context, connectionDeps, []byte) (event.Payload, error){
+		"txco://connection/start":  connectionStart,
+		"txco://connection/finish": connectionFinish,
+		"txco://connection/list":   connectionList,
+		"txco://connection/revoke": connectionRevoke,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, connD, in)
+			}))
+	}
+
 	// Run grants (txco://delegate/{mint,get,revoke,close}): what one piece of
 	// dispatched work may ask this chassis for. Rows in the identity store,
 	// so they are registered the way the identity ops are. See
@@ -2602,6 +2658,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	adminCtrl.SetBlobIndex(blobIndex)
 	// Read-only `txco notebook …` window over the notebook store. Nil-safe.
 	adminCtrl.SetNotebookStore(notebookStore)
+	adminCtrl.SetConnections(connSvc)
 	// Wire the declarative store-seed reconciler so activation materialises
 	// VECTORS/ (+ later KV/) packs into the runtime stores. Built from whatever
 	// seedable stores opened above; nil-safe when none did.

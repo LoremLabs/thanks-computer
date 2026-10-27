@@ -41,6 +41,12 @@ type Ref struct {
 	// Only ErrSecretNotFound is forgiven; a store or key error still
 	// fails the dispatch.
 	Optional bool
+	// Connection names a provider instead of a secret
+	// (`secrets.headers.authorization.connection = "github"`): the value
+	// is the calling principal's token at that provider, resolved by the
+	// chassis's connection service (chassis/connection), not the secret
+	// store. Secret is empty on such a ref, and the splice skips it.
+	Connection string
 }
 
 // ParseRefs walks the `secrets` subtree of op.Meta (a JSON-string
@@ -89,6 +95,32 @@ func walkRefs(pathPrefix string, node gjson.Result, out *[]Ref) error {
 		return fmt.Errorf("secrets: bare value at %q (expected object with `secret`)", pathPrefix)
 	}
 
+	// A node is a leaf when it has a string `connection` child: a
+	// provider's name, the principal's token resolved at request time.
+	if connField := node.Get("connection"); connField.Exists() {
+		if pathPrefix == "" {
+			return fmt.Errorf("secrets: leaf at the root of `secrets` has no path (must be e.g. `secrets.headers.x.connection = ...`)")
+		}
+		if node.Get("secret").Exists() {
+			return fmt.Errorf("secrets: %q names both a secret and a connection", pathPrefix)
+		}
+		if connField.Type != gjson.String || connField.String() == "" {
+			return fmt.Errorf("secrets: %q.connection must be a provider's name", pathPrefix)
+		}
+		ref := Ref{Path: pathPrefix, Connection: connField.String()}
+		if formatField := node.Get("format"); formatField.Exists() {
+			if formatField.Type != gjson.String {
+				return fmt.Errorf("secrets: %q.format must be a string, got %s", pathPrefix, formatField.Type)
+			}
+			ref.Format = formatField.String()
+			if err := ValidateFormat(ref.Format); err != nil {
+				return fmt.Errorf("secrets: %q.format: %w", pathPrefix, err)
+			}
+		}
+		*out = append(*out, ref)
+		return nil
+	}
+
 	// A node is a leaf when it has a string `secret` child.
 	if secretField := node.Get("secret"); secretField.Exists() {
 		if pathPrefix == "" {
@@ -133,7 +165,7 @@ func walkRefs(pathPrefix string, node gjson.Result, out *[]Ref) error {
 		// Reserved leaf-only keys: if they appear here it's a malformed
 		// declaration (e.g. `secrets.format = "Bearer {}"` at the top
 		// level, no path attached).
-		if k == "secret" || k == "format" || k == "optional" {
+		if k == "secret" || k == "format" || k == "optional" || k == "connection" {
 			iterErr = fmt.Errorf("secrets: top-level %q key at %q (must be inside an object with `secret`)", k, pathPrefix)
 			return false
 		}
@@ -163,12 +195,30 @@ func DistinctNames(refs []Ref) []string {
 	seen := make(map[string]bool, len(refs))
 	out := make([]string, 0, len(refs))
 	for _, r := range refs {
+		// A connection ref names no secret: the connection service, not
+		// the store, resolves it.
+		if r.Secret == "" {
+			continue
+		}
 		if !seen[r.Secret] {
 			seen[r.Secret] = true
 			out = append(out, r.Secret)
 		}
 	}
 	return out
+}
+
+// ConnectionRefs splits refs into those the secret store resolves and those
+// the connection service does (Ref.Connection).
+func ConnectionRefs(refs []Ref) (secretRefs, connectionRefs []Ref) {
+	for _, r := range refs {
+		if r.Connection != "" {
+			connectionRefs = append(connectionRefs, r)
+		} else {
+			secretRefs = append(secretRefs, r)
+		}
+	}
+	return secretRefs, connectionRefs
 }
 
 // OptionalNames returns the set of NAMEs whose absence the op accepts:
@@ -180,6 +230,9 @@ func OptionalNames(refs []Ref) map[string]bool {
 	}
 	out := make(map[string]bool, len(refs))
 	for _, r := range refs {
+		if r.Secret == "" {
+			continue
+		}
 		if prev, seen := out[r.Secret]; seen {
 			out[r.Secret] = prev && r.Optional
 		} else {

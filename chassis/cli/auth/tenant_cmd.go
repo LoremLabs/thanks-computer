@@ -130,6 +130,8 @@ func runTenantCmd(args []string, stdout, stderr io.Writer) int {
 		return runTenantHostnames(args[1:], stdout, stderr)
 	case "secrets":
 		return runTenantSecrets(args[1:], stdout, stderr)
+	case "connections":
+		return runTenantConnections(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printTenantUsage(stdout)
 		return 0
@@ -156,7 +158,8 @@ Available commands:
   update-caps <actor> --caps "..."       Alias for grant (same wire call)
   revoke <actor> [--tenant SLUG] [-y]    Soft-delete a membership
   hostnames <sub>                        Manage hostname → tenant routing
-  secrets <sub>                          Manage per-tenant secrets (Stripe keys, OAuth tokens, …)
+  secrets <sub>                          Manage per-tenant secrets (Stripe keys, OAuth client secrets, …)
+  connections <sub>                      List or revoke principals' connections at outside services
 
 Related:
   txco auth tenants             List tenants you can see

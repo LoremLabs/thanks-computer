@@ -200,6 +200,12 @@ type Unit struct {
 	// `secret_store_unavailable` rather than silently skip.
 	Secrets *secrets.Resolver
 
+	// Connections resolves `secrets.headers.<h>.connection = "<provider>"`
+	// on an https op to the pinned principal's token at that provider
+	// (chassis/connection). Set by the server; nil-safe — a ref then
+	// answers txco_connection_unavailable as data.
+	Connections ConnectionUse
+
 	// Outlets runs outlet://<name>/<op>: pooled, bounded calls to external
 	// services a stack declared under OUTLETS/, credentials held by the
 	// chassis. nil-safe — an outlet op then reports txco_outlet_unavailable

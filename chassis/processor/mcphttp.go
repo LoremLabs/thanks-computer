@@ -138,6 +138,14 @@ func (pu *Unit) ExecMCPHTTP(ctx context.Context, op operation.Operation) (payloa
 	} else if len(refs) > 0 {
 		var hdrOnly []secrets.Ref
 		for _, r := range refs {
+			if r.Connection != "" {
+				// A connection's token is for the https op (chassis/connection):
+				// the MCP client sends `initialize` without overlays and keys
+				// its sessions by endpoint, which no per-principal credential
+				// can ride yet.
+				cerr := fmt.Errorf("secrets.%s.connection: a connection is not usable on mcp+http yet; use https:// (chassis/connection)", r.Path)
+				return mcpFailPayload(op.Name, "secrets-overlay", 0, cerr), cerr
+			}
 			if strings.HasPrefix(r.Path, "headers.") {
 				hdrOnly = append(hdrOnly, r)
 			}

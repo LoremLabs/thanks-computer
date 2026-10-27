@@ -362,6 +362,15 @@ func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, 
 	for k, v := range grant {
 		spec.facts[k] = v
 	}
+	// The authority the frame runs under, pinned on its context (and so on
+	// every call:// frame below it): the principal the gateway decided,
+	// else the one a head verified; and the capability's name. An op that
+	// names a connection is checked against these (connection.go).
+	principal := PrincipalScope(ctx)
+	if pm, ok := grant["principal"].(map[string]string); ok && pm["id"] != "" {
+		principal = pm["id"]
+	}
+	ctx = WithCapAuthority(ctx, principal, name)
 	out := pu.runFrame(ctx, op, spec)
 
 	code, status, message := "", 0, out.message

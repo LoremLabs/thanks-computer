@@ -32,6 +32,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/oprefs"
 	"github.com/loremlabs/thanks-computer/chassis/compute"
 	"github.com/loremlabs/thanks-computer/chassis/computesrc"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
@@ -439,7 +440,7 @@ func validateStackFilePath(p string) error {
 	if first, _, _ := strings.Cut(p, "/"); first != "" {
 		up := strings.ToUpper(first)
 		switch up {
-		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS", "CALLS", computesrc.Dir, stackdir.Dir:
+		case "FILES", "VECTORS", "KV", "CALENDARS", "CONTACTS", "DATASETS", "BLOBS", "SOURCES", "OUTLETS", "SANDBOXES", "CAPS", "CALLS", computesrc.Dir, stackdir.Dir, connection.ProviderDir, connection.ConsumerDir:
 			if first != up {
 				return fmt.Errorf("directory %q must be exact-case %q", first, up)
 			}
@@ -542,6 +543,27 @@ func validateStackFilePath(p string) error {
 		if capdecl.Name(p) == "" {
 			return fmt.Errorf("capability declarations must be a single <name>%s file directly under %s/, name lowercase words joined by dots, such as crm.lookup (got %q)",
 				capdecl.DeclExt, capdecl.Dir, p)
+		}
+		return nil
+	}
+
+	// PROVIDERS/<name>.yaml declares an outside service a principal can be
+	// connected to, CONNECTIONS/<provider>.yaml how this stack uses such a
+	// connection (chassis/connection). Same shape; contents, a provider
+	// name's uniqueness across the tenant's active stacks and a connection's
+	// fit with its provider are checked at validate/activate
+	// (deepValidateProviders, deepValidateConnections).
+	if connection.IsProviderPath(p) {
+		if connection.ProviderName(p) == "" {
+			return fmt.Errorf("provider declarations must be a single <name>%s file directly under %s/, name matching [a-z][a-z0-9_-]* (got %q)",
+				connection.DeclExt, connection.ProviderDir, p)
+		}
+		return nil
+	}
+	if connection.IsConsumerPath(p) {
+		if connection.ConsumerName(p) == "" {
+			return fmt.Errorf("connection declarations must be a single <provider>%s file directly under %s/, name matching [a-z][a-z0-9_-]* (got %q)",
+				connection.DeclExt, connection.ConsumerDir, p)
 		}
 		return nil
 	}
@@ -2594,6 +2616,17 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 				writeJSONError(w, http.StatusUnprocessableEntity, "cap_invalid", issuesDetail(issues, capIssuesHint))
 				return
 			}
+			// Provider gate: every PROVIDERS/ declaration parses and no other
+			// active stack of the tenant declares the same name. Connection
+			// gate: every CONNECTIONS/ declaration parses and fits its provider.
+			if issues := c.deepValidateProviders(r.Context(), ac.TenantID, stackID, versionID); len(issues) > 0 {
+				writeJSONError(w, http.StatusUnprocessableEntity, "provider_invalid", issuesDetail(issues, providerIssuesHint))
+				return
+			}
+			if issues := c.deepValidateConnections(r.Context(), ac.TenantID, stackID, versionID); len(issues) > 0 {
+				writeJSONError(w, http.StatusUnprocessableEntity, "connection_invalid", issuesDetail(issues, connectionIssuesHint))
+				return
+			}
 			// Call-entry gate: every CALLS/ declaration parses and its entry
 			// names a scope of this version.
 			if issues := c.deepValidateCalls(r.Context(), versionID); len(issues) > 0 {
@@ -2980,6 +3013,18 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 	// Capability gate — every declaration parses, names a scope of this
 	// version, and a name no other active stack of the tenant declares.
 	for _, issue := range c.deepValidateCaps(r.Context(), ac.TenantID, stackID, versionID) {
+		resp.OK = false
+		resp.Checked++
+		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})
+	}
+	// Provider and connection gates — every declaration parses; a provider's
+	// name is no other active stack's; a connection fits its provider.
+	for _, issue := range c.deepValidateProviders(r.Context(), ac.TenantID, stackID, versionID) {
+		resp.OK = false
+		resp.Checked++
+		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})
+	}
+	for _, issue := range c.deepValidateConnections(r.Context(), ac.TenantID, stackID, versionID) {
 		resp.OK = false
 		resp.Checked++
 		resp.Errors = append(resp.Errors, validateError{Path: issue.Path, Err: issue.Err})

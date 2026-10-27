@@ -118,6 +118,13 @@ var authChildren = []node{
 					{Name: "revoke", Desc: "Revoke a secret", Aliases: []string{"rm"}},
 				},
 			},
+			{
+				Name: "connections", Desc: "Principals' connections at outside services (metadata only)",
+				Children: []node{
+					{Name: "list", Desc: "List a principal's or a provider's connections", Aliases: []string{"ls"}},
+					{Name: "revoke", Desc: "Remove a principal's connection at a provider", Aliases: []string{"rm"}},
+				},
+			},
 		},
 	},
 	{Name: "memberships", Desc: "Show this actor's memberships"},

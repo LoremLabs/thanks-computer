@@ -214,6 +214,15 @@ func buildStackFiles(dir, stack string, ops []bundle.Op, o collectOpts) (*stackB
 	if err := add("collect CALLS/", callFiles, err); err != nil {
 		return nil, err
 	}
+	// PROVIDERS/ and CONNECTIONS/ (chassis/connection): the same treatment.
+	providerFiles, err := collectProviderFiles(stackDir)
+	if err := add("collect PROVIDERS/", providerFiles, err); err != nil {
+		return nil, err
+	}
+	connectionFiles, err := collectConnectionFiles(stackDir)
+	if err := add("collect CONNECTIONS/", connectionFiles, err); err != nil {
+		return nil, err
+	}
 	// Datasets are CODE (a query and its schema deploy together). Artifacts
 	// enter as fingerprint-only rows; their bytes are made resident later.
 	dsFiles, dsUploads, err := collectDatasetFiles(stackDir)

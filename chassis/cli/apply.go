@@ -533,6 +533,15 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 		}
 		return 1
 	}
+	// Provider and connection check — every PROVIDERS/ and CONNECTIONS/
+	// declaration of every stack parses, and a connection's origins are
+	// among its provider's api destinations when both are in this tree.
+	if cerrs := checkConnectionDecls(ops, dir); len(cerrs) > 0 {
+		for _, m := range cerrs {
+			fmt.Fprintf(stderr, "%s: connection error at %s\n", cmd, m)
+		}
+		return 1
+	}
 
 	// Apply-time lint for unconditional loop shapes (self-loops and
 	// 2-stack ping-pongs). Warnings only — design-time complement to the

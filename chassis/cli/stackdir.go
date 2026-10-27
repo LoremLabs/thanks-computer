@@ -13,6 +13,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/cli/bundle"
 	"github.com/loremlabs/thanks-computer/chassis/cli/client"
 	"github.com/loremlabs/thanks-computer/chassis/computesrc"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
 	"github.com/loremlabs/thanks-computer/chassis/outlet"
 	"github.com/loremlabs/thanks-computer/chassis/sandbox"
@@ -41,6 +42,8 @@ var kindDirs = map[string]bool{
 	sandbox.Dir:            true,
 	capdecl.Dir:            true,
 	calldecl.Dir:           true,
+	connection.ProviderDir: true,
+	connection.ConsumerDir: true,
 	computesrc.Dir:         true,
 	stackdir.Dir:           true,
 }
