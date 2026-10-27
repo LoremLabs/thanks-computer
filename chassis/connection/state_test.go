@@ -144,13 +144,17 @@ func TestSetCookie(t *testing.T) {
 }
 
 func TestCheckRedirectURI(t *testing.T) {
-	if _, err := checkRedirectURI("https://ranch.example/connect/github/callback", "ranch.example", "github"); err != nil {
+	if _, err := checkRedirectURI("https://ranch.example/connect/github/callback", "ranch.example", "github", false); err != nil {
 		t.Error(err)
 	}
-	if _, err := checkRedirectURI("https://ranch.example/connect/github", "RANCH.example", "github"); err != nil {
+	if _, err := checkRedirectURI("https://ranch.example/connect/github", "RANCH.example", "github", false); err != nil {
 		t.Error(err)
 	}
-	if _, err := checkRedirectURI("http://localhost:8080/connect/github/cb", "localhost:8080", "github"); err != nil {
+	if _, err := checkRedirectURI("http://localhost:8080/connect/github/cb", "localhost:8080", "github", false); err != nil {
+		t.Error(err)
+	}
+	// A development node serves plain http on a real name.
+	if _, err := checkRedirectURI("http://ranch.local.example:8080/connect/github/callback", "ranch.local.example:8080", "github", true); err != nil {
 		t.Error(err)
 	}
 	for name, in := range map[string][3]string{
@@ -161,7 +165,7 @@ func TestCheckRedirectURI(t *testing.T) {
 		"query":          {"https://ranch.example/connect/github/callback?x=1", "ranch.example", "github"},
 		"relative":       {"/connect/github/callback", "ranch.example", "github"},
 	} {
-		if _, err := checkRedirectURI(in[0], in[1], in[2]); err == nil {
+		if _, err := checkRedirectURI(in[0], in[1], in[2], false); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

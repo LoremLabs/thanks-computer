@@ -1807,6 +1807,8 @@ func (c *Controller) handlePutDraftFiles(w http.ResponseWriter, r *http.Request)
 			!sandbox.IsSandboxPath(f.Path) &&
 			!capdecl.IsCapPath(f.Path) &&
 			!calldecl.IsCallPath(f.Path) &&
+			!connection.IsProviderPath(f.Path) &&
+			!connection.IsConsumerPath(f.Path) &&
 			!computesrc.IsPath(f.Path) &&
 			!stackdir.IsPath(f.Path) {
 			writeJSONError(w, http.StatusBadRequest, "encoding_not_allowed",
@@ -2321,6 +2323,9 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 		if calldecl.IsCallPath(rf.path) {
 			continue // call-entry declaration → read by `WITH entry` at run time, not an ops row
 		}
+		if connection.IsProviderPath(rf.path) || connection.IsConsumerPath(rf.path) {
+			continue // provider / connection declaration → read by txco://connection/* and the https op at run time, not an ops row
+		}
 		if computesrc.IsPath(rf.path) {
 			continue // compute source → read by the admin's compute-source view, not an ops row
 		}
@@ -2665,7 +2670,7 @@ func (c *Controller) handleActivateStack(w http.ResponseWriter, r *http.Request)
 		// activate is never published. Mirrors the in-tx loop's coverage
 		// exactly: rule bodies only — not FILES/, packs, datasets, mocks.
 		for _, f := range files {
-			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) || capdecl.IsCapPath(f.Path) || calldecl.IsCallPath(f.Path) {
+			if strings.HasPrefix(f.Path, "FILES/") || storeseed.IsPackPath(f.Path) || dataset.IsDatasetPath(f.Path) || outlet.IsOutletPath(f.Path) || sandbox.IsSandboxPath(f.Path) || capdecl.IsCapPath(f.Path) || calldecl.IsCallPath(f.Path) || connection.IsProviderPath(f.Path) || connection.IsConsumerPath(f.Path) {
 				continue
 			}
 			pf, ok := parseStackPath(f.Path)

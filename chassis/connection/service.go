@@ -224,7 +224,9 @@ func (s *Service) Start(ctx context.Context, in StartInput) (StartResult, *Error
 	if err != nil {
 		return StartResult{}, fail(CodeStore, "%v", err)
 	}
-	redirect, perr := checkRedirectURI(in.RedirectURI, in.Host, in.Provider)
+	// A development node (its policy open) may send the browser back over
+	// plain http, as it serves plain http; a fleet node never.
+	redirect, perr := checkRedirectURI(in.RedirectURI, in.Host, in.Provider, s.clients.loopback != nil)
 	if perr != nil {
 		return StartResult{}, perr
 	}
@@ -274,14 +276,15 @@ func (s *Service) Start(ctx context.Context, in StartInput) (StartResult, *Error
 }
 
 // checkRedirectURI: on the host serving the request, https (http to a
-// loopback host), on a path that names the provider, no query or fragment.
-func checkRedirectURI(raw, host, provider string) (*url.URL, *Error) {
+// loopback host, or anywhere on a development node), on a path that names
+// the provider, no query or fragment.
+func checkRedirectURI(raw, host, provider string, devNode bool) (*url.URL, *Error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
 		return nil, fail(CodeInvalidArg, "`redirect_uri` must be an absolute URL on this host")
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && Loopback(strings.ToLower(u.Hostname()))) {
-		return nil, fail(CodeInvalidArg, "`redirect_uri` must be https:// (http:// only to localhost)")
+	if u.Scheme != "https" && !(u.Scheme == "http" && (devNode || Loopback(strings.ToLower(u.Hostname())))) {
+		return nil, fail(CodeInvalidArg, "`redirect_uri` must be https:// (http:// only to localhost, or on a development node)")
 	}
 	if !strings.EqualFold(u.Host, strings.TrimSpace(host)) {
 		return nil, fail(CodeInvalidArg, "`redirect_uri` must be on the host serving this request (%s), not %s", host, u.Host)

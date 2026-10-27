@@ -34,6 +34,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/calldecl"
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/computesrc"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	"github.com/loremlabs/thanks-computer/chassis/controlevent"
 	"github.com/loremlabs/thanks-computer/chassis/controlpublish"
 	"github.com/loremlabs/thanks-computer/chassis/dataset"
@@ -120,7 +121,7 @@ func (c *Controller) readStackFilesForArtifact(
 		// CALLS/ was missing, so on the fleet every `WITH entry` call failed
 		// "filecas: hash not found" (single-node keeps content inline, so dev
 		// never showed it).
-		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) || calldecl.IsCallPath(path) || computesrc.IsPath(path) || stackdir.IsPath(path) {
+		if strings.HasPrefix(path, "FILES/") || storeseed.IsPackPath(path) || dataset.IsDatasetPath(path) || outlet.IsOutletPath(path) || sandbox.IsSandboxPath(path) || capdecl.IsCapPath(path) || calldecl.IsCallPath(path) || connection.IsProviderPath(path) || connection.IsConsumerPath(path) || computesrc.IsPath(path) || stackdir.IsPath(path) {
 			if hash == "" {
 				hash = sha256Hex(content)
 			}
