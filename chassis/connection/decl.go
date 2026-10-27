@@ -200,10 +200,14 @@ func (p *Provider) validate() error {
 	default:
 		return fmt.Errorf("kind %q: want %s or %s", p.Kind, KindOAuth2, KindGitHubApp)
 	}
+	// The issuer identifier a provider sends back as `iss` (RFC 9207): a
+	// URL, with a path when the provider has one (GitHub's is
+	// https://github.com/login/oauth), compared whole, not as an origin.
 	if p.Issuer != "" {
-		if _, err := ParseOrigin(p.Issuer); err != nil {
+		if err := checkEndpoint(p.Issuer); err != nil {
 			return fmt.Errorf("issuer: %v", err)
 		}
+		p.Issuer = normalizeIssuer(p.Issuer)
 	}
 	for field, raw := range map[string]string{"authorization": p.Destinations.Authorization, "token": p.Destinations.Token} {
 		if raw == "" {
@@ -359,6 +363,28 @@ func checkEndpoint(raw string) error {
 		return fmt.Errorf("%q: no user info or fragment", raw)
 	}
 	return nil
+}
+
+// normalizeIssuer is the form two issuer identifiers are compared in:
+// scheme and host in lower case, the default port dropped, no trailing
+// slash. "" when it does not parse.
+func normalizeIssuer(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	o, err := OriginOf(u)
+	if err != nil {
+		return ""
+	}
+	return o.String() + strings.TrimRight(u.Path, "/")
+}
+
+// SameIssuer reports whether a callback's `iss` names the provider's
+// issuer: the same URL, as normalizeIssuer sees both.
+func SameIssuer(declared, got string) bool {
+	d, g := normalizeIssuer(declared), normalizeIssuer(got)
+	return d != "" && d == g
 }
 
 // Allows reports whether stack may use this provider's connections for the

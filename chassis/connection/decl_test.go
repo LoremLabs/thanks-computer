@@ -84,6 +84,9 @@ func TestParseProvider(t *testing.T) {
 		"bad issuer": func(s string) string {
 			return strings.Replace(s, "issuer: https://github.com", "issuer: github.com", 1)
 		},
+		"http issuer": func(s string) string {
+			return strings.Replace(s, "issuer: https://github.com", "issuer: http://github.com", 1)
+		},
 	} {
 		if _, err := ParseProvider([]byte(edit(goodProvider))); err == nil {
 			t.Errorf("%s: parsed, want an error", name)

@@ -372,12 +372,12 @@ func (s *Service) Finish(ctx context.Context, in FinishInput) (FinishResult, *Er
 	if err != nil {
 		return FinishResult{ClearCookie: clear}, fail(CodeStore, "%v", err)
 	}
-	if in.Iss != "" {
-		want, werr := ParseOrigin(p.Issuer)
-		got, gerr := ParseOrigin(in.Iss)
-		if p.Issuer == "" || werr != nil || gerr != nil || want != got {
-			return FinishResult{ClearCookie: clear}, fail(CodeMismatch, "the callback's iss is not the provider's issuer")
-		}
+	// The provider's `iss` (RFC 9207), when it sends one and the declaration
+	// names an issuer: the same URL, whole. A declaration that names none
+	// cannot check it; the state, the cookie and the PKCE verifier still
+	// bind the callback to this sign-in.
+	if in.Iss != "" && p.Issuer != "" && !SameIssuer(p.Issuer, in.Iss) {
+		return FinishResult{ClearCookie: clear}, fail(CodeMismatch, "the callback's iss is not the provider's issuer")
 	}
 	if in.ProviderError != "" {
 		return FinishResult{ClearCookie: clear}, fail(CodeRefused, "%s did not complete the sign-in: %s", providerTitle(p, flow.Provider), in.ProviderError)

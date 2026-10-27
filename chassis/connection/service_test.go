@@ -390,6 +390,33 @@ func TestFinishRefusals(t *testing.T) {
 	if _, err := r.svc.Finish(r.ctx, in); err != nil {
 		t.Errorf("the provider's own iss: %v", err)
 	}
+	// An issuer with a path (GitHub's https://github.com/login/oauth): the
+	// same URL whole, trailing slash or not; another path is another issuer.
+	r.decls.mu.Lock()
+	r.decls.provider.Issuer = r.fp.srv.URL + "/login/oauth"
+	r.decls.mu.Unlock()
+	_, in = fresh()
+	in.Iss = r.fp.srv.URL + "/login/oauth/"
+	if _, err := r.svc.Finish(r.ctx, in); err != nil {
+		t.Errorf("an issuer with a path: %v", err)
+	}
+	_, in = fresh()
+	in.Iss = r.fp.srv.URL + "/login"
+	if _, err := r.svc.Finish(r.ctx, in); err == nil || err.Code != CodeMismatch {
+		t.Errorf("another path: %v", err)
+	}
+	// No issuer declared: iss is not checked.
+	r.decls.mu.Lock()
+	r.decls.provider.Issuer = ""
+	r.decls.mu.Unlock()
+	_, in = fresh()
+	in.Iss = "https://anything.example/x"
+	if _, err := r.svc.Finish(r.ctx, in); err != nil {
+		t.Errorf("no issuer declared: %v", err)
+	}
+	r.decls.mu.Lock()
+	r.decls.provider.Issuer = r.fp.srv.URL
+	r.decls.mu.Unlock()
 	_, in = fresh()
 	in.ProviderError = "access_denied"
 	if _, err := r.svc.Finish(r.ctx, in); err == nil || err.Code != CodeRefused {
