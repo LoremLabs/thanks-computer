@@ -150,16 +150,31 @@ func (pu *Unit) ExecHTTP(ctx context.Context, op operation.Operation) (event.Pay
 	// the whole input); nested objects/arrays use bracket notation
 	// (line_items[0][price]=…). Header overlays still run last, so an
 	// operator can override Content-Type.
+	// Without an encoding, `WITH body_path` sends that one value of the
+	// envelope as the JSON body, exactly — what a REST API that refuses
+	// unknown fields needs (the envelope's `_txc` and the rule's own keys
+	// never reach it). A path with nothing at it sends nothing: the op fails
+	// rather than post an empty or a whole-envelope body.
 	contentType := "application/json"
 	if sendBody {
+		bp := normalizeEnvelopePath(metaFields[3].String())
 		switch strings.ToLower(strings.TrimSpace(metaFields[2].String())) {
 		case "urlencoded", "form":
 			src := bodyForWire
-			if bp := normalizeEnvelopePath(metaFields[3].String()); bp != "" {
+			if bp != "" {
 				src = []byte(gjson.GetBytes(bodyForWire, bp).Raw)
 			}
 			bodyForWire = []byte(formEncode(src))
 			contentType = "application/x-www-form-urlencoded"
+		default:
+			if bp != "" {
+				v := gjson.GetBytes(bodyForWire, bp)
+				if !v.Exists() {
+					return event.Payload{Raw: `{}`, Type: event.Null, Meta: `{"error":["http-body-path-missing"]}`},
+						fmt.Errorf("ExecHTTP: WITH body_path %q names nothing in the envelope", bp)
+				}
+				bodyForWire = []byte(v.Raw)
+			}
 		}
 	}
 
