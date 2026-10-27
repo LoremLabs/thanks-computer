@@ -314,3 +314,21 @@ func TestCloseDropsLinkers(t *testing.T) {
 		t.Fatalf("after Close: %d idle linkers, want 0", n)
 	}
 }
+
+// A cancelled caller must not poison the plugin snapshot: the build runs
+// under a context of its own, and a failed build is tried again. (On prod,
+// 2026-10-27, the first nano-op on a fresh node ran under a cancelled
+// request and every nano-op on that node then failed until a restart.)
+func TestSnapshotSurvivesCancelledCaller(t *testing.T) {
+	e := newEngine(t).(*engine)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	snap, pages, err := e.snapshot(cancelled)
+	if err != nil || len(snap) == 0 || pages == 0 {
+		t.Fatalf("snapshot under a cancelled caller: %d bytes, %d pages, %v", len(snap), pages, err)
+	}
+	again, _, err := e.snapshot(context.Background())
+	if err != nil || len(again) != len(snap) {
+		t.Fatalf("second snapshot: %d bytes, %v (want the first, kept)", len(again), err)
+	}
+}

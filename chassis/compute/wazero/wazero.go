@@ -85,10 +85,10 @@ type engine struct {
 	// invocation (see dynamicInstance). The post-init plugin memory is captured
 	// once and restored into a fresh plugin instance per call, which lets us run
 	// with the event loop enabled while leaving runtime stdin free for input.
-	dynOnce  sync.Once
+	// dynMu serializes the build; a build that failed is not kept (snapshot).
+	dynMu    sync.Mutex
 	dynSnap  []byte
 	dynPages uint32
-	dynErr   error
 
 	// Idle linkers for dynamically linked ops, reused across calls (see
 	// linker). closed stops a Close'd engine from keeping any.
@@ -431,13 +431,35 @@ func (l *linker) run(ctx context.Context, art compute.Artifact, input []byte, li
 	return readOut(stdout.Bytes()), nil
 }
 
-// snapshot lazily initializes the plugin runtime once and returns the captured
+// snapshotTimeout bounds one build of the plugin snapshot: compiling and
+// initializing the QuickJS runtime takes seconds on a small machine, never
+// a minute.
+const snapshotTimeout = 60 * time.Second
+
+// snapshot lazily initializes the plugin runtime and returns the captured
 // post-init linear memory (shared, read-only) plus its size in pages.
+//
+// The build runs under a context of its own, not the first caller's: that
+// request may be cancelled halfway through (a client gone, a short op
+// deadline), and with close-on-context-done the plugin would die mid-init.
+// A build that failed is not kept either: the next call builds again. Once
+// (2026-10-27) the first nano-op on a fresh prod node ran under a cancelled
+// request, and every nano-op on that node then answered "initialize-runtime:
+// module closed with context canceled" until it was restarted.
 func (e *engine) snapshot(ctx context.Context) ([]byte, uint32, error) {
-	e.dynOnce.Do(func() {
-		e.dynSnap, e.dynPages, e.dynErr = buildSnapshot(ctx, e.cache)
-	})
-	return e.dynSnap, e.dynPages, e.dynErr
+	e.dynMu.Lock()
+	defer e.dynMu.Unlock()
+	if e.dynSnap != nil {
+		return e.dynSnap, e.dynPages, nil
+	}
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotTimeout)
+	defer cancel()
+	snap, pages, err := buildSnapshot(bctx, e.cache)
+	if err != nil {
+		return nil, 0, err
+	}
+	e.dynSnap, e.dynPages = snap, pages
+	return snap, pages, nil
 }
 
 // buildSnapshot instantiates the plugin with the SharedConfig on stdin, runs
