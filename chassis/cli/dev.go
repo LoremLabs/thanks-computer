@@ -592,12 +592,14 @@ Flags:
 			if v, ok := os.LookupEnv("TXCO_MAIL_RELAY_ADDR"); ok && v != "" {
 				relay = v
 			}
-			fmt.Fprintf(stdout, "[txco]   lmtp head: %s → relay %s (run MailHog/Mailpit for the sink)\n", devLMTPListenAddr, relay)
-			fmt.Fprintf(stdout, "[txco]        test: swaks --protocol LMTP --server localhost%s --to you@<host>\n", devLMTPListenAddr)
+			lmtpAddr := devAddr("TXCO_LMTP_LISTEN_ADDRS", devLMTPListenAddr)
+			fmt.Fprintf(stdout, "[txco]   lmtp head: %s → relay %s (run MailHog/Mailpit for the sink)\n", lmtpAddr, relay)
+			fmt.Fprintf(stdout, "[txco]        test: swaks --protocol LMTP --server localhost%s --to you@<host>\n", lmtpAddr)
 		}
 		if *imapHead {
 			certPath := filepath.Join(dir, ".txco", "dev", "imap-selfsigned.crt")
-			fmt.Fprintf(stdout, "[txco]   imap head: %s (STARTTLS) and %s (IMAPS), self-signed certificate at %s\n", devIMAPListenAddr, devIMAPTLSAddr, certPath)
+			fmt.Fprintf(stdout, "[txco]   imap head: %s (STARTTLS) and %s (IMAPS), self-signed certificate at %s\n",
+				devAddr("TXCO_IMAP_LISTEN_ADDRS", devIMAPListenAddr), devAddr("TXCO_IMAP_TLS_ADDRS", devIMAPTLSAddr), certPath)
 			fmt.Fprintln(stdout, "[txco]        trust it once so mail clients connect without a warning (macOS):")
 			fmt.Fprintf(stdout, "[txco]          security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n", certPath)
 			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://imap/account\" WITH username = \"you@<bound-host>\"`, then add the account in Mail/Thunderbird:")
@@ -1208,6 +1210,27 @@ type chassisOpts struct {
 // parent environment have been applied.
 type chassisAddrs struct {
 	Admin, Web, TCP, DNS string
+	// LMTP, IMAP and IMAPTLS are the mail heads' listeners: the dev
+	// defaults, or what the parent environment names (TXCO_LMTP_LISTEN_ADDRS,
+	// TXCO_IMAP_LISTEN_ADDRS, TXCO_IMAP_TLS_ADDRS), as the flags' help
+	// promises — so a second dev loop on one machine takes other ports.
+	LMTP, IMAP, IMAPTLS string
+}
+
+func orDefault(v, dflt string) string {
+	if strings.TrimSpace(v) == "" {
+		return dflt
+	}
+	return v
+}
+
+// devAddr is the dev default for a head's listener unless the parent
+// environment names another.
+func devAddr(envKey, dflt string) string {
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return v
+	}
+	return dflt
 }
 
 // startChassis spawns a chassis subprocess pointed at a per-workspace
@@ -1270,16 +1293,22 @@ func startChassis(ctx context.Context, o chassisOpts) (adminURL, webURL string, 
 			return "", "", err
 		}
 	}
+	// The mail heads' listeners: the dev defaults, or the parent's (a
+	// second dev loop beside the first, on other ports). One address each,
+	// so the free-port precheck still applies.
+	imapAddr := devAddr("TXCO_IMAP_LISTEN_ADDRS", devIMAPListenAddr)
+	imapTLSAddr := devAddr("TXCO_IMAP_TLS_ADDRS", devIMAPTLSAddr)
+	lmtpAddr := devAddr("TXCO_LMTP_LISTEN_ADDRS", devLMTPListenAddr)
 	if o.Heads.IMAP {
-		if err := requirePortFree(devIMAPListenAddr, "IMAP head"); err != nil {
+		if err := requirePortFree(imapAddr, "IMAP head"); err != nil {
 			return "", "", err
 		}
-		if err := requirePortFree(devIMAPTLSAddr, "IMAPS head"); err != nil {
+		if err := requirePortFree(imapTLSAddr, "IMAPS head"); err != nil {
 			return "", "", err
 		}
 	}
 	if o.Heads.LMTP {
-		if err := requirePortFree(devLMTPListenAddr, "LMTP inlet"); err != nil {
+		if err := requirePortFree(lmtpAddr, "LMTP inlet"); err != nil {
 			return "", "", err
 		}
 	}
@@ -1288,7 +1317,7 @@ func startChassis(ctx context.Context, o chassisOpts) (adminURL, webURL string, 
 	// known repo-relative path.
 	schemaDir := findSchemaDir(o.Workspace)
 
-	env, _ := chassisEnv(o, chassisAddrs{Admin: adminAddr, Web: webAddr, TCP: tcpAddr, DNS: dnsAddr},
+	env, _ := chassisEnv(o, chassisAddrs{Admin: adminAddr, Web: webAddr, TCP: tcpAddr, DNS: dnsAddr, LMTP: lmtpAddr, IMAP: imapAddr, IMAPTLS: imapTLSAddr},
 		devDir, schemaDir, os.LookupEnv)
 
 	// Disable basic auth in dev (chassis emits a WARN at boot).
@@ -1397,7 +1426,7 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 	}
 	if o.Heads.LMTP {
 		heads = append(heads, "lmtp")
-		env = append(env, "TXCO_LMTP_LISTEN_ADDRS="+devLMTPListenAddr)
+		env = append(env, "TXCO_LMTP_LISTEN_ADDRS="+orDefault(a.LMTP, devLMTPListenAddr))
 	}
 	if o.Heads.Scheduled {
 		heads = append(heads, "scheduled")
@@ -1417,8 +1446,8 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 	}
 	if o.Heads.IMAP {
 		heads = append(heads, "imap")
-		env = append(env, "TXCO_IMAP_LISTEN_ADDRS="+devIMAPListenAddr)
-		env = append(env, "TXCO_IMAP_TLS_ADDRS="+devIMAPTLSAddr)
+		env = append(env, "TXCO_IMAP_LISTEN_ADDRS="+orDefault(a.IMAP, devIMAPListenAddr))
+		env = append(env, "TXCO_IMAP_TLS_ADDRS="+orDefault(a.IMAPTLS, devIMAPTLSAddr))
 		env = append(env, "TXCO_IMAP_DB_PATH="+filepath.Join(devDir, "imap.db"))
 	}
 	if o.Heads.Calendar {
