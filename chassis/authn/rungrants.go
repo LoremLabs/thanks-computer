@@ -109,9 +109,11 @@ type RunGrant struct {
 	// Allow is what the work may be handed: every secret its sandboxes
 	// name, and anything the minter allowed by name.
 	Allow []Resource
-	// Sandboxes is what the work may OPEN, by name: sandbox → variable →
-	// reference (`secret:NAME`), snapshotted at mint from the minting
-	// stack's declarations (chassis/sandbox).
+	// Sandboxes is what the work may OPEN, by name: sandbox → entry →
+	// value, snapshotted at mint from the minting stack's declarations
+	// (chassis/sandbox Decl.Entries): a variable → its reference
+	// (`secret:NAME`, `connection:<provider>`), `file:<path>` → its
+	// reference, `dotenv:<path>` → "env".
 	Sandboxes   map[string]map[string]string
 	BudgetCalls int64
 	SpentCalls  int64
@@ -226,13 +228,17 @@ func parseAllow(in []string, sandboxes map[string]map[string]string) ([]Resource
 	}
 	for _, name := range sortedKeys(sandboxes) {
 		for _, v := range sortedKeys(sandboxes[name]) {
+			if ek, _, _ := sandbox.ParseEntry(v); ek == sandbox.EntryDotenv {
+				// The variables, again, as one file: nothing of its own.
+				continue
+			}
 			kind, sname, err := sandbox.ParseRef(sandboxes[name][v])
 			if err != nil {
-				return nil, invalid("sandbox %s: env.%s: %v", name, v, err)
+				return nil, invalid("sandbox %s: %s: %v", name, v, err)
 			}
 			res, err := NewResource(ResourceKind(kind), sname)
 			if err != nil {
-				return nil, invalid("sandbox %s: env.%s: %v", name, v, err)
+				return nil, invalid("sandbox %s: %s: %v", name, v, err)
 			}
 			add(res)
 		}
@@ -260,15 +266,12 @@ func checkSandboxes(in map[string]map[string]string) error {
 		}
 		// A sandbox that only names capabilities sets no variable: what it
 		// allows is in the allowlist, and opening it hands over nothing.
-		if len(env) > sandbox.MaxEnv {
-			return invalid("sandbox %s: sets %d variables, at most %d", name, len(env), sandbox.MaxEnv)
+		if len(env) > sandbox.MaxEnv+sandbox.MaxFiles+1 {
+			return invalid("sandbox %s: has %d entries, at most %d", name, len(env), sandbox.MaxEnv+sandbox.MaxFiles+1)
 		}
 		for v, ref := range env {
-			if !sandbox.ValidVar(v) {
-				return invalid("sandbox %s: %q is not a variable a sandbox may set", name, v)
-			}
-			if _, _, err := sandbox.ParseRef(ref); err != nil {
-				return invalid("sandbox %s: env.%s: %v", name, v, err)
+			if err := sandbox.CheckEntry(v, ref); err != nil {
+				return invalid("sandbox %s: %v", name, err)
 			}
 		}
 	}

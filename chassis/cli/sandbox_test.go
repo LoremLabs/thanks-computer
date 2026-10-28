@@ -32,14 +32,15 @@ func newSandboxRig(t *testing.T, environ ...string) *sandboxRig {
 	t.Cleanup(func() {
 		sandboxOpen, sandboxExec, sandboxLook, sandboxEnviron, sandboxGetenv = oldOpen, oldExec, oldLook, oldEnviron, oldGetenv
 	})
-	sandboxOpen = func(_ context.Context, socket string, req grantwire.Request) (map[string][]byte, error) {
+	sandboxOpen = func(_ context.Context, socket string, req grantwire.Request) (grantwire.Opened, error) {
 		r.asks = append(r.asks, req)
 		r.sockets = append(r.sockets, socket)
 		if r.answer == nil {
 			// Every sandbox sets one variable named for it, in upper case.
-			return map[string][]byte{strings.ToUpper(req.Sandbox) + "_TOKEN": []byte("value-of-" + req.Sandbox)}, nil
+			return grantwire.Opened{Env: map[string][]byte{strings.ToUpper(req.Sandbox) + "_TOKEN": []byte("value-of-" + req.Sandbox)}}, nil
 		}
-		return r.answer(req)
+		env, err := r.answer(req)
+		return grantwire.Opened{Env: env}, err
 	}
 	sandboxExec = func(path string, argv, env []string) error {
 		r.started, r.path, r.argv, r.env = true, path, argv, env
@@ -238,12 +239,12 @@ func TestSandboxCommandLine(t *testing.T) {
 		}
 	}
 	r := newSandboxRig(t, grantEnviron...)
-	if code, stdout, _ := runSandboxIn("--help"); code != 0 || !strings.Contains(stdout, "Usage: txco sandbox") || r.started {
+	if code, stdout, _ := runSandboxIn("--help"); code != 0 || !strings.Contains(stdout, "txco sandbox serve [--parent URL]") || r.started {
 		t.Errorf("--help: exit %d, stdout %q", code, stdout)
 	}
 	// It is a built-in, so no plugin and no chassis is asked about it.
 	var out, errb bytes.Buffer
-	if code, ok := Dispatch([]string{"txco", "sandbox", "--help"}, &out, &errb); !ok || code != 0 || !strings.Contains(out.String(), "Usage: txco sandbox") {
+	if code, ok := Dispatch([]string{"txco", "sandbox", "--help"}, &out, &errb); !ok || code != 0 || !strings.Contains(out.String(), "txco sandbox serve [--parent URL]") {
 		t.Errorf("dispatch: exit %d ok=%v out %q", code, ok, out.String())
 	}
 }

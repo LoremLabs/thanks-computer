@@ -210,6 +210,7 @@ is a package on the default registry ([sharing stacks](../packages.md)).
 | `txco auth tenant hostnames {add,attach,verify,challenge,list,remove}` | Hostname bindings ([ingress](../routing.md)) |
 | `txco auth tenant secrets {set,generate,list,show,describe,policy,rotate,revoke}` | ([Secret store](./runbook-secret-store.md)); `policy NAME --pull none\|reviewed\|any` says whether dispatched work may be handed the secret ([grants](./grants.md#the-pull-policy)) |
 | `txco sandbox NAME [NAME…] -- PROGRAM` | Inside a workspace: start a program inside named sandboxes, opened with the command's run grant ([grants](./grants.md#txco-sandbox)) |
+| `txco sandbox serve [--pid FILE] NAME [NAME…]` | Inside a workspace: serve the sandboxes' files (named pipes, each read asked for and logged) until stopped or the grant ends ([grants](./grants.md#txco-sandbox-serve)) |
 | `txco auth login` (alias `txco ui`) | Mint a signed browser session, open the admin UI |
 | `txco auth sessions {list,revoke}` / `logout` | Browser sessions / stop signing |
 | `txco login` / `logout` / `cloud {…}` | **Cloud** account OAuth — distinct from `auth login`, which targets your own chassis |

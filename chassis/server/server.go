@@ -2315,8 +2315,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		}
 		decide, _ := time.ParseDuration(conf.GrantDecideTimeout)
 		window, _ := time.ParseDuration(conf.GrantRefusalWindow)
-		grantGateway = grantgw.New(ctx, pu, identityStore, runSigner,
-			grantgw.Config{DecideTimeout: decide, RefusalWindow: window})
+		gcfg := grantgw.Config{DecideTimeout: decide, RefusalWindow: window}
+		if connSvc != nil {
+			// A sandbox's connection:<provider> releases the principal's
+			// token through the same service the https op uses.
+			gcfg.Connections = connSvc
+		}
+		grantGateway = grantgw.New(ctx, pu, identityStore, runSigner, gcfg)
 		pu.Grants = grantGateway
 	}
 
@@ -2734,6 +2739,9 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// gateway to decide (an identity store).
 	if grantGateway != nil {
 		webCtrl.SetCapGateway(capgw.New(ctx, pu, grantGateway, capDecls).Handle)
+		// …and the sandbox inlet beside it (POST /v1/sandbox/{name}): a
+		// command on another machine opens a sandbox with the same token.
+		webCtrl.SetSandboxGateway(grantGateway.HandleSandbox)
 	}
 
 	// The serving half of txco://drive/sign. Mounted only when this node can

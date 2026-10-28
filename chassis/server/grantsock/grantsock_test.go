@@ -88,7 +88,7 @@ func TestTheLauncherAsksOverTheSocket(t *testing.T) {
 		t.Errorf("the gateway was told %q, the socket is %q", gw.served(), c.Path())
 	}
 
-	env, err := grantwire.Open(ctx, c.Path(), grantwire.Request{Token: "rg1.a.b", Sandbox: "github"})
+	env, err := openEnv(ctx, c.Path(), grantwire.Request{Token: "rg1.a.b", Sandbox: "github"})
 	if err != nil || string(env["V"]) != "value-of-github" || len(env) != 1 {
 		t.Fatalf("open: %q err=%v", env, err)
 	}
@@ -100,23 +100,23 @@ func TestTheLauncherAsksOverTheSocket(t *testing.T) {
 	}
 
 	// A value is bytes: it survives whatever it holds, and its size.
-	if env, err := grantwire.Open(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "binary"}); err != nil ||
+	if env, err := openEnv(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "binary"}); err != nil ||
 		string(env["B"]) != "\x00\x01\x02\n\xff\"\\" {
 		t.Errorf("binary: %q err=%v", env, err)
 	}
-	if env, err := grantwire.Open(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "big"}); err != nil || len(env["K"]) != 1<<20 {
+	if env, err := openEnv(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "big"}); err != nil || len(env["K"]) != 1<<20 {
 		t.Errorf("a megabyte: %d bytes err=%v", len(env["K"]), err)
 	}
-	if env, err := grantwire.Open(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "two"}); err != nil || string(env["A"]) != "a" || string(env["B"]) != "b" {
+	if env, err := openEnv(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "two"}); err != nil || string(env["A"]) != "a" || string(env["B"]) != "b" {
 		t.Errorf("two variables: %q err=%v", env, err)
 	}
 
-	if _, err := grantwire.Open(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "refused"}); !errors.Is(err, grantwire.ErrRefused) {
+	if _, err := openEnv(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "refused"}); !errors.Is(err, grantwire.ErrRefused) {
 		t.Errorf("refused: %v", err)
 	} else if strings.Contains(err.Error(), "pull") {
 		t.Errorf("the refusal says why: %v", err)
 	}
-	if _, err := grantwire.Open(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "down"}); !errors.Is(err, grantwire.ErrUnavailable) {
+	if _, err := openEnv(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "down"}); !errors.Is(err, grantwire.ErrUnavailable) {
 		t.Errorf("unavailable: %v", err)
 	} else if strings.Contains(err.Error(), "secret store") {
 		t.Errorf("the failure says what failed inside the chassis: %v", err)
@@ -128,7 +128,7 @@ func TestTheLauncherAsksOverTheSocket(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if env, err := grantwire.Open(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "github"}); err != nil || string(env["V"]) != "value-of-github" {
+			if env, err := openEnv(ctx, c.Path(), grantwire.Request{Token: "t", Sandbox: "github"}); err != nil || string(env["V"]) != "value-of-github" {
 				t.Errorf("concurrent open: %q err=%v", env, err)
 			}
 		}()
@@ -211,7 +211,7 @@ func TestTheSocketIsThisUsersAlone(t *testing.T) {
 		t.Errorf("a second listener: %v", err)
 	}
 	// …and the first still answers.
-	if env, err := grantwire.Open(context.Background(), c.Path(), grantwire.Request{Token: "t", Sandbox: "x"}); err != nil || string(env["V"]) != "value-of-x" {
+	if env, err := openEnv(context.Background(), c.Path(), grantwire.Request{Token: "t", Sandbox: "x"}); err != nil || string(env["V"]) != "value-of-x" {
 		t.Errorf("after a refused second listener: %q err=%v", env, err)
 	}
 
@@ -223,7 +223,7 @@ func TestTheSocketIsThisUsersAlone(t *testing.T) {
 	if gw.served() != "" {
 		t.Errorf("the gateway still hands out %q", gw.served())
 	}
-	if _, err := grantwire.Open(context.Background(), c.Path(), grantwire.Request{Token: "t", Sandbox: "x"}); !errors.Is(err, grantwire.ErrUnavailable) {
+	if _, err := openEnv(context.Background(), c.Path(), grantwire.Request{Token: "t", Sandbox: "x"}); !errors.Is(err, grantwire.ErrUnavailable) {
 		t.Errorf("asking a stopped chassis: %v", err)
 	}
 
@@ -240,7 +240,7 @@ func TestTheSocketIsThisUsersAlone(t *testing.T) {
 	}
 	third.Start()
 	defer third.Stop()
-	if env, err := grantwire.Open(context.Background(), c.Path(), grantwire.Request{Token: "t", Sandbox: "x"}); err != nil || string(env["V"]) != "value-of-x" {
+	if env, err := openEnv(context.Background(), c.Path(), grantwire.Request{Token: "t", Sandbox: "x"}); err != nil || string(env["V"]) != "value-of-x" {
 		t.Errorf("over a stale socket: %q err=%v", env, err)
 	}
 }
@@ -273,4 +273,10 @@ func TestWhatCannotBeASocket(t *testing.T) {
 	if a == b || a != DefaultPath("/srv/a/data") || filepath.Base(a) != "g.sock" || len(a) > grantwire.MaxSocketPath {
 		t.Errorf("default paths: %q %q", a, b)
 	}
+}
+
+// openEnv is grantwire.Open's values alone.
+func openEnv(ctx context.Context, socket string, req grantwire.Request) (map[string][]byte, error) {
+	o, err := grantwire.Open(ctx, socket, req)
+	return o.Env, err
 }

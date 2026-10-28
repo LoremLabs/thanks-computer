@@ -65,6 +65,10 @@ type WebController struct {
 	// calls back with its run grant. Nil ⇒ the path falls through to the
 	// catch-all like any other request.
 	capHandler http.HandlerFunc
+	// sandboxHandler, when set (via SetSandboxGateway), serves POST
+	// /v1/sandbox/{name}: a program on another machine opening a sandbox
+	// with its run grant (chassis/server/grantgw HandleSandbox).
+	sandboxHandler http.HandlerFunc
 
 	// signedHandler, when set (via SetSignedHandler), serves GET/HEAD
 	// /_txc/signed/<token>: the by-reference read of one drive document
@@ -113,6 +117,9 @@ func (web *WebController) SetLLMGateway(messages, countTokens http.HandlerFunc) 
 // SetCapGateway wires the capability inlet's handler onto POST
 // /v1/cap/{name}. Call before Start.
 func (web *WebController) SetCapGateway(h http.HandlerFunc) { web.capHandler = h }
+
+// SetSandboxGateway mounts the network form of `txco sandbox`.
+func (web *WebController) SetSandboxGateway(h http.HandlerFunc) { web.sandboxHandler = h }
 
 // SetSignedHandler wires the signed-URL endpoint onto GET/HEAD
 // /_txc/signed/<token>. Call before Start. The token is the whole
@@ -347,6 +354,11 @@ func (web *WebController) Start() {
 			// inlet shapes its own JSON answers.
 			if web.capHandler != nil {
 				r.Path("/v1/cap/{name}").HandlerFunc(web.capHandler).Methods(http.MethodPost)
+			}
+			// The sandbox inlet beside it: a program on another machine
+			// opening a sandbox (or one file of it) with its run grant.
+			if web.sandboxHandler != nil {
+				r.Path("/v1/sandbox/{name}").HandlerFunc(web.sandboxHandler).Methods(http.MethodPost)
 			}
 
 			// Host-claimed personalities (ipp: `ipp.<zone>`): the whole

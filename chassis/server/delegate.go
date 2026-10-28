@@ -266,11 +266,7 @@ func (c identityCall) sandboxesParam(ctx context.Context, decls sandboxDecls, st
 		case err != nil:
 			return nil, nil, c.err("store", err.Error()), false
 		}
-		env := make(map[string]string, len(d.Env))
-		for v, ref := range d.Env {
-			env[v] = ref
-		}
-		out[name] = env
+		out[name] = d.Entries()
 		capabilities = append(capabilities, d.CapabilityNames()...)
 	}
 	return out, capabilities, event.Payload{}, true

@@ -311,7 +311,7 @@ var cliCommandTree = []node{
 		"watch", "watch-ignore", "apply", "force-opstacks", "verbose",
 	}},
 	{Name: "demo", Desc: "Start the txcl learning environment"},
-	{Name: "sandbox", Desc: "Start a program inside named sandboxes, opened with its run grant (inside a workspace)"},
+	{Name: "sandbox", Desc: "Start a program inside named sandboxes, or serve their files (sandbox serve), with its run grant (inside a workspace)"},
 	{Name: "trace", Desc: "Inspect request traces"},
 	{Name: "snapshot", Desc: "Snapshot subcommands", Children: snapshotChildren},
 	{Name: "auth", Desc: "Auth + identity management", Children: authChildren},

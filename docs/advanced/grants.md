@@ -14,13 +14,14 @@ chassis, and sandboxes say what it holds._
        │
    run grant             may open the sandboxes github, postgres       txco://delegate/mint
        │
-  ┌────┴──────────────────────────────┐
-  │ exec WITH grant, sandbox = github │ the chassis opens it, then starts the command
-  │ txco sandbox github -- gh pr list │ the program asks its chassis to open it
-  └────┬──────────────────────────────┘
-       │ one request per secret, decided by the tenant's _grant stack
+  ┌────┴─────────────────────────────────┐
+  │ exec WITH grant, sandbox = github    │ the chassis opens it, then starts the command
+  │ txco sandbox github -- gh pr list    │ the program asks its chassis to open it
+  │ txco sandbox serve github --pid p    │ its files, served until stopped
+  └────┬─────────────────────────────────┘
+       │ one request per value, decided by the tenant's _grant stack
        ▼
-   PROGRAM     GH_TOKEN=…      authority stops here
+   PROGRAM     GH_TOKEN=…   ~/.ssh/id_ed25519   run.env      authority stops here
 ```
 
 | To | Read |
@@ -31,6 +32,7 @@ chassis, and sandboxes say what it holds._
 | Say what one piece of work may open | [Run grants](#run-grants) |
 | Start a command inside a sandbox | [Opening a sandbox for a command](#opening-a-sandbox-for-a-command) |
 | Let a program open one itself | [`txco sandbox`](#txco-sandbox) |
+| Serve a sandbox's files to a whole machine | [`txco sandbox serve`](#txco-sandbox-serve) |
 | Decide which requests are allowed | [What decides a request](#what-decides-a-request) |
 | Let dispatched work ask this chassis to do something | [Capabilities](./capabilities.md) |
 | Turn it on | [Turning it on](#turning-it-on) |
@@ -38,7 +40,7 @@ chassis, and sandboxes say what it holds._
 ## Who ends up holding what
 
 **The secret goes to the program, in cleartext,** as the value of a
-variable the sandbox names. It goes nowhere else.
+variable the sandbox names, or as a file it serves. It goes nowhere else.
 
 | | holds | never holds |
 |---|---|---|
@@ -158,15 +160,21 @@ description: what a deploy step holds     # optional
 env:
   GH_TOKEN: secret:GITHUB_PAT             # VARIABLE: reference
   GH_HOST:  secret:GH_ENTERPRISE_HOST
+  GITHUB:   connection:github             # the principal's own token at a provider
+files:
+  ~/.ssh/id_ed25519: secret:DEPLOY_KEY    # path: reference, served as a file
+dotenv: run.env                           # the env entries, also as a file
 ```
 
 | | |
 |---|---|
 | **The name** | The file's stem: `[a-z][a-z0-9_-]*`, at most 64. It appears in `allow`, in `WITH sandbox`, on the command line. |
-| **`env`** | Each entry sets one variable to one secret. A variable is `[A-Za-z_][A-Za-z0-9_]*`; a reference is `secret:<NAME>`. One secret may fill several variables. A name starting `TXCO_` is the chassis's own. At most 32. |
+| **`env`** | Each entry sets one variable to one value. A variable is `[A-Za-z_][A-Za-z0-9_]*`. A reference is `secret:<NAME>`, a tenant secret, or `connection:<provider>`, the principal's current token at that provider ([connections](#a-connection-as-a-value)). One secret may fill several variables. A name starting `TXCO_` is the chassis's own. At most 32. |
+| **`files`** | Each entry serves one value as a file: the whole value, so a multi-line key is a file, not a variable. A path is relative to the directory it is served in, or under `~/`; its parts are letters, digits and `. _ @ + -`, never `.` or `..`. At most 8. |
+| **`dotenv`** | A path at which the `env` entries are also served, as `NAME=value` lines, for a program that reads a `.env` file. |
 | **`capabilities`** | A list of [capability](./capabilities.md) names a run whose grant names this sandbox may call on this chassis: `crm.lookup`, `mail.send`. Nothing is handed over for one; each call is decided when it is made. At most 32. |
 | **`description`** | Optional, for whoever reads the file. |
-| **`env` or `capabilities`** | At least one. A sandbox may set variables, name capabilities, or both. |
+| **`env`, `files` or `capabilities`** | At least one. |
 | **Anything else** | A deploy error. Only what the chassis enforces is declared. |
 
 - **It deploys with the stack.** `txco apply` uploads it, `txco lint` and
@@ -182,12 +190,36 @@ env:
   on its own, in the trace on its own, charged on its own. One refused, and
   the program is handed nothing; what was already released is discarded and
   what was charged stays charged.
-- **The `_grant` stack sees which sandbox and which variable**
-  (`@grant.sandbox`, `@grant.env`) beside the secret's name, so a rule may
-  allow a secret through one sandbox and refuse it through another.
+- **The `_grant` stack sees which sandbox and which variable or file**
+  (`@grant.sandbox`, `@grant.env`, `@grant.file`) beside the secret's name,
+  so a rule may allow a secret through one sandbox and refuse it through
+  another.
+- **A file is asked for when it is read.** Each open of a served file is
+  one request, at that moment: the store's current version, a
+  connection's token renewed when due. Nothing is held between reads.
 
-`files:` and `network:` are not declared yet: a sandbox holds only what the
-chassis enforces.
+`network:` is not declared yet: a sandbox holds only what the chassis
+enforces.
+
+### A connection as a value
+
+`connection:<provider>` hands over the principal's own token at a provider
+it connected (a connection: its identity at an outside service, signed in
+through `txco://connection/start` and declared by `PROVIDERS/<provider>.yaml`),
+renewed when it is due —
+the same token a capability's `https` call carries, given to the program
+instead. Three things must say yes:
+
+- **The provider names the sandbox** as a consumer of the stack that
+  declares it: `consumers: {loop: [sandbox:github]}` in
+  `PROVIDERS/github.yaml`.
+- **The principal holds a standing grant on it:**
+  `txco://grant/put WITH kind = "connection", name = "github"`.
+- **The tenant's `_grant` stack,** with `@grant.kind == "connection"` and
+  `@grant.connection.status` (`ok`, or why not: `missing`, `reconnect`).
+
+There is no destination check: the token is meant to leave for the
+machine the program runs on. A connection has no pull policy.
 
 ## Standing grants
 
@@ -382,6 +414,11 @@ The command also gets what it needs to present itself at run time:
 | `grant_unavailable` | This node opened no identity store |
 | `bad_request` | `grant` is not a run grant's id; `sandbox` is not a name or a list of them, or is given without `grant`; `grant` names no sandbox on a provider whose commands cannot reach this chassis (nothing would be handed over); or `grant` is combined with `stream` or a verb that runs no command |
 
+A sandbox that serves files is refused here (`grant_refused`, saying so):
+an exec can only set the command's environment. Serve its files on the
+machine with [`txco sandbox serve`](#txco-sandbox-serve), or start the
+program with `txco sandbox NAME -- PROGRAM`.
+
 ## `txco sandbox`
 
 ```sh
@@ -390,9 +427,17 @@ The command also gets what it needs to present itself at run time:
 ```
 
 `txco sandbox` asks the chassis to open each named sandbox, with the token
-this command was started with, then becomes the program. It is for a
-program that decides on its own when it needs what: an agent loop, a
-script with many steps. It needs the `grant` personality on the chassis.
+this command was started with, and starts the program with their
+variables. It is for a program that decides on its own when it needs what:
+an agent loop, a script with many steps. It reaches the chassis over the
+`grant` personality's socket on the chassis's own machine, or over HTTPS
+from another (`--parent URL`, else `TXCO_PARENT_URL`).
+
+- **Without files it becomes the program,** as it always has.
+- **With files it stays the program's parent:** it serves the files while
+  the program runs, forwards its signals, exits with its code and removes
+  the files after. Relative paths are under `--dir` (the current
+  directory by default).
 
 - **The `--` is required.** A program's name is as good a sandbox name as
   any.
@@ -406,7 +451,36 @@ script with many steps. It needs the `grant` personality on the chassis.
 | `69` | The chassis could not be asked, or could not decide |
 | `65` | A value holds a NUL byte, which no variable can |
 | `126`, `127` | The program could not be started, or was not found |
+| `73` | A file to serve could not be made (a regular file is at its path) |
 | `2` | The command line, or two sandboxes that set one variable |
+
+## `txco sandbox serve`
+
+```sh
+setsid "$BIN" sandbox serve --pid /var/lib/txco/run.pid github </dev/null >>serve.log 2>&1 &
+. ./run.env; git push        # each read is asked for, decided and logged
+kill "$(cat /var/lib/txco/run.pid)"
+```
+
+`serve` serves the sandboxes' files to anything on the machine, with no
+program of its own, until SIGTERM or SIGINT, or until the run's grant
+ends. It asks only which files at start; nothing is released until a read.
+
+- **Each file is a named pipe, mode 0600.** Each open asks the chassis for
+  the value at that moment and writes it once; the pipe is then re-armed
+  for the next reader. A reader that is still reading keeps its own copy.
+- **Each read is one request** to the `_grant` stack, one charge to the
+  budget, and one line in this command's log (time, sandbox, file, never a
+  value).
+- **A pipe is not a file in every way.** A size check (`test -s`) sees it
+  empty, a seek fails, and nothing can write to it. Some shells cannot
+  source one (`.` in bash 3.2 reads nothing; dash and bash 4 and later can):
+  read it with `cat` or `sed` where it matters. A regular file already
+  at a path is never replaced; a pipe a dead server left is.
+- **`--pid FILE`** writes the process id and removes it on exit. A pid file
+  that names a running process stops a second `serve`.
+- **When the grant ends** the next read is refused, `serve` finds the
+  grant gone, removes its files and exits 0.
 
 ### Whatever a command prints is in the trace
 
@@ -469,9 +543,11 @@ secret `any` only when its loss is tolerable.
 ## Turning it on
 
 The push form — `exec WITH grant, sandbox` — needs nothing turned on
-beyond a workspace provider. For `txco sandbox`, add the `grant`
-personality: the Unix socket a program on this machine reaches the chassis
-on.
+beyond a workspace provider. For `txco sandbox` on the chassis's own
+machine, add the `grant` personality: the Unix socket a program on this
+machine reaches the chassis on. From another machine it reaches the
+chassis over HTTPS, `POST /v1/sandbox/<name>` on the web head with the
+token in `Txco-Run-Grant`, wherever there is an identity store.
 
 ```sh
 txco dev --allow-local-workspace --grant
@@ -483,7 +559,8 @@ txco dev --allow-local-workspace --grant
   another machine ([workspaces](../workspaces.md#providers)). A command there
   cannot reach this machine's socket, so `exec WITH grant` gives it the run's
   name and the token (`TXCO_RUN_GRANT`) and nothing else, as on a fleet
-  provider; `txco sandbox` is not available to it.
+  provider; `txco sandbox` there reaches the chassis at its URL
+  (`--parent`, `TXCO_PARENT_URL`).
 - **Listed and unable to listen is fatal at boot.** A node that was meant to
   answer and silently does not is worse than one that will not start.
 

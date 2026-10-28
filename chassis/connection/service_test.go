@@ -204,6 +204,7 @@ pkce: true
 account: {url: %[1]s/user, subject: id, name: login}
 consumers:
   tools-api: [api.github.read]
+  loop: [sandbox:github]
 `, fp.srv.URL)))
 	if err != nil {
 		t.Fatal(err)
@@ -803,5 +804,63 @@ func TestParseTokenAnswer(t *testing.T) {
 	}
 	if got := classify(errors.New("read: connection reset")); got != outcomeUncertain {
 		t.Error("anything else is uncertain")
+	}
+}
+
+// TestReleaseForASandbox: a stack's sandbox the provider names as a
+// consumer is handed the principal's bare token, renewed when due; any other
+// sandbox, stack or principal is not, and a capability's consumer entry is
+// no sandbox's.
+func TestReleaseForASandbox(t *testing.T) {
+	r := newRig(t)
+	r.connect("service:pony-a")
+	in := ReleaseInput{Tenant: "acme", Stack: "loop", Provider: "github", Principal: "service:pony-a", Sandbox: "github"}
+	if err := r.svc.ReleaseCheck(r.ctx, in); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	tok, row, err := r.svc.Release(r.ctx, in)
+	if err != nil || tok != "at-1" || row.Generation != 1 {
+		t.Fatalf("release = %q %+v %v", tok, row, err)
+	}
+	// Expired: renewed, and the new token handed over.
+	r.clock.advance(200 * time.Second)
+	if tok, _, err = r.svc.Release(r.ctx, in); err != nil || tok != "at-2" {
+		t.Fatalf("after expiry = %q %v", tok, err)
+	}
+	for name, c := range map[string]struct {
+		mut  func(ReleaseInput) ReleaseInput
+		want string
+	}{
+		"another sandbox":         {func(i ReleaseInput) ReleaseInput { i.Sandbox = "deploy"; return i }, CodeDenied},
+		"another stack":           {func(i ReleaseInput) ReleaseInput { i.Stack = "helper"; return i }, CodeDenied},
+		"a capability's consumer": {func(i ReleaseInput) ReleaseInput { i.Stack = "tools-api"; return i }, CodeDenied},
+		"another principal":       {func(i ReleaseInput) ReleaseInput { i.Principal = "service:pony-b"; return i }, CodeMissing},
+		"no principal":            {func(i ReleaseInput) ReleaseInput { i.Principal = ""; return i }, CodeDenied},
+		"no sandbox":              {func(i ReleaseInput) ReleaseInput { i.Sandbox = ""; return i }, CodeDenied},
+		"another provider":        {func(i ReleaseInput) ReleaseInput { i.Provider = "slack"; return i }, CodeDenied},
+	} {
+		if _, _, err := r.svc.Release(r.ctx, c.mut(in)); err == nil || err.Code != c.want {
+			t.Errorf("%s: %v, want %s", name, err, c.want)
+		}
+		if err := r.svc.ReleaseCheck(r.ctx, c.mut(in)); err == nil || err.Code != c.want {
+			t.Errorf("%s (check): %v, want %s", name, err, c.want)
+		}
+	}
+	// A canary's stack is its base stack's.
+	in.Stack = "loop/canary"
+	if _, _, err := r.svc.Release(r.ctx, in); err != nil {
+		t.Errorf("canary stack: %v", err)
+	}
+}
+
+func TestSandboxConsumerParse(t *testing.T) {
+	base := "title: X\nkind: oauth2\ndestinations:\n  authorization: https://x.example/a\n  token: https://x.example/t\n  api: [https://api.x.example]\nclient_id: cid\nclient_secret: secret:S\naccount: {url: https://api.x.example/me, subject: id, name: login}\nconsumers:\n"
+	if _, err := ParseProvider([]byte(base + "  loop: [sandbox:github, api.x.read]\n")); err != nil {
+		t.Errorf("sandbox and capability consumers: %v", err)
+	}
+	for _, bad := range []string{"  loop: [sandbox:Git Hub]\n", "  loop: ['sandbox:']\n", "  loop: [sandbox:github, sandbox:github]\n"} {
+		if _, err := ParseProvider([]byte(base + bad)); err == nil {
+			t.Errorf("%q parsed", bad)
+		}
 	}
 }

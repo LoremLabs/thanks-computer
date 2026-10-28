@@ -63,18 +63,34 @@ const (
 	ErrorBadRequest  = "bad_request" // not a request this chassis understands
 )
 
-// Request is one ask: open a sandbox.
+// Request is one ask: open a sandbox. Entry is what of it: "" its
+// variables (to start a program); `file:<path>` one file it serves;
+// `dotenv:<path>` its variables for its dotenv file (chassis/sandbox
+// ParseEntry).
 type Request struct {
 	V       int    `json:"v"`
 	Token   string `json:"token"`
 	Sandbox string `json:"sandbox"`
+	Entry   string `json:"entry,omitempty"`
 }
 
 // Response is the answer.
 type Response struct {
 	OK    bool              `json:"ok"`
-	Env   map[string]string `json:"env,omitempty"` // variable → base64 (standard, padded)
+	Env   map[string]string `json:"env,omitempty"` // variable (or file:<path>) → base64 (standard, padded)
+	Serve []string          `json:"serve,omitempty"` // file:<path> and dotenv:<path>: what the sandbox serves as files
 	Error string            `json:"error,omitempty"`
+}
+
+// EntryList is the Request.Entry that asks only which files a sandbox
+// serves: nothing is released.
+const EntryList = "list"
+
+// Opened is what an open hands over: the values, and the files the
+// sandbox serves (paths only).
+type Opened struct {
+	Env   map[string][]byte
+	Serve []string
 }
 
 var (
@@ -85,17 +101,18 @@ var (
 )
 
 // Open asks the chassis listening on socket to open one sandbox and returns
-// what it hands over, variable → value. The error is ErrRefused, or wraps
+// what it hands over: variable (or file:<path>) → value, and the files it
+// serves. The error is ErrRefused, or wraps
 // ErrUnavailable with what went wrong between here and the chassis. The
 // caller owns the values and should overwrite them once they are handed on.
-func Open(ctx context.Context, socket string, req Request) (map[string][]byte, error) {
+func Open(ctx context.Context, socket string, req Request) (Opened, error) {
 	if socket == "" {
-		return nil, fmt.Errorf("%w: no socket", ErrUnavailable)
+		return Opened{}, fmt.Errorf("%w: no socket", ErrUnavailable)
 	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", socket)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return Opened{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	defer conn.Close()
 	if dl, ok := ctx.Deadline(); ok {
@@ -106,18 +123,24 @@ func Open(ctx context.Context, socket string, req Request) (map[string][]byte, e
 	req.V = Version
 	line, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return Opened{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	if _, err := conn.Write(append(line, '\n')); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return Opened{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	resp, err := ReadLine(bufio.NewReaderSize(conn, 64<<10), MaxResponse)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return Opened{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
+	return decodeResponse(resp)
+}
+
+// decodeResponse reads a Response: the values, ErrRefused, or
+// ErrUnavailable with why.
+func decodeResponse(resp []byte) (Opened, error) {
 	var out Response
 	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("%w: the chassis answered with something that is not a response", ErrUnavailable)
+		return Opened{}, fmt.Errorf("%w: the chassis answered with something that is not a response", ErrUnavailable)
 	}
 	switch {
 	case out.OK:
@@ -125,15 +148,15 @@ func Open(ctx context.Context, socket string, req Request) (map[string][]byte, e
 		for v, enc := range out.Env {
 			value, err := base64.StdEncoding.DecodeString(enc)
 			if err != nil {
-				return nil, fmt.Errorf("%w: the chassis answered with a value that does not decode", ErrUnavailable)
+				return Opened{}, fmt.Errorf("%w: the chassis answered with a value that does not decode", ErrUnavailable)
 			}
 			env[v] = value
 		}
-		return env, nil
+		return Opened{Env: env, Serve: out.Serve}, nil
 	case out.Error == ErrorRefused:
-		return nil, ErrRefused
+		return Opened{}, ErrRefused
 	}
-	return nil, fmt.Errorf("%w: %s", ErrUnavailable, strings.TrimSpace(out.Error))
+	return Opened{}, fmt.Errorf("%w: %s", ErrUnavailable, strings.TrimSpace(out.Error))
 }
 
 // ReadLine reads one line of at most max bytes, without its newline. A line

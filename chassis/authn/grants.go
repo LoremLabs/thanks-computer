@@ -37,6 +37,11 @@ const (
 	// ResourceSecret is a tenant secret, by name; its verb is VerbRelease:
 	// the secret itself may be handed to the principal's work.
 	ResourceSecret ResourceKind = "secret"
+	// ResourceConnection is the principal's own connection at a provider,
+	// by the provider's name (chassis/connection); its verb is VerbRelease:
+	// the connection's current token may be handed to the principal's work
+	// (a sandbox's `connection:<provider>`).
+	ResourceConnection ResourceKind = "connection"
 )
 
 // The verbs built.
@@ -73,6 +78,12 @@ var resourceRules = map[ResourceKind]resourceRule{
 		verbs: []string{VerbRelease},
 		want:  "a secret name: a letter, then letters, digits and _ (1-128 chars)",
 	},
+	ResourceConnection: {
+		// chassis/connection's provider name grammar.
+		name:  regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`),
+		verbs: []string{VerbRelease},
+		want:  "a provider name: a lowercase letter, then lowercase letters, digits, _ and - (1-64 chars)",
+	},
 }
 
 // Resource names one thing a grant covers.
@@ -103,7 +114,7 @@ func (r Resource) Verb() string {
 func NewResource(kind ResourceKind, name string) (Resource, error) {
 	rule, ok := resourceRules[kind]
 	if !ok {
-		return Resource{}, fmt.Errorf("resource kind %q: want %q or %q", kind, ResourceCapability, ResourceSecret)
+		return Resource{}, fmt.Errorf("resource kind %q: want %q, %q or %q", kind, ResourceCapability, ResourceSecret, ResourceConnection)
 	}
 	name = strings.TrimSpace(name)
 	if !rule.name.MatchString(name) {

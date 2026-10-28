@@ -456,6 +456,78 @@ type UseInput struct {
 	URL        *url.URL
 }
 
+// ReleaseInput is one sandbox entry that names this provider
+// (`connection:<provider>`): whose connection, by which stack's sandbox.
+// Every field is the run grant's own, never the asking program's.
+type ReleaseInput struct {
+	Tenant    string // slug
+	Stack     string // the stack whose SANDBOXES/ declares the sandbox
+	Provider  string
+	Principal string
+	Sandbox   string
+}
+
+// ReleaseCheck answers whether the principal holds a connection this
+// stack's sandbox may release, without renewing or reading its material:
+// what the grant gateway shows the tenant's rules before it decides. A
+// nil error: release would find it.
+func (s *Service) ReleaseCheck(ctx context.Context, in ReleaseInput) *Error {
+	_, _, _, e := s.releaseRow(ctx, in)
+	return e
+}
+
+// Release hands over the principal's current token at the provider for a
+// sandbox, renewing it when due: the bare token, for the work that opened
+// the sandbox to hold. The provider must name the stack's sandbox as a
+// consumer (`<stack>: [sandbox:<name>]`). There is no destination check:
+// the token is meant to leave for the machine the work runs on.
+func (s *Service) Release(ctx context.Context, in ReleaseInput) (string, Row, *Error) {
+	declStack, p, row, e := s.releaseRow(ctx, in)
+	if e != nil {
+		return "", Row{}, e
+	}
+	access, row, uerr := s.current(ctx, in.Tenant, declStack, p, row)
+	if uerr != nil {
+		return "", Row{}, uerr
+	}
+	return access, row, nil
+}
+
+func (s *Service) releaseRow(ctx context.Context, in ReleaseInput) (string, *Provider, Row, *Error) {
+	if in.Principal == "" || in.Sandbox == "" {
+		return "", nil, Row{}, fail(CodeDenied, "no principal and sandbox: a connection is released to work that opened a sandbox under a run grant")
+	}
+	if !ValidName(in.Provider) {
+		return "", nil, Row{}, fail(CodeInvalidArg, "connection %q is not a provider name", in.Provider)
+	}
+	stack := baseStack(in.Stack)
+	declStack, p, err := s.decls.Provider(ctx, in.Tenant, in.Provider)
+	if errors.Is(err, ErrNotDeclared) {
+		return "", nil, Row{}, fail(CodeDenied, "no active stack of this tenant declares provider %q", in.Provider)
+	}
+	if err != nil {
+		return "", nil, Row{}, fail(CodeUnavailable, "%v", err)
+	}
+	if !p.Allows(stack, SandboxConsumerPrefix+in.Sandbox) {
+		return "", nil, Row{}, fail(CodeDenied, "provider %q does not name stack %q as a consumer for %s%s", in.Provider, stack, SandboxConsumerPrefix, in.Sandbox)
+	}
+	tenantID, err := s.slugToID(ctx, in.Tenant)
+	if err != nil {
+		return "", nil, Row{}, fail(CodeUnavailable, "%v", err)
+	}
+	row, err := s.store.Get(ctx, tenantID, in.Principal, in.Provider, "")
+	if errors.Is(err, ErrNotFound) {
+		return "", nil, Row{}, fail(CodeMissing, "%s has no %s connection: connect it first", in.Principal, providerTitle(p, in.Provider))
+	}
+	if err != nil {
+		return "", nil, Row{}, fail(CodeStore, "%v", err)
+	}
+	if row.Status == StatusReconnect {
+		return "", nil, Row{}, fail(CodeReconnect, "%s's %s connection needs the person again: reconnect it", in.Principal, providerTitle(p, in.Provider))
+	}
+	return declStack, p, row, nil
+}
+
 // UseResult is the header to set: the consumer's declared header and the
 // token in its declared format. Token is the bare token, for an op that
 // gives a format of its own; it goes on the request and nowhere else.

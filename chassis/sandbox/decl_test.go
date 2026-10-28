@@ -124,15 +124,75 @@ func TestParseDeclCapabilities(t *testing.T) {
 		t.Fatalf("both: %+v %v", d, err)
 	}
 	for name, body := range map[string]string{
-		"neither":        "description: nothing\n",
-		"empty both":     "env: {}\ncapabilities: []\n",
-		"bad name":       "capabilities: [Card.Note]\n",
-		"colon":          "capabilities: ['secret:X']\n",
-		"twice":          "capabilities: [ai.chat, ai.chat]\n",
-		"not a list":     "capabilities: ai.chat\n",
+		"neither":    "description: nothing\n",
+		"empty both": "env: {}\ncapabilities: []\n",
+		"bad name":   "capabilities: [Card.Note]\n",
+		"colon":      "capabilities: ['secret:X']\n",
+		"twice":      "capabilities: [ai.chat, ai.chat]\n",
+		"not a list": "capabilities: ai.chat\n",
 	} {
 		if _, err := ParseDecl([]byte(body)); err == nil {
 			t.Errorf("%s: parsed, want an error", name)
 		}
+	}
+}
+
+// TestParseDeclFiles: a sandbox serves files and a dotenv file beside its
+// variables, references a connection as well as a secret, and snapshots as
+// one map of entries the grant keeps.
+func TestParseDeclFiles(t *testing.T) {
+	d, err := ParseDecl([]byte("env:\n  GH_TOKEN: connection:github\nfiles:\n  ~/.ssh/id_ed25519: secret:DEPLOY_KEY\n  conf/app.key: secret:APP_KEY\ndotenv: run.env\n"))
+	if err != nil {
+		t.Fatalf("valid decl: %v", err)
+	}
+	want := map[string]string{
+		"GH_TOKEN":               "connection:github",
+		"file:~/.ssh/id_ed25519": "secret:DEPLOY_KEY",
+		"file:conf/app.key":      "secret:APP_KEY",
+		"dotenv:run.env":         DotenvValue,
+	}
+	if got := d.Entries(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Entries = %v", got)
+	}
+	if got := d.Secrets(); !reflect.DeepEqual(got, []string{"APP_KEY", "DEPLOY_KEY"}) {
+		t.Fatalf("Secrets = %v (files' secrets too, not a connection)", got)
+	}
+	for k, v := range want {
+		if err := CheckEntry(k, v); err != nil {
+			t.Errorf("CheckEntry(%q, %q): %v", k, v, err)
+		}
+	}
+	if kind, p, ok := ParseEntry("file:~/.ssh/id_ed25519"); !ok || kind != EntryFile || p != "~/.ssh/id_ed25519" {
+		t.Errorf("ParseEntry file = %q %q %v", kind, p, ok)
+	}
+	if _, err := ParseDecl([]byte("files:\n  key.pem: secret:K\n")); err != nil {
+		t.Errorf("files alone are a sandbox: %v", err)
+	}
+
+	bad := map[string]string{
+		"absolute path":       "files:\n  /etc/passwd: secret:K\n",
+		"dot-dot":             "files:\n  ../up: secret:K\n",
+		"dot-dot inside":      "files:\n  a/../b: secret:K\n",
+		"home dot-dot":        "files:\n  ~/../root: secret:K\n",
+		"space in path":       "files:\n  'a b': secret:K\n",
+		"bare file value":     "files:\n  key: K\n",
+		"bad provider":        "env:\n  A: connection:GitHub\n",
+		"dotenv without env":  "files:\n  k: secret:K\ndotenv: run.env\n",
+		"dotenv bad path":     "env:\n  A: secret:B\ndotenv: /tmp/run.env\n",
+		"dotenv is a file":    "env:\n  A: secret:B\nfiles:\n  run.env: secret:K\ndotenv: run.env\n",
+		"dotenv not a string": "env:\n  A: secret:B\ndotenv: [a]\n",
+	}
+	for name, body := range bad {
+		if _, err := ParseDecl([]byte(body)); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	for _, k := range []string{"file:/abs", "dotenv:../x", "GH-TOKEN", "other:x"} {
+		if err := CheckEntry(k, "secret:K"); err == nil {
+			t.Errorf("CheckEntry(%q) passed", k)
+		}
+	}
+	if err := CheckEntry("dotenv:run.env", "secret:K"); err == nil {
+		t.Error("a dotenv entry holds no reference")
 	}
 }

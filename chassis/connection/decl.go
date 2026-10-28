@@ -333,8 +333,14 @@ func (p *Provider) validate() error {
 		seen := map[string]bool{}
 		for i, c := range caps {
 			c = strings.TrimSpace(c)
-			if !sandbox.ValidCapability(c) {
-				return fmt.Errorf("consumers.%s[%d]: %q is not a capability name", stack, i, c)
+			if name, ok := strings.CutPrefix(c, SandboxConsumerPrefix); ok {
+				// The stack's sandbox of that name may hand the token to
+				// the work that opens it (a sandbox's connection:<provider>).
+				if !sandbox.ValidName(name) {
+					return fmt.Errorf("consumers.%s[%d]: %q is not sandbox:<a sandbox name>", stack, i, c)
+				}
+			} else if !sandbox.ValidCapability(c) {
+				return fmt.Errorf("consumers.%s[%d]: %q is not a capability name or sandbox:<name>", stack, i, c)
 			}
 			if seen[c] {
 				return fmt.Errorf("consumers.%s names %q twice", stack, c)
@@ -387,8 +393,14 @@ func SameIssuer(declared, got string) bool {
 	return d != "" && d == g
 }
 
+// SandboxConsumerPrefix marks a consumer entry that is a sandbox of the
+// stack, not a capability: `loop: [sandbox:github]` lets the loop's
+// SANDBOXES/github.yaml hand the token to the work that opens it.
+const SandboxConsumerPrefix = "sandbox:"
+
 // Allows reports whether stack may use this provider's connections for the
-// capability. No wildcards: the stack and the capability are both named.
+// capability (or, as "sandbox:<name>", for that sandbox). No wildcards:
+// the stack and the capability are both named.
 func (p *Provider) Allows(stack, capability string) bool {
 	for _, c := range p.Consumers[stack] {
 		if c == capability {

@@ -62,4 +62,4 @@ func (c *Controller) deepValidateSandboxes(ctx context.Context, versionID int64)
 	return issues
 }
 
-const sandboxIssuesHint = `sandboxes are validated before activation: every SANDBOXES/<name>.yaml parses — an env of VARIABLE: secret:NAME pairs, an optional description, nothing else`
+const sandboxIssuesHint = `sandboxes are validated before activation: every SANDBOXES/<name>.yaml parses — an env of VARIABLE: reference pairs (secret:NAME or connection:<provider>), files of path: reference pairs, an optional dotenv path, capabilities, an optional description, nothing else`

@@ -45,6 +45,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
@@ -53,12 +54,134 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 )
 
+// decideAndCharge runs the tenant's rules on one request the chassis has
+// read (f), reads the verdict, and charges the run grant when it allows:
+// the part every kind of release shares. false: refused or unavailable,
+// with the answer to give.
+func (g *Gateway) decideAndCharge(ctx context.Context, f facts, key string, fields []zap.Field, now time.Time) (Answer, bool) {
+	grant := f.grant
+	// The tenant's rules. The run gets a context of its own, off the
+	// gateway's: the caller's carries the pins of the run that asked — the
+	// dispatching rule's tenant and stack, its budget — and the `_grant` run
+	// is an inlet of its own, routed from `_sys` like every other. It ends
+	// when the caller gives up, and at the deadline.
+	rctx, cancel := context.WithTimeout(g.ctx, g.timeout)
+	rctx = context.WithValue(rctx, config.CtxKeyRid, f.rid)
+	stop := context.AfterFunc(ctx, cancel)
+	final, runErr := g.runStack(rctx, requestPayload(f))
+	timedOut := errors.Is(rctx.Err(), context.DeadlineExceeded)
+	stop()
+	cancel()
+	if runErr != nil && !timedOut {
+		g.log.Warn("grant: the _grant run failed", append(fields, zap.Error(runErr))...)
+	}
+	var v verdict
+	if runErr == nil {
+		v = parseVerdict(final)
+	}
+	d := decide(f.prop, v, runErr, timedOut)
+	if d.allow && !f.checks.exists {
+		// A rule cannot release what is not there.
+		d = decision{reason: reasonNotFound, byRule: d.byRule, note: d.note}
+	}
+	fields = append(fields, zap.Bool("by_rule", d.byRule))
+	if d.note != "" {
+		fields = append(fields, zap.String("note", d.note))
+	}
+	if !d.allow {
+		g.seen.put(key, d.reason, now)
+		g.log.Info("grant: refused", append(fields, zap.String("reason", d.reason))...)
+		return refused(d.reason), false
+	}
+
+	// Charge, then release: a charge that failed after the fact would
+	// recall nothing. The budget is enforced unless a rule allowed a
+	// request the chassis proposed to refuse for want of budget — the rule
+	// said go ahead, and the spend is still recorded.
+	enforce := !(d.byRule && !f.checks.budget)
+	switch err := g.ids.ChargeRunGrant(ctx, grant.TenantID, grant.ID, 1, enforce); {
+	case errors.Is(err, authn.ErrRunBudget):
+		g.seen.put(key, reasonBudget, now)
+		g.log.Info("grant: refused", append(fields, zap.String("reason", reasonBudget))...)
+		return refused(reasonBudget), false
+	case errors.Is(err, authn.ErrRunNotLive), errors.Is(err, authn.ErrNotFound):
+		g.log.Info("grant: refused", append(fields, zap.String("reason", reasonNotLive))...)
+		return refused(reasonNotLive), false
+	case err != nil:
+		g.log.Warn("grant: charging the run grant failed", append(fields, zap.Error(err))...)
+		return unavailable("identity store"), false
+	}
+	return Answer{}, true
+}
+
+// releaseConnection decides one `connection:<provider>` of a sandbox and,
+// when it is allowed, hands over the principal's current token at the
+// provider (chassis/connection Release: the provider must name the grant's
+// stack's sandbox as a consumer; the token is renewed when due). Decided as
+// a secret is, in the same order; a connection has no pull policy, and
+// "exists" is whether the principal holds one this sandbox may release.
+func (g *Gateway) releaseConnection(ctx context.Context, grant authn.RunGrant, tenant string, res authn.Resource, rq request, now time.Time) Answer {
+	fields := []zap.Field{
+		zap.String("grant", grant.ID), zap.String("run", grant.Run),
+		zap.String("principal", grant.Principal.ID), zap.String("via", rq.via),
+		zap.String("sandbox", rq.sandbox), zap.String("var", rq.variable), zap.String("file", rq.file),
+		zap.String("kind", string(res.Kind)), zap.String("name", res.Name), zap.String("tenant", tenant),
+	}
+	key := refusalKey(grant.ID, res)
+	if reason, again := g.seen.get(key, now); again {
+		g.log.Debug("grant: refused again, from memory", append(fields, zap.String("reason", reason))...)
+		return refused(reason)
+	}
+	if g.conns == nil {
+		g.log.Warn("grant: no connections on this node", fields...)
+		return unavailable("connections")
+	}
+	in := connection.ReleaseInput{Tenant: tenant, Stack: grant.Stack, Provider: res.Name, Principal: grant.Principal.ID, Sandbox: rq.sandbox}
+	cerr := g.conns.ReleaseCheck(ctx, in)
+	if cerr != nil && (cerr.Code == connection.CodeUnavailable || cerr.Code == connection.CodeStore) {
+		g.log.Warn("grant: reading the connection failed", append(fields, zap.String("code", cerr.Code))...)
+		return unavailable("connections")
+	}
+	standing, err := g.ids.Granted(ctx, grant.TenantID, grant.Principal, res, res.Verb())
+	if err != nil {
+		g.log.Warn("grant: reading the standing grant failed", append(fields, zap.Error(err))...)
+		return unavailable("identity store")
+	}
+	c := checks{
+		exists:    cerr == nil,
+		allowlist: grant.Allows(res),
+		standing:  standing,
+		pull:      true,
+		budget:    grant.Remaining() >= 1,
+	}
+	status := "ok"
+	if cerr != nil {
+		status = cerr.Code
+	}
+	f := facts{
+		rid: hxid.NewTimeSort().String(), tenant: tenant, grant: grant, res: res,
+		rq: rq, conn: status, checks: c, prop: propose(c), at: now,
+	}
+	fields = append(fields, zap.String("rid", f.rid), zap.Bool("proposed", f.prop.allow), zap.String("connection", status))
+	if ans, ok := g.decideAndCharge(ctx, f, key, fields, now); !ok {
+		return ans
+	}
+	token, row, rerr := g.conns.Release(ctx, in)
+	if rerr != nil {
+		g.log.Warn("grant: charged, and then could not release the connection", append(fields, zap.String("code", rerr.Code))...)
+		return unavailable("connections")
+	}
+	g.log.Info("grant: released", append(fields, zap.Int64("generation", row.Generation))...)
+	return Answer{Allowed: true, Env: map[string][]byte{rq.key(): []byte(token)}}
+}
+
 // The ways a request is made, stamped as `@grant.via`: a sandbox is opened
 // by the rule that starts the command or by the program itself; a
 // capability is called over HTTP (chassis/server/capgw).
 const (
 	ViaExec     = "exec"     // the rule that starts the command: `WITH grant, sandbox`
-	ViaLauncher = "launcher" // the program itself: `txco sandbox`
+	ViaLauncher = "launcher" // the program itself: `txco sandbox`, over the socket
+	ViaNetwork  = "network"  // the program itself: `txco sandbox`, over HTTPS (POST /v1/sandbox/<name>), from another machine
 	ViaHTTP     = "http"     // a capability call: POST /v1/cap/<name> with the token
 	ViaCall     = "call"     // a capability call made in process by a run under a grant (cap:// on the chassis that declares the name)
 )
@@ -73,6 +196,12 @@ type Open struct {
 	GrantID  string
 	Sandbox  string
 	Via      string
+	// Entry is what to open: "" is the sandbox's variables (what a program
+	// is started with); `file:<path>` is one file it serves, and
+	// `dotenv:<path>` its variables again, for its dotenv file (each open
+	// of a served file is one request). chassis/sandbox ParseEntry.
+	// EntryList asks only which files it serves: nothing is released.
+	Entry string
 }
 
 // Answer is what the presentation gets back. It tells the program one of
@@ -80,10 +209,14 @@ type Open struct {
 // chassis could not answer.
 type Answer struct {
 	Allowed bool
-	// Env is what the sandbox hands over, variable → value, when Allowed.
-	// The caller zeroes every value (secrets.Zero) once it has handed them
-	// on.
+	// Env is what the sandbox hands over, when Allowed: variable → value,
+	// or, for a file, `file:<path>` → its contents. The caller zeroes every
+	// value (secrets.Zero) once it has handed them on.
 	Env map[string][]byte
+	// Serve is what the sandbox serves as files, when Allowed and the open
+	// was for its variables or EntryList: `file:<path>` and
+	// `dotenv:<path>` keys, sorted. Paths, never values.
+	Serve []string
 	// Unavailable: the chassis could not decide — a store was down, the
 	// chassis is stopping. Not a refusal, and not to be retried forever.
 	Unavailable bool
@@ -117,6 +250,7 @@ type Gateway struct {
 	resolve    func(ctx context.Context, tenantID, stack, name string) (*secrets.SecretMetadata, error)
 	decrypt    func(ctx context.Context, meta *secrets.SecretMetadata) ([]byte, error)
 	runStack   func(ctx context.Context, payload string) (string, error)
+	conns      ConnReleaser
 
 	// Where a program opens a sandbox at run time, set by the socket's
 	// controller once it is up. Empty: that way is off on this node.
@@ -129,8 +263,19 @@ type Gateway struct {
 type Config struct {
 	// DecideTimeout bounds the `_grant` run. Past it the request is refused.
 	DecideTimeout time.Duration
+	// Connections releases a principal's token at a provider for a
+	// sandbox's `connection:<provider>`. nil: no connection is released on
+	// this node (unavailable).
+	Connections ConnReleaser
 	// RefusalWindow is how long a refusal is remembered. 0 turns that off.
 	RefusalWindow time.Duration
+}
+
+// ConnReleaser is what the gateway needs of the connections service
+// (chassis/connection Service).
+type ConnReleaser interface {
+	ReleaseCheck(ctx context.Context, in connection.ReleaseInput) *connection.Error
+	Release(ctx context.Context, in connection.ReleaseInput) (string, connection.Row, *connection.Error)
 }
 
 // errNoTenant: the tenant directory has no live tenant of that id or slug.
@@ -147,6 +292,7 @@ func New(ctx context.Context, pu *processor.Unit, ids *authn.Store, signer *rung
 	g := &Gateway{
 		ctx: ctx, log: pu.Logger, ids: ids, signer: signer,
 		timeout: cfg.DecideTimeout, seen: newRefusals(cfg.RefusalWindow), now: time.Now,
+		conns: cfg.Connections,
 	}
 	if g.log == nil {
 		g.log = zap.NewNop()
@@ -359,17 +505,28 @@ func (g *Gateway) OpenSandbox(ctx context.Context, o Open) Answer {
 		return hard(unavailable("tenant directory"))
 	}
 
-	vars := make([]string, 0, len(env))
-	for v := range env {
-		vars = append(vars, v)
+	serve := servedBy(env)
+	if o.Entry == EntryList {
+		// Which files, so a program can serve them: paths, not values.
+		// Nothing is released, so nothing is decided or charged.
+		return Answer{Allowed: true, Serve: serve}
 	}
-	sort.Strings(vars)
-	out := make(map[string][]byte, len(vars))
-	for _, v := range vars {
-		kind, name, perr := sandbox.ParseRef(env[v])
+	// What this open hands over: the variables (to start a program, or as
+	// its dotenv file), or one file. Each is decided on its own.
+	keys, answerAs, ok := entriesFor(env, o.Entry)
+	if !ok {
+		return hard(refused(reasonEntry))
+	}
+	out := make(map[string][]byte, len(keys))
+	for _, key := range keys {
+		kind, name, perr := sandbox.ParseRef(env[key])
 		var res authn.Resource
 		if perr == nil {
 			res, perr = authn.NewResource(authn.ResourceKind(kind), name)
+		}
+		rq := request{via: o.Via, sandbox: o.Sandbox, variable: key}
+		if ek, p, _ := sandbox.ParseEntry(key); ek == sandbox.EntryFile {
+			rq = request{via: o.Via, sandbox: o.Sandbox, file: p}
 		}
 		var ans Answer
 		switch {
@@ -377,11 +534,13 @@ func (g *Gateway) OpenSandbox(ctx context.Context, o Open) Answer {
 			// The row was checked when it was written; this is a row that
 			// changed under us.
 			ans = hard(refused(reasonName))
-		case res.Kind != authn.ResourceSecret:
+		case res.Kind == authn.ResourceSecret:
+			ans = g.release(ctx, grant, tenant, res, rq, now)
+		case res.Kind == authn.ResourceConnection:
+			ans = g.releaseConnection(ctx, grant, tenant, res, rq, now)
+		default:
 			// A capability is called, not handed over; nothing here can run one.
 			ans = hard(refused(reasonKind))
-		default:
-			ans = g.release(ctx, grant, tenant, res, request{via: o.Via, sandbox: o.Sandbox, variable: v}, now)
 		}
 		if !ans.Allowed {
 			for _, done := range out {
@@ -389,16 +548,73 @@ func (g *Gateway) OpenSandbox(ctx context.Context, o Open) Answer {
 			}
 			return ans
 		}
-		out[v] = ans.Env[v]
+		out[answerAs(key)] = ans.Env[rq.key()]
 	}
-	g.log.Info("grant: sandbox opened", append(fields, zap.Int("vars", len(out)))...)
-	return Answer{Allowed: true, Env: out}
+	g.log.Info("grant: sandbox opened", append(fields, zap.String("entry", o.Entry), zap.Int("values", len(out)))...)
+	opened := Answer{Allowed: true, Env: out}
+	if o.Entry == "" {
+		opened.Serve = serve
+	}
+	return opened
 }
 
-// request is how one secret was asked for: the sandbox being opened and the
-// variable it fills, for the trace.
+// EntryList is the Open.Entry that asks which files a sandbox serves.
+const EntryList = "list"
+
+// servedBy is the snapshot's file and dotenv keys, sorted.
+func servedBy(env map[string]string) []string {
+	var out []string
+	for k := range env {
+		if kind, _, ok := sandbox.ParseEntry(k); ok && kind != sandbox.EntryVar {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// entriesFor picks the snapshot's keys one open hands over, sorted, and the
+// name each answers under: the variables for "" and for the sandbox's
+// dotenv file, by their names; one file, as `file:<path>`. false: the
+// sandbox has no such entry.
+func entriesFor(env map[string]string, entry string) ([]string, func(string) string, bool) {
+	same := func(k string) string { return k }
+	if entry != "" {
+		if _, ok := env[entry]; !ok {
+			return nil, nil, false
+		}
+		kind, _, ok := sandbox.ParseEntry(entry)
+		switch {
+		case !ok:
+			return nil, nil, false
+		case kind == sandbox.EntryFile:
+			return []string{entry}, same, true
+		case kind != sandbox.EntryDotenv:
+			return nil, nil, false
+		}
+	}
+	var keys []string
+	for k := range env {
+		if kind, _, _ := sandbox.ParseEntry(k); kind == sandbox.EntryVar {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys, same, true
+}
+
+// request is how one value was asked for: the sandbox being opened and the
+// variable it fills or the file it is served as, for the trace.
 type request struct {
-	via, sandbox, variable string
+	via, sandbox, variable, file string
+}
+
+// key is the entry the value answers under in a release's own Answer.
+func (rq request) key() string {
+	if rq.file != "" {
+		return sandbox.FilePrefix + rq.file
+	}
+	return rq.variable
 }
 
 // release decides one secret of a sandbox and, when it is allowed, hands it
@@ -407,7 +623,7 @@ func (g *Gateway) release(ctx context.Context, grant authn.RunGrant, tenant stri
 	fields := []zap.Field{
 		zap.String("grant", grant.ID), zap.String("run", grant.Run),
 		zap.String("principal", grant.Principal.ID), zap.String("via", rq.via),
-		zap.String("sandbox", rq.sandbox), zap.String("var", rq.variable),
+		zap.String("sandbox", rq.sandbox), zap.String("var", rq.variable), zap.String("file", rq.file),
 		zap.String("kind", string(res.Kind)), zap.String("name", res.Name), zap.String("tenant", tenant),
 	}
 	key := refusalKey(grant.ID, res)
@@ -442,57 +658,8 @@ func (g *Gateway) release(ctx context.Context, grant authn.RunGrant, tenant stri
 		rq: rq, meta: meta, checks: c, prop: propose(c), at: now,
 	}
 	fields = append(fields, zap.String("rid", f.rid), zap.Bool("proposed", f.prop.allow))
-
-	// The tenant's rules. The run gets a context of its own, off the
-	// gateway's: the caller's carries the pins of the run that asked — the
-	// dispatching rule's tenant and stack, its budget — and the `_grant` run
-	// is an inlet of its own, routed from `_sys` like every other. It ends
-	// when the caller gives up, and at the deadline.
-	rctx, cancel := context.WithTimeout(g.ctx, g.timeout)
-	rctx = context.WithValue(rctx, config.CtxKeyRid, f.rid)
-	stop := context.AfterFunc(ctx, cancel)
-	final, runErr := g.runStack(rctx, requestPayload(f))
-	timedOut := errors.Is(rctx.Err(), context.DeadlineExceeded)
-	stop()
-	cancel()
-	if runErr != nil && !timedOut {
-		g.log.Warn("grant: the _grant run failed", append(fields, zap.Error(runErr))...)
-	}
-	var v verdict
-	if runErr == nil {
-		v = parseVerdict(final)
-	}
-	d := decide(f.prop, v, runErr, timedOut)
-	if d.allow && meta == nil {
-		// A rule cannot release what is not there.
-		d = decision{reason: reasonNotFound, byRule: d.byRule, note: d.note}
-	}
-	fields = append(fields, zap.Bool("by_rule", d.byRule))
-	if d.note != "" {
-		fields = append(fields, zap.String("note", d.note))
-	}
-	if !d.allow {
-		g.seen.put(key, d.reason, now)
-		g.log.Info("grant: refused", append(fields, zap.String("reason", d.reason))...)
-		return refused(d.reason)
-	}
-
-	// Charge, then release: a charge that failed after the fact would
-	// recall nothing. The budget is enforced unless a rule allowed a
-	// request the chassis proposed to refuse for want of budget — the rule
-	// said go ahead, and the spend is still recorded.
-	enforce := !(d.byRule && !c.budget)
-	switch err := g.ids.ChargeRunGrant(ctx, grant.TenantID, grant.ID, 1, enforce); {
-	case errors.Is(err, authn.ErrRunBudget):
-		g.seen.put(key, reasonBudget, now)
-		g.log.Info("grant: refused", append(fields, zap.String("reason", reasonBudget))...)
-		return refused(reasonBudget)
-	case errors.Is(err, authn.ErrRunNotLive), errors.Is(err, authn.ErrNotFound):
-		g.log.Info("grant: refused", append(fields, zap.String("reason", reasonNotLive))...)
-		return refused(reasonNotLive)
-	case err != nil:
-		g.log.Warn("grant: charging the run grant failed", append(fields, zap.Error(err))...)
-		return unavailable("identity store")
+	if ans, ok := g.decideAndCharge(ctx, f, key, fields, now); !ok {
+		return ans
 	}
 	value, err := g.decrypt(ctx, meta)
 	if err != nil {
@@ -500,5 +667,5 @@ func (g *Gateway) release(ctx context.Context, grant authn.RunGrant, tenant stri
 		return unavailable("secret store")
 	}
 	g.log.Info("grant: released", append(fields, zap.Int("version", meta.VersionNo))...)
-	return Answer{Allowed: true, Env: map[string][]byte{rq.variable: value}}
+	return Answer{Allowed: true, Env: map[string][]byte{rq.key(): value}}
 }

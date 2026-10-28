@@ -9,6 +9,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/grantwire"
 	"github.com/loremlabs/thanks-computer/chassis/rungrant"
+	"github.com/loremlabs/thanks-computer/chassis/sandbox"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 )
 
@@ -93,6 +94,12 @@ func (g *Gateway) ForExec(ctx context.Context, tenant, stack, workspaceID, grant
 			return nil, nil, handoffErr("run grant %s does not name sandbox %q (it names: %s)", grantID, name, names(grant.SandboxNames()))
 		}
 		for v := range env {
+			if kind, p, _ := sandbox.ParseEntry(v); kind != sandbox.EntryVar {
+				// A file is served where it is read, by `txco sandbox` on
+				// that machine; this exec can only set the command's
+				// environment.
+				return nil, nil, handoffErr("sandbox %q serves a file (%s): a rule's exec puts only variables in the command's environment; serve the files on the machine with `txco sandbox serve %s`", name, p, name)
+			}
 			if other, dup := setBy[v]; dup {
 				return nil, nil, handoffErr("sandboxes %s and %s both set %s", other, name, v)
 			}

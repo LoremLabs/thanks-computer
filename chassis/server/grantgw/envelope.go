@@ -28,7 +28,8 @@ const (
 	reasonSandbox    = "sandbox"    // the run grant does not name the sandbox
 	reasonName       = "name"       // not the name of a secret
 	reasonKind       = "kind"       // a kind of resource nothing can hand over yet
-	reasonNotFound   = "not_found"  // no such secret
+	reasonNotFound   = "not_found"  // no such secret, or no connection the sandbox may release
+	reasonEntry      = "entry"      // the sandbox has no such file
 	reasonAllowlist  = "allowlist"  // the run grant does not name it
 	reasonStanding   = "standing"   // the principal holds no standing grant for it
 	reasonPull       = "pull"       // the secret's pull policy does not admit this node
@@ -85,6 +86,9 @@ type facts struct {
 	res    authn.Resource
 	rq     request
 	meta   *secrets.SecretMetadata // nil: no such secret
+	// conn is what the chassis read of a connection: "ok", or the
+	// connections service's code for why not (missing, reconnect, denied).
+	conn string
 	// input is what a capability call carried, as the caller sent it. It is
 	// presented to the rules, which may hold or refuse on it; the chassis
 	// itself reads nothing in it.
@@ -116,6 +120,13 @@ func requestPayload(f facts) string {
 	}
 	if f.rq.variable != "" {
 		pb.Set("_txc.grant.env", f.rq.variable)
+	}
+	if f.rq.file != "" {
+		pb.Set("_txc.grant.file", f.rq.file)
+	}
+	if f.conn != "" {
+		pb.Set("_txc.grant.connection.provider", f.res.Name)
+		pb.Set("_txc.grant.connection.status", f.conn)
 	}
 	if len(f.input) > 0 && json.Valid(f.input) {
 		pb.SetRaw("_txc.grant.input", string(f.input))

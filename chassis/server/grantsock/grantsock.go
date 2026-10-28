@@ -230,16 +230,20 @@ func (c *Controller) serve(conn net.Conn) {
 		reply(conn, grantwire.Response{Error: grantwire.ErrorBadRequest})
 		return
 	}
+	if _, _, ok := sandbox.ParseEntry(req.Entry); req.Entry != "" && !ok {
+		reply(conn, grantwire.Response{Error: grantwire.ErrorBadRequest})
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.ctx, askTimeout)
 	defer cancel()
-	ans := c.gw.OpenSandbox(ctx, grantgw.Open{Token: req.Token, Sandbox: req.Sandbox, Via: grantgw.ViaLauncher})
+	ans := c.gw.OpenSandbox(ctx, grantgw.Open{Token: req.Token, Sandbox: req.Sandbox, Via: grantgw.ViaLauncher, Entry: req.Entry})
 	switch {
 	case ans.Allowed:
 		env := make(map[string]string, len(ans.Env))
 		for v, value := range ans.Env {
 			env[v] = base64.StdEncoding.EncodeToString(value)
 		}
-		reply(conn, grantwire.Response{OK: true, Env: env})
+		reply(conn, grantwire.Response{OK: true, Env: env, Serve: ans.Serve})
 		ans.Zero()
 	case ans.Unavailable:
 		reply(conn, grantwire.Response{Error: grantwire.ErrorUnavailable})
