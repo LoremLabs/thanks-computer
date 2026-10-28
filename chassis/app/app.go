@@ -41,6 +41,7 @@ import (
 	chdrive "github.com/loremlabs/thanks-computer/chassis/drive"
 	_ "github.com/loremlabs/thanks-computer/chassis/drive/filestore" // registers the "file" drive object backend
 	"github.com/loremlabs/thanks-computer/chassis/drive/scheduledsink"
+	"github.com/loremlabs/thanks-computer/chassis/gitstore"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/kv/redisstore"
@@ -540,6 +541,30 @@ func Run(bi BuildInfo) int {
 		logger.Info("skipping drive store open — webdav personality not active and --drive-store=sqlite",
 			zap.String("personalities", conf.Personalities))
 	}
+	// Git index: a tenant's repositories, their objects' ids and their refs
+	// (chassis/gitstore); the objects' content is in the filecas store. Open
+	// on a node running the `git` head (fatal there: a head without its
+	// index serves nothing) or when the backend is shared, so txco://repo/*
+	// on any node project into the one index the head serves. Own file,
+	// never the runtime DB.
+	var gitStore *gitstore.Store
+	if open, fatal := gitStoreMode(conf.Personalities, conf.GitStore); open {
+		st, gerr := gitstore.Open(conf.GitStore, gitstore.Config{DBPath: conf.GitDBPath})
+		switch {
+		case gerr != nil && fatal:
+			logger.Fatal("git store open failed", zap.String("store", conf.GitStore), zap.String("err", gerr.Error()))
+		case gerr != nil:
+			logger.Warn("git store open failed; txco://repo/* answer txco_repo_disabled on this node until restart",
+				zap.String("store", conf.GitStore), zap.String("err", gerr.Error()))
+		default:
+			defer st.Close()
+			gitStore = st
+			logger.Info("git store opened", zap.String("store", conf.GitStore), zap.Bool("head", fatal))
+		}
+	} else {
+		logger.Info("skipping git store open — git personality not active and --git-store=sqlite",
+			zap.String("personalities", conf.Personalities))
+	}
 	// IPP store: one row per printer (txco://ipp/printer) and one per print
 	// job (receiving → committed → delivered). Only a node running the `ipp`
 	// head opens it, and there it is fatal: a printer that cannot record a
@@ -778,6 +803,7 @@ func Run(bi BuildInfo) int {
 		IPP:       ippStore,
 		Identity:  identityStore,
 		State:     stateStore,
+		Git:       gitStore,
 	})
 	if err != nil {
 		// Include the underlying error so operators can see what
@@ -1288,6 +1314,14 @@ func contactsStoreMode(personalities, store string) (open, fatal bool) {
 // is `webdav`.
 func driveStoreMode(personalities, store string) (open, fatal bool) {
 	head := config.Config{Personalities: personalities}.HasPersonality("webdav")
+	shared := store != "" && store != "sqlite"
+	return head || shared, head
+}
+
+// gitStoreMode is driveStoreMode for the git index: opened where the `git`
+// head runs (fatal there) or wherever the backend is shared.
+func gitStoreMode(personalities, store string) (open, fatal bool) {
+	head := config.Config{Personalities: personalities}.HasPersonality("git")
 	shared := store != "" && store != "sqlite"
 	return head || shared, head
 }

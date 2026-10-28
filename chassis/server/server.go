@@ -90,6 +90,8 @@ import (
 	contactsp "github.com/loremlabs/thanks-computer/chassis/server/personality/contacts"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
+	gitcore "github.com/loremlabs/thanks-computer/chassis/git"
+	"github.com/loremlabs/thanks-computer/chassis/gitstore"
 	gitp "github.com/loremlabs/thanks-computer/chassis/server/personality/git"
 	imapp "github.com/loremlabs/thanks-computer/chassis/server/personality/imap"
 	ippp "github.com/loremlabs/thanks-computer/chassis/server/personality/ipp"
@@ -189,7 +191,7 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 		"_txc.dns.tenant", "_txc.imap.tenant", "_txc.calendar.tenant", "_txc.contacts.tenant",
 		"_txc.source.tenant", "_txc.source.stack", "_txc.ipp.tenant", "_txc.state.tenant",
 		"_txc.grant.tenant", "_txc.cap.tenant",
-		"_txc.cap.impl.stack", "_txc.cap.impl.to")
+		"_txc.cap.impl.stack", "_txc.cap.impl.to", "_txc.git.tenant")
 	routeTo, continuation, src := fields[0], fields[1], fields[2]
 	cronTenant, roomTenant, inspectTenant, scheduledTenant := fields[3], fields[4], fields[5], fields[6]
 	llmTenant, llmVerified := fields[7], fields[8]
@@ -200,6 +202,7 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 	grantTenant := fields[17]
 	capTenant := fields[18]
 	capImplStack, capImplTo := fields[19], fields[20]
+	gitTenant := fields[21]
 
 	if routeTo.String() != "" {
 		return `{}`
@@ -449,6 +452,19 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.ingress", "contacts")
 			b.Set("_txc.route.hostname_verified", true)
 			b.Set("_txc.route.to", "_contacts/0")
+			return b.String()
+		}
+	}
+	// A git push: the git head's two lanes (answer before the refs move,
+	// observe after the reply), the same way, into `_git/0`.
+	if src.String() == "git" {
+		if gt := gitTenant.String(); gt != "" {
+			b := jsonx.NewObject()
+			b.Set("_txc.route.tenant", gt)
+			b.Set("_txc.route.stack", "_git")
+			b.Set("_txc.route.ingress", "git")
+			b.Set("_txc.route.hostname_verified", true)
+			b.Set("_txc.route.to", "_git/0")
 			return b.String()
 		}
 	}
@@ -1242,6 +1258,10 @@ type Deps struct {
 	IPP       *chipp.Store
 	Identity  *authn.Store
 	State     *chstate.Store
+	// Git is the repository index (chassis/gitstore); the objects' content
+	// is in the filecas store. nil ⇒ the git head is off and txco://repo/*
+	// answer txco_repo_disabled.
+	Git *gitstore.Store
 }
 
 func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Deps) (modCtx context.Context, stop func(reason string), err error) {
@@ -2356,6 +2376,32 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			}))
 	}
 
+	// Repositories (txco://repo/{create,remove,refs,read,commit,log,diff,
+	// ref/update}): a stack's door to what the `git` personality serves.
+	// Registered unconditionally so a node without the git store answers
+	// `_repo.error txco_repo_disabled`. See chassis/server/repo_ops.go.
+	var gitRepos *gitcore.StoreRepos
+	if deps.Git != nil && fcas != nil {
+		gitRepos = gitcore.NewStoreRepos(deps.Git, fcas, gitp.LimitsFromConfig(conf))
+	}
+	repoD := repoDeps{repos: gitRepos, now: func() time.Time { return time.Now().UTC() }}
+	for name, fn := range map[string]func(context.Context, repoDeps, []byte) (event.Payload, error){
+		"txco://repo/create":     repoCreate,
+		"txco://repo/remove":     repoRemove,
+		"txco://repo/refs":       repoRefs,
+		"txco://repo/read":       repoRead,
+		"txco://repo/commit":     repoCommit,
+		"txco://repo/log":        repoLog,
+		"txco://repo/diff":       repoDiff,
+		"txco://repo/ref/update": repoRefUpdate,
+	} {
+		fn := fn
+		pu.Handle([]byte(name), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return fn(ctx, repoD, in)
+			}))
+	}
+
 	// Printer registry (txco://ipp/printer): the row the `ipp` personality
 	// reads on every request — a printer's label, the principal that may
 	// print to it, its display name. Registered unconditionally so a node
@@ -2796,13 +2842,15 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	// Git personality (smart HTTP on the web head under --git-path-prefix):
 	// clone, fetch and push of a tenant's repositories by a stock git
 	// client, signed in through the same login resolver with
-	// git:<repo>:fetch|push scopes. [G0] The repositories live in memory
-	// for the prototype; G1 puts them over the content-addressed store.
-	var gitRepos gitp.RepoLoader
-	if conf.HasPersonality("git") {
-		gitRepos = gitp.NewMemRepos(gitp.LimitsFromConfig(conf))
+	// git:<repo>:fetch|push scopes. The repositories are rows in the git
+	// index (deps.Git) and objects in the filecas store; the loader is the
+	// one the txco://repo/* ops above use.
+	var gitLoader gitp.RepoLoader
+	if gitRepos != nil {
+		gitLoader = gitRepos
 	}
-	gitCtrl := gitp.NewController(ctx, pu, gitRepos, resolver)
+	gitCtrl := gitp.NewController(ctx, pu, gitLoader, resolver)
+	gitCtrl.SetAuth(logins)
 	if gitCtrl.Enabled() {
 		webCtrl.MountDAV("", gitCtrl.Prefix(), gitCtrl.Handler())
 	}

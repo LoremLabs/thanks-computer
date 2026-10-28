@@ -42,6 +42,7 @@ var authorWritable = []string{
 	"source.res",   // the source inlet verdict: a per-item action override (none/seen/move:<dest>)
 	"calendar.res", // the calendar answer-lane verdict (ok/msg/code/event/ical)
 	"contacts.res", // the contacts answer-lane verdict (ok/msg/code/card/vcard)
+	"git.res",      // the git answer-lane verdict on a push (ok/msg/code)
 	"tcp.res",      // the tcp head's verdict for one connect/line run (write/action)
 	"goto",         // flow control: jump to another stage
 	"halt",         // flow control: stop the pipeline
@@ -73,6 +74,9 @@ var authorDeletable = []string{
 	"contacts.vcard",     // a client's card and its parse: consumed by the
 	"contacts.card",      // _contacts stack, then omitted from the trace
 	"contacts.prior",     // (the store holds the bytes)
+	"git.commands",       // a push's commands with their changed files, and its
+	"git.changes",        // new commits: consumed by the _git stack, then out of
+	"git.commits",        // the trace (the repository holds the objects)
 	"websocket.msg.text", // an inbound WebSocket message's payload (text, or
 	"websocket.msg.data", // base64 binary): consumed, then out of the trace
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -165,22 +166,74 @@ func (c *Controller) secure(r *http.Request) bool {
 // credential is the application's policy; ownership matters only to the
 // administrative ops (removing the repository).
 //
-// [G0] With no resolver wired the head is open: the prototype proves the
-// protocol, not the door. G1 closes this branch.
+// The username is the account's login name (an address the chassis bound
+// to a principal: `<slug>@<host>` → `pony:<slug>`); the password is a
+// credential of that principal whose scopes cover the door. A wrong
+// password, an unknown user, the right password for the wrong door and a
+// disabled user all answer 401 the same way, so nothing is learned.
+//
+// A head started without a login resolver is CLOSED (503), never open: the
+// prototype's open door is a test harness's choice (openWithoutAuth).
 func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, req *request) bool {
 	if !c.insecureAuth && !c.secure(r) {
 		http.Error(w, "TLS required", http.StatusForbidden)
 		return false
 	}
 	if c.auth == nil {
-		return true
+		if c.openWithoutAuth {
+			return true
+		}
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+		return false
 	}
-	// G1: Basic → c.auth.Login(Attempt{Tenant, Username, Password, IP,
-	// Want: Scope{Domain: "git", Instance: req.name, Action: req.action}})
-	// → admission → the tenant match → req.who.
-	w.Header().Set("Retry-After", "60")
-	http.Error(w, "authentication is not available yet", http.StatusServiceUnavailable)
-	return false
+	challenge := func() bool {
+		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return false
+	}
+	username, pass, ok := r.BasicAuth()
+	if !ok || username == "" {
+		return challenge()
+	}
+	res := c.auth.Login(r.Context(), authn.Attempt{
+		Tenant: req.tenant, Username: username, Password: pass, IP: req.ip,
+		Want: authn.Scope{Domain: "git", Instance: req.name, Action: req.action},
+	})
+	switch res.Outcome {
+	case authn.OutcomeOK:
+	case authn.OutcomeThrottled:
+		c.noteLogin("throttled", username, req.ip)
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "too many authentication attempts", http.StatusTooManyRequests)
+		return false
+	case authn.OutcomeError:
+		c.logger().Warn("git login failed", zap.String("user", username), zap.Error(res.Err))
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+		return false
+	default:
+		c.noteLogin(string(res.Outcome), username, req.ip)
+		return challenge()
+	}
+	if c.pu.Admission != nil {
+		if d := c.pu.Admission.Decide(req.tenant); !d.Admit {
+			c.noteLogin("denied", username, req.ip)
+			status := d.Status
+			if status == 0 {
+				status = http.StatusForbidden
+			}
+			if d.Retry > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(int(d.Retry.Seconds())))
+			}
+			http.Error(w, "service unavailable for this account", status)
+			return false
+		}
+	}
+	if !res.Cached {
+		c.noteLogin("ok", username, req.ip, res.Who)
+	}
+	req.who = res.Who
+	return true
 }
 
 // requestBody is one request's body, bounded, deadline-budgeted and

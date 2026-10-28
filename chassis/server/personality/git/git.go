@@ -67,22 +67,6 @@ type HostResolver interface {
 	ResolveErr(key ingress.RouteKey) (ingress.RouteTarget, bool, error)
 }
 
-// Limits are the head's caps on a push, from the --git-* flags. A zero
-// value means "no cap" for the byte and count limits.
-type Limits struct {
-	// MaxPackBytes caps one request body (a push's pack, a fetch's haves).
-	MaxPackBytes int64
-	// MaxObjectBytes caps one object (a file's bytes).
-	MaxObjectBytes int64
-	// MaxObjects caps the objects in one pack.
-	MaxObjects int
-	// MaxRepoBytes caps a repository's stored objects, the new ones included.
-	MaxRepoBytes int64
-	// TextOnly refuses a blob that is not valid UTF-8 (or holds a NUL), a
-	// symlink, an executable and a submodule.
-	TextOnly bool
-}
-
 // LimitsFromConfig reads the --git-* caps.
 func LimitsFromConfig(conf config.Config) Limits {
 	return Limits{
@@ -108,18 +92,24 @@ type Controller struct {
 	resolver HostResolver
 
 	// auth verifies passwords: the resolver the heads share, with its
-	// login cache and throttles (--login-rate). nil ⇒ the head is open
-	// [G0 only; G1 wires it and a nil answers "temporary failure"].
-	auth *authn.Resolver
+	// login cache and throttles (--login-rate). nil ⇒ every request is
+	// answered "temporary failure" — unless openWithoutAuth, a test
+	// harness's switch for driving the protocol without a door.
+	auth            *authn.Resolver
+	openWithoutAuth bool
 
 	prefix       string
 	insecureAuth bool
 	limits       Limits
 
-	// beforeRefs runs on a push after the objects are stored and the
-	// response headers are flushed, and before the refs move: the answer
-	// lane's seat [G1]. A non-nil error refuses every ref with its text.
-	// Tests use it to prove the early flush.
+	// lanes dispatch a push into the tenant's `_git` stack: the answer lane
+	// before the refs move, the observe lane after the reply.
+	lanes *lanes
+
+	// beforeRefs, when set, stands in for the answer lane: it runs on a
+	// push after the objects are stored and the response headers are
+	// flushed, and before the refs move. A non-nil error refuses every ref
+	// with its text. Tests use it to prove the early flush.
 	beforeRefs func(ctx context.Context, p *Push) error
 
 	logins metric.Int64Counter
@@ -148,6 +138,7 @@ func NewController(ctx context.Context, pu *processor.Unit, repos RepoLoader, re
 				metric.WithDescription("git Basic-auth attempts by outcome"),
 				metric.WithUnit("1"))
 		}
+		c.lanes = newLanes(ctx, pu)
 	}
 	return c
 }
@@ -176,14 +167,20 @@ func (c *Controller) Start() {
 	if !c.pu.Conf.HasPersonality("web") {
 		c.pu.Logger.Warn("git personality is on but the web head is off: git is served through the web head, so nothing is listening")
 	}
+	c.lanes.start()
 	c.pu.Logger.Info("git controller started", zap.String("prefix", c.prefix), zap.Bool("insecure_auth", c.insecureAuth),
 		zap.Int64("max_pack_bytes", c.limits.MaxPackBytes), zap.Int64("max_object_bytes", c.limits.MaxObjectBytes),
 		zap.Int("max_objects", c.limits.MaxObjects), zap.Int64("max_repo_bytes", c.limits.MaxRepoBytes),
-		zap.Bool("text_only", c.limits.TextOnly))
+		zap.Bool("text_only", c.limits.TextOnly), zap.Bool("auth", c.auth != nil))
 }
 
-// Stop is a no-op: the head holds no goroutines of its own [G0].
-func (c *Controller) Stop() {}
+// Stop drains the observe lane's workers.
+func (c *Controller) Stop() {
+	if c == nil {
+		return
+	}
+	c.lanes.stop()
+}
 
 // Handler is the http.Handler the web head mounts on Prefix()/.
 func (c *Controller) Handler() http.Handler { return c }

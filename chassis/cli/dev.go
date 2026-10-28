@@ -636,7 +636,7 @@ Flags:
 			}
 		}
 		if *gitHead {
-			fmt.Fprintf(stdout, "[txco]   git head: %s/git/<repo>.git (smart HTTP, Basic auth over plaintext); repositories in memory for now\n", webURL)
+			fmt.Fprintf(stdout, "[txco]   git head: %s/git/<repo>.git (smart HTTP, Basic auth over plaintext); index at .txco/dev/git.db, objects in the filecas store\n", webURL)
 			fmt.Fprintf(stdout, "[txco]        clone with: git clone %s/git/<repo>.git  (a password from txco://credential/create with scopes git:<repo>:fetch, git:<repo>:push)\n", webURL)
 		}
 		if *webdavHead {
@@ -1436,6 +1436,7 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 	}
 	if o.Heads.Git {
 		heads = append(heads, "git")
+		env = append(env, "TXCO_GIT_DB_PATH="+filepath.Join(devDir, "git.db"))
 	}
 	if o.Heads.IPP {
 		heads = append(heads, "ipp")

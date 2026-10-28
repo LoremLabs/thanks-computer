@@ -35,6 +35,10 @@ func TestAuthorMayWriteTxc(t *testing.T) {
 		{"_txc.calendar.tenant", false},        // …and the route hint especially
 		{"_txc.contacts.res.ok", true},
 		{"_txc.contacts.res.card.fn", true},
+		{"_txc.git.res.ok", true},
+		{"_txc.git.res.msg", true},
+		{"_txc.git.ref", false},          // a push's facts are read-only…
+		{"_txc.git.tenant", false},       // …and the route hint especially
 		{"_txc.contacts.card.fn", false}, // a client's card facts are read-only…
 		{"_txc.contacts.tenant", false},  // …and the route hint especially
 		{"_txc.tcp.res.write", true},
@@ -445,7 +449,8 @@ func TestAuthorMayDeleteTxc(t *testing.T) {
 		t.Error("calendar route hint / object identity must not be deletable")
 	}
 	// A client's card and its parse are delete-only the same way.
-	for _, p := range []string{"_txc.contacts.vcard", "_txc.contacts.card", "_txc.contacts.card.addresses", "_txc.contacts.prior", "_txc.contacts.prior.card"} {
+	for _, p := range []string{"_txc.contacts.vcard", "_txc.contacts.card", "_txc.contacts.card.addresses", "_txc.contacts.prior", "_txc.contacts.prior.card",
+		"_txc.git.commands", "_txc.git.changes", "_txc.git.commits"} {
 		if !authorMayDeleteTxc(p) || authorMayWriteTxc(p) {
 			t.Errorf("%s: delete=%v write=%v, want delete-only", p, authorMayDeleteTxc(p), authorMayWriteTxc(p))
 		}

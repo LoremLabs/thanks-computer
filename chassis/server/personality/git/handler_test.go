@@ -47,6 +47,7 @@ func newHarness(t *testing.T, limits Limits) *harness {
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := NewController(ctx, pu, NewMemRepos(limits), fakeResolver{"127.0.0.1": "acme"})
+	ctrl.openWithoutAuth = true // the protocol tests; the door has its own
 	ctrl.Start()
 	srv := httptest.NewServer(ctrl.Handler())
 	t.Cleanup(func() { srv.Close(); ctrl.Stop(); cancel() })

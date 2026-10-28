@@ -23,6 +23,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/authn"
+	gitcore "github.com/loremlabs/thanks-computer/chassis/git"
 )
 
 // Change is one file a push changes, as the lane hears it [G1]: the path,
@@ -39,18 +40,21 @@ type Change struct {
 // Push is one receive-pack request after its objects are staged: what the
 // lane is asked about and what the refs are moved from.
 type Push struct {
-	Tenant string
-	Repo   string
-	Who    authn.Authenticated
+	Tenant   string
+	Repo     string
+	Who      authn.Authenticated
+	ClientIP string
 	// Commands are the client's ref updates, in its order.
 	Commands []*packp.Command
 	// Changes are the files each command changes, old tree → new tree.
 	Changes map[plumbing.ReferenceName][]Change
 
-	staging   Staging
-	reachable []plumbing.Hash
-	refused   map[plumbing.ReferenceName]string
-	unpack    string
+	staging      Staging
+	reachable    []plumbing.Hash
+	refused      map[plumbing.ReferenceName]string
+	unpack       string
+	commits      []envCommit
+	commitsTotal int
 }
 
 func (p *Push) refuse(name plumbing.ReferenceName, why string) {
@@ -117,7 +121,7 @@ func (c *Controller) serveReceivePack(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	p := &Push{
-		Tenant: req.tenant, Repo: req.name, Who: req.who,
+		Tenant: req.tenant, Repo: req.name, Who: req.who, ClientIP: req.ip,
 		Commands: ur.Commands,
 		Changes:  map[plumbing.ReferenceName][]Change{},
 		refused:  map[plumbing.ReferenceName]string{},
@@ -187,12 +191,22 @@ func (c *Controller) serveReceivePack(w http.ResponseWriter, r *http.Request, re
 	} else if len(p.refused) > 0 {
 		p.refuseRest(reasonAtomic)
 	}
+	if p.pending() > 0 {
+		describeCommits(p)
+	}
 
 	// 4. Keep the objects the moved refs reach.
 	if p.pending() > 0 && len(p.reachable) > 0 {
 		if err := p.staging.Commit(ctx, dedupe(p.reachable)); err != nil {
-			c.logger().Warn("git push: objects not stored", zap.String("tenant", p.Tenant), zap.String("repo", p.Repo), zap.Error(err))
-			p.unpack = "could not store the objects"
+			switch {
+			case errors.Is(err, gitcore.ErrRepoTooLarge):
+				p.unpack = fmt.Sprintf("repository over its cap of %d bytes", c.limits.MaxRepoBytes)
+			case errors.Is(err, gitcore.ErrObjectTooLarge):
+				p.unpack = fmt.Sprintf("an object is over %d bytes", c.limits.MaxObjectBytes)
+			default:
+				c.logger().Warn("git push: objects not stored", zap.String("tenant", p.Tenant), zap.String("repo", p.Repo), zap.Error(err))
+				p.unpack = "could not store the objects"
+			}
 			p.refuseRest(reasonUnpack)
 		}
 	}
@@ -202,10 +216,18 @@ func (c *Controller) serveReceivePack(w http.ResponseWriter, r *http.Request, re
 	w.WriteHeader(http.StatusOK)
 	_ = http.NewResponseController(w).Flush()
 
-	// 6. The hook: the answer lane's seat.
-	if p.pending() > 0 && c.beforeRefs != nil {
-		if err := c.beforeRefs(ctx, p); err != nil {
-			p.refuseRest(err.Error())
+	// 6. The answer lane: the tenant's `_git` stack judges the push before
+	// any ref moves (policy `stack`); a test hook may stand in for it.
+	if p.pending() > 0 {
+		switch {
+		case c.beforeRefs != nil:
+			if err := c.beforeRefs(ctx, p); err != nil {
+				p.refuseRest(err.Error())
+			}
+		case repo.Meta().PolicyPush != "open":
+			if a := c.lanes.ask(p); !a.ok {
+				p.refuseRest(a.msg)
+			}
 		}
 	}
 
@@ -244,6 +266,11 @@ func (c *Controller) serveReceivePack(w http.ResponseWriter, r *http.Request, re
 		if err := rs.Encode(w); err != nil {
 			c.logger().Debug("git push: report not written", zap.Error(err))
 		}
+	}
+	// 9. The observe lane: an accepted push is told to the stack after the
+	// reply, fire-and-forget.
+	if moved {
+		c.lanes.observe(p)
 	}
 	fields := []zap.Field{zap.String("tenant", p.Tenant), zap.String("repo", p.Repo), zap.Int("commands", len(p.Commands)),
 		zap.Bool("moved", moved), zap.String("unpack", p.unpack)}
@@ -338,9 +365,9 @@ func (c *Controller) unpack(r io.Reader, staging Staging) string {
 		switch {
 		case tooLarge(err, c.limits.MaxPackBytes) != "":
 			return tooLarge(err, c.limits.MaxPackBytes)
-		case errors.Is(err, errObjectTooLarge):
+		case errors.Is(err, gitcore.ErrObjectTooLarge):
 			return fmt.Sprintf("an object is over %d bytes", c.limits.MaxObjectBytes)
-		case errors.Is(err, errTooManyObjects):
+		case errors.Is(err, gitcore.ErrTooManyObjects):
 			return fmt.Sprintf("too many objects: more than %d", c.limits.MaxObjects)
 		}
 		c.logger().Debug("git push: pack not parsed", zap.Error(err))
