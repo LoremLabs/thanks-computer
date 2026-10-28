@@ -383,7 +383,7 @@ func (s *Store) ListGrants(ctx context.Context, tenantID, stack string, p Princi
 	args := []any{tenantID, p.ID}
 	if kind != "" {
 		if _, ok := resourceRules[kind]; !ok {
-			return nil, invalid("resource kind %q: want %q or %q", kind, ResourceCapability, ResourceSecret)
+			return nil, invalid("resource kind %q: want %q, %q or %q", kind, ResourceCapability, ResourceSecret, ResourceConnection)
 		}
 		q += ` AND resource_kind = ?`
 		args = append(args, string(kind))
