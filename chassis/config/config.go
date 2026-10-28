@@ -198,16 +198,13 @@ type Config struct {
 	GrantDecideTimeout           string   `id:"grant-decide-timeout" default:"5s" desc:"How long a tenant's _grant stack may take to decide one request made with a run grant. Past it the request is refused. (5s)"`
 	ParentURL                    string   `id:"parent-url" default:"" desc:"Base URL of this node's PARENT chassis, the one that dispatched the run it is working on and answers its capability calls: a rule's EXEC \"cap://<name>\" POSTs to <parent-url>/v1/cap/<name> with the run grant the request arrived with. Empty (default) means this chassis has no parent and every cap:// call answers cap.error txco_cap_unconfigured. ()"`
 	GrantRefusalWindow           string   `id:"grant-refusal-window" default:"5s" desc:"How long a refused request is answered from memory, so a program asking again and again cannot run the tenant's _grant stack without end. Only refusals are remembered. A change that would now allow the request takes up to this long to be seen. 0 turns it off. (5s)"`
-	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,dns,mailmap,scheduled,imap,websocket,calendar,contacts,webdav,source,ipp,state,grant} (cron,tcp,web,admin)"`
+	Personalities                string   `id:"personalities" default:"cron,tcp,web,admin" desc:"Head types to start. Comma delimited. {cron,tcp,web,admin,lmtp,dns,mailmap,scheduled,imap,websocket,calendar,contacts,webdav,git,source,ipp,state,grant} (cron,tcp,web,admin)"`
 	ShutdownGrace                string   `id:"shutdown-grace" default:"25s" desc:"On SIGTERM/SIGINT, how long in-flight runs get to finish before they are cancelled. The node drains first — new web requests get 503, new LMTP deliveries 451, the scheduled and source pollers claim nothing new — then waits for its requests and detached continuation work. 0 cancels at once. Give the container a stop timeout above this. (25s)"`
 	Repl                         bool     `id:"repl" default:"false" desc:"Run REPL mode"`
 	PromNamespace                string   `id:"prom-namespace" default:"txco" desc:"Set the Prometheus namespace (txco)"`
 	PromPeriod                   int      `id:"prom-period" default:"5" desc:"Set the Prometheus reporting period (5)"`
 	PushActionTimeout            int      `id:"push-action-timeout" default:"300" desc:"Timeout for push actions, in seconds (300)"`
 	RegistryFixed                []string `id:"registry-fixed" default:"" desc:"Set to use a fixed operation name registry. Prefix:Address:Port ex: *:localhost:5858 ()"`
-	RepoCloneSource              string   `id:"repoclone" default:"file://./chassis/data/generator/" desc:"What is the Git URL to use for new services (file://./chassis/data/generator/)"`
-	RepoStore                    string   `id:"repostore" default:"file" desc:"Which Repo Store to use? {memory, file} (file)"`
-	RepoStoreFileDir             string   `id:"repostore-file-dir" default:"./chassis/data/repo" desc:"What is the root directory for the file repo store? (./chassis/data/repo)"`
 	ContinuationStore            string   `id:"continuation-store" default:"file" desc:"Continuation/run store backend: {file} (file). s3 is a reserved enterprise seam."`
 	ContinuationStoreFileDir     string   `id:"continuation-store-file-dir" default:"./chassis/data/continuations" desc:"Root directory for the file continuation store (./chassis/data/continuations)"`
 	ContinuationStoreS3Bucket    string   `id:"continuation-store-s3-bucket" default:"" desc:"Reserved: S3-compatible continuation store bucket (enterprise seam; unused in open core)"`
@@ -377,6 +374,13 @@ type Config struct {
 	DriveSweepPeriod             int      `id:"drive-sweep-period" default:"900" desc:"Seconds between drive sweeps on a node running the 'webdav' head: superseded versions and the objects of failed writes are reclaimed, tombstones past --drive-tombstone-retention hard-deleted. Idempotent, so several heads sweeping is wasteful, not wrong. 0 disables. (900)"`
 	DriveSweepGrace              int      `id:"drive-sweep-grace" default:"3600" desc:"Seconds an object must be older than before the sweeper may reclaim it — covers a put whose bytes landed before its index row and a reader still streaming a version that was just replaced. (3600)"`
 	DriveTombstoneRetention      int      `id:"drive-tombstone-retention" default:"604800" desc:"Seconds a deleted resource's tombstone row stays, so a txco://drive/list since=<modseq> consumer can learn of the deletion; the sweeper hard-deletes older ones. Bytes are reclaimed after --drive-sweep-grace regardless. (604800 = 7d)"`
+	GitPathPrefix                string   `id:"git-path-prefix" default:"/git" desc:"URL prefix the 'git' personality reserves on EVERY hostname the web head serves: a repository is cloned from https://<host><prefix>/<repo>.git with a credential whose scopes cover git:<repo>:fetch (and git:<repo>:push to push). Smart HTTP only; requests here never run a stack except a push's lanes into the tenant's _git stack. Must differ from the other DAV prefixes. (/git)"`
+	GitInsecureAuth              bool     `id:"git-insecure-auth" default:"false" desc:"Accept Basic authentication on a plaintext request. Off (default), a request must arrive over TLS — the chassis's own --web-tls-addr listener, or X-Forwarded-Proto: https from a front proxy that terminates TLS. For txco dev only. (false)"`
+	GitMaxPackBytes              int      `id:"git-max-pack-bytes" default:"16777216" desc:"Cap on one git request body: a push's pack, a fetch's negotiation. A larger push is refused with 'pack too large' in its report. 0 = unlimited. (16777216, 16 MiB)"`
+	GitMaxObjectBytes            int      `id:"git-max-object-bytes" default:"1048576" desc:"Cap on one git object (a file's bytes) a push may deliver; the push is refused naming the path and the size. 0 = unlimited. (1048576, 1 MiB)"`
+	GitMaxObjects                int      `id:"git-max-objects" default:"5000" desc:"Cap on the objects one push's pack may carry, read from the pack header before anything is inflated. 0 = unlimited. (5000)"`
+	GitMaxRepoBytes              int      `id:"git-max-repo-bytes" default:"67108864" desc:"Cap on a repository's stored objects, a push's new ones included; a push past it is refused. 0 = unlimited. (67108864, 64 MiB)"`
+	GitTextOnly                  bool     `id:"git-text-only" default:"true" desc:"Refuse a push that adds or changes a file which is not text (valid UTF-8 without a NUL byte), a symlink, an executable or a submodule, naming the path. Configuration repositories hold text; turn it off for a repository of anything else. (true)"`
 	WebsocketMaxConns            int      `id:"websocket-max-conns" default:"8192" desc:"Max open WebSocket sessions on this node, all tenants; an upgrade past the cap answers 503 with Retry-After. A memory guard, not a throughput limit: an idle session costs ~50 KB and no processor time, and message work is bounded by tenant admission. Keep it under the process's file-descriptor limit and under any front proxy's connection cap. 0 disables the cap. Needs 'websocket' (with 'web') in --personalities. (8192)"`
 	WebsocketMaxConnsPerTenant   int      `id:"websocket-max-conns-per-tenant" default:"2048" desc:"Max open WebSocket sessions per tenant on this node; past it an upgrade answers 503 with Retry-After. Stops one tenant from taking a node's whole session budget. 0 disables the cap. (2048)"`
 	WebsocketMaxMessageBytes     int      `id:"websocket-max-message-bytes" default:"262144" desc:"Max bytes of one complete WebSocket message, inbound (a larger one closes the session with 1009) and outbound (txco://websocket/send answers txco_websocket_message_too_large). Text and binary alike; a stack may lower it per session at accept. (262144, 256 KiB)"`
@@ -490,23 +494,6 @@ func Load() (Config, error) {
 		}
 	}
 
-	// repo
-	if config.RepoStore == "file" {
-		if len(config.RepoStoreFileDir) > 0 {
-			if strings.HasPrefix(config.RepoStoreFileDir, ".") {
-				// convert to absolute path
-				p, _ := os.Getwd()
-				config.RepoStoreFileDir = filepath.Join(p, config.RepoStoreFileDir)
-			}
-
-			err = os.MkdirAll(config.RepoStoreFileDir, os.ModePerm)
-
-			if err != nil {
-				log.Fatalf("unable to make directory %s", config.RepoStoreFileDir)
-			}
-		}
-	}
-
 	// artifact store (snapshot/event artifacts) — same idiom as repo store
 	if config.ArtifactStore == "file" {
 		if len(config.ArtifactStoreFileDir) > 0 {
@@ -572,12 +559,6 @@ func Load() (Config, error) {
 		if err != nil {
 			log.Fatalf("unable to make directory %s", config.LogOpsDir)
 		}
-	}
-
-	// convert relative repo path to absolute
-	if strings.HasPrefix(config.RepoCloneSource, "file://./") {
-		p, _ := os.Getwd()
-		config.RepoCloneSource = "file://" + p + config.RepoCloneSource[8:]
 	}
 
 	if len(config.DbSchemaDir) > 0 {

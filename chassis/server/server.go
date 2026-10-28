@@ -90,6 +90,7 @@ import (
 	contactsp "github.com/loremlabs/thanks-computer/chassis/server/personality/contacts"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
+	gitp "github.com/loremlabs/thanks-computer/chassis/server/personality/git"
 	imapp "github.com/loremlabs/thanks-computer/chassis/server/personality/imap"
 	ippp "github.com/loremlabs/thanks-computer/chassis/server/personality/ipp"
 	"github.com/loremlabs/thanks-computer/chassis/server/personality/lmtp"
@@ -2792,6 +2793,19 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	if wdCtrl.Enabled() {
 		webCtrl.MountDAV("", wdCtrl.Prefix(), wdCtrl.Handler())
 	}
+	// Git personality (smart HTTP on the web head under --git-path-prefix):
+	// clone, fetch and push of a tenant's repositories by a stock git
+	// client, signed in through the same login resolver with
+	// git:<repo>:fetch|push scopes. [G0] The repositories live in memory
+	// for the prototype; G1 puts them over the content-addressed store.
+	var gitRepos gitp.RepoLoader
+	if conf.HasPersonality("git") {
+		gitRepos = gitp.NewMemRepos(gitp.LimitsFromConfig(conf))
+	}
+	gitCtrl := gitp.NewController(ctx, pu, gitRepos, resolver)
+	if gitCtrl.Enabled() {
+		webCtrl.MountDAV("", gitCtrl.Prefix(), gitCtrl.Handler())
+	}
 	// IPP personality (a stack presented as a PRINTER): it claims whole
 	// hostnames — `ipp.<zone>` — rather than a path on everyone's, so it is a
 	// host mount, not a DAV mount. Documents stream into the file CAS; a
@@ -2964,6 +2978,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		calCtrl,
 		conCtrl,
 		wdCtrl,
+		gitCtrl,
 		ippCtrl,
 		controlapply.NewController(ctx, pu, adminCtrl, fsrc, astore),
 		controlpublish.NewController(ctx, pu, fsink),

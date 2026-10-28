@@ -306,7 +306,7 @@ var cliCommandTree = []node{
 	{Name: "edit", Desc: "Edit a rule and apply on save"},
 	{Name: "dev", Desc: "Run the dev loop (apps + chassis + hot reload)", Flags: []string{
 		"target", "workspace", "no-chassis", "chassis-addr", "web-addr",
-		"ui", "tcp", "dns", "lmtp", "imap", "calendar", "contacts", "webdav", "ipp",
+		"ui", "tcp", "dns", "lmtp", "imap", "calendar", "contacts", "webdav", "git", "ipp",
 		"state", "scheduled", "source", "grant", "allow-local-workspace",
 		"watch", "watch-ignore", "apply", "force-opstacks", "verbose",
 	}},

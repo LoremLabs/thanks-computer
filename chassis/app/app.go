@@ -620,6 +620,7 @@ func Run(bi BuildInfo) int {
 		{"calendar", "--calendar-path-prefix", conf.CalendarPathPrefix},
 		{"contacts", "--contacts-path-prefix", conf.ContactsPathPrefix},
 		{"webdav", "--drive-path-prefix", conf.DrivePathPrefix},
+		{"git", "--git-path-prefix", conf.GitPathPrefix},
 	} {
 		if !conf.HasPersonality(h.personality) {
 			continue

@@ -139,10 +139,15 @@ type ResolvedTarget struct {
 	// prefer the signing profile's bound chassis_url over a blind
 	// localhost default, without overriding an explicit config.
 	ChassisExplicit bool
-	User            string
-	Pass            string
-	Mock            string // "allow" | "deny"
-	Operations      map[string]operationConfig
+	// Profile is the target's own profile name (`targets.<name>.profile`),
+	// "" when the target names none. `txco dev` registers its keyless
+	// profile under this name, so two dev loops on one machine keep
+	// separate profiles.
+	Profile    string
+	User       string
+	Pass       string
+	Mock       string // "allow" | "deny"
+	Operations map[string]operationConfig
 }
 
 // AsClientTarget reduces a ResolvedTarget to the subset the admin HTTP
@@ -427,6 +432,7 @@ func resolveFullTargetFromConfig(cfg *workspaceConfig, targetName string) Resolv
 		out.Chassis = tcfg.Chassis
 		out.ChassisExplicit = true
 	}
+	out.Profile = strings.TrimSpace(tcfg.Profile)
 	if tcfg.User != "" {
 		out.User = tcfg.User
 	}

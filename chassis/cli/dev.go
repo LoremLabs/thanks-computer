@@ -105,6 +105,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	calendarHead := fs.Bool("calendar", false, "start the calendar personality (CalDAV + ICS feeds) on the web head with dev defaults: served under http://<dev host>:<web port>/dav/ with Basic auth allowed over plaintext, index at .txco/dev/calendar.db — so a stack can provision an account with txco://calendar/account, issue its password with txco://credential/create, and a calendar app can open it (server <bound-host>, port = the web port, SSL off, path /dav/). Disabled by default. Override TXCO_CALENDAR_DB_PATH/CALENDAR_PATH_PREFIX.")
 	contactsHead := fs.Bool("contacts", false, "start the contacts personality (CardDAV) on the web head with dev defaults: served under http://<dev host>:<web port>/carddav/ with Basic auth allowed over plaintext, index at .txco/dev/contacts.db — so a stack can provision an account with txco://contacts/account, issue its password with txco://credential/create, and a contacts app can open it (server <bound-host>, port = the web port, SSL off, path /carddav/). Disabled by default. Override TXCO_CONTACTS_DB_PATH/CONTACTS_PATH_PREFIX.")
 	webdavHead := fs.Bool("webdav", false, "start the webdav personality (the drive store as a mountable folder) on the web head with dev defaults: served under http://<dev host>:<web port>/drive/ with Basic auth allowed over plaintext, index at .txco/dev/drive.db and the bytes under .txco/dev/drive/ — so a stack can provision an account with txco://drive/collection + txco://drive/account, issue its password with txco://credential/create, and Finder / rclone can mount it (server <bound-host>, port = the web port, SSL off, path /drive/). Disabled by default. Override TXCO_DRIVE_DB_PATH/DRIVE_OBJECTS_FILE_DIR/DRIVE_PATH_PREFIX.")
+	gitHead := fs.Bool("git", false, "start the git personality (clone, fetch and push by a stock git client) on the web head with dev defaults: served under http://<dev host>:<web port>/git/<repo>.git with Basic auth allowed over plaintext — so a stack can make a repository with txco://repo/create, issue a password with txco://credential/create (scopes git:<repo>:fetch, git:<repo>:push), and `git clone` opens it. Disabled by default. Override TXCO_GIT_PATH_PREFIX.")
 	ippHead := fs.Bool("ipp", false, "start the ipp personality (a stack presented as a PRINTER) with dev defaults: the web head also listens on "+devIPPTLSAddr+" (HTTPS, self-signed certificate kept at .txco/dev/web-selfsigned.crt) and answers IPP on hosts named ipp.<bound-host> — ipps://ipp.localhost:8443/p/<printer>; job store at .txco/dev/ipp.db; every request's operation and attribute NAMES are logged. A tenant has printers only once it has an active `_ipp` stack AND a registered printer (txco://ipp/printer); a client signs in as the printer's principal, with a password from txco://credential/create. Disabled by default. Override TXCO_WEB_TLS_ADDR/IPP_DB_PATH/IPP_WIRE_DEBUG.")
 	lmtpHead := fs.Bool("lmtp", false, "start the LMTP mail head with dev defaults: binds "+devLMTPListenAddr+", relays outbound mail to a local sink ("+devMailRelayAddr+", TLS off — MailHog/Mailpit), and auto-loads ./ingress.yaml from the workspace when present (the local stand-in for minted hostnames). Disabled by default. Override any of TXCO_LMTP_LISTEN_ADDRS/MAIL_RELAY_ADDR/MAIL_RELAY_TLS/INGRESS_CONFIG.")
 	staticOnly := fs.Bool("static-only", false, "deploy a bound Web ABI build's static half even though it has a server entry (no chassis runs server/ yet)")
@@ -296,13 +297,17 @@ Flags:
 	chassisURL := resolved.Chassis
 	webURL := "" // unknown when --no-chassis (assume caller knows where to curl)
 	var devProfileAction auth.DevProfileAction
+	devProfileName := auth.DevProfileName
+	if p := strings.TrimSpace(resolved.Profile); p != "" {
+		devProfileName = p
+	}
 	if !*noChassis {
 		chassisURL, webURL, err = startChassis(ctx, chassisOpts{
 			Workspace: dir, AdminAddr: *chassisAddr, WebAddr: *webAddr,
 			Heads: devHeads{
 				TCP: *tcpHead, DNS: *dnsHead, LMTP: *lmtpHead, Scheduled: *scheduledHead, Source: *sourceHead,
 				IMAP: *imapHead, Calendar: *calendarHead, Contacts: *contactsHead, WebDAV: *webdavHead,
-				IPP: *ippHead, State: *stateHead, Grant: *grantHead,
+				Git: *gitHead, IPP: *ippHead, State: *stateHead, Grant: *grantHead,
 			},
 			AllowLocalWorkspace: *allowLocalWorkspace, LocalExec: *workspaceLocalExec, Verbose: *verbose,
 			Stdout: stdout, Stderr: stderr, Started: &started, Out: &chassisProc,
@@ -315,16 +320,21 @@ Flags:
 		// inside this process talks to the spawned chassis.
 		resolved.Chassis = chassisURL
 
-		// Register a keyless `dev` profile pointing at this chassis so the
+		// Register a keyless profile pointing at this chassis so the
 		// developer gets a named target — `txco apply dev`, `txco ui dev`,
 		// `txco auth tenant secrets set X dev` — without `bootstrap-local`.
-		// Not made active, so prod/cloud commands are untouched. Do it now (so
-		// the profile exists before the initial apply), but defer the
-		// user-facing line to the banner below. Non-fatal: the loop still works
-		// via `--target <url>` if this can't be written.
+		// The profile is named `dev` unless the selected target names its
+		// own (`targets.<name>.profile` in txco.yaml): a second dev loop on
+		// other ports then registers ITS name and leaves the first loop's
+		// `dev` profile — another shell's, another session's — pointing
+		// where it was. Not made active, so prod/cloud commands are
+		// untouched. Do it now (so the profile exists before the initial
+		// apply), but defer the user-facing line to the banner below.
+		// Non-fatal: the loop still works via `--target <url>` if this
+		// can't be written.
 		var perr error
-		if devProfileAction, _, perr = auth.EnsureDevProfile(auth.DevProfileName, chassisURL, auth.DefaultTenantSlug); perr != nil {
-			fmt.Fprintf(stderr, "[txco] note: couldn't register %q profile: %v\n", auth.DevProfileName, perr)
+		if devProfileAction, _, perr = auth.EnsureDevProfile(devProfileName, chassisURL, auth.DefaultTenantSlug); perr != nil {
+			fmt.Fprintf(stderr, "[txco] note: couldn't register %q profile: %v\n", devProfileName, perr)
 		}
 	}
 
@@ -625,6 +635,10 @@ Flags:
 				fmt.Fprintln(stdout, "[txco]        NOTE: no workspace provider is on, so no command can be handed a grant: add --allow-local-workspace")
 			}
 		}
+		if *gitHead {
+			fmt.Fprintf(stdout, "[txco]   git head: %s/git/<repo>.git (smart HTTP, Basic auth over plaintext); repositories in memory for now\n", webURL)
+			fmt.Fprintf(stdout, "[txco]        clone with: git clone %s/git/<repo>.git  (a password from txco://credential/create with scopes git:<repo>:fetch, git:<repo>:push)\n", webURL)
+		}
 		if *webdavHead {
 			fmt.Fprintf(stdout, "[txco]   webdav head: %s/drive/ (WebDAV, Basic auth over plaintext); index at .txco/dev/drive.db, bytes under .txco/dev/drive/\n", webURL)
 			fmt.Fprintln(stdout, "[txco]        provision with `EXEC \"txco://drive/collection\" WITH name = \"docs\"` and `txco://drive/account WITH username = \"you@<bound-host>\", collection = \"docs\"`, then mount it:")
@@ -644,10 +658,10 @@ Flags:
 	if !*noChassis {
 		if devProfileAction == auth.DevProfileWrote || devProfileAction == auth.DevProfileCurrent {
 			fmt.Fprintf(stdout, "[txco]   profile %q → %s (tenant %s) — e.g. `txco apply %s`\n",
-				auth.DevProfileName, chassisURL, auth.DefaultTenantSlug, auth.DevProfileName)
+				devProfileName, chassisURL, auth.DefaultTenantSlug, devProfileName)
 		}
-		if active, _ := auth.ReadActiveProfile(); active != auth.DevProfileName && active != auth.ActiveNone {
-			fmt.Fprintf(stdout, "[txco]   tip: active profile is %q — run `txco auth profile use %s` so plain\n", active, auth.DevProfileName)
+		if active, _ := auth.ReadActiveProfile(); active != devProfileName && active != auth.ActiveNone {
+			fmt.Fprintf(stdout, "[txco]   tip: active profile is %q — run `txco auth profile use %s` so plain\n", active, devProfileName)
 			fmt.Fprintf(stdout, "[txco]        `txco apply` / `txco ui` hit this chassis (then `txco auth profile use %s` to switch back).\n", active)
 		}
 	}
@@ -1159,7 +1173,7 @@ func isVersionNotDraftErr(err error) bool {
 // those four, and the extra binds otherwise cause spurious "port in use"
 // failures on machines running other things there.
 type devHeads struct {
-	TCP, DNS, LMTP, Scheduled, Source, IMAP, Calendar, Contacts, WebDAV, IPP, State bool
+	TCP, DNS, LMTP, Scheduled, Source, IMAP, Calendar, Contacts, WebDAV, Git, IPP, State bool
 	// Grant is the launcher's socket: how a command opens a sandbox itself.
 	Grant bool
 }
@@ -1420,6 +1434,9 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 		env = append(env, "TXCO_DRIVE_DB_PATH="+filepath.Join(devDir, "drive.db"))
 		env = append(env, "TXCO_DRIVE_OBJECTS_FILE_DIR="+filepath.Join(devDir, "drive"))
 	}
+	if o.Heads.Git {
+		heads = append(heads, "git")
+	}
 	if o.Heads.IPP {
 		heads = append(heads, "ipp")
 		env = append(env, "TXCO_WEB_TLS_ADDR="+devIPPTLSAddr)
@@ -1535,6 +1552,9 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 	}
 	if o.Heads.WebDAV {
 		devDefaults["TXCO_DRIVE_INSECURE_AUTH"] = "true"
+	}
+	if o.Heads.Git {
+		devDefaults["TXCO_GIT_INSECURE_AUTH"] = "true"
 	}
 	// IPP dev defaults: the HTTPS listener serves a self-signed certificate
 	// kept under .txco/dev (there is no dns head or CA in dev — without this
