@@ -1,4 +1,4 @@
-.PHONY: all lint test build clean install ui smoke version bump-version
+.PHONY: all lint test build clean install ui smoke version bump-version plugin
 
 -include .env
 export
@@ -13,6 +13,11 @@ clean:
 	cd ./chassis && make clean
 fetch-tools:
 	cd ./chassis && make fetch-tools
+# Rebuild the vendored txco Javy plugin (the QuickJS engine nano-ops link
+# against) from chassis/compute/javyplugin/plugin. Needs rustup and the pinned
+# javy; see that directory's README. Only when the plugin crate changes.
+plugin:
+	sh ./chassis/compute/javyplugin/build.sh
 lint:
 	cd ./chassis && make lint
 test:

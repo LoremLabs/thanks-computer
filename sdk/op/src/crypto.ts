@@ -1,9 +1,35 @@
-// @txco/op/crypto — pure-JS crypto helpers. The sandbox has no host crypto, so
-// these are self-contained implementations.
+// @txco/op/crypto — hashing and encoding for nano-ops.
 //
 //   import { b64, sha256, hmac } from "@txco/op/crypto";
+//
+// sha256 and hmac run natively when the txco Javy plugin provides
+// `__txco_native` (every op built by txco since the plugin shipped it:
+// chassis/compute/javyplugin/plugin), hundreds of times faster than QuickJS
+// can interpret the hash. Without it — an older plugin, or another runtime
+// for the npm copy — the self-contained JS implementations below run and
+// give the same answer. The sandbox has no other host crypto.
 
 type Bytes = string | Uint8Array;
+
+/** The natives the txco Javy plugin registers on the global object. */
+interface TxcoNative {
+  version: number;
+  sha256(data: Uint8Array): Uint8Array;
+  hmacSha256(key: Uint8Array, message: Uint8Array): Uint8Array;
+}
+
+function findNative(): TxcoNative | undefined {
+  const n = (globalThis as { __txco_native?: Partial<TxcoNative> }).__txco_native;
+  if (n && typeof n.sha256 === "function" && typeof n.hmacSha256 === "function") {
+    return n as TxcoNative;
+  }
+  return undefined;
+}
+
+const native = findNative();
+
+/** Whether sha256 and hmac run natively in this sandbox. */
+export const isNative: boolean = native !== undefined;
 
 const _enc = new TextEncoder();
 
@@ -58,17 +84,17 @@ export const b64 = {
   },
 };
 
-// --- sha256 ---
+// --- sha256 (JS fallback) ---
 //
 // Tuned for QuickJS, which interprets op code: 32-bit integer math only
 // (`| 0` throughout; an unsigned coercion mid-round drops QuickJS into
 // doubles), rotations written inline, one reused Int32Array schedule,
 // big-endian words read straight from the padded buffer, and hex from a lookup
 // table. The earlier version (a data view per word, a helper call per rotation,
-// unsigned coercions) cost ~1.7x more per byte, and an op that hashes a whole
-// message body or a rendered prompt pays that out of its wall-clock budget.
-// Verified against Go's crypto/sha256 and crypto/hmac in
-// chassis/cli/op/crypto_sdk_test.go.
+// unsigned coercions) cost ~1.7x more per byte. Even tuned, QuickJS under
+// wazero hashes ~135 KB/s this way — about 65 KB inside a 500 ms op — which is
+// why the native path above exists. Verified against Go's crypto/sha256 and
+// crypto/hmac in chassis/cli/op/crypto_sdk_test.go.
 
 const K = new Int32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -85,6 +111,11 @@ const W = new Int32Array(64);
 
 function sha256Bytes(input: Bytes): Uint8Array {
   const msg = toBytes(input);
+  if (native) return native.sha256(msg);
+  return sha256JS(msg);
+}
+
+function sha256JS(msg: Uint8Array): Uint8Array {
   const len = msg.length;
   // Padding: 0x80, zeros, then the bit length as a 64-bit big-endian integer.
   const total = Math.ceil((len + 9) / 64) * 64;
@@ -162,6 +193,7 @@ export function sha256(input: Bytes): string {
 
 /** HMAC-SHA256(key, message), returned as a lowercase hex string. */
 export function hmac(key: Bytes, message: Bytes): string {
+  if (native) return toHex(native.hmacSha256(toBytes(key), toBytes(message)));
   const blockSize = 64;
   let k = toBytes(key);
   if (k.length > blockSize) k = sha256Bytes(k);

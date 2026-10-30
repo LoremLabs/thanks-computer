@@ -272,12 +272,16 @@ func BuildFile(entryPath, workspaceRoot string) (Built, error) {
 		}
 		// Dynamic linking: emit just this op's bytecode (~1 KB) linked against the
 		// shared QuickJS plugin, instead of a self-contained ~1.25 MB module. The
-		// vendored plugin is the same bytes the runtime links against. The JS
+		// vendored plugin is the same bytes the runtime links against, and it
+		// carries the txco natives (sha256, hmac) the SDK's crypto helpers use. The JS
 		// runtime features (event loop, text-encoding, stream-io) come from the
 		// plugin, so the old `-J` flags don't apply here (`-C plugin=` rejects
 		// them); `source=omitted` drops the embedded JS source (smaller; the
 		// authored source isn't needed to run).
-		pluginPath := filepath.Join(cacheDir, "javy-plugin-"+javyplugin.JavyVersion+".wasm")
+		// The file is named for the plugin's namespace as well as the Javy
+		// version: a workspace cache that still holds the plugin an earlier txco
+		// wrote must not be linked against by mistake.
+		pluginPath := filepath.Join(cacheDir, "javy-plugin-"+javyplugin.JavyVersion+"-"+javyplugin.Namespace+".wasm")
 		if _, perr := os.Stat(pluginPath); perr != nil {
 			if werr := os.WriteFile(pluginPath, javyplugin.Bytes(), 0o644); werr != nil {
 				return Built{}, fmt.Errorf("write javy plugin: %w", werr)

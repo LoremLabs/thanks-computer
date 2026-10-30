@@ -52,3 +52,7 @@ chassis/server/personality/ipp/ui/dist/*
 *.wasm
 # The compute engine's JS fixtures are committed so its tests need no javy.
 !chassis/compute/wazero/testdata/src/js/*.wasm
+# The vendored Javy plugins (the QuickJS engine nano-ops link against) are
+# committed; the Rust build tree that produces them is not.
+!chassis/compute/javyplugin/*.wasm
+chassis/compute/javyplugin/plugin/target/

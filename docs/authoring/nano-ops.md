@@ -48,6 +48,14 @@ What the tooling handles for you:
   `txco apply --no-source` (or `push`) leaves source out; the new version
   then carries none.
 
+## Hashing
+
+`sha256` and `hmac` from `@txco/op/crypto` run natively inside the sandbox:
+the QuickJS engine every nano-op links against carries them, so hashing a
+whole message body or a rendered prompt costs milliseconds, not the op's
+wall-clock budget. Nothing to import differently; an op built before the
+engine carried them picks the native path up on its next `txco apply`.
+
 ## Important restrictions when choosing nano-ops
 
 Nano-ops are not meant for running large operations requiring IO, but instead as a way to have a richer language

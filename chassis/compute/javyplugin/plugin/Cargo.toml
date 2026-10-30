@@ -1,0 +1,30 @@
+# The txco Javy plugin: Javy's default QuickJS plugin (crates/plugin in the
+# Javy repository at the pinned version) plus native crypto for nano-ops. See
+# README.md in this directory and ../javyplugin.go.
+#
+# javy-plugin-api is pinned to the version shipped with the Javy CLI the
+# chassis pins (chassis/compute/javyplugin.JavyVersion): the CLI compiles an
+# op's JS to bytecode by running THIS plugin, so the two must agree.
+[package]
+name = "txco-javy-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Javy's default QuickJS plugin plus native sha256/HMAC for txco nano-ops"
+
+[lib]
+name = "plugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0"
+javy-plugin-api = { version = "=6.0.0", features = ["json"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json = "1.0"
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+
+[profile.release]
+lto = true
+opt-level = 3

@@ -16,16 +16,20 @@ import (
 // TestSDKCryptoMatchesGo: @txco/op/crypto's pure-JS sha256 and hmac, run in the
 // real sandbox, agree with Go's crypto/sha256 and crypto/hmac on the padding
 // boundaries, UTF-8, an empty input, a large input, and keys shorter than,
-// equal to and longer than the 64-byte block. Guards the QuickJS-tuned
-// implementation: one wrong rotation passes every smoke test and corrupts
-// every msgkey, campaign and signature silently.
+// equal to and longer than the 64-byte block. The op is built against the
+// current plugin, so this exercises the native path (and asserts it is the
+// one in use); the JS fallback is the same code the natives replaced and is
+// checked by the SDK's own tests when they run elsewhere. One wrong byte here
+// passes every smoke test and corrupts every msgkey, campaign and signature
+// silently.
 func TestSDKCryptoMatchesGo(t *testing.T) {
 	if _, err := exec.LookPath("javy"); err != nil {
 		t.Skip("javy not on PATH")
 	}
 	setupColocated(t, `import { op } from "@txco/op";
-import { sha256, hmac } from "@txco/op/crypto";
+import { sha256, hmac, isNative } from "@txco/op/crypto";
 export default op(({ input }) => ({
+  native: isNative,
   sha: input.msgs.map((m) => sha256(m)),
   mac: input.keys.map((k) => hmac(k, input.msgs[1])),
 }));`)
@@ -58,11 +62,15 @@ export default op(({ input }) => ({
 	}
 	line := strings.SplitN(strings.TrimSpace(out.String()), "\n", 2)[0]
 	var got struct {
-		Sha []string `json:"sha"`
-		Mac []string `json:"mac"`
+		Native bool     `json:"native"`
+		Sha    []string `json:"sha"`
+		Mac    []string `json:"mac"`
 	}
 	if err := json.Unmarshal([]byte(line), &got); err != nil {
 		t.Fatalf("decode %q: %v", line, err)
+	}
+	if !got.Native {
+		t.Error("isNative = false: the op did not find __txco_native (built against the wrong plugin?)")
 	}
 	if len(got.Sha) != len(msgs) || len(got.Mac) != len(keys) {
 		t.Fatalf("got %d digests and %d macs, want %d and %d", len(got.Sha), len(got.Mac), len(msgs), len(keys))

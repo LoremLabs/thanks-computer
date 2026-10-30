@@ -10,10 +10,12 @@
 //   - Self-contained: the whole runtime is in the module (Rust/TinyGo native
 //     wasm, or a static `javy build`). Compiled once, instantiated per call.
 //   - Dynamically linked Javy: a tiny (~1 KB) module carrying only the op's JS
-//     bytecode, importing `invoke`/`cabi_realloc`/`memory` from the shared
-//     QuickJS plugin (chassis/compute/javyplugin). The engine links it against
-//     that plugin so thousands of ops share one ~1.25 MB engine instead of
-//     embedding it per op. See the dynamic-link section below.
+//     bytecode, importing `invoke`/`cabi_realloc`/`memory` from a shared
+//     QuickJS plugin (chassis/compute/javyplugin), chosen by the namespace the
+//     module imports: the current plugin, or the one an earlier chassis built
+//     against. The engine links it against that plugin so thousands of ops
+//     share one ~1.25 MB engine instead of embedding it per op. See the
+//     dynamic-link section below.
 //
 // Sandbox posture ("restricted WASI"): no filesystem, no network, no env, no
 // args. Wall clock is frozen and randomness is a fixed-seed PRNG — deterministic
@@ -42,6 +44,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,20 +84,30 @@ type engine struct {
 	mu    sync.Mutex
 	cmods map[string]wazero.CompiledModule
 
-	// Dynamic-link plugin snapshot, built lazily on first dynamically linked
-	// invocation (see dynamicInstance). The post-init plugin memory is captured
-	// once and restored into a fresh plugin instance per call, which lets us run
-	// with the event loop enabled while leaving runtime stdin free for input.
-	// dynMu serializes the build; a build that failed is not kept (snapshot).
-	dynMu    sync.Mutex
-	dynSnap  []byte
-	dynPages uint32
+	// Per-plugin state for dynamically linked ops, keyed by the namespace a
+	// module imports (see pluginState). closed stops a Close'd engine from
+	// keeping any linker.
+	dynMu  sync.Mutex
+	dyn    map[string]*pluginState
+	closed bool
+}
 
-	// Idle linkers for dynamically linked ops, reused across calls (see
-	// linker). closed stops a Close'd engine from keeping any.
+// pluginState is what the engine keeps for one vendored plugin: its post-init
+// memory snapshot, built lazily on the first op that links against it (see
+// snapshot), and the idle linkers reused across calls (see linker). The
+// snapshot is captured once and restored into a fresh plugin instance per
+// call, which lets us run with the event loop enabled while leaving runtime
+// stdin free for input. snapMu serializes the build; a build that failed is
+// not kept.
+type pluginState struct {
+	plugin javyplugin.Plugin
+
+	snapMu sync.Mutex
+	snap   []byte
+	pages  uint32
+
 	linkMu  sync.Mutex
 	linkers []*linker
-	closed  bool
 }
 
 // New builds the engine. The runtime enables context-deadline interruption
@@ -113,6 +126,7 @@ func New(cfg compute.EngineConfig) (compute.Engine, error) {
 		cache: cache,
 		rt:    rt,
 		cmods: map[string]wazero.CompiledModule{},
+		dyn:   map[string]*pluginState{},
 	}, nil
 }
 
@@ -151,25 +165,66 @@ func (e *engine) Load(ctx context.Context, art compute.Artifact) (compute.Instan
 	if err != nil {
 		return nil, err
 	}
-	if importsPlugin(cm) {
-		// Dynamically linked Javy module: it imports the plugin namespace, so it
-		// is linked against the shared plugin at invoke time in a fresh per-call
-		// runtime (see dynamicInstance.Invoke). Compiling it here (above) only
+	if ns, ok := importedPlugin(cm); ok {
+		// Dynamically linked Javy module: it imports a plugin namespace, so it
+		// is linked against that vendored plugin at invoke time on a linker of
+		// its own (see dynamicInstance.Invoke). Compiling it here (above) only
 		// inspects/caches it — compilation does not resolve imports.
-		return &dynamicInstance{eng: e, art: art}, nil
+		ps, err := e.pluginState(ns)
+		if err != nil {
+			return nil, fmt.Errorf("wazero: %s:%s: %w", art.Alg, art.Digest, err)
+		}
+		return &dynamicInstance{eng: e, art: art, ps: ps}, nil
 	}
 	return &instance{rt: e.rt, cm: cm}, nil
+}
+
+// pluginState returns the state for the vendored plugin with namespace ns,
+// creating it on first use, or an error when no vendored plugin has that
+// namespace: the module was built by a newer txco, or against a plugin this
+// chassis never shipped. Rebuilding the op (`txco apply`) links it against
+// the current plugin.
+func (e *engine) pluginState(ns string) (*pluginState, error) {
+	e.dynMu.Lock()
+	defer e.dynMu.Unlock()
+	if ps, ok := e.dyn[ns]; ok {
+		return ps, nil
+	}
+	p, ok := javyplugin.Lookup(ns)
+	if !ok {
+		return nil, fmt.Errorf("module imports unknown javy plugin %q (this chassis has %s); rebuild the op with `txco apply`", ns, strings.Join(namespaces(), ", "))
+	}
+	ps := &pluginState{plugin: p}
+	e.dyn[ns] = ps
+	return ps, nil
+}
+
+func namespaces() []string {
+	var out []string
+	for _, p := range javyplugin.All() {
+		out = append(out, p.Namespace)
+	}
+	return out
 }
 
 // Close releases the runtime, idle linkers, compiled modules, and the
 // compilation cache.
 func (e *engine) Close(ctx context.Context) error {
-	e.linkMu.Lock()
-	idle := e.linkers
-	e.linkers, e.closed = nil, true
-	e.linkMu.Unlock()
-	for _, l := range idle {
-		_ = l.rt.Close(ctx)
+	e.dynMu.Lock()
+	e.closed = true
+	states := make([]*pluginState, 0, len(e.dyn))
+	for _, ps := range e.dyn {
+		states = append(states, ps)
+	}
+	e.dynMu.Unlock()
+	for _, ps := range states {
+		ps.linkMu.Lock()
+		idle := ps.linkers
+		ps.linkers = nil
+		ps.linkMu.Unlock()
+		for _, l := range idle {
+			_ = l.rt.Close(ctx)
+		}
 	}
 	err := e.rt.Close(ctx)
 	if cerr := e.cache.Close(ctx); err == nil {
@@ -178,19 +233,21 @@ func (e *engine) Close(ctx context.Context) error {
 	return err
 }
 
-// importsPlugin reports whether a compiled module imports a function from the
-// Javy plugin namespace — i.e. it is a small dynamically linked op rather than
-// a self-contained module. Inspecting imports (not a substring scan) is the
-// reliable probe: a self-contained javy build *embeds* the plugin, so the
-// namespace string also appears in its custom sections, but only a linked
-// module actually imports `<namespace>.invoke` et al.
-func importsPlugin(cm wazero.CompiledModule) bool {
+// importedPlugin returns the Javy plugin namespace a compiled module imports
+// `invoke` from — i.e. it is a small dynamically linked op rather than a
+// self-contained module — and false for a module that imports no such thing.
+// Inspecting imports (not a substring scan) is the reliable probe: a
+// self-contained javy build *embeds* the plugin, so the namespace string also
+// appears in its custom sections, but only a linked module actually imports
+// `<namespace>.invoke` et al. The namespace is reported whether or not a
+// plugin by that name is vendored, so the caller can say which one is missing.
+func importedPlugin(cm wazero.CompiledModule) (string, bool) {
 	for _, f := range cm.ImportedFunctions() {
-		if m, _, ok := f.Import(); ok && m == javyplugin.Namespace {
-			return true
+		if m, name, ok := f.Import(); ok && name == "invoke" && m != wasi_snapshot_preview1.ModuleName {
+			return m, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // ---- self-contained modules ----
@@ -249,15 +306,17 @@ func (i *instance) Close(context.Context) error { return nil }
 // ---- dynamically linked Javy modules ----
 //
 // A dynamically linked module is just the op's QuickJS bytecode; the engine
-// lives in the shared plugin (chassis/compute/javyplugin). Running it:
+// lives in a shared plugin (chassis/compute/javyplugin), the one whose
+// namespace the module imports. Running it:
 //
-//  1. Once (lazily): instantiate the plugin feeding the SharedConfig on stdin,
-//     call initialize-runtime (turns the event loop on), and snapshot its full
-//     linear memory. This freezes the configured QuickJS runtime.
-//  2. Per call: take a linker (a runtime of its own, see below), instantiate
-//     the plugin WITHOUT re-initializing, restore the snapshot into its
-//     memory, then instantiate the op module. Its `_start` calls
-//     `plugin.invoke`, which runs the JS; the SDK reads input from the
+//  1. Once per plugin (lazily): instantiate the plugin feeding the
+//     SharedConfig on stdin, call initialize-runtime (turns the event loop
+//     on), and snapshot its full linear memory. This freezes the configured
+//     QuickJS runtime.
+//  2. Per call: take a linker for that plugin (a runtime of its own, see
+//     below), instantiate the plugin WITHOUT re-initializing, restore the
+//     snapshot into its memory, then instantiate the op module. Its `_start`
+//     calls `plugin.invoke`, which runs the JS; the SDK reads input from the
 //     plugin's stdin (fd 0) and writes output to its stdout (fd 1). Restoring
 //     the snapshot — rather than re-running initialize-runtime — leaves stdin
 //     free to carry the request input. Both modules are closed before the
@@ -269,6 +328,7 @@ func (i *instance) Close(context.Context) error { return nil }
 type dynamicInstance struct {
 	eng *engine
 	art compute.Artifact
+	ps  *pluginState // the plugin this module imports
 }
 
 func (d *dynamicInstance) Close(context.Context) error { return nil }
@@ -277,7 +337,7 @@ func (d *dynamicInstance) Invoke(ctx context.Context, input []byte, lim compute.
 	if len(input) == 0 {
 		input = []byte("{}")
 	}
-	snap, pages, err := d.eng.snapshot(ctx)
+	snap, pages, err := d.eng.snapshot(ctx, d.ps)
 	if err != nil {
 		return nil, err
 	}
@@ -295,73 +355,80 @@ func (d *dynamicInstance) Invoke(ctx context.Context, input []byte, lim compute.
 		}()
 	}
 
-	l, err := d.eng.takeLinker(ctx)
+	l, err := d.eng.takeLinker(ctx, d.ps)
 	if err != nil {
 		status = "trapped"
 		return nil, err
 	}
 	out, err := l.run(ctx, d.art, input, lim, snap, pages, &status, &memBytes)
-	d.eng.giveLinker(ctx, l, err == nil)
+	d.eng.giveLinker(ctx, d.ps, l, err == nil)
 	return out, err
 }
 
 // ---- linkers ----
 
-// maxIdleLinkers bounds the linkers kept between calls; a call that finds
-// none idle builds one, and a linker handed back to a full pool is closed.
-// Each idle one holds the decoded plugin, about 1.4 MB, so a full pool is
-// ~11 MB; it covers a node's usual compute concurrency rather than its peak.
+// maxIdleLinkers bounds the linkers kept between calls per plugin; a call
+// that finds none idle builds one, and a linker handed back to a full pool is
+// closed. Each idle one holds the decoded plugin, about 1.4 MB, so a full
+// pool is ~11 MB; it covers a node's usual compute concurrency rather than
+// its peak. In practice only the current plugin's pool fills: the legacy
+// plugin serves ops not yet rebuilt, and those thin out with each apply.
 const maxIdleLinkers = 8
 
-// linker is a runtime ready to run dynamically linked ops: WASI instantiated
-// and the plugin decoded. Decoding and validating the ~1.25 MB plugin costs
-// ~10 ms even when its machine code comes from the compilation cache, and a
-// per-call runtime paid it on every call, which was most of a nano-op's cost.
-// A linker runs one call at a time.
+// linker is a runtime ready to run ops linked against one plugin: WASI
+// instantiated and that plugin decoded. Decoding and validating the ~1.25 MB
+// plugin costs ~10 ms even when its machine code comes from the compilation
+// cache, and a per-call runtime paid it on every call, which was most of a
+// nano-op's cost. A linker runs one call at a time.
 type linker struct {
 	rt     wazero.Runtime
+	ns     string // the plugin's namespace: the module name it is instantiated under
 	plugin wazero.CompiledModule
 }
 
-func (e *engine) newLinker(ctx context.Context) (*linker, error) {
+func (e *engine) newLinker(ctx context.Context, ps *pluginState) (*linker, error) {
 	rt := wazero.NewRuntimeWithConfig(ctx, runtimeConfig(e.cfg, e.cache))
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
 		_ = rt.Close(ctx)
 		return nil, fmt.Errorf("wazero: instantiate WASI: %w", err)
 	}
-	cm, err := rt.CompileModule(ctx, javyplugin.Bytes()) // machine code is a cache hit after the first build
+	cm, err := rt.CompileModule(ctx, ps.plugin.Wasm) // machine code is a cache hit after the first build
 	if err != nil {
 		_ = rt.Close(ctx)
-		return nil, fmt.Errorf("wazero: compile plugin: %w", err)
+		return nil, fmt.Errorf("wazero: compile plugin %s: %w", ps.plugin.Namespace, err)
 	}
-	return &linker{rt: rt, plugin: cm}, nil
+	return &linker{rt: rt, ns: ps.plugin.Namespace, plugin: cm}, nil
 }
 
-// takeLinker returns an idle linker, or a new one when none is idle.
-func (e *engine) takeLinker(ctx context.Context) (*linker, error) {
-	e.linkMu.Lock()
-	if n := len(e.linkers); n > 0 {
-		l := e.linkers[n-1]
-		e.linkers = e.linkers[:n-1]
-		e.linkMu.Unlock()
+// takeLinker returns an idle linker for ps's plugin, or a new one when none
+// is idle.
+func (e *engine) takeLinker(ctx context.Context, ps *pluginState) (*linker, error) {
+	ps.linkMu.Lock()
+	if n := len(ps.linkers); n > 0 {
+		l := ps.linkers[n-1]
+		ps.linkers = ps.linkers[:n-1]
+		ps.linkMu.Unlock()
 		return l, nil
 	}
-	e.linkMu.Unlock()
-	return e.newLinker(ctx)
+	ps.linkMu.Unlock()
+	return e.newLinker(ctx, ps)
 }
 
-// giveLinker hands l back after a call. Only a linker whose call ran clean is
-// kept: after a trap or a wall-limit kill the runtime is closed instead, so
-// no call ever inherits whatever state a failed one left.
-func (e *engine) giveLinker(ctx context.Context, l *linker, clean bool) {
+// giveLinker hands l back to ps's pool after a call. Only a linker whose call
+// ran clean is kept: after a trap or a wall-limit kill the runtime is closed
+// instead, so no call ever inherits whatever state a failed one left.
+func (e *engine) giveLinker(ctx context.Context, ps *pluginState, l *linker, clean bool) {
 	if clean {
-		e.linkMu.Lock()
-		if !e.closed && len(e.linkers) < maxIdleLinkers {
-			e.linkers = append(e.linkers, l)
-			e.linkMu.Unlock()
+		e.dynMu.Lock()
+		closed := e.closed
+		e.dynMu.Unlock()
+		ps.linkMu.Lock()
+		if !closed && len(ps.linkers) < maxIdleLinkers {
+			ps.linkers = append(ps.linkers, l)
+			ps.linkMu.Unlock()
 			return
 		}
-		e.linkMu.Unlock()
+		ps.linkMu.Unlock()
 	}
 	_ = l.rt.Close(ctx)
 }
@@ -383,7 +450,7 @@ func (l *linker) run(ctx context.Context, art compute.Artifact, input []byte, li
 	// functions: we restore the post-init snapshot instead of running
 	// initialize-runtime (which would consume stdin, where the input must go).
 	pluginCfg := moduleConfig(lim, input, &stdout, &stderr).
-		WithName(javyplugin.Namespace).
+		WithName(l.ns).
 		WithStartFunctions()
 	plugin, err := rt.InstantiateModule(ctx, l.plugin, pluginCfg)
 	if err != nil {
@@ -431,12 +498,12 @@ func (l *linker) run(ctx context.Context, art compute.Artifact, input []byte, li
 	return readOut(stdout.Bytes()), nil
 }
 
-// snapshotTimeout bounds one build of the plugin snapshot: compiling and
+// snapshotTimeout bounds one build of a plugin snapshot: compiling and
 // initializing the QuickJS runtime takes seconds on a small machine, never
 // a minute.
 const snapshotTimeout = 60 * time.Second
 
-// snapshot lazily initializes the plugin runtime and returns the captured
+// snapshot lazily initializes ps's plugin runtime and returns the captured
 // post-init linear memory (shared, read-only) plus its size in pages.
 //
 // The build runs under a context of its own, not the first caller's: that
@@ -446,57 +513,57 @@ const snapshotTimeout = 60 * time.Second
 // (2026-10-27) the first nano-op on a fresh prod node ran under a cancelled
 // request, and every nano-op on that node then answered "initialize-runtime:
 // module closed with context canceled" until it was restarted.
-func (e *engine) snapshot(ctx context.Context) ([]byte, uint32, error) {
-	e.dynMu.Lock()
-	defer e.dynMu.Unlock()
-	if e.dynSnap != nil {
-		return e.dynSnap, e.dynPages, nil
+func (e *engine) snapshot(ctx context.Context, ps *pluginState) ([]byte, uint32, error) {
+	ps.snapMu.Lock()
+	defer ps.snapMu.Unlock()
+	if ps.snap != nil {
+		return ps.snap, ps.pages, nil
 	}
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotTimeout)
 	defer cancel()
-	snap, pages, err := buildSnapshot(bctx, e.cache)
+	snap, pages, err := buildSnapshot(bctx, e.cache, ps.plugin)
 	if err != nil {
 		return nil, 0, err
 	}
-	e.dynSnap, e.dynPages = snap, pages
+	ps.snap, ps.pages = snap, pages
 	return snap, pages, nil
 }
 
-// buildSnapshot instantiates the plugin with the SharedConfig on stdin, runs
+// buildSnapshot instantiates plugin p with the SharedConfig on stdin, runs
 // initialize-runtime, and copies out its full linear memory. It uses its own
 // runtime (no memory cap) since init must allocate the QuickJS heap regardless
 // of per-op limits; the captured bytes are then restored per call. It closes
 // on context done like the linkers do: that setting is part of wazero's cache
 // key, so the plugin compiles once, here, rather than again in each of the
 // first linkers a burst of calls builds at the same time.
-func buildSnapshot(ctx context.Context, cache wazero.CompilationCache) ([]byte, uint32, error) {
+func buildSnapshot(ctx context.Context, cache wazero.CompilationCache, p javyplugin.Plugin) ([]byte, uint32, error) {
 	rt := wazero.NewRuntimeWithConfig(ctx,
 		wazero.NewRuntimeConfig().WithCompilationCache(cache).WithCloseOnContextDone(true))
 	defer rt.Close(ctx)
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
 		return nil, 0, fmt.Errorf("wazero: snapshot WASI: %w", err)
 	}
-	cm, err := rt.CompileModule(ctx, javyplugin.Bytes())
+	cm, err := rt.CompileModule(ctx, p.Wasm)
 	if err != nil {
-		return nil, 0, fmt.Errorf("wazero: compile plugin: %w", err)
+		return nil, 0, fmt.Errorf("wazero: compile plugin %s: %w", p.Namespace, err)
 	}
 	var serr bytes.Buffer
 	cfg := wazero.NewModuleConfig().
-		WithName(javyplugin.Namespace).
+		WithName(p.Namespace).
 		WithStdin(bytes.NewReader([]byte(javyplugin.ConfigJSON))).
 		WithStderr(&serr).
 		WithStartFunctions() // reactor: we drive initialize-runtime ourselves
 	mod, err := rt.InstantiateModule(ctx, cm, cfg)
 	if err != nil {
-		return nil, 0, fmt.Errorf("wazero: instantiate plugin: %w", err)
+		return nil, 0, fmt.Errorf("wazero: instantiate plugin %s: %w", p.Namespace, err)
 	}
 	defer func() { _ = mod.Close(ctx) }()
 	if fn := mod.ExportedFunction("initialize-runtime"); fn != nil {
 		if _, err := fn.Call(ctx); err != nil {
-			return nil, 0, fmt.Errorf("wazero: initialize-runtime: %w (stderr=%q)", err, serr.String())
+			return nil, 0, fmt.Errorf("wazero: initialize-runtime (%s): %w (stderr=%q)", p.Namespace, err, serr.String())
 		}
 	} else {
-		return nil, 0, errors.New("wazero: plugin missing initialize-runtime export")
+		return nil, 0, fmt.Errorf("wazero: plugin %s missing initialize-runtime export", p.Namespace)
 	}
 	mem := mod.Memory()
 	if mem == nil {

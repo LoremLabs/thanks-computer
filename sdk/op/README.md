@@ -56,7 +56,7 @@ cleartext: returning a secret in the output envelope **will** log/trace it.
 ```js
 import { get, set, pick } from "@txco/op/envelope"; // nested path read/write
 import { z } from "@txco/op/schema";                // tiny runtime validator
-import { b64, sha256, hmac } from "@txco/op/crypto"; // pure-JS crypto
+import { b64, sha256, hmac } from "@txco/op/crypto"; // sha256/hmac native on txco, JS elsewhere
 import { json, text } from "@txco/op/codec";         // encode/decode
 ```
 

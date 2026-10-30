@@ -1,11 +1,16 @@
 package wazero
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +18,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/loremlabs/thanks-computer/chassis/compute"
+	"github.com/loremlabs/thanks-computer/chassis/compute/javyplugin"
 )
 
 // fixtureCache holds compiled .wasm bytes keyed by fixture name, so each is
@@ -188,28 +194,52 @@ func TestJSFixtureOnWazero(t *testing.T) {
 	}
 }
 
+// legacyNamespace is the namespace of the plugin earlier chassis versions
+// built against; linked.js.wasm imports it, so the linked-op tests below also
+// cover an op that has not been rebuilt since the plugin changed.
+const legacyNamespace = "javy-default-plugin-v3"
+
 // linkedFixture loads the committed dynamically linked JS fixture
-// (testdata/src/js/linked.js) on e, checking it takes the linked path.
+// (testdata/src/js/linked.js, built against the legacy plugin) on e, checking
+// it takes the linked path against that plugin.
 func linkedFixture(t *testing.T, e *engine) compute.Instance {
 	t.Helper()
-	wasm, err := os.ReadFile("testdata/src/js/linked.js.wasm")
+	return dynamicFixture(t, e, "linked", legacyNamespace)
+}
+
+// dynamicFixture loads testdata/src/js/<name>.js.wasm on e and checks it is
+// a dynamically linked op importing the plugin namespace ns.
+func dynamicFixture(t *testing.T, e *engine, name, ns string) compute.Instance {
+	t.Helper()
+	wasm, err := os.ReadFile("testdata/src/js/" + name + ".js.wasm")
 	if err != nil {
-		t.Fatalf("read linked fixture (regenerate with `javy build … -C dynamic`): %v", err)
+		t.Fatalf("read %s fixture (regenerate with `javy build … -C dynamic`): %v", name, err)
 	}
-	inst, err := e.Load(context.Background(), compute.Artifact{Alg: "sha256", Digest: "js-linked", Engine: Name, Wasm: wasm})
+	inst, err := e.Load(context.Background(), compute.Artifact{Alg: "sha256", Digest: "js-" + name, Engine: Name, Wasm: wasm})
 	if err != nil {
-		t.Fatalf("Load linked: %v", err)
+		t.Fatalf("Load %s: %v", name, err)
 	}
-	if _, ok := inst.(*dynamicInstance); !ok {
-		t.Fatalf("linked fixture loaded as %T, want *dynamicInstance", inst)
+	d, ok := inst.(*dynamicInstance)
+	if !ok {
+		t.Fatalf("%s fixture loaded as %T, want *dynamicInstance", name, inst)
+	}
+	if d.ps.plugin.Namespace != ns {
+		t.Fatalf("%s fixture linked against %q, want %q", name, d.ps.plugin.Namespace, ns)
 	}
 	return inst
 }
 
+// idleLinkers counts the idle linkers across every plugin's pool.
 func idleLinkers(e *engine) int {
-	e.linkMu.Lock()
-	defer e.linkMu.Unlock()
-	return len(e.linkers)
+	e.dynMu.Lock()
+	defer e.dynMu.Unlock()
+	n := 0
+	for _, ps := range e.dyn {
+		ps.linkMu.Lock()
+		n += len(ps.linkers)
+		ps.linkMu.Unlock()
+	}
+	return n
 }
 
 // TestLinkedOpReusesLinker: calls in a row share one linker, and each still
@@ -302,14 +332,15 @@ func TestCloseDropsLinkers(t *testing.T) {
 	if _, err := inst.Invoke(context.Background(), []byte(`{}`), compute.Limits{MaxWall: 5 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
-	l, err := e.takeLinker(context.Background())
+	ps := inst.(*dynamicInstance).ps
+	l, err := e.takeLinker(context.Background(), ps)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	e.giveLinker(context.Background(), l, true)
+	e.giveLinker(context.Background(), ps, l, true)
 	if n := idleLinkers(e); n != 0 {
 		t.Fatalf("after Close: %d idle linkers, want 0", n)
 	}
@@ -321,14 +352,110 @@ func TestCloseDropsLinkers(t *testing.T) {
 // request and every nano-op on that node then failed until a restart.)
 func TestSnapshotSurvivesCancelledCaller(t *testing.T) {
 	e := newEngine(t).(*engine)
+	ps, err := e.pluginState(javyplugin.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	snap, pages, err := e.snapshot(cancelled)
+	snap, pages, err := e.snapshot(cancelled, ps)
 	if err != nil || len(snap) == 0 || pages == 0 {
 		t.Fatalf("snapshot under a cancelled caller: %d bytes, %d pages, %v", len(snap), pages, err)
 	}
-	again, _, err := e.snapshot(context.Background())
+	again, _, err := e.snapshot(context.Background(), ps)
 	if err != nil || len(again) != len(snap) {
 		t.Fatalf("second snapshot: %d bytes, %v (want the first, kept)", len(again), err)
+	}
+}
+
+// TestNativeCryptoFixture: an op built against the current plugin reaches
+// the plugin's natives, and they agree with Go's crypto — on a plain
+// Uint8Array, on a view with an offset, and for HMAC — while refusing what
+// is not bytes.
+func TestNativeCryptoFixture(t *testing.T) {
+	e := newEngine(t).(*engine)
+	inst := dynamicFixture(t, e, "native", javyplugin.Namespace)
+	msg := "héllo wörld — Ω 🙂 " + strings.Repeat("x", 1000)
+	key := strings.Repeat("key!", 30) // longer than the 64-byte block
+	in := fmt.Sprintf(`{"msg":%q,"key":%q}`, msg, key)
+	out, err := inst.Invoke(context.Background(), []byte(in), compute.Limits{MaxWall: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got := gjson.GetBytes(out, "native").String(); got != "object" {
+		t.Fatalf("__txco_native is %q, want object: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "version").Int(); got != 1 {
+		t.Fatalf("__txco_native.version = %d, want 1", got)
+	}
+	sum := sha256.Sum256([]byte(msg))
+	if want := hex.EncodeToString(sum[:]); gjson.GetBytes(out, "sha").String() != want {
+		t.Errorf("sha256: got %s, want %s", gjson.GetBytes(out, "sha").String(), want)
+	}
+	if want := hex.EncodeToString(sum[:]); gjson.GetBytes(out, "shaView").String() != want {
+		t.Errorf("sha256 of a view: got %s, want %s (offset/length not honoured)", gjson.GetBytes(out, "shaView").String(), want)
+	}
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(msg))
+	if want := hex.EncodeToString(mac.Sum(nil)); gjson.GetBytes(out, "mac").String() != want {
+		t.Errorf("hmac: got %s, want %s", gjson.GetBytes(out, "mac").String(), want)
+	}
+	if got := gjson.GetBytes(out, "notBytes").String(); !strings.Contains(got, "Error") {
+		t.Errorf("sha256(string) did not throw: %q", got)
+	}
+}
+
+// TestBothPluginsServeTogether: an op built against the legacy plugin and one
+// built against the current plugin run on the same engine, each on its own
+// plugin's linkers.
+func TestBothPluginsServeTogether(t *testing.T) {
+	e := newEngine(t).(*engine)
+	legacy := linkedFixture(t, e)
+	current := dynamicFixture(t, e, "native", javyplugin.Namespace)
+	lim := compute.Limits{MaxWall: 5 * time.Second}
+	for i := 0; i < 2; i++ {
+		out, err := legacy.Invoke(context.Background(), []byte(`{"in":1}`), lim)
+		if err != nil || !gjson.GetBytes(out, "linked").Bool() {
+			t.Fatalf("legacy op: out=%s err=%v", out, err)
+		}
+		out, err = current.Invoke(context.Background(), []byte(`{"msg":"abc"}`), lim)
+		if err != nil || gjson.GetBytes(out, "sha").String() != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+			t.Fatalf("current op: out=%s err=%v", out, err)
+		}
+	}
+	e.dynMu.Lock()
+	n := len(e.dyn)
+	e.dynMu.Unlock()
+	if n != 2 {
+		t.Fatalf("%d plugin states, want 2", n)
+	}
+	if got := idleLinkers(e); got != 2 {
+		t.Fatalf("%d idle linkers, want 2 (one per plugin)", got)
+	}
+}
+
+// TestUnknownPluginNamespaceIsClear: a module importing a plugin this chassis
+// does not vendor (built by a newer txco, say) fails at Load with an error
+// that names the namespace and the fix, instead of a bare link error later.
+func TestUnknownPluginNamespaceIsClear(t *testing.T) {
+	wasm, err := os.ReadFile("testdata/src/js/linked.js.wasm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same length as the legacy namespace, so the import's length prefix holds.
+	other := []byte("javy-default-plugin-v9")
+	if len(other) != len(legacyNamespace) {
+		t.Fatal("test namespace must match the legacy one in length")
+	}
+	wasm = bytes.ReplaceAll(wasm, []byte(legacyNamespace), other)
+	e := newEngine(t)
+	_, err = e.Load(context.Background(), compute.Artifact{Alg: "sha256", Digest: "js-future", Engine: Name, Wasm: wasm})
+	if err == nil {
+		t.Fatal("Load accepted a module importing an unknown plugin")
+	}
+	for _, want := range []string{string(other), javyplugin.Namespace, "txco apply"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }

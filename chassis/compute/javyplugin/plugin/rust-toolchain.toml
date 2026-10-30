@@ -1,0 +1,5 @@
+# Pinned so a rebuild of the vendored plugin is reproducible. Bump deliberately.
+[toolchain]
+channel = "1.99.1"
+targets = ["wasm32-wasip1"]
+profile = "minimal"

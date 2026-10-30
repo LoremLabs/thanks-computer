@@ -1,11 +1,15 @@
 // linked.js — a dynamically linked JavaScript fixture: only this script's
-// bytecode, importing the QuickJS engine from the vendored plugin
+// bytecode, importing the QuickJS engine from a vendored plugin
 // (chassis/compute/javyplugin), the shape `txco` builds every op:// into.
+// It is compiled against the LEGACY plugin (javy-default-plugin-v3), the one
+// earlier chassis versions built against, so it stands in for an op already
+// in a store that has not been rebuilt; native.js is its counterpart for the
+// current plugin. Keep it that way when regenerating.
 // It counts its runs in a global and reports the count, so a reused runtime
 // that let state through from an earlier call would answer runs > 1.
 // {"spin": true} loops forever (the wall limit); {"throw": true} throws (a
 // guest error). Compiled with:
-// javy build linked.js -C dynamic -C plugin=../../../../javyplugin/plugin.wasm -C source=omitted -o linked.js.wasm
+// javy build linked.js -C dynamic -C plugin=../../../../javyplugin/javy-default-plugin-v3.wasm -C source=omitted -o linked.js.wasm
 function readInput() {
   const chunks = [];
   let total = 0;
