@@ -49,6 +49,11 @@ type Meta struct {
 	// PolicyPush is "stack" (a push is accepted only when the tenant's
 	// `_git` stack answers ok) or "open" (no lane).
 	PolicyPush string
+	// PolicyContent is "text" (a blob that is not text is refused by the
+	// head, --git-text-only) or "stack" (the `_git` stack decides from the
+	// `text`/`type` facts; a symlink, an executable and a submodule are
+	// still refused).
+	PolicyContent string
 }
 
 // Repo is one repository as the protocol sees it.

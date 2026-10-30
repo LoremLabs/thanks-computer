@@ -33,7 +33,7 @@ func (m *MemRepos) Open(_ context.Context, tenant, name string) (Repo, bool, err
 	if !ok {
 		r = &memRepo{
 			EncodedObjectStorer: memory.NewStorage(),
-			meta:                Meta{ID: "mem:" + key, Tenant: tenant, Name: name, PolicyPush: "open"},
+			meta:                Meta{ID: "mem:" + key, Tenant: tenant, Name: name, PolicyPush: "open", PolicyContent: "text"},
 			refs:                map[plumbing.ReferenceName]plumbing.Hash{},
 			head:                plumbing.NewBranchReferenceName("main"),
 			limits:              m.limits,
@@ -41,6 +41,22 @@ func (m *MemRepos) Open(_ context.Context, tenant, name string) (Repo, bool, err
 		m.repos[key] = r
 	}
 	return r, true, nil
+}
+
+// SetPolicy changes a repository's policies (the tests' repo/policy):
+// push and content, each left alone when "". The repository is made when
+// absent, as Open makes it.
+func (m *MemRepos) SetPolicy(tenant, name, push, content string) {
+	r, _, _ := m.Open(context.Background(), tenant, name)
+	mr := r.(*memRepo)
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
+	if push != "" {
+		mr.meta.PolicyPush = push
+	}
+	if content != "" {
+		mr.meta.PolicyContent = content
+	}
 }
 
 type memRepo struct {
@@ -53,7 +69,11 @@ type memRepo struct {
 	limits Limits
 }
 
-func (r *memRepo) Meta() Meta                   { return r.meta }
+func (r *memRepo) Meta() Meta {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.meta
+}
 func (r *memRepo) Head() plumbing.ReferenceName { return r.head }
 
 func (r *memRepo) Refs(context.Context) ([]Ref, error) {

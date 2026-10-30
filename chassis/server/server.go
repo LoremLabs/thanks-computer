@@ -2377,7 +2377,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	}
 
 	// Repositories (txco://repo/{create,remove,refs,read,commit,log,diff,
-	// ref/update}): a stack's door to what the `git` personality serves.
+	// ref/update,policy}): a stack's door to what the `git` personality serves.
 	// Registered unconditionally so a node without the git store answers
 	// `_repo.error txco_repo_disabled`. See chassis/server/repo_ops.go.
 	var gitRepos *gitcore.StoreRepos
@@ -2394,6 +2394,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		"txco://repo/log":        repoLog,
 		"txco://repo/diff":       repoDiff,
 		"txco://repo/ref/update": repoRefUpdate,
+		"txco://repo/policy":     repoPolicy,
 	} {
 		fn := fn
 		pu.Handle([]byte(name), event.OpsHandlerFunc(

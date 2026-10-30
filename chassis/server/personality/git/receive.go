@@ -27,7 +27,9 @@ import (
 )
 
 // Change is one file a push changes, as the lane hears it [G1]: the path,
-// the blob, its size and mode, and what happened to it.
+// the blob, its size and mode, what happened to it, and two facts about
+// its content a stack judges a binary by (docs/0061 §8): whether it is
+// text, and its media type as sniffed from its first bytes.
 type Change struct {
 	Path string
 	Hash plumbing.Hash
@@ -35,6 +37,12 @@ type Change struct {
 	Mode filemode.FileMode
 	// Op is add, modify or delete.
 	Op string
+	// Text is whether the blob is UTF-8 without a NUL (false for a delete).
+	Text bool
+	// Type is the media type http.DetectContentType reads from the first 512
+	// bytes ("" for a delete): image/png, application/pdf, text/plain;
+	// charset=utf-8, application/octet-stream when nothing is recognized.
+	Type string
 }
 
 // Push is one receive-pack request after its objects are staged: what the
@@ -177,7 +185,7 @@ func (c *Controller) serveReceivePack(w http.ResponseWriter, r *http.Request, re
 				continue
 			}
 			p.reachable = append(p.reachable, objs...)
-			changes, why := c.inspect(p.staging, cmd)
+			changes, why := c.inspect(p.staging, repo.Meta(), cmd)
 			if why != "" {
 				p.refuse(cmd.Name, why)
 				continue
@@ -387,8 +395,9 @@ func tooLarge(err error, max int64) string {
 // inspect lists what a command changes, old tree → new tree, and refuses
 // what the head's limits forbid: a tip that is not a commit, a symlink, an
 // executable, a submodule, an object over the cap, a blob that is not
-// text (when --git-text-only).
-func (c *Controller) inspect(s storer.EncodedObjectStorer, cmd *packp.Command) ([]Change, string) {
+// text (when --git-text-only, unless the repository's content policy is
+// "stack": then the lane decides from the `text`/`type` facts).
+func (c *Controller) inspect(s storer.EncodedObjectStorer, meta gitcore.Meta, cmd *packp.Command) ([]Change, string) {
 	newCommit, err := object.GetCommit(s, cmd.New)
 	if err != nil {
 		return nil, fmt.Sprintf("%s must point at a commit", cmd.Name.Short())
@@ -438,7 +447,12 @@ func (c *Controller) inspect(s storer.EncodedObjectStorer, cmd *packp.Command) (
 					return nil, fmt.Sprintf("%s is %d bytes; the cap is %d", ch.Path, size, c.limits.MaxObjectBytes)
 				}
 			}
-			if c.limits.TextOnly && !isText(s, ch.Hash) {
+			text, typ, err := blobFacts(s, ch.Hash)
+			if err != nil {
+				return nil, fmt.Sprintf("%s could not be read", ch.Path)
+			}
+			ch.Text, ch.Type = text, typ
+			if c.limits.TextOnly && !text && meta.PolicyContent != "stack" {
 				return nil, fmt.Sprintf("%s is not text (UTF-8 without NUL)", ch.Path)
 			}
 		}
@@ -447,22 +461,37 @@ func (c *Controller) inspect(s storer.EncodedObjectStorer, cmd *packp.Command) (
 	return out, ""
 }
 
-// isText reads a blob and says whether it is UTF-8 without a NUL byte.
-func isText(s storer.EncodedObjectStorer, h plumbing.Hash) bool {
+// blobFacts reads a blob once and answers whether it is text (UTF-8
+// without a NUL byte) and the media type its first 512 bytes sniff as.
+func blobFacts(s storer.EncodedObjectStorer, h plumbing.Hash) (text bool, typ string, err error) {
 	o, err := s.EncodedObject(plumbing.BlobObject, h)
 	if err != nil {
-		return false
+		return false, "", err
 	}
 	rd, err := o.Reader()
 	if err != nil {
-		return false
+		return false, "", err
 	}
 	defer rd.Close()
 	b, err := io.ReadAll(rd)
 	if err != nil {
-		return false
+		return false, "", err
 	}
-	return utf8.Valid(b) && bytes.IndexByte(b, 0) < 0
+	return IsText(b), SniffType(b), nil
+}
+
+// IsText is the head's one notion of text: UTF-8 without a NUL byte.
+func IsText(b []byte) bool { return utf8.Valid(b) && bytes.IndexByte(b, 0) < 0 }
+
+// SniffType is the media type of a file's first 512 bytes, as
+// http.DetectContentType reads them — image/png, application/pdf,
+// font/woff2, application/zip (an office template is one), text/plain;
+// charset=utf-8, and application/octet-stream when nothing is recognized.
+func SniffType(b []byte) string {
+	if len(b) > 512 {
+		b = b[:512]
+	}
+	return http.DetectContentType(b)
 }
 
 func oldOf(cmds []*packp.Command, name plumbing.ReferenceName) plumbing.Hash {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"regexp"
@@ -24,6 +25,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
+	gitp "github.com/loremlabs/thanks-computer/chassis/server/personality/git"
 )
 
 // repo_ops.go holds the txco://repo/* ops: a stack's door to the
@@ -31,9 +33,10 @@ import (
 // (`repo/create`), reads the files at a commit (`repo/read`), writes one
 // commit for one logical change (`repo/commit`, guarded by `expected` so a
 // lost update is refused), lists history (`repo/log`), diffs two commits
-// (`repo/diff`), lists refs (`repo/refs`) and moves one by compare-and-swap
+// (`repo/diff`), lists refs (`repo/refs`), moves one by compare-and-swap
 // (`repo/ref/update`) — the application's own refs (`refs/txco/*`)
-// included, which no client may push. Nobody but a developer needs git.
+// included, which no client may push — and changes a repository's
+// policies (`repo/policy`). Nobody but a developer needs git.
 //
 // Scoping is trusted: the tenant from processor.TenantScope(ctx); a
 // repository is addressed by NAME and must belong to the tenant; any stack
@@ -143,12 +146,54 @@ func repoActor(stack string) gitcore.Actor {
 
 // ── repo/create ──────────────────────────────────────────────────────────
 
+// repoPolicies reads WITH `policy.{push, content}` and validates the pair:
+// push is "stack" (default: a push is accepted only when the tenant's _git
+// stack says ok) or "open" (no lane); content is "text" (default: the head
+// refuses a blob that is not text) or "stack" (the _git stack decides from
+// the `text`/`type` facts on each changed file — docs/0061 §8), which
+// needs push "stack", since without a lane nobody would judge. With
+// partial=true an absent field stays "" (repo/policy leaves it alone), and
+// `cur` supplies the other half for the pair's check.
+func repoPolicies(meta []byte, partial bool, cur gitcore.Meta) (push, content, bad string) {
+	push = strings.TrimSpace(gjson.GetBytes(meta, "policy.push").String())
+	content = strings.TrimSpace(gjson.GetBytes(meta, "policy.content").String())
+	switch push {
+	case "stack", "open":
+	case "":
+		if !partial {
+			push = "stack"
+		}
+	default:
+		return "", "", "`policy.push` must be stack or open"
+	}
+	switch content {
+	case "text", "stack":
+	case "":
+		if !partial {
+			content = "text"
+		}
+	default:
+		return "", "", "`policy.content` must be text or stack"
+	}
+	effPush, effContent := push, content
+	if effPush == "" {
+		effPush = cur.PolicyPush
+	}
+	if effContent == "" {
+		effContent = cur.PolicyContent
+	}
+	if effContent == "stack" && effPush != "stack" {
+		return "", "", "`policy.content` stack needs `policy.push` stack: a _git stack must judge what the head no longer refuses"
+	}
+	return push, content, ""
+}
+
 // repoCreate makes a repository: `name`; `principal` (the identity whose
-// credentials the application issues for it); `policy.push` ("stack",
-// default: a push is accepted only when the tenant's _git stack says ok;
-// "open": no lane); `quotas.{max_object_bytes, max_pack_bytes,
-// max_repo_bytes, max_objects}` to override the head's caps. Idempotent:
-// an existing repository of that name is returned with created=false.
+// credentials the application issues for it); `policy.push` and
+// `policy.content` (repoPolicies); `quotas.{max_object_bytes,
+// max_pack_bytes, max_repo_bytes, max_objects}` to override the head's
+// caps. Idempotent: an existing repository of that name is returned with
+// created=false.
 func repoCreate(ctx context.Context, d repoDeps, in []byte) (event.Payload, error) {
 	tenant, stack, meta, into, ep, ok := repoPrelude(ctx, d)
 	if !ok {
@@ -158,19 +203,16 @@ func repoCreate(ctx context.Context, d repoDeps, in []byte) (event.Payload, erro
 	if !repoNameRE.MatchString(name) {
 		return repoErr(into, "txco_repo_invalid_arg", "`name` must be [A-Za-z0-9_][A-Za-z0-9._-]{0,63}"), nil
 	}
-	policy := strings.TrimSpace(gjson.GetBytes(meta, "policy.push").String())
-	switch policy {
-	case "", "stack":
-		policy = "stack"
-	case "open":
-	default:
-		return repoErr(into, "txco_repo_invalid_arg", "`policy.push` must be stack or open"), nil
+	policy, content, bad := repoPolicies(meta, false, gitcore.Meta{})
+	if bad != "" {
+		return repoErr(into, "txco_repo_invalid_arg", bad), nil
 	}
 	row := gitstore.Repo{
 		Tenant: tenant, Name: name,
-		Principal:  strings.TrimSpace(gjson.GetBytes(meta, "principal").String()),
-		CreatedBy:  stack,
-		PolicyPush: policy,
+		Principal:     strings.TrimSpace(gjson.GetBytes(meta, "principal").String()),
+		CreatedBy:     stack,
+		PolicyPush:    policy,
+		PolicyContent: content,
 		Quotas: gitstore.Quotas{
 			MaxObjectBytes: gjson.GetBytes(meta, "quotas.max_object_bytes").Int(),
 			MaxPackBytes:   gjson.GetBytes(meta, "quotas.max_pack_bytes").Int(),
@@ -190,7 +232,54 @@ func repoCreate(ctx context.Context, d repoDeps, in []byte) (event.Payload, erro
 	out.Set(into+".principal", m.Principal)
 	out.Set(into+".created_by", m.CreatedBy)
 	out.Set(into+".policy.push", m.PolicyPush)
+	out.Set(into+".policy.content", m.PolicyContent)
 	out.Set(into+".head", repo.Head().String())
+	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
+}
+
+// ── repo/policy ──────────────────────────────────────────────────────────
+
+// repoPolicy changes an existing repository's policies: `name`,
+// `policy.{push, content}` — a field left out stays as it is; the pair is
+// validated as at create (repoPolicies). Answers the policies now in
+// force and `changed` (false when nothing differed).
+func repoPolicy(ctx context.Context, d repoDeps, in []byte) (event.Payload, error) {
+	tenant, _, meta, into, ep, ok := repoPrelude(ctx, d)
+	if !ok {
+		return ep, nil
+	}
+	repo, ep, ok := repoOpen(ctx, d, tenant, meta, into)
+	if !ok {
+		return ep, nil
+	}
+	cur := repo.Meta()
+	push, content, bad := repoPolicies(meta, true, cur)
+	if bad != "" {
+		return repoErr(into, "txco_repo_invalid_arg", bad), nil
+	}
+	if push == cur.PolicyPush {
+		push = ""
+	}
+	if content == cur.PolicyContent {
+		content = ""
+	}
+	if push != "" || content != "" {
+		if err := d.repos.Store().SetRepoPolicy(ctx, cur.ID, push, content); err != nil {
+			return repoErr(into, "txco_repo_store", err.Error()), nil
+		}
+	}
+	now := cur
+	if push != "" {
+		now.PolicyPush = push
+	}
+	if content != "" {
+		now.PolicyContent = content
+	}
+	out := jsonx.NewObject()
+	out.Set(into+".name", cur.Name)
+	out.Set(into+".policy.push", now.PolicyPush)
+	out.Set(into+".policy.content", now.PolicyContent)
+	out.Set(into+".changed", push != "" || content != "")
 	return event.Payload{Raw: out.String(), Type: event.JSON}, nil
 }
 
@@ -273,9 +362,14 @@ func repoRefs(ctx context.Context, d repoDeps, in []byte) (event.Payload, error)
 // branch; `active` for refs/txco/active) or `commit`; `prefix` to take one
 // directory; `paths` for exact files; `max_bytes` (default 1 MiB, ceiling
 // 8 MiB) caps the content returned — files past it are listed without
-// content and `over_limit` is set. A file that is not text carries its
-// sha256 instead of content. `found` is false when the ref does not
-// exist (an empty repository).
+// content and `over_limit` is set. `found` is false when the ref does not
+// exist (an empty repository). A file that is not text (UTF-8 without a
+// NUL) is `binary: true` with its sniffed `type`, and `binary` says what
+// else happens to it (docs/0061 §8): "skip" (default) lists it with no
+// content and counts its size toward `max_bytes`, as before; "list"
+// lists it and counts nothing, so a configuration's read is not pushed
+// over its limit by an image beside it; "base64" returns its bytes as
+// `content_base64`, counted.
 func repoRead(ctx context.Context, d repoDeps, in []byte) (event.Payload, error) {
 	tenant, _, meta, into, ep, ok := repoPrelude(ctx, d)
 	if !ok {
@@ -323,6 +417,14 @@ func repoRead(ctx context.Context, d repoDeps, in []byte) (event.Payload, error)
 	if max > repoReadCeiling {
 		max = repoReadCeiling
 	}
+	binaryMode := strings.TrimSpace(gjson.GetBytes(meta, "binary").String())
+	switch binaryMode {
+	case "", "skip":
+		binaryMode = "skip"
+	case "list", "base64":
+	default:
+		return repoErr(into, "txco_repo_invalid_arg", "`binary` must be skip, list or base64"), nil
+	}
 	var used int64
 	over := false
 	files := make([]map[string]any, 0, 16)
@@ -334,7 +436,9 @@ func repoRead(ctx context.Context, d repoDeps, in []byte) (event.Payload, error)
 			return nil
 		}
 		entry := map[string]any{"path": f.Name, "size": f.Size, "mode": f.Mode.String(), "oid": f.Hash.String()}
-		if used+f.Size > max {
+		// In "list" mode a binary counts toward nothing, so it must be read
+		// (and told apart from text) before the budget is consulted.
+		if binaryMode != "list" && used+f.Size > max {
 			over = true
 			files = append(files, entry)
 			return nil
@@ -343,12 +447,26 @@ func repoRead(ctx context.Context, d repoDeps, in []byte) (event.Payload, error)
 		if err != nil {
 			return err
 		}
-		if utf8.ValidString(content) && !strings.ContainsRune(content, 0) {
+		if gitp.IsText([]byte(content)) {
+			if used+f.Size > max {
+				over = true
+				files = append(files, entry)
+				return nil
+			}
 			entry["content"] = content
-		} else {
-			entry["binary"] = true
+			used += f.Size
+			files = append(files, entry)
+			return nil
 		}
-		used += f.Size
+		entry["binary"] = true
+		entry["type"] = gitp.SniffType([]byte(content))
+		switch binaryMode {
+		case "base64":
+			entry["content_base64"] = base64.StdEncoding.EncodeToString([]byte(content))
+			used += f.Size
+		case "skip":
+			used += f.Size
+		}
 		files = append(files, entry)
 		return nil
 	})
@@ -481,10 +599,27 @@ func repoCommit(ctx context.Context, d repoDeps, in []byte) (event.Payload, erro
 			return repoErr(into, "txco_repo_invalid_arg", "bad path in `writes`: "+w.Get("path").String()), nil
 		}
 		content := w.Get("content").String()
+		// A write's `encoding: "base64"` carries bytes (an importer's image or
+		// template, docs/0061 §8); the content policy below decides whether
+		// the repository takes them.
+		switch enc := strings.TrimSpace(w.Get("encoding").String()); enc {
+		case "":
+		case "base64":
+			raw, err := base64.StdEncoding.DecodeString(content)
+			if err != nil {
+				return repoErr(into, "txco_repo_invalid_arg", path+": `content` is not base64"), nil
+			}
+			content = string(raw)
+		default:
+			return repoErr(into, "txco_repo_invalid_arg", path+": `encoding` must be base64 or left out"), nil
+		}
 		if limits.MaxObjectBytes > 0 && int64(len(content)) > limits.MaxObjectBytes {
 			return repoErr(into, "txco_repo_too_large", fmt.Sprintf("%s is %d bytes; the cap is %d", path, len(content), limits.MaxObjectBytes)), nil
 		}
-		if limits.TextOnly && (!utf8.ValidString(content) || strings.ContainsRune(content, 0)) {
+		// Text only, unless the repository's content policy hands the
+		// decision to the stack — which, for an op's commit, is the caller:
+		// it applies the same check a push gets before it writes.
+		if limits.TextOnly && !gitp.IsText([]byte(content)) && repo.Meta().PolicyContent != "stack" {
 			return repoErr(into, "txco_repo_invalid_arg", path+" is not text (UTF-8 without NUL)"), nil
 		}
 		blob := repo.NewEncodedObject()

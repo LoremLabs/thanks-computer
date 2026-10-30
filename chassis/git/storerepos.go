@@ -90,7 +90,7 @@ type storeRepo struct {
 
 func (r *storeRepo) Meta() Meta {
 	return Meta{ID: r.row.ID, Tenant: r.row.Tenant, Name: r.row.Name, Principal: r.row.Principal,
-		CreatedBy: r.row.CreatedBy, PolicyPush: r.row.PolicyPush}
+		CreatedBy: r.row.CreatedBy, PolicyPush: r.row.PolicyPush, PolicyContent: r.row.PolicyContent}
 }
 
 // Limits reports the caps in force for this repository.

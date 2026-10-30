@@ -116,7 +116,8 @@ func TestLanesAnswerAndObserve(t *testing.T) {
 			gjson.Get(raw, "_txc.git.pusher.credential").String() == "" {
 			t.Fatalf("envelope facts: %s", raw)
 		}
-		if ch := gjson.Get(raw, "_txc.git.changes").Array(); len(ch) != 1 || ch[0].Get("path").String() != "config/MISSION.md" || ch[0].Get("op").String() != "add" {
+		if ch := gjson.Get(raw, "_txc.git.changes").Array(); len(ch) != 1 || ch[0].Get("path").String() != "config/MISSION.md" || ch[0].Get("op").String() != "add" ||
+			!ch[0].Get("text").Bool() || !strings.HasPrefix(ch[0].Get("type").String(), "text/plain") {
 			t.Fatalf("changes: %s", gjson.Get(raw, "_txc.git.changes"))
 		}
 		if cs := gjson.Get(raw, "_txc.git.commits").Array(); len(cs) != 1 || cs[0].Get("message").String() != "first\n" || gjson.Get(raw, "_txc.git.commits_total").Int() != 1 {
@@ -211,6 +212,51 @@ func TestLanesDefaultDeny(t *testing.T) {
 		a := d.seededClone(t, "open")
 		d.must(a, "push", "-q", "origin", "main")
 	})
+}
+
+// Content policy "stack" (docs/0061 §8): the head takes a binary and the
+// lane hears `text: false` and its type; the stack judges by them.
+func TestLanesContentFacts(t *testing.T) {
+	gitPath(t)
+	d := newDoorHarness(t)
+	ctx := context.Background()
+	if _, _, err := d.repos.Create(ctx, gitstore.Repo{Tenant: "acme", Name: "pony", Principal: "pony:pony", PolicyPush: "stack", PolicyContent: "stack"}); err != nil {
+		t.Fatal(err)
+	}
+	d.grant(t, "pony:pony", "pony@pony.example.com", "bcdf-correct-horse", "git:pony:fetch", "git:pony:push")
+	fs := &fakeStack{}
+	// The stack takes a PNG under a skill and nothing else that is not text.
+	fs.respond = func(raw string) string {
+		if gjson.Get(raw, "_txc.git.phase").String() != "answer" {
+			return "{}"
+		}
+		for _, ch := range gjson.Get(raw, "_txc.git.changes").Array() {
+			if ch.Get("text").Bool() {
+				continue
+			}
+			p, typ := ch.Get("path").String(), ch.Get("type").String()
+			if !strings.HasPrefix(p, "config/skills/") || typ != "image/png" {
+				return `{"_txc":{"git":{"res":{"ok":false,"code":"cannot","msg":"` + p + ` is ` + typ + `; a skill may hold images"}}}}`
+			}
+		}
+		return `{"_txc":{"git":{"res":{"ok":true}}}}`
+	}
+	d.withStack(t, fs)
+	work := t.TempDir()
+	d.must(work, "clone", d.authURL("pony", "pony@pony.example.com", "bcdf-correct-horse"), "a")
+	a := filepath.Join(work, "a")
+	write(t, a, "config/skills/pdf/assets/logo.png", pngBytes)
+	d.must(a, "add", ".")
+	d.must(a, "commit", "-qm", "png")
+	d.must(a, "push", "-q", "origin", "main")
+	ans := fs.wait(t, 2)[0]
+	if ch := gjson.Get(ans, "_txc.git.changes").Array(); len(ch) != 1 || ch[0].Get("text").Bool() || ch[0].Get("type").String() != "image/png" {
+		t.Fatalf("the binary's facts on the lane: %s", gjson.Get(ans, "_txc.git.changes"))
+	}
+	write(t, a, "config/policies/blob.bin", "\x00\x01\x02\x03binary")
+	d.must(a, "add", ".")
+	d.must(a, "commit", "-qm", "elsewhere")
+	d.fails(a, "config/policies/blob.bin is application/octet-stream; a skill may hold images", "push", "origin", "main")
 }
 
 func TestTranslateAnswer(t *testing.T) {

@@ -83,6 +83,12 @@ type Repo struct {
 	// PolicyPush is "stack" (a push is accepted only when the tenant's
 	// `_git` stack answers ok) or "open" (no lane).
 	PolicyPush string
+	// PolicyContent is "text" (the head refuses a blob that is not text,
+	// --git-text-only) or "stack" (the tenant's `_git` stack decides from
+	// the `text` and `type` facts on each changed file; the head still
+	// refuses a symlink, an executable and a submodule). "stack" needs
+	// PolicyPush "stack": without a lane nobody would judge.
+	PolicyContent string
 	// Head is the ref HEAD names (refs/heads/main).
 	Head      string
 	Quotas    Quotas
@@ -184,6 +190,7 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 			principal        TEXT NOT NULL DEFAULT '',
 			created_by       TEXT NOT NULL DEFAULT '',
 			policy_push      TEXT NOT NULL DEFAULT 'stack',
+			policy_content   TEXT NOT NULL DEFAULT 'text',
 			head             TEXT NOT NULL DEFAULT 'refs/heads/main',
 			max_object_bytes BIGINT NOT NULL DEFAULT 0,
 			max_pack_bytes   BIGINT NOT NULL DEFAULT 0,
@@ -231,6 +238,23 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 			return fmt.Errorf("gitstore: ensure schema: %w", err)
 		}
 	}
+	// Additive columns, for a table that predates them: probe, then add (the
+	// drive store's shape — the two engines disagree about ADD COLUMN IF NOT
+	// EXISTS). Two nodes booting together may both try; the loser's error is
+	// fine once the column is there.
+	for _, c := range []struct{ table, column, ddl string }{
+		{"repos", "policy_content", `ALTER TABLE repos ADD COLUMN policy_content TEXT NOT NULL DEFAULT 'text'`},
+	} {
+		if _, err := s.db.ExecContext(ctx, `SELECT `+c.column+` FROM `+c.table+` WHERE 1 = 0`); err == nil {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, c.ddl); err != nil {
+			if _, perr := s.db.ExecContext(ctx, `SELECT `+c.column+` FROM `+c.table+` WHERE 1 = 0`); perr == nil {
+				continue
+			}
+			return fmt.Errorf("gitstore: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
 	return nil
 }
 
@@ -256,13 +280,13 @@ func norm(oid string) string {
 
 // ── repositories ─────────────────────────────────────────────────────────
 
-const repoCols = `id, tenant, name, principal, created_by, policy_push, head,
+const repoCols = `id, tenant, name, principal, created_by, policy_push, policy_content, head,
 	max_object_bytes, max_pack_bytes, max_repo_bytes, max_objects, created_at`
 
 func scanRepo(row interface{ Scan(...any) error }) (Repo, error) {
 	var r Repo
 	var created string
-	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Principal, &r.CreatedBy, &r.PolicyPush, &r.Head,
+	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Principal, &r.CreatedBy, &r.PolicyPush, &r.PolicyContent, &r.Head,
 		&r.Quotas.MaxObjectBytes, &r.Quotas.MaxPackBytes, &r.Quotas.MaxRepoBytes, &r.Quotas.MaxObjects, &created)
 	r.CreatedAt = parseTime(created)
 	return r, err
@@ -271,7 +295,7 @@ func scanRepo(row interface{ Scan(...any) error }) (Repo, error) {
 // CreateRepo makes the repository, or returns the existing one of that
 // tenant and name (created = false): the create is idempotent so an
 // application may "ensure" a repository. The id is minted here; Head
-// defaults to refs/heads/main, PolicyPush to "stack".
+// defaults to refs/heads/main, PolicyPush to "stack", PolicyContent to "text".
 func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, bool, error) {
 	if existing, found, err := s.GetRepo(ctx, r.Tenant, r.Name); err != nil {
 		return Repo{}, false, err
@@ -287,10 +311,13 @@ func (s *Store) CreateRepo(ctx context.Context, r Repo) (Repo, bool, error) {
 	if r.PolicyPush == "" {
 		r.PolicyPush = "stack"
 	}
+	if r.PolicyContent == "" {
+		r.PolicyContent = "text"
+	}
 	r.CreatedAt = s.now()
 	_, err := s.db.ExecContext(ctx, s.rb(`INSERT INTO repos (`+repoCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		r.ID, r.Tenant, r.Name, r.Principal, r.CreatedBy, r.PolicyPush, r.Head,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		r.ID, r.Tenant, r.Name, r.Principal, r.CreatedBy, r.PolicyPush, r.PolicyContent, r.Head,
 		r.Quotas.MaxObjectBytes, r.Quotas.MaxPackBytes, r.Quotas.MaxRepoBytes, r.Quotas.MaxObjects, fmtTime(r.CreatedAt))
 	if err != nil {
 		if s.dialect.IsUniqueViolationGeneric(err) {
@@ -326,6 +353,26 @@ func (s *Store) GetRepoByID(ctx context.Context, id string) (Repo, bool, error) 
 		return Repo{}, false, fmt.Errorf("gitstore: get repo: %w", err)
 	}
 	return r, true, nil
+}
+
+// SetRepoPolicy changes a repository's policies (`repo/policy`): push
+// ("stack" | "open") and content ("text" | "stack"), each left alone when
+// "". The caller has validated the pair.
+func (s *Store) SetRepoPolicy(ctx context.Context, id, push, content string) error {
+	if push == "" && content == "" {
+		return nil
+	}
+	res, err := s.db.ExecContext(ctx, s.rb(`UPDATE repos SET
+		policy_push = CASE WHEN ? = '' THEN policy_push ELSE ? END,
+		policy_content = CASE WHEN ? = '' THEN policy_content ELSE ? END
+		WHERE id = ?`), push, push, content, content, id)
+	if err != nil {
+		return fmt.Errorf("gitstore: set policy: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListRepos lists a tenant's repositories by name.

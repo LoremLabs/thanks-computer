@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	gitcore "github.com/loremlabs/thanks-computer/chassis/git"
 	"github.com/loremlabs/thanks-computer/chassis/processor"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
@@ -31,10 +32,11 @@ func (f fakeResolver) ResolveErr(k ingress.RouteKey) (ingress.RouteTarget, bool,
 var defaultLimits = Limits{MaxPackBytes: 16 << 20, MaxObjectBytes: 1 << 20, MaxObjects: 5000, MaxRepoBytes: 64 << 20, TextOnly: true}
 
 type harness struct {
-	t    *testing.T
-	ctrl *Controller
-	srv  *httptest.Server
-	home string // a HOME of its own, so the developer's git config stays out
+	t     *testing.T
+	ctrl  *Controller
+	srv   *httptest.Server
+	home  string // a HOME of its own, so the developer's git config stays out
+	repos *gitcore.MemRepos
 }
 
 func newHarness(t *testing.T, limits Limits) *harness {
@@ -46,12 +48,13 @@ func newHarness(t *testing.T, limits Limits) *harness {
 	}
 	pu := &processor.Unit{Conf: conf, Logger: zap.NewNop()}
 	ctx, cancel := context.WithCancel(context.Background())
-	ctrl := NewController(ctx, pu, NewMemRepos(limits), fakeResolver{"127.0.0.1": "acme"})
+	repos := NewMemRepos(limits)
+	ctrl := NewController(ctx, pu, repos, fakeResolver{"127.0.0.1": "acme"})
 	ctrl.openWithoutAuth = true // the protocol tests; the door has its own
 	ctrl.Start()
 	srv := httptest.NewServer(ctrl.Handler())
 	t.Cleanup(func() { srv.Close(); ctrl.Stop(); cancel() })
-	return &harness{t: t, ctrl: ctrl, srv: srv, home: t.TempDir()}
+	return &harness{t: t, ctrl: ctrl, srv: srv, home: t.TempDir(), repos: repos}
 }
 
 func (h *harness) url(repo string) string { return h.srv.URL + "/git/" + repo + ".git" }
@@ -269,6 +272,60 @@ func TestTextOnly(t *testing.T) {
 
 	write(t, a, "config/run.sh", "#!/bin/sh\necho hi\n")
 	h.must(a, "add", "--chmod=+x", "config/run.sh")
+	h.must(a, "commit", "-qm", "exec")
+	h.fails(a, "is executable", "push", "origin", "main")
+}
+
+// pngBytes is a binary fixture: the PNG signature and the start of its
+// first chunk, which http.DetectContentType names image/png.
+const pngBytes = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+// A repository whose content policy is "stack" (docs/0061 §8) takes a
+// binary and tells the lane what it is; a symlink and an executable are
+// still refused by the head.
+func TestContentPolicyStack(t *testing.T) {
+	h := newHarness(t, defaultLimits)
+	a, _ := h.seeded("pony")
+	write(t, a, "config/skills/pdf/assets/logo.png", pngBytes)
+	h.must(a, "add", ".")
+	h.must(a, "commit", "-qm", "png")
+	h.fails(a, "is not text", "push", "origin", "main")
+
+	h.repos.SetPolicy("acme", "pony", "", "stack")
+	var facts atomic.Pointer[[]Change]
+	h.ctrl.beforeRefs = func(_ context.Context, p *Push) error {
+		for _, chs := range p.Changes {
+			chs := chs
+			facts.Store(&chs)
+		}
+		return nil
+	}
+	h.must(a, "push", "-q", "origin", "main")
+	got := facts.Load()
+	if got == nil || len(*got) != 1 {
+		t.Fatalf("changes seen by the hook: %v", got)
+	}
+	if ch := (*got)[0]; ch.Path != "config/skills/pdf/assets/logo.png" || ch.Text || ch.Type != "image/png" || ch.Size != int64(len(pngBytes)) {
+		t.Fatalf("the binary's facts: %+v", ch)
+	}
+	write(t, a, "config/AGENTS.md", "Be brief.\n")
+	h.must(a, "add", ".")
+	h.must(a, "commit", "-qm", "text")
+	h.must(a, "push", "-q", "origin", "main")
+	if ch := (*facts.Load())[0]; !ch.Text || !strings.HasPrefix(ch.Type, "text/plain") {
+		t.Fatalf("the text file's facts: %+v", ch)
+	}
+
+	if err := os.Symlink("MISSION.md", filepath.Join(a, "config", "link.md")); err != nil {
+		t.Skip("no symlinks here")
+	}
+	h.must(a, "add", ".")
+	h.must(a, "commit", "-qm", "symlink")
+	h.fails(a, "is a symlink", "push", "origin", "main")
+	h.must(a, "reset", "-q", "--hard", "HEAD~1")
+
+	write(t, a, "config/skills/pdf/scripts/run.sh", "#!/bin/sh\necho hi\n")
+	h.must(a, "add", "--chmod=+x", "config/skills/pdf/scripts/run.sh")
 	h.must(a, "commit", "-qm", "exec")
 	h.fails(a, "is executable", "push", "origin", "main")
 }

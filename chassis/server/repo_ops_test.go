@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -282,6 +283,99 @@ func TestRepoOps(t *testing.T) {
 	noErr(t, out)
 	if gjson.Get(out, "_repo.removed").Bool() {
 		t.Fatalf("second remove: %s", out)
+	}
+}
+
+// The content policy (docs/0061 §8): "text" refuses a binary as before;
+// "stack" takes it, reports it with its type, and reads it three ways.
+func TestRepoContentPolicy(t *testing.T) {
+	d := newRepoDeps(t)
+	png := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"))
+
+	// The pair: content stack needs push stack.
+	out := callRepo(t, repoCreate, d, "acme", "ranch", `{"name":"open","policy":{"push":"open","content":"stack"}}`)
+	if gjson.Get(out, "_repo.error.code").String() != "txco_repo_invalid_arg" {
+		t.Fatalf("content stack with push open: %s", out)
+	}
+	out = callRepo(t, repoCreate, d, "acme", "ranch", `{"name":"open","policy":{"content":"bytes"}}`)
+	if gjson.Get(out, "_repo.error.code").String() != "txco_repo_invalid_arg" {
+		t.Fatalf("unknown content policy: %s", out)
+	}
+	// Default: text.
+	out = callRepo(t, repoCreate, d, "acme", "ranch", `{"name":"text"}`)
+	noErr(t, out)
+	if gjson.Get(out, "_repo.policy.content").String() != "text" || gjson.Get(out, "_repo.policy.push").String() != "stack" {
+		t.Fatalf("defaults: %s", out)
+	}
+	out = callRepo(t, repoCommit, d, "acme", "ranch", `{"name":"text","ref":"main","expected":"","message":"png","writes":[{"path":"config/skills/pdf/assets/logo.png","content":"`+png+`","encoding":"base64"}]}`)
+	if e := gjson.Get(out, "_repo.error"); e.Get("code").String() != "txco_repo_invalid_arg" || !strings.Contains(e.Get("message").String(), "is not text") {
+		t.Fatalf("a binary under text: %s", out)
+	}
+	// repo/policy flips it; a field left out stays.
+	out = callRepo(t, repoPolicy, d, "acme", "loop", `{"name":"text","policy":{"content":"stack"}}`)
+	noErr(t, out)
+	if !gjson.Get(out, "_repo.changed").Bool() || gjson.Get(out, "_repo.policy.content").String() != "stack" || gjson.Get(out, "_repo.policy.push").String() != "stack" {
+		t.Fatalf("policy → stack: %s", out)
+	}
+	out = callRepo(t, repoPolicy, d, "acme", "loop", `{"name":"text","policy":{"content":"stack"}}`)
+	noErr(t, out)
+	if gjson.Get(out, "_repo.changed").Bool() {
+		t.Fatalf("the same policy again should change nothing: %s", out)
+	}
+	out = callRepo(t, repoPolicy, d, "acme", "loop", `{"name":"text","policy":{"push":"open"}}`)
+	if gjson.Get(out, "_repo.error.code").String() != "txco_repo_invalid_arg" {
+		t.Fatalf("push open while content is stack: %s", out)
+	}
+	out = callRepo(t, repoPolicy, d, "acme", "loop", `{"name":"nope","policy":{"content":"text"}}`)
+	if gjson.Get(out, "_repo.error.code").String() != "txco_repo_not_found" {
+		t.Fatalf("unknown repository: %s", out)
+	}
+	// Under stack: the binary is written (base64), a bad encoding refused.
+	out = callRepo(t, repoCommit, d, "acme", "ranch", `{"name":"text","ref":"main","expected":"","message":"png","writes":[{"path":"config/skills/pdf/assets/logo.png","content":"not base64!","encoding":"base64"}]}`)
+	if gjson.Get(out, "_repo.error.code").String() != "txco_repo_invalid_arg" {
+		t.Fatalf("bad base64: %s", out)
+	}
+	out = callRepo(t, repoCommit, d, "acme", "ranch", `{"name":"text","ref":"main","expected":"","message":"png","writes":[
+		{"path":"config/skills/pdf/SKILL.md","content":"---\nname: pdf\ndescription: PDFs.\n---\n"},
+		{"path":"config/skills/pdf/assets/logo.png","content":"`+png+`","encoding":"base64"}]}`)
+	noErr(t, out)
+	if gjson.Get(out, "_repo.changed").Int() != 2 {
+		t.Fatalf("commit with a binary: %s", out)
+	}
+	// Read it three ways. Default (skip): the binary is listed with its
+	// type, no content, and counted — so under a 40-byte budget the 37-byte
+	// SKILL.md fits and the 16-byte PNG beside it is over the limit, listed
+	// bare as any file past the budget is.
+	out = callRepo(t, repoRead, d, "acme", "loop", `{"name":"text","ref":"main","prefix":"config/"}`)
+	noErr(t, out)
+	fs := gjson.Get(out, "_repo.files").Array()
+	if len(fs) != 2 || fs[0].Get("content").String() == "" || !fs[1].Get("binary").Bool() || fs[1].Get("content").Exists() ||
+		fs[1].Get("type").String() != "image/png" || gjson.Get(out, "_repo.over_limit").Bool() {
+		t.Fatalf("read, default (skip): %s", out)
+	}
+	out = callRepo(t, repoRead, d, "acme", "loop", `{"name":"text","ref":"main","prefix":"config/","max_bytes":40}`)
+	noErr(t, out)
+	fs = gjson.Get(out, "_repo.files").Array()
+	if len(fs) != 2 || fs[0].Get("content").String() == "" || fs[1].Get("binary").Exists() || !gjson.Get(out, "_repo.over_limit").Bool() {
+		t.Fatalf("read, skip, past the budget: %s", out)
+	}
+	// list: the same 40 bytes, and the binary counts toward nothing.
+	out = callRepo(t, repoRead, d, "acme", "loop", `{"name":"text","ref":"main","prefix":"config/","max_bytes":40,"binary":"list"}`)
+	noErr(t, out)
+	fs = gjson.Get(out, "_repo.files").Array()
+	if len(fs) != 2 || fs[0].Get("content").String() == "" || !fs[1].Get("binary").Bool() || fs[1].Get("content_base64").Exists() ||
+		fs[1].Get("type").String() != "image/png" || fs[1].Get("size").Int() != 16 || gjson.Get(out, "_repo.over_limit").Bool() {
+		t.Fatalf("read, list: %s", out)
+	}
+	out = callRepo(t, repoRead, d, "acme", "loop", `{"name":"text","ref":"main","paths":["config/skills/pdf/assets/logo.png"],"binary":"base64"}`)
+	noErr(t, out)
+	fs = gjson.Get(out, "_repo.files").Array()
+	if len(fs) != 1 || fs[0].Get("content_base64").String() != png || fs[0].Get("type").String() != "image/png" || !fs[0].Get("binary").Bool() {
+		t.Fatalf("read, base64: %s", out)
+	}
+	out = callRepo(t, repoRead, d, "acme", "loop", `{"name":"text","ref":"main","binary":"hex"}`)
+	if gjson.Get(out, "_repo.error.code").String() != "txco_repo_invalid_arg" {
+		t.Fatalf("unknown binary mode: %s", out)
 	}
 }
 

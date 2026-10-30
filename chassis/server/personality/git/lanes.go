@@ -324,6 +324,10 @@ type envChange struct {
 	Size int64  `json:"size"`
 	Mode string `json:"mode"`
 	Op   string `json:"op"`
+	// Text and Type are the content facts a stack judges a binary by
+	// (docs/0061 §8): false and "" for a delete.
+	Text bool   `json:"text"`
+	Type string `json:"type"`
 }
 
 type envCommit struct {
@@ -360,7 +364,7 @@ func buildEnvelope(p *Push, phase, rid, node string, now time.Time) string {
 	for _, cmd := range p.Commands {
 		ec := envCommand{Ref: cmd.Name.String(), Old: cmd.Old.String(), New: cmd.New.String(), Op: string(cmd.Action()), Changes: []envChange{}}
 		for _, ch := range p.Changes[cmd.Name] {
-			ec.Changes = append(ec.Changes, envChange{Path: ch.Path, OID: ch.Hash.String(), Size: ch.Size, Mode: ch.Mode.String(), Op: ch.Op})
+			ec.Changes = append(ec.Changes, envChange{Path: ch.Path, OID: ch.Hash.String(), Size: ch.Size, Mode: ch.Mode.String(), Op: ch.Op, Text: ch.Text, Type: ch.Type})
 		}
 		cmds = append(cmds, ec)
 	}

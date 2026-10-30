@@ -116,7 +116,10 @@ share, with its cache and `--login-rate` throttle.
 4. What each command changes, old tree → new tree, with the head's own
    rules: text only by default (`--git-text-only`: a blob that is not valid
    UTF-8 or holds a NUL, a symlink, an executable or a submodule is refused,
-   naming the path) and the object cap. Deleting is always allowed.
+   naming the path) and the object cap. A repository whose content policy
+   is `stack` (below) keeps the mode rules and hands the text-or-binary
+   decision to the lane, which reads each change's `text` and `type`.
+   Deleting is always allowed.
 5. The objects are stored and the response HEADERS are sent, so a front
    proxy's time-to-headers never counts what follows.
 6. **The answer lane**: the tenant's `_git` stack judges the push (policy
@@ -194,16 +197,41 @@ the push landed; a rule there typically routes into the application's own
 stack (`SET @route.stack = "loop", @route.to = "loop/100"; EXEC
 "txco://route"`).
 
+## Content policy
+
+Each repository has `policy.content`, set at `repo/create` or changed with
+`repo/policy`:
+
+- `text` (the default): the head refuses a blob that is not text, as
+  `--git-text-only` says. Configuration is text, and the secret scan a
+  stack runs reads text.
+- `stack`: the head stops refusing binaries and tells the tenant's `_git`
+  stack what each changed file is — `text` (UTF-8 without a NUL) and
+  `type` (the media type its first 512 bytes sniff as: `image/png`,
+  `application/pdf`, `font/woff2`, `application/zip`, `application/
+  octet-stream` when nothing is recognized) on every entry of
+  `@git.changes`. The stack refuses what it does not want, by path and by
+  type, in the answer lane. A symlink, an executable and a submodule are
+  still refused by the head whatever the policy. `stack` needs
+  `policy.push: stack`: without a lane nobody would judge, so the pair is
+  refused.
+
+An op's `repo/commit` follows the same policy: under `text` a write that
+is not text is refused; under `stack` the calling stack applies its own
+check before it writes, and a write may carry bytes as `encoding:
+"base64"`.
+
 ## Reading and writing without git: `txco://repo/*`
 
 | Op | WITH | Answer |
 |---|---|---|
 | `repo/refs` | `name` | `{head, main, active, refs: [{name, oid}]}` — `main` is the head branch's id, `active` is `refs/txco/active`, "" when absent |
-| `repo/read` | `name`, `ref` (default the head branch; `active` for `refs/txco/active`) or `commit`, `prefix`, `paths`, `max_bytes` (1 MiB default, 8 MiB ceiling) | `{found, commit, tree, over_limit, files: [{path, size, mode, oid, content \| binary}]}`; `found: false` for an empty repository |
-| `repo/commit` | `name`, `ref` (a branch), `message`, `writes: [{path, content}]`, `deletes: [path]`, `author: {name, email}`, `expected` (the ref's current id; "" = must not exist), `base` (the parent for a new ref), `tree` (a commit whose tree to copy: a rollback) | `{commit, tree, ref, old, changed}`; `unchanged: true` when nothing differed; `txco_repo_moved` with `current` when `expected` is stale — the lost-update guard |
+| `repo/read` | `name`, `ref` (default the head branch; `active` for `refs/txco/active`) or `commit`, `prefix`, `paths`, `max_bytes` (1 MiB default, 8 MiB ceiling), `binary` (`skip`, the default: a binary is listed without content and counted; `list`: listed and counted toward nothing; `base64`: its bytes as `content_base64`, counted) | `{found, commit, tree, over_limit, files: [{path, size, mode, oid, content \| (binary: true, type, content_base64?)}]}`; `found: false` for an empty repository |
+| `repo/commit` | `name`, `ref` (a branch), `message`, `writes: [{path, content, encoding?: "base64"}]`, `deletes: [path]`, `author: {name, email}`, `expected` (the ref's current id; "" = must not exist), `base` (the parent for a new ref), `tree` (a commit whose tree to copy: a rollback) | `{commit, tree, ref, old, changed}`; `unchanged: true` when nothing differed; `txco_repo_moved` with `current` when `expected` is stale — the lost-update guard |
 | `repo/log` | `name`, `ref` or `commit`, `limit` (≤ 100) | `{found, commits: [{commit, parents, tree, author, when, message}]}` first-parent, newest first |
 | `repo/diff` | `name`, `base` (empty = the empty tree), `head`, `paths`, `max_bytes` | `{head, changes: [{path, op, from, to, patch}]}` with unified patches for text files under the budget |
 | `repo/ref/update` | `name`, `ref` (any `refs/…`, `refs/txco/*` included), `old`, `new` ("" = create / delete) | `{ok, ref, old, new}`; `txco_repo_moved` with `current` otherwise |
+| `repo/policy` | `name`, `policy: {push?, content?}` (a field left out stays) | `{name, policy: {push, content}, changed}`; `txco_repo_invalid_arg` for `content: stack` without `push: stack` |
 
 Every error is `<into>.error.{code, message}` with the codes
 `txco_repo_disabled`, `txco_repo_no_tenant`, `txco_repo_invalid_arg`,
@@ -229,7 +257,7 @@ knows how to read.
 | `--git-max-object-bytes` | 1 MiB | one object (a file) |
 | `--git-max-objects` | 5000 | objects in one push |
 | `--git-max-repo-bytes` | 64 MiB | a repository's stored objects |
-| `--git-text-only` | true | refuse non-text blobs, symlinks, executables, submodules |
+| `--git-text-only` | true | refuse non-text blobs (unless the repository's content policy is `stack`), symlinks, executables, submodules |
 | `--git-resp-timeout` | 10 s | the answer lane's wait |
 
 There is no garbage collection: objects no ref reaches stay indexed, as the
