@@ -161,6 +161,58 @@ func TestDoorScopesAndTenant(t *testing.T) {
 	}
 }
 
+// A username without an address names no binding: the repository's own
+// name, or any word (`pony`, as GitHub takes `git`), signs in as the
+// repository's owning principal, and the password alone authenticates —
+// `https://<repo>@<host>/git/<repo>.git`, with the owner's git password.
+// Another principal's password is refused under that username, and a
+// repository that does not exist answers 401 as to any unknown user.
+func TestDoorBareUsernameIsTheRepositoryOwner(t *testing.T) {
+	gitPath(t)
+	d := newDoorHarness(t)
+	ctx := context.Background()
+	if _, _, err := d.repos.Create(ctx, gitstore.Repo{Tenant: "acme", Name: "paris", Principal: "pony:paris", CreatedBy: "ranch", PolicyPush: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	d.grant(t, "pony:paris", "paris@pony.example.com", "bcdf-correct-horse", "git:paris:fetch", "git:paris:push")
+	d.grant(t, "member:reader", "reader@pony.example.com", "bcdf-only-looking-here", "git:paris:fetch")
+
+	work := t.TempDir()
+	// The repository's name as the username, the owner's password: clone and push.
+	d.must(work, "clone", "-q", d.authURL("paris", "paris", "bcdf-correct-horse"), "a")
+	a := filepath.Join(work, "a")
+	write(t, a, "config/MISSION.md", "# Mission\n")
+	d.must(a, "add", ".")
+	d.must(a, "commit", "-qm", "first")
+	d.must(a, "push", "-q", "origin", "main")
+	// Any word works the same way.
+	d.must(work, "clone", "-q", d.authURL("paris", "pony", "bcdf-correct-horse"), "b")
+	// The address still works.
+	d.must(work, "clone", "-q", d.authURL("paris", "paris@pony.example.com", "bcdf-correct-horse"), "c")
+	// A wrong password under the bare name.
+	d.fails(work, "Authentication failed", "clone", d.authURL("paris", "paris", "bcdf-not-the-password"), "w")
+	// Another principal's password under the bare name: the identity is the
+	// owner, so the reader's credential does not open it.
+	d.fails(work, "Authentication failed", "clone", d.authURL("paris", "paris", "bcdf-only-looking-here"), "r")
+	// The reader by their own address still fetches.
+	d.must(work, "clone", "-q", d.authURL("paris", "reader@pony.example.com", "bcdf-only-looking-here"), "r2")
+	// A bare username on a repository that does not exist: 401, nothing learned.
+	res, _ := http.Get(d.authURL("nothere", "nothere", "bcdf-correct-horse") + "/info/refs?service=git-upload-pack")
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a bare username on a missing repository: %d, want 401", res.StatusCode)
+	}
+	// The audit row names the owner, as a login by address would.
+	repo, found, err := d.repos.Open(ctx, "acme", "paris")
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	log, err := d.repos.Store().RefLog(ctx, repo.Meta().ID, 10)
+	if err != nil || len(log) != 1 || log[0].Principal != "pony:paris" || log[0].Source != "push" {
+		t.Fatalf("the push's audit row: %+v %v", log, err)
+	}
+}
+
 func TestDoorClosedWithoutResolver(t *testing.T) {
 	h := newHarness(t, defaultLimits)
 	h.ctrl.openWithoutAuth = false

@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/authn"
+	gitcore "github.com/loremlabs/thanks-computer/chassis/git"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 )
 
@@ -29,6 +30,9 @@ type request struct {
 	action  string // "fetch" | "push": the credential scope the request needs
 	who     authn.Authenticated
 	ip      string
+	// repo is set by authenticate when a bare username made it open the
+	// repository for its owning principal; ServeHTTP then opens nothing twice.
+	repo gitcore.Repo
 }
 
 // ServeHTTP is the whole request flow: hostname → tenant, the path → a
@@ -80,16 +84,20 @@ func (c *Controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !c.authenticate(w, r, &req) {
 		return
 	}
-	// 4. The repository.
-	repo, found, err := c.repos.Open(r.Context(), tenant, name)
-	if err != nil {
-		c.logger().Warn("git repo open failed", zap.String("tenant", tenant), zap.String("repo", name), zap.Error(err))
-		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
-		return
-	}
-	if !found {
-		http.NotFound(w, r)
-		return
+	// 4. The repository (already open when the username named it, step 3).
+	repo := req.repo
+	if repo == nil {
+		opened, found, err := c.repos.Open(r.Context(), tenant, name)
+		if err != nil {
+			c.logger().Warn("git repo open failed", zap.String("tenant", tenant), zap.String("repo", name), zap.Error(err))
+			http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		repo = opened
 	}
 	// 5. The service.
 	switch service {
@@ -168,9 +176,16 @@ func (c *Controller) secure(r *http.Request) bool {
 //
 // The username is the account's login name (an address the chassis bound
 // to a principal: `<slug>@<host>` → `pony:<slug>`); the password is a
-// credential of that principal whose scopes cover the door. A wrong
-// password, an unknown user, the right password for the wrong door and a
-// disabled user all answer 401 the same way, so nothing is learned.
+// credential of that principal whose scopes cover the door. A username
+// WITHOUT an address — the repository's own name, or any word, as GitHub
+// takes `git` — names no binding: the repository's row says whose it is,
+// its owning principal is the identity, and the password alone
+// authenticates (authn.Attempt.Principal, the printer's door), so a clone
+// line reads `https://<repo>@<host>/git/<repo>.git`. A team member signs in
+// by their own address as before. A wrong password, an unknown user, the
+// right password for the wrong door and a disabled user all answer 401 the
+// same way, and a bare username on a repository that does not exist falls
+// back to the (unknown) username, so nothing is learned.
 //
 // A head started without a login resolver is CLOSED (503), never open: the
 // prototype's open door is a test harness's choice (openWithoutAuth).
@@ -196,10 +211,23 @@ func (c *Controller) authenticate(w http.ResponseWriter, r *http.Request, req *r
 	if !ok || username == "" {
 		return challenge()
 	}
-	res := c.auth.Login(r.Context(), authn.Attempt{
+	attempt := authn.Attempt{
 		Tenant: req.tenant, Username: username, Password: pass, IP: req.ip,
 		Want: authn.Scope{Domain: "git", Instance: req.name, Action: req.action},
-	})
+	}
+	if !strings.Contains(username, "@") {
+		repo, found, err := c.repos.Open(r.Context(), req.tenant, req.name)
+		if err != nil {
+			c.logger().Warn("git repo open failed", zap.String("tenant", req.tenant), zap.String("repo", req.name), zap.Error(err))
+			http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+			return false
+		}
+		if found {
+			attempt.Principal = repo.Meta().Principal
+			req.repo = repo
+		}
+	}
+	res := c.auth.Login(r.Context(), attempt)
 	switch res.Outcome {
 	case authn.OutcomeOK:
 	case authn.OutcomeThrottled:

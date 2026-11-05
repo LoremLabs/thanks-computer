@@ -74,7 +74,12 @@ A client signs in with HTTP Basic: the username is an address the chassis
 bound to a principal (`paris@pony.example.com` → `pony:paris`, the binding
 the mail, calendar, contacts and drive accounts make), the password a
 credential of that principal (`txco://credential/create`) whose scopes
-cover the door:
+cover the door. A username **without** an address — the repository's own
+name, or any word, as GitHub takes `git` — names no binding: the
+repository's `principal` is the identity and the password alone
+authenticates, so the line a page prints can read
+`https://paris@pony.example.com/git/paris.git` with the owner's git
+password. A team member signs in by their own address.
 
 | Operation | Scope the credential must cover |
 |---|---|
@@ -269,7 +274,11 @@ not source trees.
 - Any git ≥ 2.x works; the protocol v2 the client asks for first is not
   advertised and it falls back to v0 unaided.
 - A credential helper (`git config credential.helper`) remembers the
-  password; the username is the bound address.
+  password; the username is the bound address, or the repository's name
+  for its owner. A keychain keys a saved password by host and username, so
+  a constant username (`pony@…`) across many repositories needs
+  `credential.useHttpPath true`; the repository's name as the username
+  keeps them apart by itself.
 - `git fetch origin refs/txco/active` shows what the application activated.
 - `git push --atomic` is honoured; every push is all-or-nothing anyway.
 - `git clone --depth` fails: shallow clones are not served.
