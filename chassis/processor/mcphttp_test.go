@@ -491,10 +491,18 @@ func TestExecMCPHTTPHonorsHeaderSecretOverlays(t *testing.T) {
 	if got := last.Header.Get("Authorization"); got != "Bearer abc" {
 		t.Errorf("tools/call Authorization = %q, want 'Bearer abc'", got)
 	}
-	// Authorization must NOT have been set on initialize / notif.
+	// The header rides every phase: a server that requires
+	// authorization refuses `initialize` without it, and the handshake
+	// goes to the same endpoint as the call.
 	for i, phase := range []string{"initialize", "notifications/initialized"} {
-		if got := stub.calls[i].Header.Get("Authorization"); got != "" {
-			t.Errorf("%s also carried Authorization=%q (overlay leaked to handshake)", phase, got)
+		if got := stub.calls[i].Header.Get("Authorization"); got != "Bearer abc" {
+			t.Errorf("%s Authorization = %q, want 'Bearer abc' (credentials ride the handshake)", phase, got)
+		}
+	}
+	// Cleartext must not be inside any phase's JSON-RPC body.
+	for i, b := range stub.bodies {
+		if strings.Contains(string(b), "abc") {
+			t.Errorf("request %d body carries the cleartext: %s", i, b)
 		}
 	}
 	// Cleartext must not be inside the JSON-RPC body of tools/call.

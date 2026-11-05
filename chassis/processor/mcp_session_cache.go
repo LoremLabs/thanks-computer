@@ -71,6 +71,17 @@ func sessionCacheKey(tenant, endpoint string) string {
 	return tenant + "|" + endpoint
 }
 
+// sessionCacheKeyFor is sessionCacheKey for a call that carries a
+// credential: `cred` names it (the tenant secrets on its headers, or the
+// connection and the principal whose token it is), so two principals at one
+// endpoint never share a session id. An empty cred is the plain key.
+func sessionCacheKeyFor(tenant, endpoint, cred string) string {
+	if cred == "" {
+		return sessionCacheKey(tenant, endpoint)
+	}
+	return sessionCacheKey(tenant, endpoint) + "|" + cred
+}
+
 // get returns the cached session id for `key`, refreshing its
 // `lastUsed` timestamp on a hit. Misses (no entry) and TTL-expired
 // entries both return ok=false; TTL-expired entries are also
