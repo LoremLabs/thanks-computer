@@ -293,9 +293,18 @@ func TestLocalAsyncResumeTraceCarriesUsageEvent(t *testing.T) {
 		t.Fatalf("run state = %q, want completed", st)
 	}
 
+	// The run reads as completed from inside Resume, and the usage event is
+	// written after Resume returns, so wait for it rather than race it.
 	resumeRID := continuation.ResumeTraceRID(runID, "usage-tst/100")
-	events := readTimeline(t, traceDir, resumeRID)
-	u := findEventByName(events, "request.usage")
+	var events []map[string]any
+	var u map[string]any
+	for deadline := time.Now().Add(3 * time.Second); ; {
+		events = readTimeline(t, traceDir, resumeRID)
+		if u = findEventByName(events, "request.usage"); u != nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if u == nil {
 		t.Fatalf("resume trace missing request.usage event; timeline=%v", events)
 	}
