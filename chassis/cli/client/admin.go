@@ -1767,6 +1767,8 @@ type TraceSummary struct {
 	FinishedAt string `json:"finished_at,omitempty"`
 	DurationMs *int64 `json:"duration_ms,omitempty"`
 	Status     string `json:"status"`
+	// Tags name what the trace is about, in the stack's words.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // ListTraces fetches recent traces. See ListTracesETag for the
@@ -1867,6 +1869,40 @@ type TraceResponse struct {
 	Steps     []TraceStep    `json:"steps"`
 	In        map[string]any `json:"in,omitempty"`
 	Out       any            `json:"out,omitempty"`
+	// Tags name what the trace is about, in the stack's words.
+	Tags map[string]string `json:"tags,omitempty"`
+	// Continuation links the two halves of a suspended run.
+	Continuation *TraceContinuation `json:"continuation,omitempty"`
+
+	client *Client // set by GetTrace, for LoadStepBody
+}
+
+// TraceContinuation is the link between a request that suspended and the
+// traces of what resumed it.
+type TraceContinuation struct {
+	Self              string        `json:"self"` // "origin" | "resume"
+	RunContinuationID string        `json:"run_continuation_id,omitempty"`
+	OriginRID         string        `json:"origin_rid,omitempty"`
+	Resumes           []TraceResume `json:"resumes,omitempty"`
+}
+
+// TraceResume is one resumed stage of a run.
+type TraceResume struct {
+	RID   string `json:"rid"`
+	Stage string `json:"stage"`
+}
+
+// TraceModel is what a model call was.
+type TraceModel struct {
+	Kind      string `json:"kind"`
+	Provider  string `json:"provider,omitempty"`
+	Model     string `json:"model,omitempty"`
+	TokensIn  int64  `json:"tokens_in,omitempty"`
+	TokensOut int64  `json:"tokens_out,omitempty"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+	Retries   int    `json:"retries,omitempty"`
+	Routing   string `json:"routing,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 type TraceStep struct {
@@ -1888,6 +1924,10 @@ type TraceStep struct {
 	Out             any    `json:"out,omitempty"`
 	Passes          int    `json:"passes,omitempty"`
 	StopReason      string `json:"stop_reason,omitempty"`
+	// BodyRef says In and Out are not in the document: LoadStepBody fetches
+	// them. Opaque, and only ever handed back.
+	BodyRef string      `json:"body_ref,omitempty"`
+	Model   *TraceModel `json:"model,omitempty"`
 }
 
 // TraceNotFoundError marks a 404 from the trace endpoint so the caller
@@ -1939,7 +1979,46 @@ func (c *Client) GetTrace(ctx context.Context, rid string, full bool) (*TraceRes
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, nil, fmt.Errorf("decode trace response: %w", err)
 	}
+	out.client = c
 	return &out, body, nil
+}
+
+// LoadStepBody fills a step's In and Out when they are not in the document. A
+// step that has them, or never had any, is left alone. A body that did not
+// survive (a run the chassis shut down on writes its document first) is an
+// error the caller can show.
+func (r *TraceResponse) LoadStepBody(ctx context.Context, step *TraceStep) error {
+	if step.BodyRef == "" || step.In != nil || step.Out != nil || r.client == nil {
+		return nil
+	}
+	endpoint := r.client.tracesURL("/requests/" + url.PathEscape(r.RID) + "/body?ref=" + url.QueryEscape(step.BodyRef))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	if err := r.client.applyAuth(req, nil); err != nil {
+		return err
+	}
+	resp, err := r.client.do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("this step's bodies are not available")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return decodeError(resp)
+	}
+	var body struct {
+		In  any `json:"in"`
+		Out any `json:"out"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return fmt.Errorf("decode step body: %w", err)
+	}
+	step.In, step.Out = body.In, body.Out
+	return nil
 }
 
 // HTTPError captures a server-side JSON error response in a typed

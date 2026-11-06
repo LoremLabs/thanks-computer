@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -207,10 +208,69 @@ func printSummary(w io.Writer, r *client.TraceResponse) {
 	if r.Fuel > 0 {
 		fmt.Fprintf(w, "  fuel     %d\n", r.Fuel)
 	}
+	if len(r.Tags) > 0 {
+		fmt.Fprintf(w, "  tags     %s\n", formatTags(r.Tags))
+	}
+	if c := r.Continuation; c != nil {
+		if c.OriginRID != "" && c.OriginRID != r.RID {
+			fmt.Fprintf(w, "  origin   %s\n", c.OriginRID)
+		}
+		for _, rr := range c.Resumes {
+			if rr.RID != r.RID {
+				fmt.Fprintf(w, "  resume   %s (%s)\n", rr.RID, rr.Stage)
+			}
+		}
+	}
 	fmt.Fprintln(w)
 }
 
+func formatTags(tags map[string]string) string {
+	keys := make([]string, 0, len(tags))
+	for k := range tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+tags[k])
+	}
+	return strings.Join(parts, " ")
+}
+
+// stepsInOrder is the steps as they ran, the order the admin page shows. A
+// reader answers them in its own order, and a call's steps belong between its
+// caller's. Steps with no timestamp keep their place among themselves.
+func stepsInOrder(steps []client.TraceStep) []client.TraceStep {
+	at := func(s client.TraceStep) time.Time {
+		t, _ := time.Parse(time.RFC3339Nano, s.StartedAt)
+		return t
+	}
+	out := append([]client.TraceStep(nil), steps...)
+	sort.SliceStable(out, func(i, j int) bool { return at(out[i]).Before(at(out[j])) })
+	return out
+}
+
+// operationCell is the operation column: a model call says which model and
+// how many tokens, which is what a person scanning for one is looking for.
+func operationCell(s client.TraceStep) string {
+	if s.Model == nil {
+		return s.Operation
+	}
+	return strings.Join(strings.Fields(s.Operation+" "+s.Model.Model+" "+modelTokens(s.Model)), " ")
+}
+
+func modelTokens(m *client.TraceModel) string {
+	if m.ErrorCode != "" {
+		return m.ErrorCode
+	}
+	if m.Kind == "embed" {
+		return strconv.FormatInt(m.TokensIn, 10)
+	}
+	return fmt.Sprintf("%d→%d", m.TokensIn, m.TokensOut)
+}
+
 func printSteps(w io.Writer, steps []client.TraceStep) {
+	steps = stepsInOrder(steps)
 	fmt.Fprintf(w, "steps (%d):\n", len(steps))
 	if len(steps) == 0 {
 		fmt.Fprintln(w, "  -")
@@ -226,7 +286,7 @@ func printSteps(w io.Writer, steps []client.TraceStep) {
 		fmt.Fprintf(w, "  %-16s %-18s %-40s %-8s %5dms  %s→%s\n",
 			truncate(s.Stack, 16),
 			stepLabel(s),
-			truncate(s.Operation, 40),
+			truncate(operationCell(s), 40),
 			truncate(s.Status, 8),
 			s.DurationMs,
 			humanBytes(s.InputBytes),
@@ -295,11 +355,22 @@ func printStep(stdout, stderr io.Writer, r *client.TraceResponse, sel string, ve
 	if step.Passes > 0 {
 		fmt.Fprintf(stdout, "  passes      %d (stopped: %s)\n", step.Passes, step.StopReason)
 	}
+	if m := step.Model; m != nil {
+		fmt.Fprintf(stdout, "  model       %s %s (%s), tokens %s, %dms", m.Kind, m.Model, m.Provider, modelTokens(m), m.LatencyMS)
+		if m.Retries > 0 {
+			fmt.Fprintf(stdout, ", %d retries", m.Retries)
+		}
+		fmt.Fprintln(stdout)
+	}
 
 	if verbose {
 		if r.TraceMode != "full" {
 			fmt.Fprintf(stderr, "trace: --verbose requested but chassis trace_mode=%q (no payload data on disk)\n",
 				traceModeOrUnset(r.TraceMode))
+			return 0
+		}
+		if err := r.LoadStepBody(context.Background(), step); err != nil {
+			fmt.Fprintf(stderr, "trace: %v\n", err)
 			return 0
 		}
 		if step.In != nil {

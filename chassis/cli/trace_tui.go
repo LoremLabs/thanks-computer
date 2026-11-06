@@ -441,6 +441,10 @@ func buildStepDetail(resp *client.TraceResponse, step *client.TraceStep, back fu
 		SetWrap(false)
 	metaView.SetText(formatStepMeta(step))
 
+	// A step of a long trace keeps its bodies out of the document. A failure
+	// here shows as an empty tab, and the step's metadata still stands.
+	_ = resp.LoadStepBody(context.Background(), step)
+
 	inTree := buildJSONTreeView("input", step.In, resp.TraceMode)
 	outTree := buildJSONTreeView("output", step.Out, resp.TraceMode)
 
