@@ -40,6 +40,16 @@ func WithIssuedSecrets(ctx context.Context) context.Context {
 	return context.WithValue(ctx, ctxKeyIssued, &issuedSecrets{})
 }
 
+// carryIssued puts src's list of issued secrets on dst, or a new list if src
+// has none. Work that outlives its request runs on a context of its own, and
+// its envelope still holds what the request issued.
+func carryIssued(dst, src context.Context) context.Context {
+	if is, ok := src.Value(ctxKeyIssued).(*issuedSecrets); ok {
+		return context.WithValue(dst, ctxKeyIssued, is)
+	}
+	return WithIssuedSecrets(dst)
+}
+
 // NoteIssuedSecret records a secret an op just issued, so ScrubIssued keeps
 // it out of this request's trace. A no-op outside a request.
 func NoteIssuedSecret(ctx context.Context, v string) {

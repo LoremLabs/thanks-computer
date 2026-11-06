@@ -19,7 +19,8 @@ import (
 //	                map. If a tracer hasn't received Step/Event/End for
 //	                this long, the worker closes it to avoid leaked file
 //	                descriptors when End events drop under load. Default
-//	                60s.
+//	                60s. A trace that asked for longer (RequestInfo.IdleTTL)
+//	                keeps its own.
 //	DropCounter   — optional atomic counter incremented when the buffer
 //	                is full and an event is dropped. nil to ignore.
 type AsyncOpts struct {
@@ -183,6 +184,7 @@ func (s *AsyncSink) DroppedCount() int64 {
 type trackedTracer struct {
 	tracer     RequestTracer
 	lastActive time.Time
+	idleTTL    time.Duration
 }
 
 // run is the worker goroutine. It drains the event channel, maintains
@@ -217,9 +219,14 @@ func (s *AsyncSink) run() {
 				// Create the per-request tracer via the base sink.
 				// This is the moment the request directory is mkdir'd
 				// and in.json gets written.
+				ttl := op.info.IdleTTL
+				if ttl <= 0 {
+					ttl = s.opts.StaleAfter
+				}
 				tracers[op.rid] = &trackedTracer{
 					tracer:     s.base.Begin(op.info),
 					lastActive: now,
+					idleTTL:    ttl,
 				}
 			case opStep:
 				if tt, ok := tracers[op.rid]; ok {
@@ -259,7 +266,7 @@ func (s *AsyncSink) run() {
 			// a goroutine so the worker isn't blocked.
 			now := time.Now()
 			for rid, tt := range tracers {
-				if now.Sub(tt.lastActive) > s.opts.StaleAfter {
+				if now.Sub(tt.lastActive) > tt.idleTTL {
 					tracer := tt.tracer
 					delete(tracers, rid)
 					s.flushWg.Add(1)

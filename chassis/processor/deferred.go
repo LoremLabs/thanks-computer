@@ -431,26 +431,7 @@ func (pu *Unit) DriveDeferredResume(runID, stage string) {
 		return
 	}
 
-	var tracer trace.RequestTracer
-	var runTenant string // the run's tenant slug, for resume-trace attribution
-	if pu.Sink != nil {
-		tracer = pu.Sink.Begin(trace.RequestInfo{
-			RID: continuation.ResumeTraceRID(runID, stage), Src: "continuation",
-			Stack: stage, StartedAt: time.Now(),
-		})
-		if rc, rcErr := pu.Runs.ReadRunCreated(bg, runID); rcErr == nil {
-			runTenant = rc.TenantID
-			tracer.Event(trace.TimelineEvent{
-				Ts: time.Now(), Event: "continuation.resume",
-				Fields: map[string]any{
-					"run_id": runID, "run_continuation_id": rc.RunContinuationID,
-					"origin_rid": rc.OriginRID, "stage": stage,
-					"stack_version_id": rc.StackVersionID,
-				},
-			})
-		}
-		bg = trace.WithContext(bg, tracer)
-	}
+	bg, tracer, runTenant := pu.BeginResumeTrace(bg, pu.Sink, runID, stage, ResumeTraceOptions{})
 	rerr := pu.Resume(bg, runID, stage)
 	if tracer != nil {
 		rStatus := "ok"

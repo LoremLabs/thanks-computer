@@ -2047,35 +2047,10 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		// finCtx runs the record/resume sequence: workCtx bounds the op
 		// and may be at (or past) its deadline by the time the terminal
 		// lands — a slow upstream must not starve the resume pipeline.
-		finCtx := context.Background()
-		var tracer trace.RequestTracer
-		var runTenant string // the run's tenant slug, for resume-trace attribution
-		if pu.Sink != nil {
-			tracer = pu.Sink.Begin(trace.RequestInfo{
-				RID:       continuation.ResumeTraceRID(runID, stage),
-				Src:       "continuation",
-				Stack:     stage,
-				StartedAt: time.Now(),
-			})
-			// Linkage event — admin-ui uses these to cross-navigate
-			// from the original (suspending) request to the resume
-			// trace and back.
-			if rc, rcErr := pu.Runs.ReadRunCreated(finCtx, runID); rcErr == nil {
-				runTenant = rc.TenantID
-				tracer.Event(trace.TimelineEvent{
-					Ts:    time.Now(),
-					Event: "continuation.resume",
-					Fields: map[string]any{
-						"run_id":              runID,
-						"run_continuation_id": rc.RunContinuationID,
-						"origin_rid":          rc.OriginRID,
-						"stage":               stage,
-						"stack_version_id":    rc.StackVersionID,
-					},
-				})
-			}
+		finCtx, tracer, runTenant := pu.BeginResumeTrace(carryIssued(context.Background(), workCtx), pu.Sink, runID, stage,
+			ResumeTraceOptions{IdleTTL: timeout + detachedTraceSlack})
+		if tracer != nil {
 			workCtx = trace.WithContext(workCtx, tracer)
-			finCtx = trace.WithContext(finCtx, tracer)
 		}
 
 		// The transport is persisted on the terminal so the resume merge

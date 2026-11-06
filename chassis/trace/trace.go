@@ -85,6 +85,19 @@ type RequestInfo struct {
 	StartedAt    time.Time
 	Payload      []byte
 	PayloadBytes int
+
+	// IdleTTL is how long this trace may go without a record before a sink
+	// that evicts idle traces may close it. A request's trace is busy to its
+	// end; a resume trace that holds a detached op can sit through one slow
+	// model call. Zero: the sink's default.
+	IdleTTL time.Duration
+
+	// RedactStack is the stack whose redact and omit hints apply from this
+	// trace's first record. Stack is a display name, a stage like "loop/502",
+	// and hints are keyed by stack, so a resume trace names its suspended
+	// stack here. Without it, steps of the stacks that stack called reach the
+	// sink before that stack's own first step does.
+	RedactStack string
 }
 
 // StepInfo describes one op execution.

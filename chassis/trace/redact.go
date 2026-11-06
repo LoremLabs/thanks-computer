@@ -169,6 +169,9 @@ func (s *RedactingSink) Begin(info RequestInfo) RequestTracer {
 	if info.Stack != "" {
 		rt.slots[slot{info.Tenant, info.Stack}] = struct{}{}
 	}
+	if info.RedactStack != "" {
+		rt.slots[slot{info.Tenant, info.RedactStack}] = struct{}{}
+	}
 	info.Payload = scrubWith(info.Payload, rt.union(), info.PayloadBytes > len(info.Payload), s.noScrub)
 	rt.inner = s.inner.Begin(info)
 	return rt

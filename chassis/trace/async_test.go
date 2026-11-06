@@ -318,3 +318,30 @@ func TestAsyncSinkEndToEndWithFileSink(t *testing.T) {
 		t.Errorf("meta.input_truncated should be true; meta=%v", meta)
 	}
 }
+
+// A trace that holds a detached op can sit quiet through one slow model call:
+// it keeps the idle allowance it asked for, while a dropped End on an ordinary
+// trace is still evicted on time.
+func TestAsyncSinkIdleTTLOutlivesStaleAfter(t *testing.T) {
+	base := &recordingSink{}
+	s := NewAsyncSink(base, AsyncOpts{StaleAfter: 40 * time.Millisecond})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	s.Begin(RequestInfo{RID: "ordinary"})
+	s.Begin(RequestInfo{RID: "detached", IdleTTL: time.Hour})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, _, ends := base.snapshot(); ends >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // long enough to have evicted the second, had it been
+
+	base.mu.Lock()
+	defer base.mu.Unlock()
+	if len(base.ends) != 1 || base.ends[0].status != "stale" {
+		t.Fatalf("ends = %+v, want exactly the ordinary trace evicted as stale", base.ends)
+	}
+}

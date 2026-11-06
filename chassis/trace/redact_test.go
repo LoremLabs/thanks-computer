@@ -456,3 +456,39 @@ func TestRedactingSink_RetenantedRequestUsesTheStepsTenant(t *testing.T) {
 		t.Errorf("another tenant's hint applied: %q", got)
 	}
 }
+
+// A resume trace's first records are the steps of the stacks its suspended
+// stack called. That stack's hints must already apply: its own first step may
+// not come until the call returns.
+func TestRedactingSink_RedactStackAppliesFromTheFirstStep(t *testing.T) {
+	lookup := func(tenant, stack string) Hints {
+		if tenant == "acme" && stack == "loop" {
+			return Hints{Redact: []string{"secret"}}
+		}
+		return Hints{}
+	}
+	body := []byte(`{"secret":"hidden"}`)
+
+	for _, tc := range []struct {
+		name        string
+		redactStack string
+		want        string
+	}{
+		{"seeded", "loop", "[REDACTED]"},
+		{"not seeded", "", "hidden"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &recordingSink{}
+			tr := NewRedactingSink(inner, lookup).Begin(RequestInfo{
+				RID: "r", Tenant: "acme", Stack: "loop/502", RedactStack: tc.redactStack,
+			})
+			tr.Step(StepInfo{Stack: "pony-agent", Scope: 100, Name: "think", Output: body, Input: body})
+
+			inner.mu.Lock()
+			defer inner.mu.Unlock()
+			if got := gjson.GetBytes(inner.steps[0].Output, "secret").String(); got != tc.want {
+				t.Errorf("secret = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

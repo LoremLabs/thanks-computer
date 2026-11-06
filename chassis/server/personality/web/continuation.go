@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
@@ -146,30 +145,7 @@ func (web *WebController) handleContinuationComplete(w http.ResponseWriter, r *h
 	// controller ctx (the request ctx dies when this handler returns;
 	// the original client already has its 202). NoopSink (trace off)
 	// makes this free.
-	tracer := web.sink.Begin(trace.RequestInfo{
-		RID:       continuation.ResumeTraceRID(lk.RunID, lk.Stage),
-		Src:       "continuation",
-		Stack:     lk.Stage,
-		StartedAt: time.Now(),
-	})
-	rctx := trace.WithContext(web.ctx, tracer)
-	// Link this resume trace back to the run / originating request so
-	// admin-ui can cross-navigate. ReadRunCreated is O(1).
-	var runTenant string // the run's tenant slug, for resume-trace attribution
-	if rc, rcErr := runs.ReadRunCreated(rctx, lk.RunID); rcErr == nil {
-		runTenant = rc.TenantID
-		tracer.Event(trace.TimelineEvent{
-			Ts:    time.Now(),
-			Event: "continuation.resume",
-			Fields: map[string]any{
-				"run_id":              lk.RunID,
-				"run_continuation_id": rc.RunContinuationID,
-				"origin_rid":          rc.OriginRID,
-				"stage":               lk.Stage,
-				"stack_version_id":    rc.StackVersionID,
-			},
-		})
-	}
+	rctx, tracer, runTenant := web.pu.BeginResumeTrace(web.ctx, web.sink, lk.RunID, lk.Stage, processor.ResumeTraceOptions{})
 	endWork := web.pu.Work.Begin() // shutdown waits for a resume in progress
 	rerr := web.pu.Resume(rctx, lk.RunID, lk.Stage)
 	endWork()
