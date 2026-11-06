@@ -710,9 +710,12 @@ func (c *Controller) Start() {
 			protected.HandleFunc("/traces/requests.json", c.handleTraceList).Methods(http.MethodGet)
 			// JSON aggregator for a single request — backs `txco trace <rid>`.
 			protected.HandleFunc("/traces/requests/{rid}.json", c.handleTraceRequest).Methods(http.MethodGet)
+			// One step's bodies, when they are not in the document.
+			protected.HandleFunc("/traces/requests/{rid}/body", c.handleTraceStepBody).Methods(http.MethodGet)
 			// Tenant-scoped copies (per-tenant isolation).
 			tenantR.HandleFunc("/traces/requests.json", c.handleTraceList).Methods(http.MethodGet)
 			tenantR.HandleFunc("/traces/requests/{rid}.json", c.handleTraceRequest).Methods(http.MethodGet)
+			tenantR.HandleFunc("/traces/requests/{rid}/body", c.handleTraceStepBody).Methods(http.MethodGet)
 			// Raw artifact browse: only when the backend is
 			// filesystem-shaped; non-fs backends 404 the raw path.
 			if fsys, ok := tr.RawFS(); ok {

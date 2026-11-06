@@ -154,6 +154,9 @@ type traceStep struct {
 	Out             any    `json:"out,omitempty"`
 	Passes          int    `json:"passes,omitempty"`
 	StopReason      string `json:"stop_reason,omitempty"`
+	// BodyRef says this step's in and out are fetched alone, from
+	// /traces/requests/{rid}/body?ref=. Opaque to everything but the backend.
+	BodyRef string `json:"body_ref,omitempty"`
 }
 
 // traceRdr returns the trace reader, lazily building it from config if
@@ -266,6 +269,7 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 			Out:             s.Out,
 			Passes:          s.Passes,
 			StopReason:      s.StopReason,
+			BodyRef:         s.BodyRef,
 		})
 	}
 
@@ -294,6 +298,50 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(resp)
+}
+
+// handleTraceStepBody returns one step's bodies when they are not in the
+// trace's document: GET /traces/requests/{rid}/body?ref=. The tenant is handed
+// to the backend, which owns what a ref means and must confine it. 404 for a
+// backend that serves bodies inline, for a ref this caller may not read, and
+// for bodies that never landed: a run the chassis shut down on writes its
+// document first.
+func (c *Controller) handleTraceStepBody(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := c.traceTenantScope(w, r)
+	if !ok {
+		return
+	}
+	rid := mux.Vars(r)["rid"]
+	if !validRID.MatchString(rid) {
+		http.Error(w, "invalid rid", http.StatusBadRequest)
+		return
+	}
+	ref := r.URL.Query().Get("ref")
+	if ref == "" {
+		http.Error(w, "ref is required", http.StatusBadRequest)
+		return
+	}
+	rdr, rerr := c.traceRdr()
+	if rerr != nil {
+		http.Error(w, "trace read error", http.StatusInternalServerError)
+		return
+	}
+	bodies, ok := rdr.(trace.StepBodyReader)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	b, err := bodies.StepBody(r.Context(), rid, ref, tenant)
+	if err != nil {
+		if errors.Is(err, trace.ErrNotFound) {
+			http.Error(w, "body not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "trace read error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(b)
 }
 
 // handleTraceList returns up to ?limit=N (default 50, max 500) recent

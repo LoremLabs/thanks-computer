@@ -1,12 +1,15 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -611,3 +614,100 @@ func TestHandleTraceRequest_TenantIsolation(t *testing.T) {
 		t.Errorf("cross-tenant read: status %d, want 404", code)
 	}
 }
+
+// A big body stays out of the document, and comes back alone: this is what
+// keeps a long run's trace openable.
+func TestHandleTraceStepBody(t *testing.T) {
+	dir := t.TempDir()
+	rid := "CawWjXCkFe7p3F3E5rCgM"
+	writeTraceFixture(t, dir, rid, true)
+
+	steps := filepath.Join(dir, "requests", rid, "steps")
+	ents, err := os.ReadDir(steps)
+	if err != nil || len(ents) == 0 {
+		t.Fatalf("fixture steps: %v", err)
+	}
+	folder := ents[0].Name()
+	big := `{"big":"` + strings.Repeat("x", 300<<10) + `"}`
+	mustWrite(t, filepath.Join(steps, folder, "in.json"), big)
+
+	c := newTestController(t, config.Config{Personalities: "admin", TraceDir: dir, TraceMode: "full"})
+
+	req := httptest.NewRequest(http.MethodGet, "/traces/requests/"+rid+".json?include=full", nil)
+	req = mux.SetURLVars(req, map[string]string{"rid": rid})
+	w := httptest.NewRecorder()
+	c.handleTraceRequest(w, asSuperAdmin(req))
+	var doc traceRequestResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if doc.Steps[0].BodyRef != folder || doc.Steps[0].In != nil {
+		t.Fatalf("big step: ref %q, in inline %v", doc.Steps[0].BodyRef, doc.Steps[0].In != nil)
+	}
+	if doc.Steps[1].BodyRef != "" {
+		t.Errorf("a small step should stay inline: ref %q", doc.Steps[1].BodyRef)
+	}
+
+	body := func(ref string, as func(*http.Request) *http.Request) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/traces/requests/"+rid+"/body?ref="+url.QueryEscape(ref), nil)
+		req = mux.SetURLVars(req, map[string]string{"rid": rid})
+		w := httptest.NewRecorder()
+		c.handleTraceStepBody(w, as(req))
+		return w
+	}
+
+	w = body(folder, asSuperAdmin)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var got trace.StepBody
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.In) != len(big) {
+		t.Errorf("in is %d bytes, want %d", len(got.In), len(big))
+	}
+
+	// A tenant reads its own and nobody else's, and a ref is a value that came
+	// through a browser: it names a folder of this trace or nothing.
+	if w := body(folder, func(r *http.Request) *http.Request { return asTenant(r, "acme") }); w.Code != http.StatusOK {
+		t.Errorf("own tenant: status %d", w.Code)
+	}
+	if w := body(folder, func(r *http.Request) *http.Request { return asTenant(r, "other") }); w.Code != http.StatusNotFound {
+		t.Errorf("other tenant: status %d", w.Code)
+	}
+	for _, ref := range []string{"..", ".", "../..", "../../../in.json", folder + "/../..", "missing", "/etc"} {
+		if w := body(ref, asSuperAdmin); w.Code != http.StatusNotFound {
+			t.Errorf("ref %q: status %d", ref, w.Code)
+		}
+	}
+	if w := body("", asSuperAdmin); w.Code != http.StatusBadRequest {
+		t.Errorf("no ref: status %d", w.Code)
+	}
+}
+
+// A backend with no per-step bodies answers 404, not a server error.
+func TestHandleTraceStepBody_BackendWithoutIt(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin", TraceDir: t.TempDir(), TraceMode: "full"})
+	c.traceReader = inlineOnlyReader{}
+
+	rid := "CawWjXCkFe7p3F3E5rCgM"
+	req := httptest.NewRequest(http.MethodGet, "/traces/requests/"+rid+"/body?ref=x", nil)
+	req = mux.SetURLVars(req, map[string]string{"rid": rid})
+	w := httptest.NewRecorder()
+	c.handleTraceStepBody(w, asSuperAdmin(req))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status %d", w.Code)
+	}
+}
+
+type inlineOnlyReader struct{}
+
+func (inlineOnlyReader) List(context.Context, trace.ListQuery) (trace.ListResult, error) {
+	return trace.ListResult{}, nil
+}
+func (inlineOnlyReader) Get(context.Context, string, bool) (trace.RequestDetail, error) {
+	return trace.RequestDetail{}, trace.ErrNotFound
+}
+func (inlineOnlyReader) IndexNames(context.Context, int) ([]string, int, error) { return nil, 0, nil }
+func (inlineOnlyReader) RawFS() (http.FileSystem, bool)                         { return nil, false }

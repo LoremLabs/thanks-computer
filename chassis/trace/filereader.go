@@ -258,21 +258,71 @@ func readSteps(reqDir string, d *RequestDetail, full bool) {
 			st.StopReason = v
 		}
 		if full {
-			if b, err := os.ReadFile(filepath.Join(stepDir, "in.json")); err == nil {
-				var v any
-				if json.Unmarshal(b, &v) == nil {
-					st.In = v
+			if fileBodiesLarge(stepDir) {
+				st.BodyRef = e.Name() // fetched alone, by StepBody
+			} else {
+				if b, err := os.ReadFile(filepath.Join(stepDir, "in.json")); err == nil {
+					var v any
+					if json.Unmarshal(b, &v) == nil {
+						st.In = v
+					}
 				}
-			}
-			if b, err := os.ReadFile(filepath.Join(stepDir, "out.json")); err == nil {
-				var v any
-				if json.Unmarshal(b, &v) == nil {
-					st.Out = v
+				if b, err := os.ReadFile(filepath.Join(stepDir, "out.json")); err == nil {
+					var v any
+					if json.Unmarshal(b, &v) == nil {
+						st.Out = v
+					}
 				}
 			}
 		}
 		d.Steps = append(d.Steps, st)
 	}
+}
+
+// fileInlineMax is the largest pair of bodies a document carries. Above it a
+// page loads the step alone when someone opens it. A trace of a long run would
+// otherwise send every envelope it saw to show a list of steps.
+const fileInlineMax = 256 << 10
+
+func fileBodiesLarge(stepDir string) bool {
+	var n int64
+	for _, name := range []string{"in.json", "out.json"} {
+		if fi, err := os.Stat(filepath.Join(stepDir, name)); err == nil {
+			n += fi.Size()
+		}
+	}
+	return n > fileInlineMax
+}
+
+// StepBody reads one step's bodies. ref is the step's folder, and it is a
+// value that came through a browser: it must name one folder of this trace
+// and nothing else. A body that is not JSON reads as absent, as it does in a
+// document.
+func (fr *fileReader) StepBody(_ context.Context, rid, ref, tenant string) (StepBody, error) {
+	if !validRID.MatchString(rid) || ref == "" || ref == "." || ref == ".." || ref != filepath.Base(ref) {
+		return StepBody{}, ErrNotFound
+	}
+	reqDir := filepath.Join(fr.dir, "requests", rid)
+	if tenant != "" {
+		d := RequestDetail{}
+		readHeader(reqDir, &d, false)
+		readTimeline(reqDir, &d)
+		if d.Tenant != tenant {
+			return StepBody{}, ErrNotFound
+		}
+	}
+	stepDir := filepath.Join(reqDir, "steps", ref)
+	if fi, err := os.Stat(stepDir); err != nil || !fi.IsDir() {
+		return StepBody{}, ErrNotFound
+	}
+	read := func(name string) json.RawMessage {
+		b, err := os.ReadFile(filepath.Join(stepDir, name))
+		if err != nil || !json.Valid(b) {
+			return nil
+		}
+		return b
+	}
+	return StepBody{In: read("in.json"), Out: read("out.json")}, nil
 }
 
 func readOut(reqDir string, d *RequestDetail) {

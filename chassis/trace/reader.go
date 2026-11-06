@@ -63,6 +63,11 @@ type Step struct {
 	In              any
 	Out             any
 
+	// BodyRef, when set, says this step's bodies are not in the document and
+	// are fetched one step at a time (StepBodyReader). It is opaque to all
+	// but the reader that made it.
+	BodyRef string
+
 	// Passes / StopReason: set only for a step that repeated inside its
 	// dispatch (a LOOP clause); see StepInfo.
 	Passes     int
