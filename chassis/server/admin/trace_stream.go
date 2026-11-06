@@ -15,18 +15,19 @@ import (
 // path — clients can resolve them by opening /traces/requests/{rid}.
 // json on click) and plus an opaque per-subscription cursor.
 type traceStreamEvent struct {
-	RID              string `json:"rid"`
-	Src              string `json:"src,omitempty"`
-	Tenant           string `json:"tenant,omitempty"`
-	Stack            string `json:"stack,omitempty"`
-	Route            string `json:"route,omitempty"`
-	StartedAt        string `json:"started_at,omitempty"`
-	FinishedAt       string `json:"finished_at,omitempty"`
-	DurationMs       *int64 `json:"duration_ms,omitempty"`
-	Status           string `json:"status"`
-	Error            string `json:"error,omitempty"`
-	PayloadBytes     int64  `json:"payload_bytes,omitempty"`
-	PayloadTruncated bool   `json:"payload_truncated,omitempty"`
+	RID              string            `json:"rid"`
+	Src              string            `json:"src,omitempty"`
+	Tenant           string            `json:"tenant,omitempty"`
+	Stack            string            `json:"stack,omitempty"`
+	Route            string            `json:"route,omitempty"`
+	Tags             map[string]string `json:"tags,omitempty"`
+	StartedAt        string            `json:"started_at,omitempty"`
+	FinishedAt       string            `json:"finished_at,omitempty"`
+	DurationMs       *int64            `json:"duration_ms,omitempty"`
+	Status           string            `json:"status"`
+	Error            string            `json:"error,omitempty"`
+	PayloadBytes     int64             `json:"payload_bytes,omitempty"`
+	PayloadTruncated bool              `json:"payload_truncated,omitempty"`
 	// Fuel/BytesIn/BytesOut mirror the archive detail response
 	// (traceRequestResponse): per-request fuel + request/response sizes,
 	// lifted from the request.usage timeline event. Without these the
@@ -209,6 +210,7 @@ func closedTraceToWire(t trace.ClosedTrace) traceStreamEvent {
 		Tenant:           t.Tenant,
 		Stack:            t.Stack,
 		Route:            t.Route,
+		Tags:             t.Tags,
 		StartedAt:        t.StartedAt,
 		FinishedAt:       t.FinishedAt,
 		DurationMs:       t.DurationMs,

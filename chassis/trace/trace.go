@@ -202,6 +202,38 @@ type RequestTracer interface {
 	End(status, reason string, finalPayload []byte)
 }
 
+// EventTags is the timeline event that names what a trace is about, in the
+// words of the stack that ran it: which pony, which run. The chassis has no
+// notion of those, and a person reading a list of traces asks for them first.
+const EventTags = "trace.tags"
+
+// EmitTags records tags on a trace. Sinks and readers lift them onto the
+// trace, so they appear in a list; a later tag of the same name wins.
+func EmitTags(t RequestTracer, tags map[string]string) {
+	if len(tags) == 0 {
+		return
+	}
+	t.Event(TimelineEvent{Ts: time.Now(), Event: EventTags, Fields: map[string]any{"tags": tags}})
+}
+
+// TagsFrom reads the tags out of an event's fields, as they are in process or
+// as they come back from a JSON timeline.
+func TagsFrom(fields map[string]any) map[string]string {
+	switch v := fields["tags"].(type) {
+	case map[string]string:
+		return v
+	case map[string]any:
+		out := make(map[string]string, len(v))
+		for k, e := range v {
+			if s, ok := e.(string); ok {
+				out[k] = s
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // EmitUsage records the per-request usage primitives — fuel, response size,
 // and the resolved tenant slug — as a `request.usage` timeline event. The
 // trace readers (file + NATS) lift these onto the trace's Fuel / BytesOut /

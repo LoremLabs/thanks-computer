@@ -276,6 +276,7 @@ func (pu *Unit) completeContinuableSync(
 	resCh chan event.Payload,
 ) error {
 	aStart, finish := r.startedAt, r.finishedAt
+	emitTraceTags(trace.FromContext(ctx), op)
 	if r.err != nil {
 		trace.FromContext(ctx).Step(trace.StepInfo{
 			Tenant: tenantScope(ctx),
@@ -449,6 +450,7 @@ func (pu *Unit) promoteContinuable(
 			"stage":               cstage,
 		},
 	})
+	emitTraceTags(trace.FromContext(ctx), op)
 	ack, _ := json.Marshal(map[string]string{"status": "promoted", "transport": "continuable"})
 	trace.FromContext(ctx).Step(trace.StepInfo{
 		Tenant: tenantScope(ctx),
@@ -517,6 +519,9 @@ func (pu *Unit) finishContinuableDetached(
 	finCtx, tracer, runTenant := pu.BeginResumeTrace(carryIssued(context.Background(), workCtx), pu.Sink, runID, stage,
 		ResumeTraceOptions{StartedAt: aStart, IdleTTL: pu.opContinuableTimeout(op) + detachedTraceSlack})
 	relay.FlushTo(tracer)
+	if tracer != nil {
+		emitTraceTags(tracer, op)
+	}
 
 	var r continuableResult
 	select {

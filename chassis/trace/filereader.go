@@ -153,6 +153,8 @@ func readTimeline(reqDir string, d *RequestDetail) {
 					d.Route = v
 				}
 			}
+		case EventTags:
+			d.Tags = mergeTags(d.Tags, TagsFrom(ev))
 		case "request.end":
 			if v, ok := ev["ts"].(string); ok {
 				d.FinishedAt = v
@@ -185,6 +187,19 @@ func readTimeline(reqDir string, d *RequestDetail) {
 			}
 		}
 	}
+}
+
+func mergeTags(into, tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return into
+	}
+	if into == nil {
+		into = make(map[string]string, len(tags))
+	}
+	for k, v := range tags {
+		into[k] = v
+	}
+	return into
 }
 
 func readSteps(reqDir string, d *RequestDetail, full bool) {
@@ -540,6 +555,8 @@ func readListEntry(reqDir, rid string) Summary {
 				continue
 			}
 			switch ev["event"] {
+			case EventTags:
+				s.Tags = mergeTags(s.Tags, TagsFrom(ev))
 			case "stage.jump":
 				if s.Route == "" {
 					if v, ok := ev["to"].(string); ok {

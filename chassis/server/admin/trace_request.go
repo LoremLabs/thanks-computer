@@ -84,15 +84,16 @@ type traceListResponse struct {
 }
 
 type traceListEntry struct {
-	RID        string `json:"rid"`
-	Src        string `json:"src,omitempty"`
-	Tenant     string `json:"tenant,omitempty"`
-	Stack      string `json:"stack,omitempty"`
-	Route      string `json:"route,omitempty"`
-	StartedAt  string `json:"started_at,omitempty"`
-	FinishedAt string `json:"finished_at,omitempty"`
-	DurationMs *int64 `json:"duration_ms,omitempty"`
-	Status     string `json:"status"`
+	RID        string            `json:"rid"`
+	Src        string            `json:"src,omitempty"`
+	Tenant     string            `json:"tenant,omitempty"`
+	Stack      string            `json:"stack,omitempty"`
+	Route      string            `json:"route,omitempty"`
+	Tags       map[string]string `json:"tags,omitempty"`
+	StartedAt  string            `json:"started_at,omitempty"`
+	FinishedAt string            `json:"finished_at,omitempty"`
+	DurationMs *int64            `json:"duration_ms,omitempty"`
+	Status     string            `json:"status"`
 }
 
 const (
@@ -111,6 +112,7 @@ type traceRequestResponse struct {
 	Tenant           string             `json:"tenant,omitempty"`
 	Stack            string             `json:"stack,omitempty"`
 	Route            string             `json:"route,omitempty"`
+	Tags             map[string]string  `json:"tags,omitempty"`
 	StartedAt        string             `json:"started_at,omitempty"`
 	FinishedAt       string             `json:"finished_at,omitempty"`
 	DurationMs       *int64             `json:"duration_ms,omitempty"`
@@ -230,6 +232,7 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 		Tenant:           d.Tenant,
 		Stack:            d.Stack,
 		Route:            d.Route,
+		Tags:             d.Tags,
 		StartedAt:        d.StartedAt,
 		FinishedAt:       d.FinishedAt,
 		DurationMs:       d.DurationMs,
@@ -403,6 +406,7 @@ func (c *Controller) handleTraceList(w http.ResponseWriter, r *http.Request) {
 			Tenant:     s.Tenant,
 			Stack:      s.Stack,
 			Route:      s.Route,
+			Tags:       s.Tags,
 			StartedAt:  s.StartedAt,
 			FinishedAt: s.FinishedAt,
 			DurationMs: s.DurationMs,

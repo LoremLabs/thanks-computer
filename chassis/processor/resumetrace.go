@@ -2,9 +2,13 @@ package processor
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
+	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -76,4 +80,42 @@ func (pu *Unit) BeginResumeTrace(ctx context.Context, sink trace.Sink, runID, st
 		})
 	}
 	return trace.WithContext(ctx, tracer), tracer, tenant
+}
+
+// A rule names what its trace is about with `WITH trace_tags`. The chassis
+// has no notion of a pony or a run; a person looking at a list of traces asks
+// for exactly that, and both halves of a run should answer the same.
+const (
+	maxTraceTags   = 8
+	maxTraceTagLen = 64
+)
+
+// traceTags reads an op's `WITH trace_tags`: strings only, a few, short.
+func traceTags(op operation.Operation) map[string]string {
+	v := gjson.Get(op.Meta, "trace_tags")
+	if !v.IsObject() {
+		return nil
+	}
+	tags := map[string]string{}
+	v.ForEach(func(key, value gjson.Result) bool {
+		if len(tags) >= maxTraceTags {
+			return false
+		}
+		if value.Type == gjson.String && key.String() != "" && value.String() != "" {
+			tags[cutTag(key.String())] = cutTag(value.String())
+		}
+		return true
+	})
+	return tags
+}
+
+func cutTag(s string) string {
+	if len(s) <= maxTraceTagLen {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxTraceTagLen], "")
+}
+
+func emitTraceTags(t trace.RequestTracer, op operation.Operation) {
+	trace.EmitTags(t, traceTags(op))
 }

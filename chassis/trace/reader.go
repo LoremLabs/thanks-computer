@@ -42,6 +42,8 @@ type Summary struct {
 	// Empty on success. Companion to Status; lifted from the request.end
 	// timeline event (file backend) / set by the sink (NATS backend).
 	Error string
+	// Tags name what the trace is about, in the stack's words (EmitTags).
+	Tags map[string]string
 }
 
 // Step is one op execution in the aggregated detail.
@@ -104,9 +106,11 @@ type RequestDetail struct {
 	// resume traces).
 	Fuel     int64
 	BytesOut int64
-	Steps    []Step
-	In       map[string]any
-	Out      any
+	// Tags name what the trace is about, in the stack's words (EmitTags).
+	Tags  map[string]string
+	Steps []Step
+	In    map[string]any
+	Out   any
 }
 
 // ListResult is the aggregated list response. ETag is an OPAQUE cursor:

@@ -13,12 +13,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/loremlabs/thanks-computer/chassis/chat"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	"github.com/loremlabs/thanks-computer/chassis/continuation/filestore"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -386,6 +388,67 @@ func TestContinuableModelCallsCarryTheirFacts(t *testing.T) {
 	}
 	if callee["slow"].Model != nil {
 		t.Errorf("a step that called no model has facts: %+v", callee["slow"].Model)
+	}
+}
+
+// Both halves of a run answer the same when asked which pony it was.
+func TestContinuableTagsBothTraces(t *testing.T) {
+	g := newTraceRig(t)
+	stub, _ := delayedStub(t, 300*time.Millisecond, `{}`)
+	seedCallee(t, g.pu, stub.URL, `continue_after = "100ms", timeout = "10s", trace_tags = &object("pony", "eager.moss", "run", "run_abc")`)
+
+	const rid = "CbTags0000000001"
+	resCh, end := g.run(context.Background(), rid, "acme/100")
+	rcid, _ := waitFor202(t, resCh)
+	end()
+	runID := resolveRunIDFromRcid(t, g.pu, rcid)
+	waitForRunCompleted(t, g.pu, runID)
+
+	resumeRID := continuation.ResumeTraceRID(runID, "acme/100")
+	for _, id := range []string{rid, resumeRID} {
+		d := g.ended(t, id)
+		if d.Tags["pony"] != "eager.moss" || d.Tags["run"] != "run_abc" {
+			t.Errorf("%s: tags = %v", id, d.Tags)
+		}
+	}
+	rd, err := trace.OpenReader("file", trace.StoreConfig{Dir: g.dir, Mode: trace.ModeFull})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := rd.List(context.Background(), trace.ListQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Traces) != 2 {
+		t.Fatalf("listed %d", len(list.Traces))
+	}
+	for _, s := range list.Traces {
+		if s.Tags["pony"] != "eager.moss" {
+			t.Errorf("%s lists tags %v", s.RID, s.Tags)
+		}
+	}
+}
+
+func TestTraceTagsAreBounded(t *testing.T) {
+	var pairs []string
+	for i := 0; i < 20; i++ {
+		pairs = append(pairs, fmt.Sprintf(`"k%d":"v"`, i))
+	}
+	tags := traceTags(operation.Operation{Meta: `{"trace_tags":{` + strings.Join(pairs, ",") + `}}`})
+	if len(tags) != maxTraceTags {
+		t.Errorf("kept %d tags", len(tags))
+	}
+
+	long := strings.Repeat("é", 100)
+	tags = traceTags(operation.Operation{Meta: `{"trace_tags":{"a":"` + long + `","n":3,"o":{},"":"x"}}`})
+	if len(tags) != 1 || len(tags["a"]) > maxTraceTagLen || !utf8.ValidString(tags["a"]) {
+		t.Errorf("tags = %v", tags)
+	}
+	if got := traceTags(operation.Operation{Meta: `{"trace_tags":"not an object"}`}); got != nil {
+		t.Errorf("tags = %v", got)
+	}
+	if got := traceTags(operation.Operation{Meta: `{}`}); got != nil {
+		t.Errorf("tags = %v", got)
 	}
 }
 
