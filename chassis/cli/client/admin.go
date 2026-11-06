@@ -1928,6 +1928,8 @@ type TraceStep struct {
 	// them. Opaque, and only ever handed back.
 	BodyRef string      `json:"body_ref,omitempty"`
 	Model   *TraceModel `json:"model,omitempty"`
+	// StackVersion is the version of Stack this step's rule came from.
+	StackVersion int64 `json:"stack_version,omitempty"`
 }
 
 // TraceNotFoundError marks a 404 from the trace endpoint so the caller

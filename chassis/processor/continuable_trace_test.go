@@ -3,6 +3,7 @@ package processor
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"io/fs"
@@ -21,6 +22,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/continuation/filestore"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
+	"github.com/loremlabs/thanks-computer/chassis/stackdir"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -30,6 +32,7 @@ type traceRig struct {
 	pu   *Unit
 	sink trace.Sink
 	dir  string
+	raw  string // the envelope a request starts from
 }
 
 func newTraceRig(t *testing.T) *traceRig {
@@ -47,7 +50,7 @@ func newTraceRig(t *testing.T) *traceRig {
 		t.Fatalf("NewFileSink: %v", err)
 	}
 	pu.Sink = sink
-	return &traceRig{pu: pu, sink: sink, dir: dir}
+	return &traceRig{pu: pu, sink: sink, dir: dir, raw: `{"_txc":{"src":"http"}}`}
 }
 
 // run starts a traced request the way runWithTrace does, and answers its
@@ -57,7 +60,7 @@ func (g *traceRig) run(ctx context.Context, rid, stage string) (chan event.Paylo
 	tr := ScrubbingTracer(ctx, g.sink.Begin(trace.RequestInfo{RID: rid, Src: "http", Stack: stage, StartedAt: time.Now()}))
 	ctx = trace.WithContext(ctx, tr)
 	resCh := make(chan event.Payload, 4)
-	go func() { _ = g.pu.Run(ctx, `{"_txc":{"src":"http"}}`, stage, resCh) }()
+	go func() { _ = g.pu.Run(ctx, g.raw, stage, resCh) }()
 	return resCh, func() { tr.End("ok", "", nil) }
 }
 
@@ -388,6 +391,148 @@ func TestContinuableModelCallsCarryTheirFacts(t *testing.T) {
 	}
 	if callee["slow"].Model != nil {
 		t.Errorf("a step that called no model has facts: %+v", callee["slow"].Model)
+	}
+}
+
+// seedVersioned makes tenant acme's stacks active at the given version numbers.
+func seedVersioned(t *testing.T, db *sql.DB, versions map[string]int) {
+	t.Helper()
+	stackTables(t, db)
+	if _, err := db.Exec(`INSERT OR IGNORE INTO tenants (tenant_id, slug, name, created_at) VALUES ('tnt_acme', 'acme', 'acme', '')`); err != nil {
+		t.Fatal(err)
+	}
+	id := 100
+	for name, v := range versions {
+		id++
+		for _, stmt := range []struct {
+			q    string
+			args []any
+		}{
+			{`INSERT INTO stacks (stack_id, tenant_id, name, active_version, created_at) VALUES (?, 'tnt_acme', ?, ?, '')`, []any{"stk_" + name, name, id}},
+			{`INSERT INTO stack_versions (version_id, stack_id, version_number, status, created_by, created_at) VALUES (?, ?, ?, 'active', 't', '')`, []any{id, "stk_" + name, v}},
+		} {
+			if _, err := db.Exec(stmt.q, stmt.args...); err != nil {
+				t.Fatalf("%s: %v", stmt.q, err)
+			}
+		}
+	}
+}
+
+// A rule changes and a trace outlives the change, so a step says which version
+// of its stack it ran: the call's stack and its caller's alike, the op's own
+// row on both traces, and the scopes after a resume, which run on the rules the
+// run froze with.
+func TestStepsNameTheVersionOfTheirRule(t *testing.T) {
+	g := newTraceRig(t)
+	seedVersioned(t, g.pu.Dbc.Db, map[string]int{"site": 5, "agent": 12})
+	stub, _ := delayedStub(t, 300*time.Millisecond, `{}`)
+	for _, op := range []struct {
+		stack string
+		scope int
+		name  string
+		rule  string
+	}{
+		{"agent", 100, "think", fmt.Sprintf(`EXEC "%s"`, stub.URL)},
+		{"agent", 200, "after", `EMIT ._call.output.done = true`},
+		{"site", 100, "dispatch", `EXEC "call://agent" WITH mode = "continuable", into = "_d", continue_after = "100ms", timeout = "10s"`},
+		{"site", 200, "render", `EMIT .resumed = true`},
+	} {
+		if _, err := g.pu.Dbc.Db.Exec(
+			`INSERT INTO ops (tenant_id, stack, scope, name, txcl, mock_req, mock_res) VALUES ('tnt_acme', ?, ?, ?, ?, '', '')`,
+			op.stack, op.scope, op.name, op.rule); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.raw = `{"_txc":{"tenant":"acme"}}`
+
+	const rid = "CbVersions000001"
+	resCh, end := g.run(WithTenant(context.Background(), "acme"), rid, "site/100")
+	rcid, _ := waitFor202(t, resCh)
+	end()
+	runID := resolveRunIDFromRcid(t, g.pu, rcid)
+	waitForRunCompleted(t, g.pu, runID)
+
+	if got := stepsOf(g.ended(t, rid), "site")["dispatch"]; got.StackVersion != 5 {
+		t.Errorf("the pending row: %+v", got)
+	}
+	resume := g.ended(t, continuation.ResumeTraceRID(runID, "site/100"))
+	for stack, want := range map[string]int64{"agent": 12, "site": 5} {
+		steps := stepsOf(resume, stack)
+		if len(steps) == 0 {
+			t.Fatalf("no %s steps: %+v", stack, resume.Steps)
+		}
+		for name, s := range steps {
+			if s.StackVersion != want {
+				t.Errorf("%s/%s reads v%d, want v%d", stack, name, s.StackVersion, want)
+			}
+		}
+	}
+}
+
+// A resumed step reads the version it froze with, whatever is active by then,
+// and the frozen DB's stack trees keep working beside it.
+func TestOpstackSnapshotKeepsStackVersions(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	db := pu.Dbc.Db
+	stackTables(t, db)
+	seedVersioned(t, db, map[string]int{"plain": 7})
+	digest, _ := seedTree(t, db, 900, "treed", stackdir.File{Path: "a.txt", Content: []byte("a")})
+	if _, err := db.Exec(`UPDATE stack_versions SET version_number = 31 WHERE version_id = 900`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO ops (tenant_id, stack, scope, name, txcl, mock_req, mock_res) VALUES ('tnt_acme', 'plain', 100, 'r', 'EMIT .a = 1', '', '')`); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _, n, err := pu.snapshotOpstack(context.Background(), "acme")
+	if err != nil || n == 0 {
+		t.Fatalf("snapshot: %d ops, %v", n, err)
+	}
+	if _, err := db.Exec(`UPDATE stack_versions SET version_number = version_number + 100`); err != nil {
+		t.Fatal(err)
+	}
+	snapDB, err := buildSnapshotDB(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapDB.Close()
+	frozen := context.WithValue(context.Background(), ctxKeyOpstackSnap, snapDB)
+
+	if got := pu.stackVersion(frozen, "acme", "plain"); got != 7 {
+		t.Errorf("plain reads v%d, want the frozen v7", got)
+	}
+	if got := pu.stackVersion(frozen, "acme", "treed"); got != 31 {
+		t.Errorf("treed reads v%d, want the frozen v31", got)
+	}
+	var hash string
+	if err := snapDB.QueryRow(`SELECT sf.content_hash FROM stack_files sf JOIN stacks s ON s.active_version = sf.version_id WHERE s.name = 'treed'`).Scan(&hash); err != nil || hash != digest {
+		t.Errorf("the tree moved: %q, %v", hash, err)
+	}
+	if got := pu.stackVersion(frozen, "acme", "unknown"); got != 0 {
+		t.Errorf("a stack the snapshot does not hold reads v%d", got)
+	}
+
+	// A run frozen before this was recorded still resumes, and reads no version.
+	old, err := buildSnapshotDB([]byte(`{"ops":[],"tenants":[{"slug":"acme","tenant_id":"tnt_acme"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	if got := pu.stackVersion(context.WithValue(context.Background(), ctxKeyOpstackSnap, old), "acme", "plain"); got != 0 {
+		t.Errorf("an old snapshot reads v%d", got)
+	}
+}
+
+// With nothing listening, nothing is looked up.
+func TestTracedStackVersionIsSilentWithTracingOff(t *testing.T) {
+	g := newTraceRig(t)
+	seedVersioned(t, g.pu.Dbc.Db, map[string]int{"site": 5})
+	if got := g.pu.tracedStackVersion(WithTenant(context.Background(), "acme"), "site"); got != 0 {
+		t.Errorf("read v%d with no tracer", got)
+	}
+	ctx := trace.WithContext(WithTenant(context.Background(), "acme"), trace.NewRelay(0))
+	if got := g.pu.tracedStackVersion(ctx, "site"); got != 5 {
+		t.Errorf("read v%d with a tracer", got)
 	}
 }
 

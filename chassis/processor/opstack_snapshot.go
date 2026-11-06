@@ -30,10 +30,21 @@ import (
 // gets the tree it suspended with. The bundles are immutable and content-
 // addressed, so the digest is the whole freeze. Omitted when there are none,
 // which keeps every doc without trees byte-identical to before.
+//
+// StackVersions is each stack's active version when the run froze. A resumed
+// step's trace says which version its rule came from, and the frozen rules are
+// exactly that one, whatever is active by the time it runs.
 type opstackSnapshot struct {
-	Ops        []opSnapRow        `json:"ops"`
-	Tenants    []tenantSnapRow    `json:"tenants"`
-	StackTrees []stackTreeSnapRow `json:"stack_trees,omitempty"`
+	Ops           []opSnapRow           `json:"ops"`
+	Tenants       []tenantSnapRow       `json:"tenants"`
+	StackTrees    []stackTreeSnapRow    `json:"stack_trees,omitempty"`
+	StackVersions []stackVersionSnapRow `json:"stack_versions,omitempty"`
+}
+
+type stackVersionSnapRow struct {
+	TenantID *string `json:"tenant_id,omitempty"`
+	Stack    string  `json:"stack"`
+	Version  int64   `json:"version"`
 }
 
 type stackTreeSnapRow struct {
@@ -127,6 +138,9 @@ func (pu *Unit) snapshotOpstack(ctx context.Context, tenant string) ([]byte, str
 			pu.Logger.Warn("opstack snapshot: stack trees not captured", zap.Error(err))
 		}
 		snap.StackTrees = trees
+		// Best-effort too, and quietly: a resumed step then records no
+		// version, which is all a chassis without the tables can say.
+		snap.StackVersions = snapshotStackVersions(ctx, db, tenant)
 	}
 
 	data, err := json.Marshal(&snap)
@@ -135,6 +149,36 @@ func (pu *Unit) snapshotOpstack(ctx context.Context, tenant string) ([]byte, str
 	}
 	sum := sha256.Sum256(data)
 	return data, hex.EncodeToString(sum[:]), len(snap.Ops), nil
+}
+
+// snapshotStackVersions reads each of the tenant's stacks' active version
+// number, from the same pinned DB the ops came from.
+func snapshotStackVersions(ctx context.Context, db *sql.DB, tenant string) []stackVersionSnapRow {
+	rows, err := db.QueryContext(ctx, `
+		SELECT s.tenant_id, s.name, v.version_number
+		  FROM stacks s
+		  JOIN tenants t ON t.tenant_id = s.tenant_id
+		  JOIN stack_versions v ON v.version_id = s.active_version
+		 WHERE t.slug = ?
+		 ORDER BY s.name`, tenant)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []stackVersionSnapRow
+	for rows.Next() {
+		var tid sql.NullString
+		var r stackVersionSnapRow
+		if err := rows.Scan(&tid, &r.Stack, &r.Version); err != nil {
+			return nil
+		}
+		r.TenantID = nullStr(tid)
+		out = append(out, r)
+	}
+	if rows.Err() != nil {
+		return nil
+	}
+	return out
 }
 
 // snapshotStackTrees reads the digest of every stack tree the tenant's active
@@ -167,9 +211,10 @@ func snapshotStackTrees(ctx context.Context, db *sql.DB, tenant string) ([]stack
 
 // buildSnapshotDB rebuilds an in-memory SQLite holding exactly the frozen
 // opstack. The schema mirrors only the columns the resume-path queries
-// touch (lookupOpsExact, buildOpstack, tenantExists, stackTree). The stack
-// trees go in as one active version per stack holding one STACKDIR/ row, so
-// stackTree runs its unchanged query here too. MaxOpenConns(1) is
+// touch (lookupOpsExact, buildOpstack, tenantExists, stackTree, stackVersion).
+// The stack trees go in as one active version per stack holding one STACKDIR/
+// row, so stackTree runs its unchanged query here too, and stackVersion too.
+// MaxOpenConns(1) is
 // mandatory: go-sqlite3 gives each pooled connection its own private
 // `:memory:` DB, so without pinning a second connection would see an
 // empty schema (same rationale as dbcache.New).
@@ -187,7 +232,8 @@ func buildSnapshotDB(data []byte) (*sql.DB, error) {
 		`CREATE TABLE ops (tenant_id TEXT, stack TEXT, scope INTEGER, name TEXT, txcl TEXT, mock_req TEXT, mock_res TEXT);
 		 CREATE TABLE tenants (tenant_id TEXT, slug TEXT, revoked_at TEXT);
 		 CREATE TABLE stacks (tenant_id TEXT, name TEXT, active_version INTEGER);
-		 CREATE TABLE stack_files (version_id INTEGER, path TEXT, content_hash TEXT);`); err != nil {
+		 CREATE TABLE stack_files (version_id INTEGER, path TEXT, content_hash TEXT);
+		 CREATE TABLE stack_versions (version_id INTEGER, version_number INTEGER);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -221,6 +267,23 @@ func buildSnapshotDB(data []byte) (*sql.DB, error) {
 		if _, err := db.Exec(
 			`INSERT INTO stack_files (version_id, path, content_hash) VALUES (?,?,?)`,
 			v, stackdir.Path(r.Digest), r.Digest); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	// A row of its own per stack, apart from any tree's: stackVersion joins
+	// stack_versions and stackTree joins stack_files, so each finds its row.
+	for i, r := range snap.StackVersions {
+		v := len(snap.StackTrees) + i + 1
+		if _, err := db.Exec(
+			`INSERT INTO stacks (tenant_id, name, active_version) VALUES (?,?,?)`,
+			r.TenantID, r.Stack, v); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if _, err := db.Exec(
+			`INSERT INTO stack_versions (version_id, version_number) VALUES (?,?)`,
+			v, r.Version); err != nil {
 			db.Close()
 			return nil, err
 		}

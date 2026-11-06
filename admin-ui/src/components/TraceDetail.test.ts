@@ -80,6 +80,23 @@ describe('TraceDetail compute operations', () => {
     })
 })
 
+describe('TraceDetail links a step to the rule that ran', () => {
+    it('opens the version the step recorded, not the active one', () => {
+        store.state.stacks = [{ name: 'loop', created_at: '2026-06-01T00:00:00Z', active_version: 120 }]
+        store.cacheLiveTrace({
+            rid: 'CbVersioned',
+            cursor: 'CbVersioned',
+            steps: [
+                { stack: 'loop', scope: 7100, name: 'chat', operation: 'ai://chat', stack_version: 116, started_at: '2026-11-06T00:00:00.100Z' },
+                { stack: 'loop', scope: 7200, name: 'old', started_at: '2026-11-06T00:00:00.200Z' },
+            ],
+        } as unknown as TraceCachedEvent)
+        render(TraceDetail, { props: { rid: 'CbVersioned', onBack: vi.fn() } })
+        expect(screen.getByRole('link', { name: '7100-chat' })).toHaveAttribute('href', '#ops/loop/v116/7100/chat')
+        expect(screen.getByRole('link', { name: '7200-old' })).toHaveAttribute('href', '#ops/loop/7200/old')
+    })
+})
+
 describe('TraceDetail, a run seen from its resume trace', () => {
     const LONG = 'resume-run_x-loop_502'
 

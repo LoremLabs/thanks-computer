@@ -154,6 +154,10 @@ WHEN ._packet.run =~ /./
 
 Tags appear on both traces of a run, in the list and on the trace, as strings: at most 8 pairs, each key and value cut to 64 characters.
 
+### Which rule ran
+
+A step records the version of its stack its rule came from, so a trace keeps pointing at the rule that ran after the stack has moved on. `txco trace <rid> --step <step>` prints it, and the admin page links a step to that version of the rule. A step of a resumed run reads the version the run froze at. A worker's callback, and a trace from before this was recorded, have none, and the link opens the active version.
+
 ### Model calls
 
 A step that called a model carries what the call was: the kind (`chat`, `decide`, `embed`), provider, model, tokens, latency and retries, or its error code. `txco trace <rid>` shows them in the step table, `--step` in full, and the admin page can show only those steps. A call refused before it reached a provider still shows as one. The prompt and the answer are the step's bodies.

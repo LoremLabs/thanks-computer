@@ -139,6 +139,11 @@ type StepInfo struct {
 	InputBytes  int
 	OutputBytes int
 
+	// StackVersion is the version of Stack this step's rule came from. A rule
+	// changes, and a trace outlives the change: with this, a step names the
+	// rule that ran, not the one active now. Zero when it is not known.
+	StackVersion int64
+
 	// Model is what a model call was, on a step that made one. It rides the
 	// step, not an event, so it survives wherever a step's metadata does.
 	Model *ModelFacts

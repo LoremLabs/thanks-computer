@@ -298,6 +298,16 @@ func printSteps(w io.Writer, steps []client.TraceStep) {
 	}
 }
 
+// stepWhere is the stack and scope of a step, with the version of the stack its
+// rule came from when that is known: the rule that ran, not the one active now.
+func stepWhere(s *client.TraceStep) string {
+	where := fmt.Sprintf("%s/%d", s.Stack, s.Scope)
+	if s.StackVersion > 0 {
+		where += fmt.Sprintf(" (v%d)", s.StackVersion)
+	}
+	return where
+}
+
 // stepLabel returns "<scope-padded>-<name>", matching the on-disk
 // folder name written by chassis/trace/file.go. Four-digit pad on the
 // scope so the column stays aligned across `0000-`..`9999-`. Two rows
@@ -342,7 +352,7 @@ func printStep(stdout, stderr io.Writer, r *client.TraceResponse, sel string, ve
 		fmt.Fprintf(stdout, "  transport   %s\n", step.Transport)
 	}
 	if step.Stack != "" {
-		fmt.Fprintf(stdout, "  stack/scope %s/%d\n", step.Stack, step.Scope)
+		fmt.Fprintf(stdout, "  stack/scope %s\n", stepWhere(step))
 	}
 	if step.StartedAt != "" {
 		fmt.Fprintf(stdout, "  started     %s\n", step.StartedAt)

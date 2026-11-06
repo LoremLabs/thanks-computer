@@ -276,6 +276,7 @@ func (pu *Unit) completeContinuableSync(
 	resCh chan event.Payload,
 ) error {
 	aStart, finish := r.startedAt, r.finishedAt
+	version := pu.tracedStackVersion(ctx, op.Stack)
 	emitTraceTags(trace.FromContext(ctx), op)
 	if r.err != nil {
 		trace.FromContext(ctx).Step(trace.StepInfo{
@@ -283,7 +284,7 @@ func (pu *Unit) completeContinuableSync(
 			Stack:  op.Stack, Scope: op.Scope, Name: name,
 			Operation: op.Resonator.Exec, Transport: "continuable",
 			Input:     []byte(op.Input),
-			StartedAt: aStart, FinishedAt: finish, Model: r.model,
+			StartedAt: aStart, FinishedAt: finish, Model: r.model, StackVersion: version,
 			Status: "error", Error: r.err.Error(),
 		})
 		select {
@@ -304,7 +305,7 @@ func (pu *Unit) completeContinuableSync(
 				Stack:  op.Stack, Scope: op.Scope, Name: name,
 				Operation: op.Resonator.Exec, Transport: "continuable",
 				Input:     []byte(op.Input),
-				StartedAt: aStart, FinishedAt: finish, Model: r.model,
+				StartedAt: aStart, FinishedAt: finish, Model: r.model, StackVersion: version,
 				Status: "error", Error: oerr.Error(),
 			})
 			select {
@@ -321,7 +322,7 @@ func (pu *Unit) completeContinuableSync(
 		Operation: op.Resonator.Exec, Transport: "continuable",
 		Input:     []byte(op.Input),
 		Output:    []byte(payload),
-		StartedAt: aStart, FinishedAt: finish, Model: r.model,
+		StartedAt: aStart, FinishedAt: finish, Model: r.model, StackVersion: version,
 		Status: "ok",
 	})
 
@@ -361,6 +362,7 @@ func (pu *Unit) promoteContinuable(
 	resCh chan event.Payload,
 ) error {
 	promotedAt := time.Now() // the sync window's end, before the durable writes
+	version := pu.tracedStackVersion(ctx, op.Stack)
 	stack := op.Stack
 	tenant, _ := ctx.Value(ctxKeyTenant).(string)
 	cstage := stage
@@ -459,7 +461,7 @@ func (pu *Unit) promoteContinuable(
 		Input:     []byte(op.Input),
 		Output:    ack,
 		StartedAt: aStart, FinishedAt: promotedAt,
-		Status: "pending",
+		Status: "pending", StackVersion: version,
 	})
 
 	// 4. Detach the upstream goroutine. When it returns (or workCtx
@@ -468,7 +470,7 @@ func (pu *Unit) promoteContinuable(
 	endWork := pu.Work.Begin() // the rest of the run happens here: shutdown waits for it
 	go func() {
 		defer endWork()
-		pu.finishContinuableDetached(workCtx, workCancel, done, runID, cstage, name, op, fuelStart, aStart, relay)
+		pu.finishContinuableDetached(workCtx, workCancel, done, runID, cstage, name, op, fuelStart, aStart, relay, version)
 	}()
 
 	// 5. Emit the 202 (or 303 for browser Accept) to the client. From
@@ -507,6 +509,7 @@ func (pu *Unit) finishContinuableDetached(
 	fuelStart int64,
 	aStart time.Time,
 	relay *trace.Relay,
+	version int64,
 ) {
 	defer workCancel()
 
@@ -581,6 +584,7 @@ func (pu *Unit) finishContinuableDetached(
 		continuation.TerminalMeta{
 			Transport: r.transport, FuelUsed: drawnFuel,
 			StartedAt: r.startedAt, FinishedAt: r.finishedAt, Operation: op.Resonator.Exec, Model: r.model,
+			StackVersion: version,
 		}, []byte(payload)); terr != nil {
 		pu.Logger.Error("continuable: RecordTerminal failed",
 			zap.String("run", runID), zap.String("stage", stage),

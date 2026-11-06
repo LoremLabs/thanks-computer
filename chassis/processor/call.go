@@ -533,6 +533,19 @@ func budgetExhaustedInCall(ctx context.Context, fr *frame, stage string) (code, 
 // code answered. 0 when it cannot be told (no tenant pinned, no such stack,
 // no active version, a snapshot without the control tables). Remembered per
 // (tenant, stack) on the snapshot's ops index when there is one.
+// tracedStackVersion is the version a trace step records: stackVersion, against
+// the snapshot this request is pinned to, so it is the version of the rule that
+// ran. Nothing is looked up when no trace is listening.
+func (pu *Unit) tracedStackVersion(ctx context.Context, stack string) int64 {
+	if pu.Dbc == nil {
+		return 0
+	}
+	if _, off := trace.FromContext(ctx).(trace.NoopTracer); off {
+		return 0
+	}
+	return pu.stackVersion(ctx, tenantScope(ctx), stack)
+}
+
 func (pu *Unit) stackVersion(ctx context.Context, tenant, stack string) int64 {
 	if tenant == "" {
 		return 0

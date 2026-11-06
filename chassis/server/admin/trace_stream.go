@@ -251,6 +251,7 @@ func closedTraceToWire(t trace.ClosedTrace) traceStreamEvent {
 			StopReason:      s.StopReason,
 			BodyRef:         s.BodyRef,
 			Model:           s.Model,
+			StackVersion:    s.StackVersion,
 		})
 	}
 	return ev

@@ -82,3 +82,13 @@ func TestOperationCellNamesTheModel(t *testing.T) {
 		}
 	}
 }
+
+// A step names the version its rule came from, when that is known.
+func TestStepWhereNamesTheVersion(t *testing.T) {
+	if got := stepWhere(&client.TraceStep{Stack: "loop", Scope: 7100, StackVersion: 116}); got != "loop/7100 (v116)" {
+		t.Errorf("got %q", got)
+	}
+	if got := stepWhere(&client.TraceStep{Stack: "loop", Scope: 7100}); got != "loop/7100" {
+		t.Errorf("got %q", got)
+	}
+}

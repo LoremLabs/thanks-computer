@@ -158,10 +158,11 @@ type OpTerminal struct {
 	// step needs, for a terminal the chassis ran itself. A worker's callback
 	// and older docs have none of them, and the step falls back to what was
 	// known: when the stage was suspended and when the terminal landed.
-	StartedAt  time.Time         `json:"started_at,omitzero"`
-	FinishedAt time.Time         `json:"finished_at,omitzero"`
-	Operation  string            `json:"operation,omitempty"`
-	Model      *trace.ModelFacts `json:"model,omitempty"`
+	StartedAt    time.Time         `json:"started_at,omitzero"`
+	FinishedAt   time.Time         `json:"finished_at,omitzero"`
+	Operation    string            `json:"operation,omitempty"`
+	Model        *trace.ModelFacts `json:"model,omitempty"`
+	StackVersion int64             `json:"stack_version,omitempty"`
 }
 
 // TerminalMeta carries the chassis-recorded provenance of a terminal:
@@ -169,19 +170,21 @@ type OpTerminal struct {
 // what the op's trace step should say. The worker-callback endpoint passes the
 // zero value — worker-posted bytes must never carry a trusted transport label.
 type TerminalMeta struct {
-	Transport  string
-	FuelUsed   int64
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Operation  string
-	Model      *trace.ModelFacts
+	Transport    string
+	FuelUsed     int64
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	Operation    string
+	Model        *trace.ModelFacts
+	StackVersion int64
 }
 
 // terminal is the doc for one result, before its bytes are stored.
 func (m TerminalMeta) terminal(status string) OpTerminal {
 	return OpTerminal{Status: status, RecordedAt: time.Now().UTC(),
 		Transport: m.Transport, FuelUsed: m.FuelUsed,
-		StartedAt: m.StartedAt, FinishedAt: m.FinishedAt, Operation: m.Operation, Model: m.Model}
+		StartedAt: m.StartedAt, FinishedAt: m.FinishedAt, Operation: m.Operation, Model: m.Model,
+		StackVersion: m.StackVersion}
 }
 
 // ---- key builders (logical, "/"-separated; store sanitizes segments) ------

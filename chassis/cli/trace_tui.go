@@ -1218,7 +1218,7 @@ func formatStepMetaPlain(s *client.TraceStep) string {
 		fmt.Fprintf(&b, "  transport   %s\n", s.Transport)
 	}
 	if s.Stack != "" {
-		fmt.Fprintf(&b, "  stack/scope %s/%d\n", s.Stack, s.Scope)
+		fmt.Fprintf(&b, "  stack/scope %s\n", stepWhere(s))
 	}
 	if s.StartedAt != "" {
 		fmt.Fprintf(&b, "  started     %s\n", s.StartedAt)
@@ -1247,7 +1247,7 @@ func formatStepMeta(s *client.TraceStep) string {
 		fmt.Fprintf(&b, "  transport   %s\n", s.Transport)
 	}
 	if s.Stack != "" {
-		fmt.Fprintf(&b, "  stack/scope %s/%d\n", s.Stack, s.Scope)
+		fmt.Fprintf(&b, "  stack/scope %s\n", stepWhere(s))
 	}
 	if s.StartedAt != "" {
 		fmt.Fprintf(&b, "  started     %s\n", s.StartedAt)

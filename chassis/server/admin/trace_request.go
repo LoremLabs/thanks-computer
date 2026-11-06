@@ -161,6 +161,8 @@ type traceStep struct {
 	BodyRef string `json:"body_ref,omitempty"`
 	// Model is what a model call was, on a step that made one.
 	Model *trace.ModelFacts `json:"model,omitempty"`
+	// StackVersion is the version of Stack this step's rule came from.
+	StackVersion int64 `json:"stack_version,omitempty"`
 }
 
 // traceRdr returns the trace reader, lazily building it from config if
@@ -276,6 +278,7 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 			StopReason:      s.StopReason,
 			BodyRef:         s.BodyRef,
 			Model:           s.Model,
+			StackVersion:    s.StackVersion,
 		})
 	}
 

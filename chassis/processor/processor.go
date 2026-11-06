@@ -972,6 +972,8 @@ func (pu *Unit) Run(ctx context.Context, raw string, stage string, resCh chan ev
 				FinishedAt: now,
 				Status:     status,
 				Error:      reason,
+
+				StackVersion: pu.tracedStackVersion(ctx, op.Stack),
 			})
 		}
 	}
@@ -2027,7 +2029,7 @@ func (pu *Unit) dispatchLocalAsync(reqCtx context.Context, op operation.Operatio
 		Input:     []byte(op.Input),
 		Output:    ack,
 		StartedAt: aStart, FinishedAt: time.Now(),
-		Status: "pending",
+		Status: "pending", StackVersion: pu.tracedStackVersion(reqCtx, op.Stack),
 	})
 
 	// Detach under the value-preserving ctx (built now, while the request
@@ -2719,7 +2721,7 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 			trace.FromContext(ctx).Step(trace.StepInfo{
 				Stack: rStack, Scope: rScope, Name: e.Op, Operation: term.Operation, Transport: stepTransport,
 				Output: eb, StartedAt: stepStart, FinishedAt: stepFinish, Model: term.Model,
-				Status: "error", Error: "op failed",
+				Status: "error", Error: "op failed", StackVersion: term.StackVersion,
 			})
 			_ = pu.Runs.FailStage(ctx, runID, stage, "op-failed:"+e.Op)
 			_ = pu.Runs.AppendEvent(ctx, runID, "stage.failed",
@@ -2737,7 +2739,7 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 		trace.FromContext(ctx).Step(trace.StepInfo{
 			Stack: rStack, Scope: rScope, Name: e.Op, Operation: term.Operation, Transport: stepTransport,
 			Output: ob, StartedAt: stepStart, FinishedAt: stepFinish, Model: term.Model,
-			Status: "completed",
+			Status: "completed", StackVersion: term.StackVersion,
 		})
 		detachedFuel += term.FuelUsed
 		if s := string(ob); s != "" && s != "{}" {
@@ -3342,6 +3344,7 @@ func (pu *Unit) recordStep(ctx context.Context, op operation.Operation, r execRe
 	info.Txcl = op.Txcl
 	info.Input = []byte(r.input)
 	info.Model = r.model
+	info.StackVersion = pu.tracedStackVersion(ctx, op.Stack)
 	if info.StartedAt.IsZero() {
 		info.StartedAt = r.startedAt
 	}

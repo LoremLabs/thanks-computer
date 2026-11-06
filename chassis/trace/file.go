@@ -197,6 +197,9 @@ func (t *fileTracer) Step(info StepInfo) {
 	if info.Model != nil {
 		meta["model"] = info.Model
 	}
+	if info.StackVersion > 0 {
+		meta["stack_version"] = info.StackVersion
+	}
 	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
 		_ = writeFile(filepath.Join(stepDir, "meta.json"), data)
 	}

@@ -491,6 +491,7 @@ func (pu *Unit) dispatchLocalAsyncDeferred(reqCtx context.Context, op operation.
 		Operation: op.Resonator.Exec, Transport: "async",
 		Input: []byte(op.Input), Output: ack,
 		StartedAt: aStart, FinishedAt: time.Now(), Status: "pending",
+		StackVersion: pu.tracedStackVersion(reqCtx, op.Stack),
 	})
 
 	workCtx, fuelStart, cancel := pu.detachedOpContext(reqCtx, raw, timeout)

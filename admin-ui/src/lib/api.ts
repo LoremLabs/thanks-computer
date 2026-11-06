@@ -570,6 +570,8 @@ export interface TraceStep {
     body_ref?: string
     // Set on a step that called a model.
     model?: TraceModel
+    // The version of `stack` this step's rule came from, when it is known.
+    stack_version?: number
 }
 
 export interface TraceListResponse {

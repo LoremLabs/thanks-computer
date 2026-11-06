@@ -121,16 +121,18 @@
         return `${scope}-${s.name}`
     }
 
-    // The op a step ran, as an #ops deep link to its definition (the
-    // stack's active version). The step's name and its operation both link
-    // there, except a compute's operation, which opens its source. Only the
-    // tenant's own stacks link — boot and other system steps have no op to
-    // open here.
+    // The op a step ran, as an #ops deep link to its definition: the version
+    // the step ran, when it says, since a rule changes and a trace outlives
+    // that; otherwise the stack's active version. The step's name and its
+    // operation both link there, except a compute's operation, which opens its
+    // source. Only the tenant's own stacks link — boot and other system steps
+    // have no op to open here.
     const tenantStacks = $derived(new Set(store.state.stacks.map((st) => st.name)))
     function stepOpHref(s: TraceStep): string {
         const stack = stripScope(s.stack ?? '')
         if (!stack || !s.name || !tenantStacks.has(stack)) return ''
-        return `#ops/${stack}/${s.scope ?? 0}/${s.name}`
+        const version = s.stack_version ? `v${s.stack_version}/` : ''
+        return `#ops/${stack}/${version}${s.scope ?? 0}/${s.name}`
     }
 
     // A compute step's operation (`compute://sha256/<digest>`) links to its

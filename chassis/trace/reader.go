@@ -70,6 +70,10 @@ type Step struct {
 	// but the reader that made it.
 	BodyRef string
 
+	// StackVersion is the version of Stack this step's rule came from. 0 when
+	// it is not known: a trace from before it was recorded, a worker's callback.
+	StackVersion int64
+
 	// Model: set on a step that called a model.
 	Model *ModelFacts
 

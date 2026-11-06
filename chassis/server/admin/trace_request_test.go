@@ -711,3 +711,37 @@ func (inlineOnlyReader) Get(context.Context, string, bool) (trace.RequestDetail,
 }
 func (inlineOnlyReader) IndexNames(context.Context, int) ([]string, int, error) { return nil, 0, nil }
 func (inlineOnlyReader) RawFS() (http.FileSystem, bool)                         { return nil, false }
+
+// What a page links to, and what the CLI prints, comes through this wire.
+func TestHandleTraceRequest_StepVersion(t *testing.T) {
+	dir := t.TempDir()
+	rid := "CawWjXCkFe7p3F3E5rCgM"
+	writeTraceFixture(t, dir, rid, false)
+	steps := filepath.Join(dir, "requests", rid, "steps")
+	ents, err := os.ReadDir(steps)
+	if err != nil || len(ents) == 0 {
+		t.Fatalf("fixture steps: %v", err)
+	}
+	meta := filepath.Join(steps, ents[0].Name(), "meta.json")
+	b, err := os.ReadFile(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, meta, strings.Replace(string(b), "{", `{"stack_version": 116,`, 1))
+
+	c := newTestController(t, config.Config{Personalities: "admin", TraceDir: dir, TraceMode: "full"})
+	req := httptest.NewRequest(http.MethodGet, "/traces/requests/"+rid+".json", nil)
+	req = mux.SetURLVars(req, map[string]string{"rid": rid})
+	w := httptest.NewRecorder()
+	c.handleTraceRequest(w, asSuperAdmin(req))
+	var doc traceRequestResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if doc.Steps[0].StackVersion != 116 || doc.Steps[1].StackVersion != 0 {
+		t.Errorf("versions: %d, %d", doc.Steps[0].StackVersion, doc.Steps[1].StackVersion)
+	}
+	if !strings.Contains(w.Body.String(), `"stack_version": 116`) {
+		t.Error("not on the wire as stack_version")
+	}
+}

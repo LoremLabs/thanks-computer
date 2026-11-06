@@ -272,6 +272,9 @@ func readSteps(reqDir string, d *RequestDetail, full bool) {
 		if v, ok := m["stop_reason"].(string); ok {
 			st.StopReason = v
 		}
+		if v, ok := m["stack_version"].(float64); ok {
+			st.StackVersion = int64(v)
+		}
 		if v, ok := m["model"]; ok {
 			if b, err := json.Marshal(v); err == nil {
 				var f ModelFacts
