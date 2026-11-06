@@ -1,14 +1,20 @@
 package processor
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/tidwall/gjson"
-
+	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
+	"github.com/tidwall/gjson"
 )
 
 // TestScrubIssued — an issued password must leave no readable trace: not as
@@ -79,3 +85,80 @@ type scrubRecorder struct {
 func (r *scrubRecorder) Step(info trace.StepInfo)  { r.steps = append(r.steps, info.Input, info.Output) }
 func (r *scrubRecorder) Event(trace.TimelineEvent) {}
 func (r *scrubRecorder) End(_, _ string, b []byte) { r.final = b }
+
+// A kept password is read, not issued, so nothing notes it, and a path hint
+// cannot reach the response body that shows it, base64-encoded. WITH
+// trace_secret says what it is, on the read and on a rule that makes a
+// secret by EMIT, and every record of the request is scrubbed of it.
+func TestTraceSecretScrubsAValueFromEveryRecord(t *testing.T) {
+	g := newTraceRig(t)
+	const kept = "kept-password-0123456789"
+	stub, _ := delayedStub(t, 0, `{"found":true,"password":"`+kept+`"}`)
+	seedOp(t, g.pu, "acme", 100, "read", fmt.Sprintf(`EXEC "%s" WITH into = "_pw", trace_secret = "_pw.password"`, stub.URL))
+	seedOp(t, g.pu, "acme", 200, "show", `EMIT .shown = &b64encode(._pw.password)`)
+	seedOp(t, g.pu, "acme", 300, "mint", `WITH trace_secret = "_sess.sid" EMIT ._sess.sid = &uuid()`)
+	seedOp(t, g.pu, "acme", 400, "after", `EMIT .again = ._sess.sid`)
+
+	const rid = "CbTraceSecret001"
+	resCh, end := g.run(context.Background(), rid, "acme/100")
+	var final string
+	select {
+	case p := <-resCh:
+		final = p.Raw
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer")
+	}
+	end()
+
+	sid := gjson.Get(final, "_sess.sid").String()
+	if sid == "" || gjson.Get(final, "_pw.password").String() != kept {
+		t.Fatalf("the rules did not run: %s", final)
+	}
+	g.ended(t, rid)
+
+	var forms [][]byte
+	for _, v := range []string{kept, sid} {
+		forms = append(forms, []byte(v))
+		forms = append(forms, base64Forms(v)...)
+	}
+	err := filepath.WalkDir(g.dir, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil || d.IsDir() {
+			return werr
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		for _, f := range forms {
+			if bytes.Contains(b, f) {
+				t.Errorf("%s holds a secret", path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not vacuous: the steps that carry them were written, with the marker.
+	if out := fmt.Sprint(stepsOf(g.get(t, rid), "acme")["read"].Out); !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("the read's own step: %s", out)
+	}
+}
+
+// Only what is named goes, and only a string: a path that holds nothing, or a
+// value under the floor, does nothing.
+func TestNoteTraceSecretsIsNarrow(t *testing.T) {
+	ctx := WithIssuedSecrets(context.Background())
+	op := operation.Operation{Meta: `{"trace_secret":"a.b, missing, num, short"}`}
+	noteTraceSecrets(ctx, op, []byte(`{"a":{"b":"named-value-0123456789"},"num":12345678901234567890,"short":"x","other":"other-value-0123456789"}`))
+
+	got := string(ScrubIssued(ctx, []byte(`named-value-0123456789 other-value-0123456789 x`)))
+	if got != "[REDACTED] other-value-0123456789 x" {
+		t.Errorf("got %q", got)
+	}
+
+	noteTraceSecrets(ctx, operation.Operation{Meta: `{}`}, []byte(`{"a":"another-value-0123456789"}`))
+	if got := string(ScrubIssued(ctx, []byte(`another-value-0123456789`))); got != "another-value-0123456789" {
+		t.Errorf("a rule that named nothing scrubbed: %q", got)
+	}
+}

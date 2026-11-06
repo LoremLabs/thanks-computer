@@ -3382,6 +3382,7 @@ func (pu *Unit) recordStep(ctx context.Context, op operation.Operation, r execRe
 		}
 		info.Output = []byte(tracedOutput)
 	}
+	noteTraceSecrets(ctx, op, info.Output)
 	trace.FromContext(ctx).Step(info)
 }
 
@@ -3437,6 +3438,10 @@ func (pu *Unit) finishOutput(ctx context.Context, op *operation.Operation, outpu
 			op.Output = out
 		}
 	}
+	// Again here, after recordStep's: this overlay is evaluated apart from the
+	// one the step shows, so `EMIT ._sess.sid = &uuid()` has its real value
+	// only now, and that is the one the rest of the request carries.
+	noteTraceSecrets(ctx, *op, []byte(op.Output))
 }
 
 // resolveWith materializes a rule's WITH clause into the op's Meta

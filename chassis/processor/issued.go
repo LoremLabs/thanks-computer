@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"strings"
 	"sync"
 
+	"github.com/tidwall/gjson"
+
+	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
 )
 
@@ -60,6 +64,26 @@ func NoteIssuedSecret(ctx context.Context, v string) {
 	is.mu.Lock()
 	is.vals = append(is.vals, v)
 	is.mu.Unlock()
+}
+
+// noteTraceSecrets scrubs what a rule says is a secret: `WITH trace_secret`,
+// one or more comma-separated paths into the op's contribution. A kept
+// password read back to show its owner is the case. It is not issued here, so
+// the note above never fires for it, and a path hint cannot follow it into a
+// response body, which holds it base64-encoded, without blanking every
+// response of the stack. Scrubbed by value, it goes from every later record of
+// the request, and from this op's own step, which is recorded after this runs.
+// An op that holds no value at a path notes nothing.
+func noteTraceSecrets(ctx context.Context, op operation.Operation, output []byte) {
+	paths := gjson.Get(op.Meta, "trace_secret")
+	if paths.Type != gjson.String {
+		return
+	}
+	for _, p := range strings.Split(paths.String(), ",") {
+		if v := gjson.GetBytes(output, strings.TrimSpace(p)); v.Type == gjson.String {
+			NoteIssuedSecret(ctx, v.String())
+		}
+	}
 }
 
 // issuedRedacted replaces a secret written as itself.

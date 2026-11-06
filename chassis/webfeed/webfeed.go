@@ -139,7 +139,7 @@ var (
 		"into": true, "timeout": true, "mode": true, "redact": true, "omit": true,
 		"secrets": true, "grant": true, "debug": true, "comment": true, "note": true,
 		"stream": true, "max_duration": true, "continue_after": true,
-		"checkpoint": true, "join_at_scope": true, "trace_tags": true,
+		"checkpoint": true, "join_at_scope": true, "trace_tags": true, "trace_secret": true,
 	}
 )
 
