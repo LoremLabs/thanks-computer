@@ -474,10 +474,11 @@ WITH redact = "user.email, user.ssn"           # mask these paths with "[REDACTE
 WITH omit   = "_classify.transcript"           # delete these paths entirely
 ```
 
-Two reserved WITH keys scrub **trace logs** only — runtime data is untouched: the resonator's own WHEN and SELECT still read the full envelope (though what the EXEC *receives* is the SELECT-projected view when the rule selects). Both take a comma-separated list of gjson dot-paths (exact match, no wildcards):
+Three reserved WITH keys scrub **trace logs** only — runtime data is untouched: the resonator's own WHEN and SELECT still read the full envelope (though what the EXEC *receives* is the SELECT-projected view when the rule selects). Both take a comma-separated list of gjson dot-paths (exact match, no wildcards):
 
 - `redact` masks each value with `"[REDACTED]"` (the field stays — use when "something was here" matters, e.g. credentials).
 - `omit` deletes the path entirely (use for bulky data like attachments or raw bodies).
+- `trace_secret` names a value in the op's own output, a kept password read back, and removes it **by value** from every later record of the request, raw and base64. Reach for it when the value moves, into a response body say, where a path cannot follow. See [Trace logs](../trace.md#a-value-read-back).
 
 A hint starts when the request reaches its stack, so it protects what your stack adds, not what arrived with the request. Credential headers, cookies and raw mail are scrubbed by the chassis on every record ([trace](../trace.md#always-scrubbed)). A path listed in both → **omit wins**. Hints are static (literal strings only; an `@path` is skipped), scoped per `(tenant, stack)` with union semantics across an EXEC jump, and picked up by `txco apply` without a restart. See [trace.md](../trace.md).
 
@@ -824,6 +825,7 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `join_at_scope` | async | Dispatch now, merge the result just before the first scope ≥ N in this stack runs; the scopes in between run meanwhile ([deferred join](../deferred-join.md)). Refused with `continuable` |
 | `mode = "continuable"` | any EXEC | Answer synchronously if quick; promote to a continuation at the deadline. Op-level metadata, not a scheme gate — `ai://chat`, `mcp+`, `txco://`, anything |
 | `continue_after` | continuable | The promotion deadline (default `--continue-after-default`, 5s) |
+| `trace_tags` | continuable | Strings naming what the trace is about, shown on both traces of a run and in the list: `trace_tags = &object("pony", ._p.slug)`. See [Trace logs](../trace.md#naming-a-trace) |
 | `redact` / `omit` | any | Scrub paths from [trace](../trace.md) artifacts (runtime data untouched) |
 | `debug = true` | any | Surface extra op debug detail to the trace |
 | `prompt`, `system`, `messages`, `model`, `provider`, `schema`, `intent`, `limits.*` | ai://chat | The chat request — see [ai](../../ai.md) |

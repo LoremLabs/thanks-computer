@@ -153,6 +153,7 @@ scopes in between are independent.
   appear in the join scope's input.
 - **A suspend** adds a `continuation.suspend` event with the run id and stage.
 - **A resume** is a separate trace whose id starts with `resume-<run id>`. It
-  opens with a `continuation.resume` event (carrying the original request's
-  id), then one step per joined op, then the join scope's own ops. See
-  [Trace internals](./trace.md) and [Visibility](../visibility.md).
+  holds one step per joined op, then the join scope's own ops, and links back
+  to the original request: `txco trace` prints `origin`, and the admin page
+  links it. See [Trace internals](./trace.md#reading-a-continuation) and
+  [Visibility](../visibility.md).

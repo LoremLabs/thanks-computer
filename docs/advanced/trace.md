@@ -104,6 +104,18 @@ A record over `--trace-body-cap-bytes` is cut in async mode, and JSON that has l
 
 A key pasted into a page arrives in a request's body, which is on the record before any hint applies and is not always scrubbed. To keep it out altogether, send the request with the `X-Txco-Pasted-Key` header instead. The web head keeps its body off the envelope entirely and `txco://connection/put` reads it from the request's context, so it reaches no rule, step or trace. The header only keeps a body from the rules: it grants nothing.
 
+### A value read back
+
+A secret a stack keeps and shows again, a stored password read to show its owner, is not issued by the request, so nothing scrubs it. A hint cannot do it either: a hint applies to its whole stack, so hiding the response body that shows the value would blank every response. Name the value on the rule that produces it:
+
+```txcl
+WHEN @web.req.url.path == "/api/password"
+  WITH key = "password", into = "_pw", trace_secret = "_pw.password"
+  EXEC "txco://kv/get"
+```
+
+`trace_secret` is one or more comma-separated paths into the op's own output. The value goes from every record of the request after that op, and from the op's own step: as itself, and as it reads inside base64 text. It works on a rule that makes a value by `EMIT` too. Values under 16 characters are left alone, because a short one would shred unrelated bytes.
+
 ### What's NOT redacted
 
 - **Runtime data** is never touched. The rule's matchers, the op's (possibly SELECT-projected) input, the merged response all carry real, unmasked values.
@@ -114,6 +126,45 @@ A key pasted into a page arrives in a request's body, which is on the record bef
 - **Operational logs** are not affected.
 - **The DLQ** preserves the original envelope by design (forensics).
 
+
+## Reading a continuation
+
+A request that promotes to a continuation has two traces, because the second half can land on another machine: a worker's callback reaches any web node.
+
+- **The origin** is the request up to the suspend. Its last step is the suspending op, status `pending`, spanning the sync window (`continue_after`).
+- **The resume** has the id `resume-<run id>-<stage>`. It holds everything after.
+
+Each links to the other: `txco trace <rid>` prints `origin` or `resume`, the admin page links them, and `--json` has them under `continuation`.
+
+A `mode = "continuable"` op is different from a worker's: it runs here, so what it does inside is traced. A `call://` op's rules, every `cap://` capability they call and every `ai://` call they make are steps on the resume trace, which starts when the op started. A continuable op that finishes inside `continue_after` has them on the request's own trace instead. Either way the op itself has one row, with its real duration. A worker's own work is its own business: a resume after a worker's callback holds what came after.
+
+`--trace-detached-bytes` bounds the bodies one op's work keeps. Past it, a step keeps its sizes and timings and shows as truncated. `0` keeps metadata only.
+
+The steps of a deferred join (`join_at_scope`) are not traced.
+
+### Naming a trace
+
+A list of traces shows routes, and a person reading one wants to know whose run it was. A continuable op can say, in the stack's own words:
+
+```txcl
+WHEN ._packet.run =~ /./
+  WITH mode = "continuable", trace_tags = &object("pony", ._packet.pony, "run", ._packet.run)
+  EXEC "call://agent"
+```
+
+Tags appear on both traces of a run, in the list and on the trace, as strings: at most 8 pairs, each key and value cut to 64 characters.
+
+### Model calls
+
+A step that called a model carries what the call was: the kind (`chat`, `decide`, `embed`), provider, model, tokens, latency and retries, or its error code. `txco trace <rid>` shows them in the step table, `--step` in full, and the admin page can show only those steps. A call refused before it reached a provider still shows as one. The prompt and the answer are the step's bodies.
+
+## Long traces
+
+A trace is one document, and a run's can hold thousands of bodies. A backend that buffers a trace to its end can use `trace.BodyBuffer`: past a threshold it moves bodies to a temp file, which is uploaded as it stands when the trace ends, and the document carries a reference per step instead. A body is then fetched alone, `GET /traces/requests/{rid}/body?ref=`, when someone opens that step.
+
+The format is a run of concatenated gzip members, one per step, each `{"in":…,"out":…}`. Each member decodes alone, and an extent is a position in exactly the stored bytes, so a store must keep them as given, with no `Content-Encoding` on the object. A backend implements `trace.BodyStore` and runs `tracetest.BodyStoreConformance`, which fetches every member alone and out of order.
+
+The file backend keeps a pair of bodies over 256 KiB out of the document in the same way, reading it back from the step's folder.
 
 ## Open Telemetry Support
 
