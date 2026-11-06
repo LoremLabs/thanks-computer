@@ -420,13 +420,13 @@ The chassis's trace subsystem captures the inbound envelope, every per-step inpu
 
 ```txcl
 WHEN @lmtp.rcpt.0 =~ /^support@/
-WITH omit   = "_txc.lmtp.msg.attachments, _txc.lmtp.msg.raw"
-WITH redact = "_txc.lmtp.msg.headers.authorization"
+WITH redact = "_classify.summary"
 EXEC "op://CLASSIFY"
 ```
 
-- `omit` deletes the path from the trace JSON entirely — best for big payloads (`_txc.lmtp.msg.raw`, `_txc.lmtp.msg.attachments`).
-- `redact` replaces the value with `"[REDACTED]"` — best for header values where "something was here" is a useful signal.
+- `_txc.lmtp.msg.raw`, `.html` and `.attachments` are removed from every record by the chassis, so a rule does not need to name them ([always scrubbed](../trace.md#always-scrubbed)).
+- `_txc.lmtp.msg.text` and the headers stay on the record. A hint on them masks only the steps after the message reaches your stack: the inbound record and the boot steps are written first.
+- `omit` deletes a path from the trace JSON entirely. `redact` replaces the value with `"[REDACTED]"`, for when "something was here" is a useful signal.
 
 Runtime behavior is unaffected — only what hits disk is masked (the rule's `SELECT`, if any, separately projects what its EXEC receives). Scope is per-`(tenant, stack)` and hints take effect at the next dbcache reload. See [`advanced/txcl/txcl.md` § WITH](../txcl/txcl.md#with--per-call-modifiers) for the full semantic.
 

@@ -19,6 +19,9 @@ type Material struct {
 	// TokenType is the provider's word for the access token ("bearer");
 	// kept for the record, the consumer's format decides the header.
 	TokenType string `json:"t,omitempty"`
+	// Origin is where a key at an instance provider may go, sealed with it so
+	// that nothing but a new key can change it.
+	Origin string `json:"o,omitempty"`
 }
 
 // sealed is the stored form: the tenant secrets' envelope (a data key per

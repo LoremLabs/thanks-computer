@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS connections (
     principal_id       TEXT NOT NULL,                -- any principal: user:…, service:…
     provider           TEXT NOT NULL,                -- PROVIDERS/<name>.yaml, by name
     label              TEXT NOT NULL DEFAULT '',     -- several accounts per provider, later
-    kind               TEXT NOT NULL,                -- oauth2 | github_app_installation
+    kind               TEXT NOT NULL,                -- oauth2 | github_app_installation | api_key
     subject            TEXT NOT NULL DEFAULT '',     -- the provider's stable id for the identity
     account            TEXT NOT NULL DEFAULT '',     -- its display name
     status             TEXT NOT NULL,                -- active | uncertain | reconnect

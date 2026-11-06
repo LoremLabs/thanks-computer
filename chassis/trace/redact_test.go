@@ -193,14 +193,12 @@ func fixedLookup(m map[string]Hints) HintLookup {
 	}
 }
 
-func TestRedactingSink_NilLookupReturnsInnerUnchanged(t *testing.T) {
+// No stack declaring a hint is the common case, and the scrub still runs.
+func TestRedactingSink_NilLookupStillScrubs(t *testing.T) {
 	inner := newCaptureSink()
-	got := NewRedactingSink(inner, nil)
-	// NewRedactingSink returns inner unchanged when lookup is nil —
-	// no wrapper, no allocation.
-	if got != Sink(inner) {
-		t.Fatalf("expected nil lookup to return inner unchanged; got %T", got)
-	}
+	tr := NewRedactingSink(inner, nil).Begin(RequestInfo{RID: "r", Tenant: "_sys", Stack: "boot", Payload: []byte(secretEnvelope)})
+	tr.End("ok", "", nil)
+	assertNoSecrets(t, inner.get("r").info.Payload)
 }
 
 func TestRedactingSink_BeginPayloadRedacted(t *testing.T) {

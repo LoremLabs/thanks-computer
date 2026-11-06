@@ -1524,6 +1524,11 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 		"TXCO_TRACE_MODE":  "full",
 		"TXCO_TRACE_DIR":   filepath.Join(devDir, "trace"),
 		"TXCO_TRACE_ASYNC": "true",
+		// Keep tokens, cookies and raw mail in dev traces, which are for
+		// debugging exactly those. Only the stored copy on this machine
+		// (.txco/dev/trace) is affected. Set-if-missing, so
+		// `TXCO_TRACE_NO_SCRUB=false txco dev` tests what production records.
+		"TXCO_TRACE_NO_SCRUB": "true",
 		// Localhost hostnames resolve to 127.0.0.1 and other private
 		// addresses; the SSRF blocklist would reject them in
 		// production. Allow the verifier through in dev.

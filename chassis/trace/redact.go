@@ -2,6 +2,7 @@ package trace
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/tidwall/gjson"
@@ -23,6 +24,66 @@ type Hints struct {
 
 // Empty reports whether either list has work to do.
 func (h Hints) Empty() bool { return len(h.Redact) == 0 && len(h.Omit) == 0 }
+
+// A hint starts when a request reaches the stack that declares it, and every
+// request starts in `_sys`, so the inbound record and the boot steps are
+// written before any hint of a tenant's applies. What must never reach a trace
+// is therefore scrubbed here, from the first record, whatever the stacks say.
+var (
+	// sensitiveHeaders are matched in any case: a header's spelling depends on
+	// who wrote it (the web head canonicalizes, a rule's response writes lower
+	// case).
+	sensitiveHeaders = map[string]bool{
+		"authorization":       true,
+		"proxy-authorization": true,
+		"cookie":              true,
+		"set-cookie":          true,
+		"x-api-key":           true,
+		"x-auth-token":        true,
+	}
+	headerRoots = []string{"_txc.web.req.headers", "_txc.web.res.headers", "_txc.llm.headers"}
+	// builtinHints are the same rule for what sits at a fixed path.
+	builtinHints = Hints{
+		Redact: []string{"_txc.web.req.cookies"},
+		Omit:   []string{"_txc.lmtp.msg.raw", "_txc.lmtp.msg.attachments", "_txc.lmtp.msg.html"},
+	}
+)
+
+// Scrub removes what never reaches a trace. b must be whole JSON: a value cut
+// short cannot be found (AsyncSink scrubs before it caps). It never mutates b.
+func Scrub(b []byte) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	var paths []string
+	for _, root := range headerRoots {
+		gjson.GetBytes(b, root).ForEach(func(k, _ gjson.Result) bool {
+			if sensitiveHeaders[strings.ToLower(k.String())] {
+				paths = append(paths, root+"."+gjson.Escape(k.String()))
+			}
+			return true
+		})
+	}
+	return ApplyHints(ApplyHints(b, builtinHints), Hints{Redact: paths})
+}
+
+// droppedRecord stands in for a record cut short that a stack's hints cover: a
+// hint cannot be applied to JSON that has lost its end, and keeping it would
+// keep what the stack asked to hide.
+var droppedRecord = []byte(`{"_trace":"dropped: cut to the size cap, so this stack's redact and omit hints could not be applied"}`)
+
+// scrubWith is Scrub, then a stack's hints. cut says the record was capped;
+// noScrub skips Scrub and leaves the hints in force.
+func scrubWith(b []byte, h Hints, cut, noScrub bool) []byte {
+	if cut && !h.Empty() && len(b) > 0 && !gjson.ValidBytes(b) {
+		return droppedRecord
+	}
+	// A capped record was scrubbed whole before the cap (AsyncSink).
+	if !cut && !noScrub {
+		b = Scrub(b)
+	}
+	return ApplyHints(b, h)
+}
 
 // HintLookup answers "what hints apply to this (tenant, stack) write?"
 // AsyncSink calls it on the worker thread, off the request hot path.
@@ -74,36 +135,41 @@ func ApplyHints(b []byte, h Hints) []byte {
 //	                                       on the request goroutine
 //	                                       just before disk write
 //
-// nil lookup ⇒ NewRedactingSink returns the inner sink unchanged.
-// The hot path stays exactly as it was when no redaction is
-// configured.
+// A nil lookup means no stack hints: Scrub still runs on every record.
 type RedactingSink struct {
-	inner  Sink
-	lookup HintLookup
+	inner   Sink
+	lookup  HintLookup
+	noScrub bool
 }
 
-// NewRedactingSink wraps inner with redaction. When lookup is nil
-// (no rule declared any redact/omit), returns inner unchanged — no
-// allocation, no wrapper.
+// NewRedactingSink wraps inner with redaction. Every sink is wrapped, also
+// with a nil lookup (no rule declared any redact/omit). Scrub runs on every
+// record unless the operator asked for NewHintOnlySink.
 func NewRedactingSink(inner Sink, lookup HintLookup) Sink {
-	if lookup == nil {
-		return inner
-	}
 	return &RedactingSink{inner: inner, lookup: lookup}
+}
+
+// NewHintOnlySink applies stacks' hints but not Scrub, so credentials and raw
+// mail reach the trace. It exists for debugging auth and mail on a chassis whose
+// traces hold nothing worth protecting: --trace-no-scrub. Pair it with
+// AsyncOpts.NoScrub, or capped records are still scrubbed.
+func NewHintOnlySink(inner Sink, lookup HintLookup) Sink {
+	return &RedactingSink{inner: inner, lookup: lookup, noScrub: true}
 }
 
 // Begin captures the request's tenant and (initial) stack, applies hints to
 // the inbound payload, then forwards to the inner sink.
 func (s *RedactingSink) Begin(info RequestInfo) RequestTracer {
 	rt := &redactingTracer{
-		lookup: s.lookup,
-		tenant: info.Tenant,
-		slots:  map[slot]struct{}{},
+		lookup:  s.lookup,
+		noScrub: s.noScrub,
+		tenant:  info.Tenant,
+		slots:   map[slot]struct{}{},
 	}
 	if info.Stack != "" {
 		rt.slots[slot{info.Tenant, info.Stack}] = struct{}{}
 	}
-	info.Payload = ApplyHints(info.Payload, rt.union())
+	info.Payload = scrubWith(info.Payload, rt.union(), info.PayloadBytes > len(info.Payload), s.noScrub)
 	rt.inner = s.inner.Begin(info)
 	return rt
 }
@@ -120,9 +186,10 @@ func (s *RedactingSink) Close(ctx context.Context) error { return s.inner.Close(
 // `_sys` for nearly every request; keying a tenant stack's hints by it
 // found nothing, and no tenant's `WITH redact` / `WITH omit` ever applied.
 type redactingTracer struct {
-	inner  RequestTracer
-	lookup HintLookup
-	tenant string // Begin's: the fallback for a step that carries none
+	inner   RequestTracer
+	lookup  HintLookup
+	noScrub bool
+	tenant  string // Begin's: the fallback for a step that carries none
 
 	mu    sync.Mutex // guards slots (parallel ops at the same scope share one tracer)
 	slots map[slot]struct{}
@@ -190,8 +257,8 @@ func (t *redactingTracer) Step(info StepInfo) {
 		t.mu.Unlock()
 	}
 	h := t.union()
-	info.Input = ApplyHints(info.Input, h)
-	info.Output = ApplyHints(info.Output, h)
+	info.Input = scrubWith(info.Input, h, info.InputBytes > len(info.Input), t.noScrub)
+	info.Output = scrubWith(info.Output, h, info.OutputBytes > len(info.Output), t.noScrub)
 	t.inner.Step(info)
 }
 
@@ -200,6 +267,7 @@ func (t *redactingTracer) Event(ev TimelineEvent) {
 }
 
 func (t *redactingTracer) End(status, reason string, finalPayload []byte) {
-	finalPayload = ApplyHints(finalPayload, t.union())
+	// End carries no original size: a capped final shows as invalid JSON.
+	finalPayload = scrubWith(finalPayload, t.union(), len(finalPayload) > 0 && !gjson.ValidBytes(finalPayload), t.noScrub)
 	t.inner.End(status, reason, finalPayload)
 }

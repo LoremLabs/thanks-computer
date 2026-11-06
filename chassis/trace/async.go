@@ -27,6 +27,8 @@ type AsyncOpts struct {
 	BodyCapBytes int
 	StaleAfter   time.Duration
 	DropCounter  *atomic.Int64
+	// NoScrub keeps a capped body as it came, for NewHintOnlySink.
+	NoScrub bool
 }
 
 // AsyncSink wraps another Sink with a worker goroutine and a buffered
@@ -120,12 +122,26 @@ func NewAsyncSink(base Sink, opts AsyncOpts) *AsyncSink {
 func (s *AsyncSink) Begin(info RequestInfo) RequestTracer {
 	if cap := s.opts.BodyCapBytes; cap > 0 && len(info.Payload) > cap {
 		info.PayloadBytes = len(info.Payload)
-		info.Payload = info.Payload[:cap]
+		info.Payload = s.capBody(info.Payload, cap)
 	}
 	if !s.tryEnqueue(asyncOp{kind: opBegin, rid: info.RID, info: info}) {
 		return NoopTracer{}
 	}
 	return &asyncTracer{sink: s, rid: info.RID}
+}
+
+// capBody cuts a body to the cap, scrubbing it first: once cut, what must be
+// scrubbed may no longer be found. This is the one piece of redaction on the
+// request path, and only a body over the cap pays for it. A body the scrub
+// brought under the cap is kept whole.
+func (s *AsyncSink) capBody(b []byte, cap int) []byte {
+	if !s.opts.NoScrub {
+		b = Scrub(b)
+	}
+	if len(b) > cap {
+		b = b[:cap]
+	}
+	return b
 }
 
 // Close stops accepting new work, drains pending work, waits for any
@@ -289,11 +305,11 @@ func (t *asyncTracer) Step(info StepInfo) {
 	if cap := t.sink.opts.BodyCapBytes; cap > 0 {
 		if len(info.Input) > cap {
 			info.InputBytes = len(info.Input)
-			info.Input = info.Input[:cap]
+			info.Input = t.sink.capBody(info.Input, cap)
 		}
 		if len(info.Output) > cap {
 			info.OutputBytes = len(info.Output)
-			info.Output = info.Output[:cap]
+			info.Output = t.sink.capBody(info.Output, cap)
 		}
 	}
 	t.sink.tryEnqueue(asyncOp{kind: opStep, rid: t.rid, step: info})
@@ -305,7 +321,7 @@ func (t *asyncTracer) Event(ev TimelineEvent) {
 
 func (t *asyncTracer) End(status, reason string, final []byte) {
 	if cap := t.sink.opts.BodyCapBytes; cap > 0 && len(final) > cap {
-		final = final[:cap]
+		final = t.sink.capBody(final, cap)
 	}
 	t.sink.tryEnqueue(asyncOp{kind: opEnd, rid: t.rid, status: status, reason: reason, final: final})
 }

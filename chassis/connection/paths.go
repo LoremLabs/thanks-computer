@@ -43,6 +43,23 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 // ValidName reports whether s may name a provider.
 func ValidName(s string) bool { return nameRe.MatchString(s) }
 
+// instanceSep joins a provider that has instances to one of them
+// (`mcp:context7`): the declaration is the provider's, the row is the
+// instance's.
+const instanceSep = ":"
+
+// splitName reads a connection's name into its provider and instance.
+func splitName(s string) (family, instance string) {
+	family, instance, _ = strings.Cut(s, instanceSep)
+	return family, instance
+}
+
+// validConnectionName reports whether s names a provider or one instance of it.
+func validConnectionName(s string) bool {
+	family, instance, has := strings.Cut(s, instanceSep)
+	return ValidName(family) && (!has || ValidName(instance))
+}
+
 // IsProviderPath reports whether a stack_files path lives under PROVIDERS/.
 func IsProviderPath(p string) bool { return strings.HasPrefix(p, ProviderDir+"/") }
 

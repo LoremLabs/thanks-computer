@@ -1418,11 +1418,17 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			cancel()
 			return ctx, nil, berr
 		}
-		base = trace.NewRedactingSink(base, redactReg.Hints)
+		if conf.TraceNoScrub {
+			base = trace.NewHintOnlySink(base, redactReg.Hints)
+			logger.Warn("trace scrubbing is off (--trace-no-scrub): credentials and raw mail are being written to traces")
+		} else {
+			base = trace.NewRedactingSink(base, redactReg.Hints)
+		}
 		if conf.TraceAsync {
 			traceSink = trace.NewAsyncSink(base, trace.AsyncOpts{
 				BufferSize:   conf.TraceBufferSize,
 				BodyCapBytes: conf.TraceBodyCapBytes,
+				NoScrub:      conf.TraceNoScrub,
 			})
 			logger.Info("trace sink loaded",
 				zap.String("store", conf.TraceStore),
@@ -2158,6 +2164,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	for name, fn := range map[string]func(context.Context, connectionDeps, []byte) (event.Payload, error){
 		"txco://connection/start":  connectionStart,
 		"txco://connection/finish": connectionFinish,
+		"txco://connection/put":    connectionPut,
 		"txco://connection/list":   connectionList,
 		"txco://connection/revoke": connectionRevoke,
 	} {

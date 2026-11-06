@@ -68,6 +68,19 @@ func OriginOf(u *url.URL) (Origin, error) {
 	return Origin{Scheme: u.Scheme, Host: host, Port: port}, nil
 }
 
+// keyOrigin is the origin of the address a pasted key is for, held to the
+// rules an origin in a declaration is held to.
+func keyOrigin(raw string) (Origin, error) {
+	if err := checkEndpoint(raw); err != nil {
+		return Origin{}, err
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return Origin{}, err
+	}
+	return OriginOf(u)
+}
+
 // String is the canonical form: the default port left out.
 func (o Origin) String() string {
 	if o.Port == defaultPort(o.Scheme) {

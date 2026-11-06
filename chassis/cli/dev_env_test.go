@@ -46,6 +46,7 @@ func TestChassisEnvDefaults(t *testing.T) {
 		"TXCO_EGRESS_POLICY":          "open",
 		"TXCO_LOG_LEVEL":              "info",
 		"TXCO_TRACE_MODE":             "full",
+		"TXCO_TRACE_NO_SCRUB":         "true",
 		"TXCO_STRUCTURED_HOST_SUFFIX": ".localhost",
 		// Set twice on the way; the dev-scoped path is the one that lands.
 		"TXCO_SECRET_MASTER_KEY": filepath.Join(devDir, "secrets", "txco-dev-master.key"),
@@ -87,7 +88,7 @@ func TestChassisEnvParentWins(t *testing.T) {
 	ws := t.TempDir()
 	devDir := filepath.Join(ws, ".txco", "dev")
 	parent := parentEnv(map[string]string{
-		"TXCO_TRACE_MODE": "off", "TXCO_LOG_LEVEL": "error", "TXCO_AUTH_MODE": "both",
+		"TXCO_TRACE_MODE": "off", "TXCO_TRACE_NO_SCRUB": "false", "TXCO_LOG_LEVEL": "error", "TXCO_AUTH_MODE": "both",
 		"TXCO_SECRET_MASTER_KEY": "/elsewhere/key",
 	})
 	count := func(env []string, name string) (n int) {
@@ -102,7 +103,7 @@ func TestChassisEnvParentWins(t *testing.T) {
 	// A dev default is set only if the developer did not export it: the
 	// child inherits the parent's value, so the default must not be there.
 	env, _ := chassisEnv(chassisOpts{Workspace: ws}, devAddrs, devDir, "", parent)
-	for _, k := range []string{"TXCO_TRACE_MODE", "TXCO_LOG_LEVEL", "TXCO_AUTH_MODE"} {
+	for _, k := range []string{"TXCO_TRACE_MODE", "TXCO_TRACE_NO_SCRUB", "TXCO_LOG_LEVEL", "TXCO_AUTH_MODE"} {
 		if n := count(env, k); n != 0 {
 			t.Errorf("%s is set %d times over the parent's value", k, n)
 		}

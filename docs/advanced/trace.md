@@ -55,12 +55,12 @@ The admin UI's Traces tab shows the same data with a step-by-step explorer.
 
 ## Keeping sensitive data out of traces
 
-Trace logs persist whatever the rules touched, byte-for-byte. For production deployments that handle user data — auth tokens in headers, raw mail bodies, classifier outputs containing PII — two reserved `WITH` keys on any rule scrub the trace artifacts at write time, without touching runtime data:
+Trace logs persist whatever the rules touched, byte-for-byte. Credentials and raw mail are scrubbed by the chassis from the first record of every request ([below](#always-scrubbed)). For everything else a rule's own data can hold, such as classifier outputs or personal details, two reserved `WITH` keys on any rule scrub the trace artifacts:
 
 ```txcl
 WHEN @web.req.url.path = "/checkout"
-WITH redact = "_txc.web.req.body, _txc.web.req.headers.authorization"
-WITH omit   = "_txc.lmtp.msg.attachments"
+WITH redact = "_order.card_token, _order.email"
+WITH omit   = "_classify.transcript"
 EXEC "op://CHECKOUT"
 ```
 
@@ -70,6 +70,7 @@ EXEC "op://CHECKOUT"
 | `omit = "x.y"`        | Deletes the path entirely. Field vanishes from the trace JSON.                           |
 
 - Runtime behavior is unaffected — redaction changes only what hits durable storage. (What the EXEC receives is a separate mechanism: the rule's own `SELECT` projection.)
+- **A hint starts when the request reaches its stack.** Every request begins in `_sys`, so the inbound record (`in.json`) and the boot steps are written before any tenant's hint applies. A hint therefore protects what your stack adds to the envelope. It cannot protect what arrived with the request, such as `_txc.web.req.body`.
 - Paths are exact gjson dot-paths.
 - A path listed in both `redact` and `omit` is resolved by **omit wins** (the more aggressive choice).
 - Hints are **scoped per `(tenant, stack)`**: a `redact` declared in `acme/support` does NOT bleed into `acme/billing` even though both are tenant `acme`. If a request enters `acme/support` and an EXEC jumps to `acme/billing`, both stacks' hints apply to the trace from that point on (union semantic).
@@ -77,15 +78,38 @@ EXEC "op://CHECKOUT"
 - The chassis collects hints at startup and rebuilds the registry on every dbcache reload (so `txco apply` picks up new hint declarations without a restart).
 - Application order is **omits first**, then redacts. Applying omits first lets `_txc.lmtp.msg` vanish without wasting a sentinel write on `_txc.lmtp.msg.headers.authorization`.
 
+### Always scrubbed
+
+Unless `--trace-no-scrub` is set, these are removed from every record of every request, from the first, whatever a stack declares:
+
+| What | Paths | Effect |
+| ---- | ----- | ------ |
+| Credential headers, in any case: `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Auth-Token` | under `_txc.web.req.headers`, `_txc.web.res.headers`, `_txc.llm.headers` | value becomes `"[REDACTED]"` |
+| Parsed cookies | `_txc.web.req.cookies` | value becomes `"[REDACTED]"` |
+| Mail content | `_txc.lmtp.msg.raw`, `.html`, `.attachments` | field removed |
+
+Rules still read all of these at runtime. Declaring a hint for one is harmless and no longer needed.
+
+To debug auth or mail, `--trace-no-scrub` (`TXCO_TRACE_NO_SCRUB`) keeps these values in traces. Stack hints still apply, and a record that was cut short under a hint is still dropped. `txco dev` turns it on, so traces under `.txco/dev/trace` can hold whatever keys and cookies your dev chassis handles; `TXCO_TRACE_NO_SCRUB=false txco dev` shows what production records. The chassis logs a warning at boot when it is on. Traces already written stay as they are after you turn it off, so on a chassis that handles real credentials, rotate anything recorded while it was on.
+
 ### Where it runs
 
 The redaction layer lives below the async-sink boundary, so in async mode the work happens on the trace worker goroutine — off the request hot path. Per-write cost is one `gjson.Get` existence check plus an `sjson.Set` or `sjson.Delete` per declared path; sub-millisecond for typical envelopes.
 
 In sync mode (`--trace-async=false`) redaction runs on the request goroutine just before the disk write. Still cheap; the disk fsync that follows is the dominant cost.
 
+A record over `--trace-body-cap-bytes` is cut in async mode, and JSON that has lost its end cannot be searched. So the always-scrubbed fields are removed from the whole record first, on the request goroutine; only an oversized record pays for this. A stack's own hints cannot be applied to a record that is still cut short, so in a stack that declares any, that record is replaced with a note saying it was dropped.
+
+### A key a person pastes
+
+A key pasted into a page arrives in a request's body, which is on the record before any hint applies and is not always scrubbed. To keep it out altogether, send the request with the `X-Txco-Pasted-Key` header instead. The web head keeps its body off the envelope entirely and `txco://connection/put` reads it from the request's context, so it reaches no rule, step or trace. The header only keeps a body from the rules: it grants nothing.
+
 ### What's NOT redacted
 
 - **Runtime data** is never touched. The rule's matchers, the op's (possibly SELECT-projected) input, the merged response all carry real, unmasked values.
+- **Request bodies, query strings and mail text** (`_txc.web.req.body`, `_txc.web.req.url.query`, `_txc.lmtp.msg.text`) stay on the record, because debugging needs them. A password posted to a form is on the record: see [above](#a-key-a-person-pastes) for keeping a value off it.
+- **A copy** a rule makes of a scrubbed value, to a path of its own, is not scrubbed. Name that path in a hint.
+- **The rule's source** is recorded with each step (`op.json`), so a literal written in a rule is on the record.
 - **Timeline events** (`timeline.jsonl`) are not currently filtered. Avoid stamping sensitive fields directly into timeline event payloads.
 - **Operational logs** are not affected.
 - **The DLQ** preserves the original envelope by design (forensics).

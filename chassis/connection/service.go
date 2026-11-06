@@ -224,6 +224,9 @@ func (s *Service) Start(ctx context.Context, in StartInput) (StartResult, *Error
 	if err != nil {
 		return StartResult{}, fail(CodeStore, "%v", err)
 	}
+	if p.Kind == KindAPIKey {
+		return StartResult{}, fail(CodeUnsupported, "provider %q is a pasted key: there is no sign-in to start (txco://connection/put)", in.Provider)
+	}
 	// A development node (its policy open) may send the browser back over
 	// plain http, as it serves plain http; a fleet node never.
 	redirect, perr := checkRedirectURI(in.RedirectURI, in.Host, in.Provider, s.clients.loopback != nil)
@@ -547,23 +550,27 @@ func (s *Service) Use(ctx context.Context, in UseInput) (UseResult, *Error) {
 	if in.Principal == "" || in.Capability == "" {
 		return UseResult{}, fail(CodeDenied, "no principal and capability are pinned on this call: a connection is used inside a capability call")
 	}
-	if !ValidName(in.Provider) {
+	if !validConnectionName(in.Provider) {
 		return UseResult{}, fail(CodeInvalidArg, "connection %q is not a provider name", in.Provider)
 	}
+	family, instance := splitName(in.Provider)
 	stack := baseStack(in.Stack)
-	declStack, p, err := s.decls.Provider(ctx, in.Tenant, in.Provider)
+	declStack, p, err := s.decls.Provider(ctx, in.Tenant, family)
 	if errors.Is(err, ErrNotDeclared) {
-		return UseResult{}, fail(CodeDenied, "no active stack of this tenant declares provider %q", in.Provider)
+		return UseResult{}, fail(CodeDenied, "no active stack of this tenant declares provider %q", family)
 	}
 	if err != nil {
 		return UseResult{}, fail(CodeUnavailable, "%v", err)
 	}
-	if !p.Allows(stack, in.Capability) {
-		return UseResult{}, fail(CodeDenied, "provider %q does not name stack %q as a consumer for %s", in.Provider, stack, in.Capability)
+	if p.Instances != (instance != "") {
+		return UseResult{}, fail(CodeDenied, "connection %q does not fit provider %q", in.Provider, family)
 	}
-	c, err := s.decls.Consumer(ctx, in.Tenant, stack, in.Provider)
+	if !p.Allows(stack, in.Capability) {
+		return UseResult{}, fail(CodeDenied, "provider %q does not name stack %q as a consumer for %s", family, stack, in.Capability)
+	}
+	c, err := s.decls.Consumer(ctx, in.Tenant, stack, family)
 	if errors.Is(err, ErrNotDeclared) {
-		return UseResult{}, fail(CodeDenied, "stack %q has no %s", stack, ConsumerPath(in.Provider))
+		return UseResult{}, fail(CodeDenied, "stack %q has no %s", stack, ConsumerPath(family))
 	}
 	if err != nil {
 		return UseResult{}, fail(CodeUnavailable, "%v", err)
@@ -572,7 +579,8 @@ func (s *Service) Use(ctx context.Context, in UseInput) (UseResult, *Error) {
 	if oerr != nil {
 		return UseResult{}, fail(CodeDestination, "%v", oerr)
 	}
-	if !c.OriginAllowed(o) || !p.APIOrigin(o) {
+	// An instance's origin is in its row, checked below once that is open.
+	if !p.Instances && (!c.OriginAllowed(o) || !p.APIOrigin(o)) {
 		return UseResult{}, fail(CodeDestination, "%s is not a declared destination of this connection", o)
 	}
 	tenantID, err := s.slugToID(ctx, in.Tenant)
@@ -589,9 +597,22 @@ func (s *Service) Use(ctx context.Context, in UseInput) (UseResult, *Error) {
 	if row.Kind != c.Kind {
 		return UseResult{}, fail(CodeMissing, "%s's %s connection is %s; this stack uses %s", in.Principal, providerTitle(p, in.Provider), row.Kind, c.Kind)
 	}
-	access, row, uerr := s.current(ctx, in.Tenant, declStack, p, row)
-	if uerr != nil {
-		return UseResult{}, uerr
+	var access string
+	if row.Kind == CredentialAPIKey {
+		m, oerr := s.store.Open(ctx, row)
+		if oerr != nil {
+			return UseResult{}, fail(CodeUnavailable, "the stored connection could not be opened: %v", oerr)
+		}
+		if p.Instances && o.String() != m.Origin {
+			return UseResult{}, fail(CodeReconnect, "this key was stored for %s and the address is now %s: the person pastes it again to send it there", m.Origin, o)
+		}
+		access = m.Access
+	} else {
+		var uerr *Error
+		access, row, uerr = s.current(ctx, in.Tenant, declStack, p, row)
+		if uerr != nil {
+			return UseResult{}, uerr
+		}
 	}
 	value, err := secrets.Substitute(c.Use.Format, []byte(access))
 	if err != nil {
@@ -604,10 +625,11 @@ func (s *Service) Use(ctx context.Context, in UseInput) (UseResult, *Error) {
 // the declaration, or ErrNotDeclared. For the ops that must know who may
 // list a provider's connections.
 func (s *Service) ProviderDecl(ctx context.Context, tenant, name string) (string, *Provider, error) {
-	if !ValidName(name) {
+	if !validConnectionName(name) {
 		return "", nil, ErrNotDeclared
 	}
-	return s.decls.Provider(ctx, tenant, name)
+	family, _ := splitName(name)
+	return s.decls.Provider(ctx, tenant, family)
 }
 
 // HTTPClient is the client a request that carries a connection's token is
@@ -635,9 +657,10 @@ func (s *Service) ListProvider(ctx context.Context, tenantID, provider string) (
 // Revoke removes a connection and, when the provider has a revocation
 // destination, tells it. It returns false when there was none.
 func (s *Service) Revoke(ctx context.Context, tenant, tenantID, principal, provider string) (Row, bool, *Error) {
-	if !ValidName(provider) {
+	if !validConnectionName(provider) {
 		return Row{}, false, fail(CodeInvalidArg, "`provider` %q is not a provider name", provider)
 	}
+	family, _ := splitName(provider)
 	row, err := s.store.Get(ctx, tenantID, principal, provider, "")
 	if errors.Is(err, ErrNotFound) {
 		return Row{}, false, nil
@@ -651,7 +674,7 @@ func (s *Service) Revoke(ctx context.Context, tenant, tenantID, principal, provi
 		p         *Provider
 		declStack string
 	)
-	if ds, pp, derr := s.decls.Provider(ctx, tenant, provider); derr == nil {
+	if ds, pp, derr := s.decls.Provider(ctx, tenant, family); derr == nil {
 		declStack, p = ds, pp
 	}
 	var m Material

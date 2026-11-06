@@ -124,11 +124,16 @@ type fakeDecls struct {
 	stack     string
 	provider  *Provider
 	consumers map[string]*Consumer
+	// keys declares a pasted-key provider beside github (apikey_test.go).
+	keys map[string]*Provider
 }
 
 func (d *fakeDecls) Provider(_ context.Context, _, name string) (string, *Provider, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if p := d.keys[name]; p != nil {
+		return d.stack, p, nil
+	}
 	if name != "github" || d.provider == nil {
 		return "", nil, ErrNotDeclared
 	}
@@ -139,7 +144,12 @@ func (d *fakeDecls) Consumer(_ context.Context, _, stack, provider string) (*Con
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	c := d.consumers[stack]
-	if provider != "github" || c == nil {
+	if d.keys[provider] != nil {
+		c = d.consumers[stack+"/"+provider]
+	} else if provider != "github" {
+		return nil, ErrNotDeclared
+	}
+	if c == nil {
 		return nil, ErrNotDeclared
 	}
 	return c, nil

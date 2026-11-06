@@ -21,6 +21,7 @@ import (
 
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/config"
+	"github.com/loremlabs/thanks-computer/chassis/connection"
 	"github.com/loremlabs/thanks-computer/chassis/edgeproxy"
 	"github.com/loremlabs/thanks-computer/chassis/event"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
@@ -535,7 +536,12 @@ func (web *WebController) Start() {
 					cancel() // shut down the request
 					return
 				}
-				if len(body) > 0 {
+				if connection.IsPastedKey(r.Header) {
+					// A pasted key goes into the request's CONTEXT and nowhere
+					// else, as a run grant's token does: no rule and no trace
+					// sees it. txco://connection/put reads it from there.
+					ctx = connection.WithPastedKey(ctx, []byte(body))
+				} else if len(body) > 0 {
 					body := base64.StdEncoding.EncodeToString([]byte(body))
 					pb.Set("_txc.web.req.body", body)
 				}

@@ -19,6 +19,8 @@ import (
 //	                          sign-in URL, and the flow cookie on the response
 //	txco://connection/finish  on the callback: consume the flow, exchange the
 //	                          code, store the tokens (never answered)
+//	txco://connection/put     store a pasted key for a principal: the key is
+//	                          read from the request's context, never a WITH
 //	txco://connection/list    a principal's connections, or a provider's —
 //	                          metadata only
 //	txco://connection/revoke  remove one, and tell the provider when it has
@@ -175,6 +177,43 @@ func connectionFinish(ctx context.Context, d connectionDeps, in []byte) (event.P
 		return withCookie(c.err(cerr.Code, cerr.Message), res.ClearCookie), nil
 	}
 	return withCookie(identityOK(c.into, newConnectionOut(res.Row)), res.ClearCookie), nil
+}
+
+// connectionPut: WITH principal, provider [, url]. On the HTTP request that
+// carries the key in its body, sent with connection.PastedKeyHeader: the web
+// head kept that body off the envelope, so the key is read from the context
+// and is in no rule, step or trace. A `key` in WITH is refused, because
+// writing it there would put it in all three. Result at `into`: the
+// connection's metadata. The managing stack only.
+func connectionPut(ctx context.Context, d connectionDeps, in []byte) (event.Payload, error) {
+	c, ep, ok := connectionPrelude(ctx, d)
+	if !ok {
+		return ep, nil
+	}
+	p, ep, ok := c.principalParam()
+	if !ok {
+		return ep, nil
+	}
+	base, err := d.store.RequireOwner(ctx, c.tenantID, c.stack, p)
+	if err != nil {
+		return c.storeErr(err), nil
+	}
+	if c.str("key") != "" {
+		return c.err("invalid_arg", "a key is never a WITH param: send it as the request's body with the "+connection.PastedKeyHeader+" header"), nil
+	}
+	if readWebRequest(in).src != "http" {
+		return c.err("invalid_arg", "connection/put runs on the HTTP request that carries the key (@src == \"http\")"), nil
+	}
+	key := connection.TakePastedKey(ctx)
+	defer connection.ZeroKey(key)
+	row, cerr := d.svc.PutKey(ctx, connection.PutKeyInput{
+		Tenant: c.tenant, TenantID: c.tenantID, Stack: base, Principal: p.ID,
+		Provider: c.str("provider"), URL: c.str("url"), Key: key,
+	})
+	if cerr != nil {
+		return c.err(cerr.Code, cerr.Message), nil
+	}
+	return identityOK(c.into, newConnectionOut(row)), nil
 }
 
 // connectionList lists connections one of two ways:

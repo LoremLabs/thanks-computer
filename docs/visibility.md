@@ -55,8 +55,8 @@ Traces persist whatever the rules touched, so any rule can scrub its
 own trail — without affecting the live data the flow computes on:
 
 ```txcl
-WITH redact = "_txc.web.req.headers.authorization"   # value → "[REDACTED]"
-WITH omit   = "_txc.lmtp.msg.attachments"            # field vanishes
+WITH redact = "_order.card_token"     # value → "[REDACTED]"
+WITH omit   = "_classify.transcript"  # field vanishes
 ```
 
 ## Metrics

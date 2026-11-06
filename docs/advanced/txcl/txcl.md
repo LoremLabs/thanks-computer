@@ -471,7 +471,7 @@ Keys the op does not know are ignored by it.
 
 ```txcl
 WITH redact = "user.email, user.ssn"           # mask these paths with "[REDACTED]"
-WITH omit   = "_txc.lmtp.msg.attachments"      # delete these paths entirely
+WITH omit   = "_classify.transcript"           # delete these paths entirely
 ```
 
 Two reserved WITH keys scrub **trace logs** only — runtime data is untouched: the resonator's own WHEN and SELECT still read the full envelope (though what the EXEC *receives* is the SELECT-projected view when the rule selects). Both take a comma-separated list of gjson dot-paths (exact match, no wildcards):
@@ -479,7 +479,7 @@ Two reserved WITH keys scrub **trace logs** only — runtime data is untouched: 
 - `redact` masks each value with `"[REDACTED]"` (the field stays — use when "something was here" matters, e.g. credentials).
 - `omit` deletes the path entirely (use for bulky data like attachments or raw bodies).
 
-A path listed in both → **omit wins**. Hints are static (literal strings only; an `@path` is skipped), scoped per `(tenant, stack)` with union semantics across an EXEC jump, and picked up by `txco apply` without a restart. See [trace.md](../trace.md).
+A hint starts when the request reaches its stack, so it protects what your stack adds, not what arrived with the request. Credential headers, cookies and raw mail are scrubbed by the chassis on every record ([trace](../trace.md#always-scrubbed)). A path listed in both → **omit wins**. Hints are static (literal strings only; an `@path` is skipped), scoped per `(tenant, stack)` with union semantics across an EXEC jump, and picked up by `txco apply` without a restart. See [trace.md](../trace.md).
 
 ## PRIORITY — tie-breaker
 

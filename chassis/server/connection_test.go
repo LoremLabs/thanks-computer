@@ -135,3 +135,78 @@ func TestConnectionOps(t *testing.T) {
 	d.svc = nil
 	wantIdentityCode(t, "disabled", callConnection(t, connectionStart, d, "web", meta, httpEnvelope), "_connection", "txco_connection_disabled")
 }
+
+// A pasted key arrives on the request's context. Everything that reaches a
+// rule, a step or a trace is checked for it here.
+func TestConnectionPut(t *testing.T) {
+	const key = "ctx7sk-0123456789abcdef"
+	d := newConnectionDeps(t)
+	p, err := connection.ParseProvider([]byte("kind: api_key\ninstances: true\nconsumers:\n  tools-mcp: [mcp.call]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := secrets.NewInlineMasterKey(base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, _ := connection.NewSigner([]byte(strings.Repeat("s", 32)), 1)
+	node, _ := egress.Open("open", egress.Config{})
+	svc, err := connection.New(connection.NewStore(d.store.DB, registry.SQLite, mk), keyDecls{p}, testSecrets{}, signer, connection.Config{
+		Node: node, Open: true, Logger: zap.NewNop(),
+		SlugToID: func(_ context.Context, slug string) (string, error) { return "tnt_" + slug, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.svc = svc
+	const meta = `{"principal":"service:pony-a","provider":"mcp:ctx","url":"https://mcp.example.com/mcp"}`
+	put := func(stack, metaJSON, envelope string, withKey bool) string {
+		t.Helper()
+		ctx := processor.WithStack(processor.WithTenant(context.Background(), "acme"), stack)
+		ctx = operation.WithMeta(ctx, metaJSON)
+		if withKey {
+			ctx = connection.WithPastedKey(ctx, []byte(key))
+		}
+		pl, err := connectionPut(ctx, d, []byte(envelope))
+		if err != nil {
+			t.Fatalf("handler returned a Go error: %v", err)
+		}
+		if strings.Contains(pl.Raw, key) {
+			t.Fatalf("the answer holds the key: %s", pl.Raw)
+		}
+		return pl.Raw
+	}
+	code := func(raw string) string { return gjson.Get(raw, "_connection.error.code").String() }
+
+	if got := code(put("tools-mcp", meta, httpEnvelope, true)); got != "txco_connection_not_owner" {
+		t.Errorf("a stack that does not manage the principal: %s", got)
+	}
+	owner := "web"
+	if got := code(put(owner, `{"principal":"service:pony-a","provider":"mcp:ctx","key":"ctx7sk-other"}`, httpEnvelope, true)); got != "txco_connection_invalid_arg" {
+		t.Errorf("a key in WITH: %s", got)
+	}
+	if got := code(put(owner, meta, `{"_txc":{"src":"cron"}}`, true)); got != "txco_connection_invalid_arg" {
+		t.Errorf("not an http request: %s", got)
+	}
+	if got := code(put(owner, meta, httpEnvelope, false)); got != "txco_connection_invalid_arg" {
+		t.Errorf("no key on the context: %s", got)
+	}
+	raw := put(owner, meta, httpEnvelope, true)
+	if code(raw) != "" || gjson.Get(raw, "_connection.kind").String() != connection.CredentialAPIKey ||
+		gjson.Get(raw, "_connection.account").String() != "https://mcp.example.com" {
+		t.Fatalf("put: %s", raw)
+	}
+}
+
+type keyDecls struct{ p *connection.Provider }
+
+func (d keyDecls) Provider(_ context.Context, _, name string) (string, *connection.Provider, error) {
+	if name != "mcp" {
+		return "", nil, connection.ErrNotDeclared
+	}
+	return "tools-mcp", d.p, nil
+}
+
+func (d keyDecls) Consumer(_ context.Context, _, _, _ string) (*connection.Consumer, error) {
+	return nil, connection.ErrNotDeclared
+}

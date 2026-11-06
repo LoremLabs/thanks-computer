@@ -23,6 +23,9 @@ const (
 	// KindGitHubApp is OAuth 2 plus the app's own key, which mints
 	// installation tokens (a later slice). Its user flow is oauth2's.
 	KindGitHubApp = "github_app"
+	// KindAPIKey is a key the service issued, pasted in by its owner: no
+	// sign-in and no renewal.
+	KindAPIKey = "api_key"
 )
 
 // Credential kinds: which credential a consumer uses, and what a row holds.
@@ -32,6 +35,8 @@ const (
 	// CredentialInstallation is a GitHub App installation token, minted
 	// from the app's key (a later slice).
 	CredentialInstallation = "github_app_installation"
+	// CredentialAPIKey is a pasted key.
+	CredentialAPIKey = "api_key"
 )
 
 // How the client authenticates at the token destination.
@@ -146,6 +151,11 @@ type Provider struct {
 	Refresh      Refresh             `yaml:"refresh"`
 	App          *App                `yaml:"app"`
 	Consumers    map[string][]string `yaml:"consumers"`
+	// Instances (kind api_key) makes this a template: a stack cannot list
+	// every service its principals may connect to, so each connection is
+	// named <provider>:<instance> and carries its own origin, recorded when
+	// the key is stored. destinations.api is empty.
+	Instances bool `yaml:"instances"`
 
 	api originSet // parsed Destinations.API
 }
@@ -194,11 +204,17 @@ func (p *Provider) validate() error {
 		return fmt.Errorf("title is longer than %d characters", MaxTitle)
 	}
 	switch p.Kind {
-	case KindOAuth2, KindGitHubApp:
+	case KindOAuth2, KindGitHubApp, KindAPIKey:
 	case "":
-		return fmt.Errorf("kind is required (%s or %s)", KindOAuth2, KindGitHubApp)
+		return fmt.Errorf("kind is required (%s, %s or %s)", KindOAuth2, KindGitHubApp, KindAPIKey)
 	default:
-		return fmt.Errorf("kind %q: want %s or %s", p.Kind, KindOAuth2, KindGitHubApp)
+		return fmt.Errorf("kind %q: want %s, %s or %s", p.Kind, KindOAuth2, KindGitHubApp, KindAPIKey)
+	}
+	if p.Kind == KindAPIKey {
+		return p.validateAPIKey()
+	}
+	if p.Instances {
+		return fmt.Errorf("instances is for kind %s only", KindAPIKey)
 	}
 	// The issuer identifier a provider sends back as `iss` (RFC 9207): a
 	// URL, with a path when the provider has one (GitHub's is
@@ -320,6 +336,38 @@ func (p *Provider) validate() error {
 	} else if p.App != nil {
 		return fmt.Errorf("app is for kind %s only", KindGitHubApp)
 	}
+	return p.validateConsumers()
+}
+
+// validateAPIKey is the whole of a pasted key's declaration: there is no
+// sign-in, so nothing of OAuth may be named, and a key is sent to its api
+// origins or, for instances, to the origin its own row holds.
+func (p *Provider) validateAPIKey() error {
+	d := p.Destinations
+	if d.Authorization != "" || d.Token != "" || (d.Revocation != "" && d.Revocation != "none") || p.Issuer != "" ||
+		p.ClientID != "" || p.ClientSecret != "" || p.ClientAuth != "" || p.PKCE || len(p.Scopes) > 0 ||
+		p.Account != nil || p.App != nil || p.Refresh != (Refresh{}) {
+		return fmt.Errorf("kind %s is a pasted key: it takes title, destinations.api or instances, and consumers", KindAPIKey)
+	}
+	p.Destinations.Revocation = "none"
+	if p.Instances {
+		if len(d.API) > 0 {
+			return fmt.Errorf("instances: each connection records its own origin, so destinations.api is empty")
+		}
+		return p.validateConsumers()
+	}
+	if len(d.API) > MaxOrigins {
+		return fmt.Errorf("destinations.api names %d origins, at most %d", len(d.API), MaxOrigins)
+	}
+	api, _, err := parseOrigins("destinations.api", d.API)
+	if err != nil {
+		return err
+	}
+	p.api = api
+	return p.validateConsumers()
+}
+
+func (p *Provider) validateConsumers() error {
 	if len(p.Consumers) > MaxConsumers {
 		return fmt.Errorf("consumers names %d stacks, at most %d", len(p.Consumers), MaxConsumers)
 	}
@@ -456,18 +504,23 @@ func (c *Consumer) validate() error {
 	switch c.Kind {
 	case "":
 		c.Kind = CredentialOAuth2
-	case CredentialOAuth2, CredentialInstallation:
+	case CredentialOAuth2, CredentialInstallation, CredentialAPIKey:
 	default:
-		return fmt.Errorf("kind %q: want %s or %s", c.Kind, CredentialOAuth2, CredentialInstallation)
+		return fmt.Errorf("kind %q: want %s, %s or %s", c.Kind, CredentialOAuth2, CredentialInstallation, CredentialAPIKey)
 	}
 	if len(c.Origins) > MaxOrigins {
 		return fmt.Errorf("origins names %d, at most %d", len(c.Origins), MaxOrigins)
 	}
-	set, _, err := parseOrigins("origins", c.Origins)
-	if err != nil {
-		return err
+	// A key at an instance provider goes to the origin its own row holds, so
+	// there is nothing to declare. Naming none allows nothing elsewhere: a
+	// provider with fixed origins still needs them here (Service.Use).
+	if c.Kind != CredentialAPIKey || len(c.Origins) > 0 {
+		set, _, err := parseOrigins("origins", c.Origins)
+		if err != nil {
+			return err
+		}
+		c.origins = set
 	}
-	c.origins = set
 	if c.Use.Header == "" {
 		c.Use.Header = "authorization"
 	}
