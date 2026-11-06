@@ -128,7 +128,7 @@ func (pu *Unit) runScopeContinuable(
 			out.Raw = sanitizeAuthorOutputFor(r.transport, out.Raw)
 		}
 		done <- continuableResult{payload: out, transport: r.transport, err: r.err,
-			startedAt: r.startedAt, finishedAt: r.finishedAt}
+			startedAt: r.startedAt, finishedAt: r.finishedAt, model: r.model}
 	}()
 
 	timer := time.NewTimer(continueAfter)
@@ -246,6 +246,7 @@ type continuableResult struct {
 	err        error
 	startedAt  time.Time
 	finishedAt time.Time
+	model      *trace.ModelFacts
 }
 
 // failContinuableInline emits an error payload to the client without
@@ -281,7 +282,7 @@ func (pu *Unit) completeContinuableSync(
 			Stack:  op.Stack, Scope: op.Scope, Name: name,
 			Operation: op.Resonator.Exec, Transport: "continuable",
 			Input:     []byte(op.Input),
-			StartedAt: aStart, FinishedAt: finish,
+			StartedAt: aStart, FinishedAt: finish, Model: r.model,
 			Status: "error", Error: r.err.Error(),
 		})
 		select {
@@ -302,7 +303,7 @@ func (pu *Unit) completeContinuableSync(
 				Stack:  op.Stack, Scope: op.Scope, Name: name,
 				Operation: op.Resonator.Exec, Transport: "continuable",
 				Input:     []byte(op.Input),
-				StartedAt: aStart, FinishedAt: finish,
+				StartedAt: aStart, FinishedAt: finish, Model: r.model,
 				Status: "error", Error: oerr.Error(),
 			})
 			select {
@@ -319,7 +320,7 @@ func (pu *Unit) completeContinuableSync(
 		Operation: op.Resonator.Exec, Transport: "continuable",
 		Input:     []byte(op.Input),
 		Output:    []byte(payload),
-		StartedAt: aStart, FinishedAt: finish,
+		StartedAt: aStart, FinishedAt: finish, Model: r.model,
 		Status: "ok",
 	})
 
@@ -358,6 +359,7 @@ func (pu *Unit) promoteContinuable(
 	relay *trace.Relay,
 	resCh chan event.Payload,
 ) error {
+	promotedAt := time.Now() // the sync window's end, before the durable writes
 	stack := op.Stack
 	tenant, _ := ctx.Value(ctxKeyTenant).(string)
 	cstage := stage
@@ -454,7 +456,7 @@ func (pu *Unit) promoteContinuable(
 		Operation: op.Resonator.Exec, Transport: "continuable",
 		Input:     []byte(op.Input),
 		Output:    ack,
-		StartedAt: aStart, FinishedAt: time.Now(),
+		StartedAt: aStart, FinishedAt: promotedAt,
 		Status: "pending",
 	})
 
@@ -571,7 +573,10 @@ func (pu *Unit) finishContinuableDetached(
 	}
 
 	if _, terr := pu.Runs.RecordTerminal(finCtx, runID, stage, 0, name, status,
-		continuation.TerminalMeta{Transport: r.transport, FuelUsed: drawnFuel}, []byte(payload)); terr != nil {
+		continuation.TerminalMeta{
+			Transport: r.transport, FuelUsed: drawnFuel,
+			StartedAt: r.startedAt, FinishedAt: r.finishedAt, Operation: op.Resonator.Exec, Model: r.model,
+		}, []byte(payload)); terr != nil {
 		pu.Logger.Error("continuable: RecordTerminal failed",
 			zap.String("run", runID), zap.String("stage", stage),
 			zap.String("op", name), zap.Error(terr))

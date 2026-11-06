@@ -151,8 +151,7 @@ func (r *Runs) CreateDeferredOp(ctx context.Context, runID string, sp DeferredOp
 // stamp — zero value for worker-posted bytes). status must be "completed"
 // or "failed".
 func (r *Runs) RecordDeferredTerminal(ctx context.Context, runID, opc, status string, meta TerminalMeta, payload []byte) (recorded bool, err error) {
-	term := OpTerminal{Status: status, RecordedAt: time.Now().UTC(),
-		Transport: meta.Transport, FuelUsed: meta.FuelUsed}
+	term := meta.terminal(status)
 	switch status {
 	case "completed":
 		k := deferredOutputKey(runID, opc)

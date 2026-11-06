@@ -401,6 +401,18 @@ func validateChatSchema(text string, schemaJSON json.RawMessage) (json.RawMessag
 // NOT charged to the chassis fuel meter (provider compute is a separate
 // dimension; see chassis/processor/budget.go's fuel cost rationale).
 func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat.Response, routing, schemaStatus string, runErr error) {
+	facts := trace.ModelFacts{
+		Kind: aiSubOpChat, Provider: providerName, Model: resp.Model, Routing: routing,
+		TokensIn: resp.TokensIn, TokensOut: resp.TokensOut,
+		LatencyMS: resp.LatencyMS, Retries: resp.Retries,
+	}
+	if runErr != nil {
+		facts.ErrorCode = "txco_chat_unknown"
+		if coded, ok := runErr.(chat.CodedError); ok {
+			facts.ErrorCode = coded.Code()
+		}
+	}
+	noteModel(ctx, facts)
 	tr := trace.FromContext(ctx)
 	if tr == nil {
 		return

@@ -257,6 +257,14 @@ func readSteps(reqDir string, d *RequestDetail, full bool) {
 		if v, ok := m["stop_reason"].(string); ok {
 			st.StopReason = v
 		}
+		if v, ok := m["model"]; ok {
+			if b, err := json.Marshal(v); err == nil {
+				var f ModelFacts
+				if json.Unmarshal(b, &f) == nil {
+					st.Model = &f
+				}
+			}
+		}
 		if full {
 			if fileBodiesLarge(stepDir) {
 				st.BodyRef = e.Name() // fetched alone, by StepBody

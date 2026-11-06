@@ -151,6 +151,17 @@ func (pu *Unit) materializeEmbedSecrets(ctx context.Context, op *operation.Opera
 // sink change is needed). Token counts ride the event for observability but
 // are NOT charged to fuel — provider compute is a separate dimension.
 func emitEmbedCompletionEvent(ctx context.Context, providerName string, resp embed.Response, routing string, runErr error) {
+	facts := trace.ModelFacts{
+		Kind: aiSubOpEmbed, Provider: providerName, Model: resp.Model, Routing: routing,
+		TokensIn: resp.Tokens, LatencyMS: resp.LatencyMS, Retries: resp.Retries,
+	}
+	if runErr != nil {
+		facts.ErrorCode = "txco_embed_unknown"
+		if coded, ok := runErr.(embed.CodedError); ok {
+			facts.ErrorCode = coded.Code()
+		}
+	}
+	noteModel(ctx, facts)
 	tr := trace.FromContext(ctx)
 	if tr == nil {
 		return

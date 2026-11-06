@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/chat"
 	"github.com/loremlabs/thanks-computer/chassis/config"
 	"github.com/loremlabs/thanks-computer/chassis/continuation"
 	"github.com/loremlabs/thanks-computer/chassis/continuation/filestore"
@@ -311,6 +312,80 @@ func TestContinuableTimeoutKeepsItsEvidence(t *testing.T) {
 	}
 	if countNamed(resume, "after") != 0 {
 		t.Errorf("a scope after the stuck one ran: %+v", resume.Steps)
+	}
+}
+
+// A promoted op has one row, and it says what happened: the operation, and how
+// long the op itself took, not how long it was waited on. The origin's pending
+// row is the sync window, not the time the durable writes took.
+func TestContinuablePromotedRowsHaveHonestTimes(t *testing.T) {
+	g := newTraceRig(t)
+	const work = 400 * time.Millisecond
+	stub, _ := delayedStub(t, work, `{"thought":"yes"}`)
+	seedCallee(t, g.pu, stub.URL, `continue_after = "100ms", timeout = "10s"`)
+
+	const rid = "CbTimes000000001"
+	resCh, end := g.run(context.Background(), rid, "acme/100")
+	rcid, _ := waitFor202(t, resCh)
+	end()
+	runID := resolveRunIDFromRcid(t, g.pu, rcid)
+	waitForRunCompleted(t, g.pu, runID)
+
+	row := stepsOf(g.ended(t, continuation.ResumeTraceRID(runID, "acme/100")), "acme")["dispatch"]
+	if row.Operation != "call://agent" {
+		t.Errorf("operation = %q", row.Operation)
+	}
+	if row.DurationMs < work.Milliseconds() || row.DurationMs > work.Milliseconds()+500 {
+		t.Errorf("the op took about %s, its row says %d ms", work, row.DurationMs)
+	}
+
+	pending := stepsOf(g.ended(t, rid), "acme")["dispatch"]
+	if pending.DurationMs < 100 || pending.DurationMs > 250 {
+		t.Errorf("the pending row should be the sync window, about 100 ms: %d", pending.DurationMs)
+	}
+}
+
+// Model facts reach a step inside a detached call, whichever model kind it is,
+// and a call refused before it reached a provider still shows as one.
+func TestContinuableModelCallsCarryTheirFacts(t *testing.T) {
+	g := newTraceRig(t)
+	withTestBackend(t, "facts-backend", &testBackend{
+		name: "facts-backend",
+		resp: chat.Response{Text: "hello", Model: "gpt-test", Provider: "facts-backend",
+			TokensIn: 123, TokensOut: 45, LatencyMS: 67, Retries: 1},
+	})
+	stub, _ := delayedStub(t, 300*time.Millisecond, `{}`)
+	seedOp(t, g.pu, "agent", 100, "slow", fmt.Sprintf(`EXEC "%s"`, stub.URL))
+	seedOp(t, g.pu, "agent", 200, "think", `EXEC "ai://chat" WITH provider = "facts-backend", prompt = "hi"`)
+	seedOp(t, g.pu, "agent", 300, "refused", `EXEC "ai://chat" WITH provider = "no-such-provider", prompt = "hi"`)
+	seedOp(t, g.pu, "acme", 100, "dispatch", `EXEC "call://agent" WITH mode = "continuable", into = "_d", continue_after = "100ms", timeout = "10s"`)
+
+	const rid = "CbModel000000001"
+	resCh, end := g.run(context.Background(), rid, "acme/100")
+	rcid, _ := waitFor202(t, resCh)
+	end()
+	runID := resolveRunIDFromRcid(t, g.pu, rcid)
+	waitForRunCompleted(t, g.pu, runID)
+
+	callee := stepsOf(g.ended(t, continuation.ResumeTraceRID(runID, "acme/100")), "agent")
+	think := callee["think"]
+	if think.Model == nil {
+		t.Fatalf("no facts on the model step: %+v", think)
+	}
+	m := *think.Model
+	if m.Kind != "chat" || m.Provider != "facts-backend" || m.Model != "gpt-test" ||
+		m.TokensIn != 123 || m.TokensOut != 45 || m.LatencyMS != 67 || m.Retries != 1 {
+		t.Errorf("facts = %+v", m)
+	}
+	if think.Out == nil {
+		t.Errorf("the model call lost its body: %+v", think)
+	}
+	refused := callee["refused"]
+	if refused.Model == nil || refused.Model.Kind != "chat" || refused.Model.ErrorCode == "" {
+		t.Errorf("a refused call should still read as a model call: %+v", refused.Model)
+	}
+	if callee["slow"].Model != nil {
+		t.Errorf("a step that called no model has facts: %+v", callee["slow"].Model)
 	}
 }
 

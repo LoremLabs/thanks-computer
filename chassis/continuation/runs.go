@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
+	"github.com/loremlabs/thanks-computer/chassis/trace"
 	"github.com/mr-tron/base58"
 )
 
@@ -152,15 +153,35 @@ type OpTerminal struct {
 	// into the merged envelope's `_txc.fuel_used` so detached work bills
 	// exactly like sync work. 0 for worker callbacks and legacy docs.
 	FuelUsed int64 `json:"fuel_used,omitempty"`
+
+	// StartedAt, FinishedAt, Operation and Model are what the op's trace
+	// step needs, for a terminal the chassis ran itself. A worker's callback
+	// and older docs have none of them, and the step falls back to what was
+	// known: when the stage was suspended and when the terminal landed.
+	StartedAt  time.Time         `json:"started_at,omitzero"`
+	FinishedAt time.Time         `json:"finished_at,omitzero"`
+	Operation  string            `json:"operation,omitempty"`
+	Model      *trace.ModelFacts `json:"model,omitempty"`
 }
 
 // TerminalMeta carries the chassis-recorded provenance of a terminal:
-// which transport produced the payload and any detached fuel it charged.
-// The worker-callback endpoint passes the zero value — worker-posted bytes
-// must never carry a trusted transport label.
+// which transport produced the payload, any detached fuel it charged, and
+// what the op's trace step should say. The worker-callback endpoint passes the
+// zero value — worker-posted bytes must never carry a trusted transport label.
 type TerminalMeta struct {
-	Transport string
-	FuelUsed  int64
+	Transport  string
+	FuelUsed   int64
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Operation  string
+	Model      *trace.ModelFacts
+}
+
+// terminal is the doc for one result, before its bytes are stored.
+func (m TerminalMeta) terminal(status string) OpTerminal {
+	return OpTerminal{Status: status, RecordedAt: time.Now().UTC(),
+		Transport: m.Transport, FuelUsed: m.FuelUsed,
+		StartedAt: m.StartedAt, FinishedAt: m.FinishedAt, Operation: m.Operation, Model: m.Model}
 }
 
 // ---- key builders (logical, "/"-separated; store sanitizes segments) ------
@@ -427,8 +448,7 @@ func (r *Runs) RecordAccepted(ctx context.Context, runID, stage string, ordinal 
 // meta stamps the chassis-known provenance (see TerminalMeta); callers
 // recording worker-posted bytes pass the zero value.
 func (r *Runs) RecordTerminal(ctx context.Context, runID, stage string, ordinal int, op, status string, meta TerminalMeta, payload []byte) (recorded bool, err error) {
-	term := OpTerminal{Status: status, RecordedAt: time.Now().UTC(),
-		Transport: meta.Transport, FuelUsed: meta.FuelUsed}
+	term := meta.terminal(status)
 	switch status {
 	case "completed":
 		k := opOutputKey(runID, stage, ordinal, op)

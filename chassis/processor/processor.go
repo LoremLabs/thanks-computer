@@ -2705,14 +2705,20 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 		if stepTransport == "" {
 			stepTransport = "async"
 		}
+		// How long the op took, when whoever ran it could say. A worker's
+		// callback can't: all that is known is when it was waited on.
+		stepStart, stepFinish := ss.SuspendedAt, term.RecordedAt
+		if !term.StartedAt.IsZero() && !term.FinishedAt.IsZero() {
+			stepStart, stepFinish = term.StartedAt, term.FinishedAt
+		}
 		if term.Status == "failed" {
 			var eb []byte
 			if term.ErrorKey != "" {
 				eb, _ = pu.Runs.Get(ctx, term.ErrorKey)
 			}
 			trace.FromContext(ctx).Step(trace.StepInfo{
-				Stack: rStack, Scope: rScope, Name: e.Op, Transport: stepTransport,
-				Output: eb, StartedAt: ss.SuspendedAt, FinishedAt: term.RecordedAt,
+				Stack: rStack, Scope: rScope, Name: e.Op, Operation: term.Operation, Transport: stepTransport,
+				Output: eb, StartedAt: stepStart, FinishedAt: stepFinish, Model: term.Model,
 				Status: "error", Error: "op failed",
 			})
 			_ = pu.Runs.FailStage(ctx, runID, stage, "op-failed:"+e.Op)
@@ -2729,8 +2735,8 @@ func (pu *Unit) Resume(ctx context.Context, runID, stage string) error {
 			}
 		}
 		trace.FromContext(ctx).Step(trace.StepInfo{
-			Stack: rStack, Scope: rScope, Name: e.Op, Transport: stepTransport,
-			Output: ob, StartedAt: ss.SuspendedAt, FinishedAt: term.RecordedAt,
+			Stack: rStack, Scope: rScope, Name: e.Op, Operation: term.Operation, Transport: stepTransport,
+			Output: ob, StartedAt: stepStart, FinishedAt: stepFinish, Model: term.Model,
 			Status: "completed",
 		})
 		detachedFuel += term.FuelUsed
@@ -3082,6 +3088,7 @@ type execResult struct {
 	input      string
 	startedAt  time.Time
 	finishedAt time.Time
+	model      *trace.ModelFacts // set on a model call
 }
 
 // dispatch runs the op ONCE: fuel charge, OTel span, identity stamp,
@@ -3130,6 +3137,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 	var payload event.Payload
 	var err error = nil
 	var transport string
+	var model *trace.ModelFacts
 
 	// Caller-driven mock interception. If the inbound envelope set
 	// `_txc.mocks` to a list of glob patterns and this op's canonical
@@ -3198,8 +3206,10 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		// leak prevention, fuel accounting, and tracing — raw HTTP
 		// wouldn't enforce any of that. See chassis/chat and chassis/
 		// processor/aichat.go.
-		payload, err = pu.ExecAI(ctx, op)
+		aictx, note := withModelNote(ctx)
+		payload, err = pu.ExecAI(aictx, op)
 		transport = "ai"
+		model = note.facts(op.Resonator.Exec, payload)
 	case strings.HasPrefix(opName, "workspace://"):
 		// An owned, stateful execution environment (a directory on this
 		// host in dev; a fleet machine in production) addressed by name;
@@ -3307,6 +3317,7 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 		input:      op.Input,
 		startedAt:  execStart,
 		finishedAt: time.Now(),
+		model:      model,
 	}
 }
 
@@ -3330,6 +3341,7 @@ func (pu *Unit) recordStep(ctx context.Context, op operation.Operation, r execRe
 	info.Transport = r.transport
 	info.Txcl = op.Txcl
 	info.Input = []byte(r.input)
+	info.Model = r.model
 	if info.StartedAt.IsZero() {
 		info.StartedAt = r.startedAt
 	}

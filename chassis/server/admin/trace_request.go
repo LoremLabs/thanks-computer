@@ -157,6 +157,8 @@ type traceStep struct {
 	// BodyRef says this step's in and out are fetched alone, from
 	// /traces/requests/{rid}/body?ref=. Opaque to everything but the backend.
 	BodyRef string `json:"body_ref,omitempty"`
+	// Model is what a model call was, on a step that made one.
+	Model *trace.ModelFacts `json:"model,omitempty"`
 }
 
 // traceRdr returns the trace reader, lazily building it from config if
@@ -270,6 +272,7 @@ func (c *Controller) handleTraceRequest(w http.ResponseWriter, r *http.Request) 
 			Passes:          s.Passes,
 			StopReason:      s.StopReason,
 			BodyRef:         s.BodyRef,
+			Model:           s.Model,
 		})
 	}
 

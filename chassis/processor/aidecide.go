@@ -174,6 +174,15 @@ func (pu *Unit) materializeDecideSecrets(ctx context.Context, op *operation.Oper
 // Token counts are NOT charged to fuel — provider compute is a separate
 // dimension (the ai://embed convention).
 func emitDecideCompletionEvent(ctx context.Context, providerName, routing string, w decideWith, resp decide.Response, runErr error) {
+	facts := trace.ModelFacts{
+		Kind: aiSubOpDecide, Provider: providerName, Model: resp.Model, Routing: routing,
+		TokensIn: resp.InputTokens, TokensOut: resp.OutputTokens,
+		LatencyMS: resp.LatencyMS, Retries: resp.Retries,
+	}
+	if runErr != nil {
+		facts.ErrorCode = decideErrorCode(runErr)
+	}
+	noteModel(ctx, facts)
 	tr := trace.FromContext(ctx)
 	if tr == nil {
 		return

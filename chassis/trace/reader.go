@@ -68,6 +68,9 @@ type Step struct {
 	// but the reader that made it.
 	BodyRef string
 
+	// Model: set on a step that called a model.
+	Model *ModelFacts
+
 	// Passes / StopReason: set only for a step that repeated inside its
 	// dispatch (a LOOP clause); see StepInfo.
 	Passes     int

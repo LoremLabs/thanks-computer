@@ -139,6 +139,10 @@ type StepInfo struct {
 	InputBytes  int
 	OutputBytes int
 
+	// Model is what a model call was, on a step that made one. It rides the
+	// step, not an event, so it survives wherever a step's metadata does.
+	Model *ModelFacts
+
 	// Passes / StopReason describe an op that repeated inside its
 	// dispatch (a LOOP clause). The step spans every pass —
 	// StartedAt is the first dispatch, FinishedAt the last, Output the
@@ -147,6 +151,20 @@ type StepInfo struct {
 	// empty for an ordinary single-shot step.
 	Passes     int
 	StopReason string
+}
+
+// ModelFacts is one model call, as an operator reads it: never the prompt or
+// the answer, which are the step's bodies. Kind is chat, decide or embed.
+type ModelFacts struct {
+	Kind      string `json:"kind"`
+	Provider  string `json:"provider,omitempty"`
+	Model     string `json:"model,omitempty"`
+	TokensIn  int64  `json:"tokens_in,omitempty"`
+	TokensOut int64  `json:"tokens_out,omitempty"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+	Retries   int    `json:"retries,omitempty"`
+	Routing   string `json:"routing,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // TimelineEvent is a single line in timeline.jsonl. Event values are
