@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/svelte'
 import userEvent from '@testing-library/user-event'
 import TraceDetail from './TraceDetail.svelte'
+import * as api from '../lib/api'
 import { store, type TraceCachedEvent } from '../lib/store.svelte'
 
 const RID = 'CfdKKV8Cwk9P2Ac8TduDA'
@@ -76,5 +77,85 @@ describe('TraceDetail compute operations', () => {
         const links = screen.getAllByRole('link', { name: `compute://sha256/${DIGEST}` })
         expect(links).toHaveLength(1)
         expect(links[0]).toHaveAttribute('href', `#compute/_inspect/${DIGEST}`)
+    })
+})
+
+describe('TraceDetail, a run seen from its resume trace', () => {
+    const LONG = 'resume-run_x-loop_502'
+
+    function seedRun() {
+        store.state.stacks = []
+        store.cacheLiveTrace({
+            rid: LONG,
+            cursor: LONG,
+            stack: 'loop/502',
+            tags: { pony: 'eager.moss', run: 'run_abc' },
+            steps: [
+                { stack: 'pony-agent', scope: 600, name: 'decide', operation: 'cap://ai.chat', transport: 'cap', started_at: '2026-11-06T00:00:00.100Z' },
+                { stack: 'loop', scope: 7101, name: 'work', operation: 'ai://chat', transport: 'ai', started_at: '2026-11-06T00:00:00.200Z',
+                  model: { kind: 'chat', provider: 'openai', model: 'gpt-5.4', tokens_in: 13973, tokens_out: 33, latency_ms: 1948 }, body_ref: 'k#0-10', input_bytes: 100 },
+                { stack: 'loop', scope: 7103, name: 'judge', operation: 'ai://decide', transport: 'ai', started_at: '2026-11-06T00:00:00.300Z',
+                  model: { kind: 'decide', model: 'jev', tokens_in: 989, tokens_out: 101, retries: 1 } },
+                { stack: 'loop', scope: 7110, name: 'refused', operation: 'ai://chat', transport: 'ai', started_at: '2026-11-06T00:00:00.400Z',
+                  model: { kind: 'chat', error_code: 'txco_chat_no_key' } },
+                { stack: 'loop', scope: 7200, name: 'kept', operation: 'txco://kv/get', transport: 'txco', started_at: '2026-11-06T00:00:00.500Z',
+                  input_bytes: 2048, input_truncated: true, output_bytes: 10, output_truncated: true },
+                { stack: 'loop', scope: 7300, name: 'gone', operation: 'txco://kv/get', transport: 'txco', started_at: '2026-11-06T00:00:00.600Z', body_ref: 'k#10-10' },
+            ],
+        } as unknown as TraceCachedEvent)
+    }
+
+    it('names the run and adds up its model calls', () => {
+        seedRun()
+        render(TraceDetail, { props: { rid: LONG, onBack: vi.fn() } })
+        expect(screen.getByText('3 model calls,', { exact: false })).toBeInTheDocument()
+        expect(screen.getByText('14,962 → 134')).toBeInTheDocument()
+        expect(screen.getByText('eager.moss')).toBeInTheDocument()
+        expect(screen.getByText('gpt-5.4 13,973 → 33')).toBeInTheDocument()
+        expect(screen.getByText('txco_chat_no_key', { exact: false })).toBeInTheDocument()
+    })
+
+    it('shows only the model calls, numbered, and back', async () => {
+        seedRun()
+        const user = userEvent.setup()
+        render(TraceDetail, { props: { rid: LONG, onBack: vi.fn() } })
+        expect(screen.getByText('0600-decide')).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', { name: 'show model calls' }))
+        expect(screen.queryByText('0600-decide')).not.toBeInTheDocument()
+        expect(screen.getByText('7101-work')).toBeInTheDocument()
+        expect(screen.getByText('3.')).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', { name: 'show all steps' }))
+        expect(screen.getByText('0600-decide')).toBeInTheDocument()
+    })
+
+    it("fetches a step's bodies when it is opened, once", async () => {
+        seedRun()
+        const body = vi.spyOn(api, 'getTraceBody').mockResolvedValue({ in: { asked: 'what' }, out: { said: 'that' } })
+        const user = userEvent.setup()
+        render(TraceDetail, { props: { rid: LONG, onBack: vi.fn() } })
+
+        const row = screen.getByText('7101-work')
+        await user.click(row)
+        expect(body).toHaveBeenCalledWith(store.state.currentTenant, LONG, 'k#0-10')
+        expect(await screen.findByText(/asked/)).toBeInTheDocument()
+
+        await user.click(row)
+        await user.click(row)
+        expect(body).toHaveBeenCalledTimes(1)
+    })
+
+    it('says so when a body was not kept, and when it cannot be fetched', async () => {
+        seedRun()
+        vi.spyOn(api, 'getTraceBody').mockResolvedValue(null)
+        const user = userEvent.setup()
+        render(TraceDetail, { props: { rid: LONG, onBack: vi.fn() } })
+
+        await user.click(screen.getByText('7200-kept'))
+        expect(screen.getByText('not kept, 2.0 KB')).toBeInTheDocument()
+
+        await user.click(screen.getByText('7300-gone'))
+        expect((await screen.findAllByText('not available: this body was not stored')).length).toBe(2)
     })
 })

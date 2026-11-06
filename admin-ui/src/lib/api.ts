@@ -523,6 +523,22 @@ export interface TraceSummary {
     status?: string
     started_at?: string
     duration_ms?: number
+    // What the trace is about, in the stack's own words (WITH trace_tags).
+    tags?: Record<string, string>
+}
+
+// What a model call was. Never the prompt or the answer: those are the
+// step's in and out.
+export interface TraceModel {
+    kind: string
+    provider?: string
+    model?: string
+    tokens_in?: number
+    tokens_out?: number
+    latency_ms?: number
+    retries?: number
+    routing?: string
+    error_code?: string
 }
 
 export interface TraceStep {
@@ -549,6 +565,11 @@ export interface TraceStep {
     // Payloads are arbitrary JSON; UI treats them as opaque.
     in?: unknown
     out?: unknown
+    // Set when in and out are not in the document: getTraceBody fetches
+    // them, one step at a time. Opaque, and only ever handed back.
+    body_ref?: string
+    // Set on a step that called a model.
+    model?: TraceModel
 }
 
 export interface TraceListResponse {
@@ -577,6 +598,7 @@ export interface TraceResponse {
     // continuation run — cross-links to the originating request trace
     // and each per-stage resume trace.
     continuation?: TraceContinuation
+    tags?: Record<string, string>
 }
 
 export interface TraceContinuation {
@@ -613,6 +635,20 @@ function traceDetailPath(tenant: string, rid: string): string {
 // TXCO_TRACE_ARCHIVE writes a summary).
 export function traceRawUrl(tenant: string, rid: string): string {
     return traceDetailPath(tenant, rid)
+}
+
+// getTraceBody fetches one step's bodies, for a step that carries a body_ref.
+// null means they are not available: they were lost, or a run was interrupted
+// before they were written.
+export async function getTraceBody(
+    tenant: string,
+    rid: string,
+    ref: string,
+): Promise<{ in?: unknown; out?: unknown } | null> {
+    const base = tenant
+        ? `/v1/tenants/${encodeURIComponent(tenant)}/traces/requests/${encodeURIComponent(rid)}/body`
+        : `/traces/requests/${encodeURIComponent(rid)}/body`
+    return getJSON(`${base}?ref=${encodeURIComponent(ref)}`)
 }
 
 export async function listTraces(tenant: string, limit = 20): Promise<TraceSummary[]> {

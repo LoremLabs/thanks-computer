@@ -5,7 +5,8 @@
 // guards that fold + the latest-wins behaviour, and that the cached event
 // round-trips the fuel/bytes_out the live-stream wire now carries.
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import * as api from './api'
 import { store, type TraceCachedEvent } from './store.svelte'
 
 function ev(
@@ -45,5 +46,55 @@ describe('cacheLiveTrace folds op samples', () => {
         const c = store.getCachedTrace('rid-fuel')
         expect(c?.fuel).toBe(99)
         expect(c?.bytes_out).toBe(42)
+    })
+})
+
+// A long trace keeps its bodies out of its document, so its op has no sample
+// inline. The Sample tab must not go blank on the ops that matter most.
+describe('op samples from a trace whose bodies are not in its document', () => {
+    beforeEach(() => {
+        vi.restoreAllMocks()
+        for (const m of [store.state.lastInputs, store.state.lastOutputs, store.state.lastBodyRefs]) {
+            for (const k of Object.keys(m)) delete m[k]
+        }
+    })
+
+    const spilled = (rid: string) =>
+        ev(rid, [{ stack: 'loop', scope: 7101, name: 'work', duration_ms: 7, body_ref: `${rid}#0-9` }])
+
+    it('remembers where the sample is, and fetches it when asked, once', async () => {
+        const body = vi.spyOn(api, 'getTraceBody').mockResolvedValue({ in: { a: 1 }, out: { b: 2 } })
+        store.cacheLiveTrace(spilled('r1'))
+        expect(store.state.lastInputs['loop/7101/work']).toBeUndefined()
+
+        await store.loadOpSample('loop/7101/work')
+        expect(body).toHaveBeenCalledTimes(1)
+        expect(body.mock.calls[0].slice(1)).toEqual(['r1', 'r1#0-9'])
+        expect(store.state.lastInputs['loop/7101/work']).toEqual({ a: 1 })
+        expect(store.state.lastOutputs['loop/7101/work']).toEqual({ b: 2 })
+
+        await store.loadOpSample('loop/7101/work')
+        expect(body).toHaveBeenCalledTimes(1)
+    })
+
+    it('the newest trace wins, whichever kind it is', async () => {
+        const body = vi.spyOn(api, 'getTraceBody').mockResolvedValue({ in: { v: 'r2' } })
+        store.cacheLiveTrace(spilled('r1'))
+        store.cacheLiveTrace(spilled('r2'))
+        await store.loadOpSample('loop/7101/work')
+        expect(body.mock.calls[0].slice(1)).toEqual(['r2', 'r2#0-9'])
+
+        store.cacheLiveTrace(spilled('r3'))
+        store.cacheLiveTrace(ev('r4', [{ stack: 'loop', scope: 7101, name: 'work', in: { v: 'inline' } }]))
+        await store.loadOpSample('loop/7101/work')
+        expect(body).toHaveBeenCalledTimes(1)
+        expect(store.state.lastInputs['loop/7101/work']).toEqual({ v: 'inline' })
+    })
+
+    it('a body that cannot be fetched leaves the tab as it was', async () => {
+        vi.spyOn(api, 'getTraceBody').mockRejectedValue(new Error('r2 is down'))
+        store.cacheLiveTrace(spilled('r1'))
+        await store.loadOpSample('loop/7101/work')
+        expect(store.state.lastInputs['loop/7101/work']).toBeUndefined()
     })
 })

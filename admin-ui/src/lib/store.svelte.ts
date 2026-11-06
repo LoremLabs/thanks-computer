@@ -10,6 +10,7 @@ import {
     getDemoInfo,
     getSession,
     getTrace,
+    getTraceBody,
     getVersion,
     listSecrets,
     listStacks,
@@ -248,6 +249,9 @@ function createStore() {
         lastDurations: {} as Record<string, number>,
         lastInputs: {} as Record<string, unknown>,
         lastOutputs: {} as Record<string, unknown>,
+        // The latest sample of an op whose bodies are not in its trace's
+        // document. loadOpSample fetches it when someone opens the Sample tab.
+        lastBodyRefs: {} as Record<string, { rid: string; ref: string }>,
         stackLastDurations: {} as Record<string, number>,
         jsonCollapsed: readJsonCollapsed(),
         // Per-stack sidebar collapse overrides, persisted to
@@ -594,6 +598,7 @@ function createStore() {
             const nextDur: Record<string, number> = {}
             const nextIn: Record<string, unknown> = {}
             const nextOut: Record<string, unknown> = {}
+            const nextRefs: Record<string, { rid: string; ref: string }> = {}
             const nextStack: Record<string, number> = {}
             for (const t of traces) {
                 if (!t?.steps) continue
@@ -609,6 +614,9 @@ function createStore() {
                     if (!(id in nextOut) && step.out !== undefined) {
                         nextOut[id] = step.out
                     }
+                    if (!(id in nextIn) && !(id in nextRefs) && step.body_ref) {
+                        nextRefs[id] = { rid: t.rid, ref: step.body_ref }
+                    }
                     if (!byStack.has(step.stack)) byStack.set(step.stack, [])
                     byStack.get(step.stack)!.push(step)
                 }
@@ -619,6 +627,7 @@ function createStore() {
             state.lastDurations = nextDur
             state.lastInputs = nextIn
             state.lastOutputs = nextOut
+            state.lastBodyRefs = nextRefs
             state.stackLastDurations = nextStack
         } catch {
             // best-effort
@@ -1444,12 +1453,30 @@ function createStore() {
             }
             if (step.in !== undefined) state.lastInputs[id] = step.in
             if (step.out !== undefined) state.lastOutputs[id] = step.out
+            if (step.body_ref) {
+                state.lastBodyRefs[id] = { rid: ev.rid, ref: step.body_ref }
+            } else if (step.in !== undefined || step.out !== undefined) {
+                delete state.lastBodyRefs[id]
+            }
             if (!byStack.has(step.stack)) byStack.set(step.stack, [])
             byStack.get(step.stack)!.push(step)
         }
         for (const [s, ss] of byStack) {
             state.stackLastDurations[s] = stackWallclockMs(ss)
         }
+    }
+
+    // loadOpSample fetches an op's latest sample when its bodies are not in its
+    // trace's document. Once: an op's Sample tab opens many times, and a body
+    // that could not be fetched will not appear on the next look.
+    async function loadOpSample(id: string) {
+        const at = state.lastBodyRefs[id]
+        if (!at) return
+        delete state.lastBodyRefs[id]
+        const body = await getTraceBody(state.currentTenant, at.rid, at.ref).catch(() => null)
+        if (!body) return
+        if (body.in !== undefined && body.in !== null) state.lastInputs[id] = body.in
+        if (body.out !== undefined && body.out !== null) state.lastOutputs[id] = body.out
     }
 
     function getCachedTrace(rid: string): TraceCachedEvent | undefined {
@@ -1486,6 +1513,7 @@ function createStore() {
         ensureDiff,
         ensureVersionLoaded,
         getCachedTrace,
+        loadOpSample,
         loadAuthedData,
         patchDraftFile,
         patchMockFile,

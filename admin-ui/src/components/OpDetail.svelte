@@ -1,7 +1,7 @@
 <script lang="ts">
     import { store } from '../lib/store.svelte'
     import { mockReqPath, mockResPath, fileForOp } from '../lib/version_adapter'
-    import type { Op } from '../lib/types'
+    import { opId, type Op } from '../lib/types'
     import type { ValidateError } from '../lib/api'
     import JsonEditor from './JsonEditor.svelte'
     import JsonPre from './JsonPre.svelte'
@@ -41,6 +41,12 @@
     // component instance survives prop changes, so plain $state is
     // enough; no need to lift this to the store.
     let active = $state(TABS[0])
+
+    // A long trace keeps its bodies out of its document, so an op's sample may
+    // have to be fetched. Only when somebody looks.
+    $effect(() => {
+        if (op && active === 'Sample') store.loadOpSample(opId(op))
+    })
 
     // Last validation result for the focused version. Drives the
     // per-file inline error panels under each editor.

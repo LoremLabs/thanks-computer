@@ -48,6 +48,7 @@ export interface TraceStreamEvent {
     steps?: unknown[]
     in?: unknown
     out?: unknown
+    tags?: Record<string, string>
     cursor: string
 }
 

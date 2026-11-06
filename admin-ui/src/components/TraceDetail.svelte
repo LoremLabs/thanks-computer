@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { COMPUTE_REF, getTrace, traceRawUrl, type TraceResponse, type TraceStep } from '../lib/api'
+    import { COMPUTE_REF, getTrace, getTraceBody, traceRawUrl, type TraceResponse, type TraceStep } from '../lib/api'
     import { store } from '../lib/store.svelte'
     import Ago from './Ago.svelte'
     import CopyButton from './CopyButton.svelte'
@@ -27,6 +27,10 @@
     let loading = $state(true)
     let error = $state('')
     let expandedStep = $state<Record<string, boolean>>({})
+    // A step's bodies when they are not in the document, by step key.
+    let fetched = $state<Record<string, { in?: unknown; out?: unknown }>>({})
+    let fetching = $state<Record<string, 'loading' | 'unavailable'>>({})
+    let modelCallsOnly = $state(false)
 
     // Fetch when rid changes. Prefer the live-trace cache (populated
     // by TracesList as events arrive over /traces/stream) — this
@@ -38,6 +42,8 @@
         const target = rid
         loading = true
         error = ''
+        fetched = {}
+        fetching = {}
         const cached = store.getCachedTrace(target)
         if (cached) {
             trace = cached as unknown as TraceResponse
@@ -164,12 +170,47 @@
         return `${i}:${stepLabel(s)}`
     }
 
-    function toggleStep(key: string) {
+    function toggleStep(key: string, s: TraceStep) {
         if (expandedStep[key]) {
             delete expandedStep[key]
         } else {
             expandedStep[key] = true
+            loadBody(key, s)
         }
+    }
+
+    // A long trace keeps its bodies out of its document: fetch a step's when
+    // it is opened, once.
+    async function loadBody(key: string, s: TraceStep) {
+        if (!s.body_ref || s.in !== undefined || s.out !== undefined || fetched[key] || fetching[key]) return
+        const target = rid
+        fetching[key] = 'loading'
+        const body = await getTraceBody(store.state.currentTenant, target, s.body_ref).catch(() => null)
+        if (target !== rid) return
+        if (body) {
+            fetched[key] = { in: body.in ?? undefined, out: body.out ?? undefined }
+            delete fetching[key]
+        } else {
+            fetching[key] = 'unavailable'
+        }
+    }
+
+    function bodyLabel(key: string, s: TraceStep, side: 'in' | 'out'): string {
+        const state = fetching[key]
+        if (state === 'loading') return 'loading…'
+        if (state === 'unavailable') return 'not available: this body was not stored'
+        const [cut, n] = side === 'in' ? [s.input_truncated, s.input_bytes] : [s.output_truncated, s.output_bytes]
+        if (cut) return `not kept, ${formatBytes(n)}`
+        return side === 'in' ? 'no input recorded' : 'no output recorded'
+    }
+
+    function modelLine(s: TraceStep): string {
+        const m = s.model
+        if (!m) return ''
+        const name = m.model || m.kind
+        if (m.error_code) return `${name} ${m.error_code}`
+        const n = (v?: number) => (v ?? 0).toLocaleString()
+        return m.kind === 'embed' ? `${name} ${n(m.tokens_in)}` : `${name} ${n(m.tokens_in)} → ${n(m.tokens_out)}`
     }
 
     // Display steps in true execution order (started_at) rather than
@@ -181,6 +222,18 @@
         return s.started_at ? Date.parse(s.started_at) : 0
     }
     const orderedSteps = $derived((trace?.steps ?? []).slice().sort((a, b) => stepStart(a) - stepStart(b)))
+    const modelCalls = $derived(orderedSteps.filter((s) => s.model))
+    const modelTotals = $derived(
+        modelCalls.reduce(
+            (sum, s) => ({ in: sum.in + (s.model?.tokens_in ?? 0), out: sum.out + (s.model?.tokens_out ?? 0) }),
+            { in: 0, out: 0 },
+        ),
+    )
+    // A step keeps its key, and so its open row and fetched bodies, whichever
+    // way the table is filtered.
+    const rows = $derived(
+        orderedSteps.map((s, i) => ({ s, i })).filter(({ s }) => !modelCallsOnly || s.model),
+    )
 
     const rawUrl = $derived(traceRawUrl(store.state.currentTenant, rid))
     // Capture into locally-named refs so the template doesn't have to
@@ -261,6 +314,14 @@
                         {trace.status ?? '—'}
                     </span>
                 </span>
+                {#if trace.tags && Object.keys(trace.tags).length}
+                    <span class="text-neutral-500">tags</span>
+                    <span class="flex flex-wrap gap-1.5 font-mono text-neutral-800">
+                        {#each Object.entries(trace.tags).sort() as [k, v]}
+                            <span><span class="text-neutral-400">{k}=</span>{v}</span>
+                        {/each}
+                    </span>
+                {/if}
             </div>
         </section>
 
@@ -306,6 +367,21 @@
             </section>
         {/if}
 
+        {#if modelCalls.length}
+            <div class="mb-2 flex items-center gap-3 text-xs text-neutral-600">
+                <span>
+                    {modelCalls.length} model {modelCalls.length === 1 ? 'call' : 'calls'},
+                    <span class="font-mono">{modelTotals.in.toLocaleString()} → {modelTotals.out.toLocaleString()}</span> tokens
+                </span>
+                <button
+                    type="button"
+                    class="rounded border border-neutral-300 bg-white px-2 py-0.5 text-neutral-700 hover:bg-neutral-50"
+                    aria-pressed={modelCallsOnly}
+                    onclick={() => (modelCallsOnly = !modelCallsOnly)}
+                >{modelCallsOnly ? 'show all steps' : 'show model calls'}</button>
+            </div>
+        {/if}
+
         <section class="overflow-auto rounded border border-neutral-200 bg-white">
             <table class="w-full text-sm">
                 <thead class="border-b border-neutral-200 bg-neutral-50 text-left text-xs uppercase tracking-wide text-neutral-500">
@@ -325,19 +401,20 @@
                             </td>
                         </tr>
                     {:else}
-                        {#each orderedSteps as s, i (stepKey(s, i))}
+                        {#each rows as { s, i }, n (stepKey(s, i))}
                             {@const key = stepKey(s, i)}
                             {@const expanded = !!expandedStep[key]}
                             {@const tone = stackTone(s.stack)}
-                            {@const prevStack = i > 0 ? stripScope((orderedSteps)[i - 1].stack ?? '') : ''}
+                            {@const prevStack = n > 0 ? stripScope(rows[n - 1].s.stack ?? '') : ''}
                             {@const curStack = stripScope(s.stack ?? '')}
-                            {@const stackChanged = i > 0 && prevStack !== curStack}
+                            {@const stackChanged = n > 0 && prevStack !== curStack}
                             {@const opHref = stepOpHref(s)}
                             {@const computeHref = stepComputeHref(s)}
+                            {@const body = fetched[key]}
                             <tr class="cursor-pointer border-l-4 hover:bg-neutral-50 {tone.border} {stackChanged ? 'border-t-2 border-t-neutral-300' : ''}"
-                                onclick={() => toggleStep(key)}>
+                                onclick={() => toggleStep(key, s)}>
                                 <td class="px-3 py-2 align-top font-mono text-xs text-neutral-700">
-                                    <span class="mr-1 inline-block w-3 text-neutral-400 transition-transform {expanded ? 'rotate-90' : ''}">▶</span>{#if opHref}<a
+                                    {#if modelCallsOnly}<span class="mr-1 text-neutral-400">{n + 1}.</span>{/if}<span class="mr-1 inline-block w-3 text-neutral-400 transition-transform {expanded ? 'rotate-90' : ''}">▶</span>{#if opHref}<a
                                         href={opHref}
                                         class="underline-offset-2 hover:text-neutral-900 hover:underline"
                                         title="open {opHref.slice('#ops/'.length)}"
@@ -361,6 +438,12 @@
                                         title="open {opHref.slice('#ops/'.length)}"
                                         onclick={(e) => e.stopPropagation()}
                                     >{s.operation}</a>{:else}{s.operation ?? '—'}{/if}
+                                    {#if s.model}
+                                        <span class="ml-2 rounded px-1.5 py-0.5 text-[10px] font-medium {s.model.error_code ? 'bg-red-100 text-red-800' : 'bg-brand-cyan/15 text-neutral-700'}"
+                                              title="{s.model.provider ?? ''} {s.model.latency_ms ?? 0} ms{s.model.retries ? `, ${s.model.retries} retries` : ''}">
+                                            {modelLine(s)}{#if s.model.retries} ×{s.model.retries + 1}{/if}
+                                        </span>
+                                    {/if}
                                 </td>
                                 <td class="px-3 py-2 align-top">
                                     <span class="rounded px-1.5 py-0.5 text-[10px] font-medium {transportBadgeClass(s.transport)}">
@@ -392,13 +475,13 @@
                                             <section class="flex min-w-0 flex-col">
                                                 <div class="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">in</div>
                                                 <div class="min-w-0">
-                                                    <JsonPre value={s.in} emptyLabel="no input recorded" />
+                                                    <JsonPre value={s.in ?? body?.in} emptyLabel={bodyLabel(key, s, 'in')} />
                                                 </div>
                                             </section>
                                             <section class="flex min-w-0 flex-col">
                                                 <div class="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">out</div>
                                                 <div class="min-w-0">
-                                                    <JsonPre value={s.out} emptyLabel="no output recorded" />
+                                                    <JsonPre value={s.out ?? body?.out} emptyLabel={bodyLabel(key, s, 'out')} />
                                                 </div>
                                             </section>
                                         </div>

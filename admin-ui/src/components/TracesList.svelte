@@ -164,6 +164,7 @@
             status: ev.status,
             started_at: ev.started_at,
             duration_ms: ev.duration_ms,
+            tags: ev.tags,
         }
     }
 
@@ -322,6 +323,9 @@
                             </td>
                             <td class="px-3 py-2 align-top font-mono text-xs text-neutral-800">
                                 {routeOf(t)}
+                                {#each Object.entries(t.tags ?? {}).sort() as [k, v]}
+                                    <span class="ml-1.5 rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-600" title="{k}={v}">{v}</span>
+                                {/each}
                             </td>
                             <td class="px-3 py-2 align-top">
                                 <div class="relative h-3.5 w-32 rounded bg-neutral-200">
