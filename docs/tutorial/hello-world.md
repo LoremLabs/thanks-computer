@@ -20,7 +20,7 @@ Same package, same rules — just no account and a local URL.
 ## 1. Install the CLI
 
 ```sh
-brew tap loremlabs/txco && brew install txco
+brew install loremlabs/txco/txco
 ```
 
 or

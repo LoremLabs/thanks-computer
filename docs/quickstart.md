@@ -10,7 +10,7 @@ Let's see one running.
 ## 1. Install
 
 ```sh
-brew tap loremlabs/txco && brew install txco
+brew install loremlabs/txco/txco
 ```
 
 or
