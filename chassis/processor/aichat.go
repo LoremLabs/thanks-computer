@@ -152,6 +152,7 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 		Model:    withCfg.model,
 		Limits:   withCfg.limits,
 		Intent:   withCfg.intent,
+		CacheKey: withCfg.cacheKey,
 	}
 
 	resp, runErr := backend.Run(ctx, req, &op.Secrets)
@@ -219,6 +220,7 @@ type chatWith struct {
 	model       string
 	provider    string
 	intent      string
+	cacheKey    string // WITH cache_key = "..." → Request.CacheKey (provider prompt cache)
 	limits      chat.Limits
 	debug       bool // WITH debug = true → stamp _txc_op_debug; chassis surfaces to trace
 }
@@ -240,7 +242,7 @@ func decodeChatWith(meta string) (chatWith, error) {
 	f := gjson.GetMany(meta,
 		"prompt", "system", "messages", "schema", "model",
 		"provider", "intent", "limits.timeout_ms", "limits.max_cost_usd",
-		"debug")
+		"debug", "cache_key")
 
 	if r := f[0]; r.Exists() {
 		out.prompt = r.String()
@@ -276,6 +278,9 @@ func decodeChatWith(meta string) (chatWith, error) {
 	}
 	if r := f[9]; r.Exists() {
 		out.debug = r.Bool()
+	}
+	if r := f[10]; r.Exists() {
+		out.cacheKey = r.String()
 	}
 
 	// XOR validation: exactly one of prompt / messages must be present.
@@ -404,6 +409,7 @@ func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat
 	facts := trace.ModelFacts{
 		Kind: aiSubOpChat, Provider: providerName, Model: resp.Model, Routing: routing,
 		TokensIn: resp.TokensIn, TokensOut: resp.TokensOut,
+		TokensCached: resp.TokensCached, TokensReasoning: resp.TokensReasoning,
 		LatencyMS: resp.LatencyMS, Retries: resp.Retries,
 	}
 	if runErr != nil {
@@ -423,6 +429,8 @@ func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat
 		"routing_decision": routing,
 		"tokens_in":        resp.TokensIn,
 		"tokens_out":       resp.TokensOut,
+		"tokens_cached":    resp.TokensCached,
+		"tokens_reasoning": resp.TokensReasoning,
 		"latency_ms":       resp.LatencyMS,
 		"retries":          resp.Retries,
 	}
@@ -453,7 +461,7 @@ func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat
 //	  "_txc": {
 //	    "chat": {
 //	      "provider", "model",
-//	      "tokens": {"in", "out"},
+//	      "tokens": {"in", "out", "cached", "reasoning"},
 //	      "latency_ms", "retries",
 //	      "routing_decision", "schema_validation"
 //	    }
@@ -486,6 +494,8 @@ func buildChatResponseEnvelope(resp chat.Response, runErr error, schemaStatus st
 	b.Set("_txc.chat.model", resp.Model)
 	b.Set("_txc.chat.tokens.in", resp.TokensIn)
 	b.Set("_txc.chat.tokens.out", resp.TokensOut)
+	b.Set("_txc.chat.tokens.cached", resp.TokensCached)
+	b.Set("_txc.chat.tokens.reasoning", resp.TokensReasoning)
 	b.Set("_txc.chat.latency_ms", resp.LatencyMS)
 	b.Set("_txc.chat.retries", resp.Retries)
 	if routing != "" {

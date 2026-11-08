@@ -87,6 +87,11 @@ func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.Secret
 	if jsonMode(req) {
 		outbound["response_format"] = map[string]string{"type": "json_object"}
 	}
+	if req.CacheKey != "" {
+		// OpenAI routes same-key requests to the same cache; omitted when
+		// unset so the body stays byte-identical to before.
+		outbound["prompt_cache_key"] = req.CacheKey
+	}
 	bodyBytes, err := json.Marshal(outbound)
 	if err != nil {
 		return chat.Response{}, fmt.Errorf("openai: marshal request: %w", err)
@@ -193,8 +198,14 @@ func parseOpenAICompatResponse(body []byte, provider, model string, latencyMS in
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
+			PromptTokens        int64 `json:"prompt_tokens"`
+			CompletionTokens    int64 `json:"completion_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails struct {
+				ReasoningTokens int64 `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -202,12 +213,14 @@ func parseOpenAICompatResponse(body []byte, provider, model string, latencyMS in
 	}
 
 	out := chat.Response{
-		Provider:  provider,
-		Model:     raw.Model, // prefer the provider's echo (the resolved model)
-		TokensIn:  raw.Usage.PromptTokens,
-		TokensOut: raw.Usage.CompletionTokens,
-		LatencyMS: latencyMS,
-		Retries:   retries,
+		Provider:        provider,
+		Model:           raw.Model, // prefer the provider's echo (the resolved model)
+		TokensIn:        raw.Usage.PromptTokens,
+		TokensOut:       raw.Usage.CompletionTokens,
+		TokensCached:    raw.Usage.PromptTokensDetails.CachedTokens,
+		TokensReasoning: raw.Usage.CompletionTokensDetails.ReasoningTokens,
+		LatencyMS:       latencyMS,
+		Retries:         retries,
 	}
 	if out.Model == "" {
 		out.Model = model

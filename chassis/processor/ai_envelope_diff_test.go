@@ -35,6 +35,8 @@ func buildChatResponseEnvelopeFrozen(resp chat.Response, runErr error, schemaSta
 	raw, _ = sjson.Set(raw, "_txc.chat.model", resp.Model)
 	raw, _ = sjson.Set(raw, "_txc.chat.tokens.in", resp.TokensIn)
 	raw, _ = sjson.Set(raw, "_txc.chat.tokens.out", resp.TokensOut)
+	raw, _ = sjson.Set(raw, "_txc.chat.tokens.cached", resp.TokensCached)
+	raw, _ = sjson.Set(raw, "_txc.chat.tokens.reasoning", resp.TokensReasoning)
 	raw, _ = sjson.Set(raw, "_txc.chat.latency_ms", resp.LatencyMS)
 	raw, _ = sjson.Set(raw, "_txc.chat.retries", resp.Retries)
 	if routing != "" {
@@ -81,6 +83,7 @@ func TestChatEnvelopeMatchesFrozen(t *testing.T) {
 		{},
 		{Text: "hello <world> é🎈", Provider: "openrouter", Model: "gpt-5.4-mini", TokensIn: 120, TokensOut: 48, LatencyMS: 900, Retries: 1},
 		{Text: `line"quote\`, Provider: "openai", Model: "m", LatencyMS: 0},
+		{Text: "cached", Provider: "openai", Model: "gpt-5-mini", TokensIn: 1200, TokensOut: 80, TokensCached: 1024, TokensReasoning: 64},
 	}
 	errs := []error{nil, errors.New("boom"), &chat.SchemaFailedError{Reason: "nope"}}
 	payloads := []json.RawMessage{nil, json.RawMessage(`{"k":1}`)}

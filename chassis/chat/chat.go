@@ -123,6 +123,13 @@ type Request struct {
 	// Intent is a trace-only label authors can stamp for diagnosability
 	// (e.g. "classify_support_ticket"). Not sent on the wire.
 	Intent string `json:"intent,omitempty"`
+
+	// CacheKey, when set, is handed to providers that take a prompt cache
+	// key (OpenAI's `prompt_cache_key`), so calls from one run that share
+	// a prefix land in the same provider-side cache. Optional; a backend
+	// whose provider has no such field ignores it. Never read by the
+	// chassis itself.
+	CacheKey string `json:"cache_key,omitempty"`
 }
 
 // Message is one turn in the conversation. JSON shapes match the
@@ -165,6 +172,15 @@ type Response struct {
 	// package godoc).
 	TokensIn  int64 `json:"tokens_in"`
 	TokensOut int64 `json:"tokens_out"`
+
+	// TokensCached is the part of TokensIn the provider served from its
+	// prefix cache; TokensReasoning is the part of TokensOut a reasoning
+	// model spent thinking before it answered. Both are observability
+	// only, zero when the provider does not report them, and NEVER
+	// charged to the chassis fuel meter (same rationale as TokensIn /
+	// TokensOut).
+	TokensCached    int64 `json:"tokens_cached"`
+	TokensReasoning int64 `json:"tokens_reasoning"`
 
 	// LatencyMS is wall-clock from request build to response parse.
 	LatencyMS int64 `json:"latency_ms"`

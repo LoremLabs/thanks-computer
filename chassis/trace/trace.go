@@ -166,10 +166,14 @@ type ModelFacts struct {
 	Model     string `json:"model,omitempty"`
 	TokensIn  int64  `json:"tokens_in,omitempty"`
 	TokensOut int64  `json:"tokens_out,omitempty"`
-	LatencyMS int64  `json:"latency_ms,omitempty"`
-	Retries   int    `json:"retries,omitempty"`
-	Routing   string `json:"routing,omitempty"`
-	ErrorCode string `json:"error_code,omitempty"`
+	// TokensCached / TokensReasoning are the provider's prefix-cache hits
+	// and reasoning spend, when it reports them. Observability only.
+	TokensCached    int64  `json:"tokens_cached,omitempty"`
+	TokensReasoning int64  `json:"tokens_reasoning,omitempty"`
+	LatencyMS       int64  `json:"latency_ms,omitempty"`
+	Retries         int    `json:"retries,omitempty"`
+	Routing         string `json:"routing,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
 }
 
 // TimelineEvent is a single line in timeline.jsonl. Event values are

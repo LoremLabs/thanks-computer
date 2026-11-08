@@ -317,3 +317,73 @@ func TestOpenRouterRegistersUnderName(t *testing.T) {
 		t.Errorf("RequiredSecrets = %v, want [OPENROUTER_KEY]", got)
 	}
 }
+
+// --- usage details (cached / reasoning tokens) ---
+
+// A body that carries prompt_tokens_details / completion_tokens_details
+// fills TokensCached / TokensReasoning; one without them leaves both zero
+// (TestOpenRouterHappyPath covers the plain usage shape end to end).
+func TestOpenRouterParseUsageDetails(t *testing.T) {
+	cases := []struct {
+		name                 string
+		body                 string
+		wantCached, wantReas int64
+	}{
+		{
+			"both details blocks",
+			`{"model":"openai/gpt-5-mini","choices":[{"message":{"content":"hi"}}],
+			  "usage":{"prompt_tokens":1200,"completion_tokens":80,
+			    "prompt_tokens_details":{"cached_tokens":1024},
+			    "completion_tokens_details":{"reasoning_tokens":64}}}`,
+			1024, 64,
+		},
+		{
+			"no details blocks",
+			`{"model":"openai/gpt-4o-mini","choices":[{"message":{"content":"hi"}}],
+			  "usage":{"prompt_tokens":12,"completion_tokens":5}}`,
+			0, 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := parseOpenAICompatResponse([]byte(tc.body), "openrouter", "m", 1, 0)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if resp.TokensCached != tc.wantCached || resp.TokensReasoning != tc.wantReas {
+				t.Errorf("cached/reasoning = (%d, %d), want (%d, %d)",
+					resp.TokensCached, resp.TokensReasoning, tc.wantCached, tc.wantReas)
+			}
+		})
+	}
+}
+
+// OpenRouter does not take prompt_cache_key, so the body never carries it —
+// with or without a Request.CacheKey (see the comment at the outbound map).
+func TestOpenRouterNeverSendsPromptCacheKey(t *testing.T) {
+	for _, key := range []string{"", "run-abc123"} {
+		t.Run("key="+key, func(t *testing.T) {
+			var capturedBody []byte
+			client, _, _ := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+				capturedBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			})
+			b := newBackend(t, client)
+			_, err := b.Run(context.Background(), chat.Request{
+				Messages: []chat.Message{{Role: "user", Content: "hello"}},
+				CacheKey: key,
+			}, newBag(t, "sk-or-test"))
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			var sent map[string]json.RawMessage
+			if err := json.Unmarshal(capturedBody, &sent); err != nil {
+				t.Fatalf("outbound body: %v", err)
+			}
+			if _, present := sent["prompt_cache_key"]; present {
+				t.Errorf("prompt_cache_key must not be sent to openrouter: %s", capturedBody)
+			}
+		})
+	}
+}

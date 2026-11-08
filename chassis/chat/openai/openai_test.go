@@ -114,3 +114,81 @@ func TestJSONModeForASchemaCall(t *testing.T) {
 		})
 	}
 }
+
+// Usage details: a body that carries prompt_tokens_details /
+// completion_tokens_details fills TokensCached / TokensReasoning; a body
+// without them (every pre-reasoning provider) leaves both zero.
+func TestParseUsageDetails(t *testing.T) {
+	cases := []struct {
+		name                 string
+		body                 string
+		wantIn, wantOut      int64
+		wantCached, wantReas int64
+	}{
+		{
+			"both details blocks",
+			`{"model":"gpt-5-mini","choices":[{"message":{"content":"hi"}}],
+			  "usage":{"prompt_tokens":1200,"completion_tokens":80,
+			    "prompt_tokens_details":{"cached_tokens":1024},
+			    "completion_tokens_details":{"reasoning_tokens":64}}}`,
+			1200, 80, 1024, 64,
+		},
+		{
+			"no details blocks",
+			`{"model":"gpt-4o-mini","choices":[{"message":{"content":"hi"}}],
+			  "usage":{"prompt_tokens":12,"completion_tokens":5}}`,
+			12, 5, 0, 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := parseOpenAICompatResponse([]byte(tc.body), "openai", "m", 1, 0)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if resp.TokensIn != tc.wantIn || resp.TokensOut != tc.wantOut {
+				t.Errorf("tokens = (%d, %d), want (%d, %d)", resp.TokensIn, resp.TokensOut, tc.wantIn, tc.wantOut)
+			}
+			if resp.TokensCached != tc.wantCached || resp.TokensReasoning != tc.wantReas {
+				t.Errorf("cached/reasoning = (%d, %d), want (%d, %d)",
+					resp.TokensCached, resp.TokensReasoning, tc.wantCached, tc.wantReas)
+			}
+		})
+	}
+}
+
+// prompt_cache_key rides the outbound body only when Request.CacheKey is set.
+func TestPromptCacheKeyOnlyWhenSet(t *testing.T) {
+	for _, key := range []string{"", "run-abc123"} {
+		t.Run("key="+key, func(t *testing.T) {
+			rt := &captureTransport{}
+			b, err := chat.Open("openai", chat.Config{HTTPClient: &http.Client{Transport: rt}})
+			if err != nil {
+				t.Fatalf("open openai: %v", err)
+			}
+			bag := &secrets.SecretBag{}
+			bag.Set("OPENAI_KEY", []byte("sk-test"))
+			_, err = b.Run(context.Background(), chat.Request{
+				Messages: []chat.Message{{Role: "user", Content: "hello"}},
+				CacheKey: key,
+			}, bag)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			var sent map[string]json.RawMessage
+			if err := json.Unmarshal(rt.body, &sent); err != nil {
+				t.Fatalf("outbound body: %v", err)
+			}
+			got, present := sent["prompt_cache_key"]
+			if key == "" {
+				if present {
+					t.Errorf("prompt_cache_key sent without a CacheKey: %s", rt.body)
+				}
+				return
+			}
+			if !present || string(got) != `"`+key+`"` {
+				t.Errorf("prompt_cache_key = %s, want %q (body %s)", got, key, rt.body)
+			}
+		})
+	}
+}

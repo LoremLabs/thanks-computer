@@ -33,11 +33,12 @@ type testBackend struct {
 	calls        int32
 	sawKey       string
 	sawMessages  []chat.Message
+	sawCacheKey  string
 	mu           sync.Mutex
 }
 
-func (b *testBackend) Name() string             { return b.name }
-func (b *testBackend) Capabilities() []string   { return b.capabilities }
+func (b *testBackend) Name() string              { return b.name }
+func (b *testBackend) Capabilities() []string    { return b.capabilities }
 func (b *testBackend) RequiredSecrets() []string { return b.required }
 
 func (b *testBackend) Run(ctx context.Context, req chat.Request, bag *secrets.SecretBag) (chat.Response, error) {
@@ -49,6 +50,7 @@ func (b *testBackend) Run(ctx context.Context, req chat.Request, bag *secrets.Se
 		}
 	}
 	b.sawMessages = append([]chat.Message(nil), req.Messages...)
+	b.sawCacheKey = req.CacheKey
 	b.mu.Unlock()
 	return b.resp, b.err
 }
@@ -714,4 +716,75 @@ func TestExecAIMocksPatternInterceptsBeforeBackend(t *testing.T) {
 	default:
 		t.Fatal("no response on resCh")
 	}
+}
+
+// --- cached / reasoning tokens reach the envelope and the trace facts ---
+
+// The envelope always carries _txc.chat.tokens.cached / .reasoning (zero when
+// the provider reports neither), and the step's model facts carry them when
+// non-zero. WITH cache_key reaches Request.CacheKey.
+func TestExecAIRecordsCachedAndReasoningTokens(t *testing.T) {
+	resetChatRegistry(t)
+
+	t.Run("reported", func(t *testing.T) {
+		stub := &testBackend{
+			required: []string{"OPENROUTER_KEY"},
+			resp: chat.Response{
+				Text: "ok", Provider: "tb-cache", Model: "m",
+				TokensIn: 1200, TokensOut: 80, TokensCached: 1024, TokensReasoning: 64,
+			},
+		}
+		withTestBackend(t, "tb-cache", stub)
+
+		pu, _ := newTestUnit(t)
+		pu.Conf.AIChatEnvFallback = true
+		t.Setenv("OPENROUTER_KEY", "k")
+
+		ctx, note := withModelNote(context.Background())
+		op := aiChatOp(`{"prompt":"x","provider":"tb-cache","cache_key":"run-abc"}`, `{}`)
+		pl, err := pu.ExecAI(ctx, op)
+		if err != nil {
+			t.Fatalf("ExecAI: %v", err)
+		}
+		if got := gjson.Get(pl.Raw, `_txc.chat.tokens.cached`).Int(); got != 1024 {
+			t.Errorf("_txc.chat.tokens.cached = %d, want 1024", got)
+		}
+		if got := gjson.Get(pl.Raw, `_txc.chat.tokens.reasoning`).Int(); got != 64 {
+			t.Errorf("_txc.chat.tokens.reasoning = %d, want 64", got)
+		}
+		if stub.sawCacheKey != "run-abc" {
+			t.Errorf("Request.CacheKey = %q, want run-abc", stub.sawCacheKey)
+		}
+		facts := note.facts("ai://chat", pl)
+		if facts.TokensCached != 1024 || facts.TokensReasoning != 64 {
+			t.Errorf("trace facts cached/reasoning = (%d, %d), want (1024, 64)", facts.TokensCached, facts.TokensReasoning)
+		}
+	})
+
+	t.Run("not reported", func(t *testing.T) {
+		stub := &testBackend{
+			required: []string{"OPENROUTER_KEY"},
+			resp:     chat.Response{Text: "ok", Provider: "tb-nocache", Model: "m", TokensIn: 12, TokensOut: 5},
+		}
+		withTestBackend(t, "tb-nocache", stub)
+
+		pu, _ := newTestUnit(t)
+		pu.Conf.AIChatEnvFallback = true
+		t.Setenv("OPENROUTER_KEY", "k")
+
+		op := aiChatOp(`{"prompt":"x","provider":"tb-nocache"}`, `{}`)
+		pl, err := pu.ExecAI(context.Background(), op)
+		if err != nil {
+			t.Fatalf("ExecAI: %v", err)
+		}
+		for _, k := range []string{`_txc.chat.tokens.cached`, `_txc.chat.tokens.reasoning`} {
+			r := gjson.Get(pl.Raw, k)
+			if !r.Exists() || r.Int() != 0 {
+				t.Errorf("%s = %v, want present and 0 (raw=%s)", k, r.Raw, pl.Raw)
+			}
+		}
+		if stub.sawCacheKey != "" {
+			t.Errorf("Request.CacheKey = %q, want empty", stub.sawCacheKey)
+		}
+	})
 }
