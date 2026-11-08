@@ -114,7 +114,7 @@
                 <code class="text-purple-700">&amp;include(&quot;file&quot;)</code>
                 <span class="text-neutral-500">a file beside the op, written in as a string literal by <code class="text-neutral-700">txco</code> when it reads <code class="text-neutral-700">OPS/</code>. Not a runtime function: this view shows the included text, and a bare <code class="text-neutral-700">&amp;include</code> uploaded here is refused at activate.</span>
                 <code class="text-purple-700">$[file.json]</code>
-                <span class="text-neutral-500">the file's JSON written in as a literal (array, object, string, number, bool or null) by <code class="text-neutral-700">txco</code>, validated at apply time; the same rules as <code class="text-neutral-700">&amp;include</code>. This view shows the expanded value, e.g. <code class="text-neutral-700">WHEN .x in ["a","b"]</code> or <code class="text-neutral-700">WITH schema = {"type":"object"}</code>.</span>
+                <span class="text-neutral-500">the file's JSON written in as a literal (array, object, string, number, bool or null) by <code class="text-neutral-700">txco</code>, validated at apply time; the same rules as <code class="text-neutral-700">&amp;include</code>. This view shows the expanded value, e.g. <code class="text-neutral-700">WHEN .x in ["a","b"]</code> or <code class="text-neutral-700">WITH schema = &#123;"type":"object"&#125;</code>.</span>
                 <code class="text-purple-700">&quot;&lt;stack&gt;/&lt;scope&gt;&quot;</code>
                 <span class="text-neutral-500">jump target — e.g. <code class="text-neutral-700">&quot;hello-world/0&quot;</code></span>
                 <code class="text-purple-700">ai://chat</code>
