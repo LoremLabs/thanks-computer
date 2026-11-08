@@ -30,6 +30,29 @@
     ],
     "description": "A file beside this op, written in as a string literal when txco reads OPS/ (no escaping)"
   },
+  "File-backed literal": {
+    "prefix": "filelit",
+    "body": [
+      "$[${1:file}.json]$0"
+    ],
+    "description": "A JSON file beside this op, written in as a literal (array, object, string, number, bool or null) when txco reads OPS/; validated at apply time"
+  },
+  "WHEN membership": {
+    "prefix": "in",
+    "body": [
+      "WHEN ${1:.path} in [${2:\"a\", \"b\"}]",
+      "$0"
+    ],
+    "description": "Match when a path's value is one of the array's scalars (strict: \"1\" is not 1). Negate with parentheses: !(.x in [...])"
+  },
+  "WHEN exists": {
+    "prefix": "exists",
+    "body": [
+      "WHEN ${1|exists,!exists|} ${2:.path}",
+      "$0"
+    ],
+    "description": "Match on a path's presence, whatever its value (null, \"\", 0 and false all exist); !exists for absence"
+  },
   "EMIT event": {
     "prefix": "emit",
     "body": [

@@ -1,0 +1,5 @@
+# GET /check?tag=<anything> — step 1c: presence, whatever the value.
+# `?tag=` with an empty value still exists; `=~ /./` would say no.
+WHEN @src == "http" && @web.req.url.path == "/check"
+  && exists @web.req.url.query.tag
+  EMIT ._tagged = true

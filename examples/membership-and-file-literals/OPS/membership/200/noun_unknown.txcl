@@ -1,0 +1,2 @@
+WHEN @web.req.url.path == "/check" && !exists ._noun_ok
+  EMIT .noun = "unknown"

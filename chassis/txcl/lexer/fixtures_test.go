@@ -101,6 +101,17 @@ EXEC "mcp+https://mcp.deepwiki.com/mcp#ask_question" WITH timeout = "60s", debug
 		input: ".a == .b != .c < .d <= .e > .f >= .g && .h || !.i = .j + .k - .l * .m / .n",
 	},
 	{
+		// `in` and `exists` are contextual words (identifiers), like
+		// EVERY and MAX; `$[path]` is one FILELIT token whose literal is
+		// the path, invisible inside strings and comments; a bare `$` is
+		// ILLEGAL; an unterminated `$[` ends at the line.
+		name: "file-literal-and-words",
+		input: `WHEN .x in $[inspect-nouns.json] && exists .y && .s == "$[not.json]" # $[c.json]
+WITH schema = $[schemas/reply.json], up = $[../shared/x.json], in = 1, d = $
+SET .a = [$[a.json], 1], .u = $[open
+EMIT .z = 2`,
+	},
+	{
 		name:  "match-and-regex",
 		input: `.x =~ /foo\/bar/ && .y !~ /^z+$/`,
 	},

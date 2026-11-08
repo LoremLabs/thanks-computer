@@ -1,0 +1,9 @@
+# step 3: answer. The web inlet renders the envelope minus `_`-keys, so
+# the flags from scope 200 are already in the body. Add the list we
+# matched against and a config object — both from files, both keeping
+# their JSON types (an object stays an object, null stays null) — and halt.
+WHEN @web.req.url.path == "/check"
+  EMIT .statuses = $[../_data/statuses.json],
+       .config = $[../_data/config.json],
+       @web.res.status = 200,
+       @halt = true

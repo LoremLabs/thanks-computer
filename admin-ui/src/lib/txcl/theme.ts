@@ -47,6 +47,7 @@ const COLORS = {
     propertyName: '#7dd3fc', // sky-300 — branches `.foo` / `@web.req...`
     variableName: '#e5e5e5', // neutral-200 — bare idents
     function: '#f472b6', // pink-400 — `&fn` function-call sigil
+    directive: '#fb923c', // orange-400 — `&include`, `$[file.json]`: expanded by txco, never runs
     punctuation: '#737373', // neutral-500 — commas / colons / brackets
     comment: '#737373', // neutral-500 italic
     invalid: '#f87171', // red-400 — illegal/ungrammatical input
@@ -135,6 +136,7 @@ export const txclHighlightStyle = HighlightStyle.define([
     { tag: t.propertyName, color: COLORS.propertyName },
     { tag: t.variableName, color: COLORS.variableName },
     { tag: t.function(t.variableName), color: COLORS.function },
+    { tag: t.macroName, color: COLORS.directive },
     { tag: t.punctuation, color: COLORS.punctuation },
     { tag: t.comment, color: COLORS.comment, fontStyle: 'italic' },
     { tag: t.invalid, color: COLORS.invalid, textDecoration: 'underline wavy' },

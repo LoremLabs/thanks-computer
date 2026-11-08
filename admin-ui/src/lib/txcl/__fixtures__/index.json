@@ -6,6 +6,7 @@
   "keywords-lower.json",
   "loop-clause.json",
   "operators.json",
+  "file-literal-and-words.json",
   "match-and-regex.json",
   "when-star.json",
   "branches.json",

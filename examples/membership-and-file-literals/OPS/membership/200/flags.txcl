@@ -1,0 +1,4 @@
+# step 2: turn the scope-100 flags into body fields. `_`-prefixed keys
+# never reach the body, so copy each onto a plain key.
+WHEN @web.req.url.path == "/check" && ._known == true
+  EMIT .known = true

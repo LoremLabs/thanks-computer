@@ -34,12 +34,20 @@ One-time setup:
 3. Register the `loremlabs` publisher at
    https://marketplace.visualstudio.com/manage/createpublisher.
 
-Each release:
+Each release, after bumping `package.json` by hand and writing the
+CHANGELOG entry:
 
 ```sh
-npx @vscode/vsce login loremlabs                    # one-time, paste PAT
-npx @vscode/vsce publish patch | minor | major      # bumps version + publishes
+npx @vscode/vsce package                            # → txcl-<version>.vsix
+npx @vscode/vsce publish --packagePath txcl-<version>.vsix --pat <token>
 ```
+
+Publish the packaged file, not `vsce publish minor`: that bumps the
+version a second time, and `vsce publish` without `--packagePath` may
+also create a git commit and a `v<version>` tag — the repo's
+`release.yml` cuts a txco release on any pushed `v*` tag. If the
+authenticated CLI call hangs, upload the `.vsix` on the publisher's
+manage page instead (⋯ → Update); that path needs no token.
 
 Live at `https://marketplace.visualstudio.com/items?itemName=loremlabs.txcl`
 within a few minutes.
@@ -59,15 +67,24 @@ Account at https://open-vsx.org via GitHub OAuth.
 ## Keep in sync with the canonical grammar
 
 The TextMate grammar at `syntaxes/txcl.tmLanguage.json` mirrors the Go
-lexer at `chassis/txcl/lexer/lexer.go` and the token table at
-`chassis/txcl/token/token.go`. When those change, update in lockstep:
+lexer at `chassis/txcl/lexer/lexer.go`, the token table at
+`chassis/txcl/token/token.go`, and the parser's contextual words
+(`EVERY`, `MAX`, `in`, `exists`). When those change, update in lockstep:
 
-1. This grammar.
-2. The TS port at `admin-ui/src/lib/txcl/lexer.ts` + `tokens.ts` (which
-   has a Go-output parity test in `lexer.test.ts`).
+1. This grammar (and the snippets, README, CHANGELOG, version).
+2. The TS port at `admin-ui/src/lib/txcl/lexer.ts` + `tokens.ts`, which
+   has a Go-output parity test in `lexer.test.ts`; regenerate its
+   fixtures with `go test ./chassis/txcl/lexer/... -run TestGenerateFixtures -update`.
+3. The admin UI's CodeMirror tokenizer `admin-ui/src/lib/txcl/codemirror.ts`
+   (+ `theme.ts` for a new tag) and the help panel
+   `admin-ui/src/components/TxclHelp.svelte`.
+4. The onepony Lab's copy of that tokenizer, `onepony/lab/src/core/txcl/highlight.ts`
+   + `tokens.ts` (byte-identical to the admin UI's), colours in
+   `lab/web/src/app.css`.
+5. The docs site's tokenizer, `www-thanks-computer/scripts/docs-highlight.mjs`.
 
-Three small artifacts, periodically synced — beats one over-engineered
-code generator.
+Five small hand-synced artifacts — still beats one over-engineered code
+generator, as long as this list stays honest.
 
 ## Regenerate the marketplace icon
 

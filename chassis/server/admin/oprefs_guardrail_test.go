@@ -190,3 +190,44 @@ func TestUnexpandedIncludeGuard(t *testing.T) {
 		t.Fatalf("expanded text mentioning &include should activate, got %+v", resp)
 	}
 }
+
+// A bare `$[path.json]` is the same story as a bare `&include`: refused
+// at activate with its own code, flagged by validate; the expanded form
+// (a plain literal) and a mention inside a string are fine.
+func TestUnexpandedFileLiteralGuard(t *testing.T) {
+	c := newTestController(t, config.Config{Personalities: "admin"})
+	v := callCreateDraft(t, c, "litstack", "")
+	callPutFiles(t, c, "litstack", v, []stackFile{
+		{Path: "100/good.txcl", Content: `WHEN .x in ["seed", "run"] EXEC "http://x/y" WITH s = "see $[nouns.json]", o = {"k": null}`},
+		{Path: "300/bad.txcl", Content: `WHEN .x in $[nouns.json] EXEC "http://x/y"`},
+	})
+
+	code, resp := callValidate(t, c, "litstack", v)
+	if code != http.StatusOK || resp.OK {
+		t.Fatalf("validate = %d %+v, want 200 and not OK", code, resp)
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0].Path != "300/bad.txcl" || !strings.Contains(resp.Errors[0].Err, "unexpanded $[...]") {
+		t.Fatalf("errors = %+v, want one unexpanded $[...] on 300/bad.txcl", resp.Errors)
+	}
+
+	w := httptest.NewRecorder()
+	r := withTenantAdminCtx(muxRequest(http.MethodPost,
+		"/v1/tenants/default/stacks/litstack/activate",
+		mustJSON(t, activateRequest{VersionNumber: v}),
+		map[string]string{"name": "litstack"}), testTenant)
+	c.handleActivateStack(w, r)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "unexpanded_file_literal") {
+		t.Fatalf("activate = %d %s, want 422 unexpanded_file_literal", w.Code, w.Body.String())
+	}
+	if got := opsCount(t, c, "litstack"); got != 0 {
+		t.Fatalf("ops rows after rejected activate = %d, want 0 (rollback)", got)
+	}
+
+	v2 := callCreateDraft(t, c, "litok", "")
+	callPutFiles(t, c, "litok", v2, []stackFile{
+		{Path: "100/good.txcl", Content: `WHEN .x in ["seed", "run"] EXEC "http://x/y" WITH s = "see $[nouns.json]", o = {"k": null}`},
+	})
+	if resp := callActivate(t, c, "litok", v2); resp.VersionNumber != v2 {
+		t.Fatalf("expanded literal and a string mentioning $[...] should activate, got %+v", resp)
+	}
+}

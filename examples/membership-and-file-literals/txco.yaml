@@ -1,0 +1,4 @@
+target: dev
+
+# No `operations:` block — every op here is a WHEN/EMIT over the
+# request; the workspace ships operations only.

@@ -65,6 +65,22 @@ func TestLintParseError(t *testing.T) {
 	}
 }
 
+// TestLintParseErrorMembershipOperand: `in` with a scalar on the right is
+// a parse error, so lint reports it with its location and exits 1.
+func TestLintParseErrorMembershipOperand(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "OPS/site/100/ok.txcl"), okRule)
+	writeFile(t, filepath.Join(root, "OPS/site/200/bad.txcl"), "WHEN .status in \"pending\" EXEC \"txco://noop\"\n")
+
+	code, out, _ := runLintArgs(t, root)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; out=%q", code, out)
+	}
+	if !strings.Contains(out, "site/200/bad") || !strings.Contains(out, "in expects an array literal") {
+		t.Fatalf("membership operand error missing location or reason: %q", out)
+	}
+}
+
 // TestLintLoopWarning: an unconditional self-loop is reported as a warning
 // (reusing apply's loop lint) but does NOT flip the exit code.
 func TestLintLoopWarning(t *testing.T) {

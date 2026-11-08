@@ -214,6 +214,49 @@ func TestLoopMaxTruncates(t *testing.T) {
 	}
 }
 
+// TestLoopUntilMembership: UNTIL shares WHEN's grammar, so `in` works
+// against the accumulated view. The pager's cursor goes "2", "3", "",
+// so a membership test on {"3", ""} stops the loop after the second page.
+func TestLoopUntilMembership(t *testing.T) {
+	pu := newLoopUnit(t)
+	p := &pager{pages: 3}
+	pu.Handle([]byte("txco://pager"), p.handler())
+	seedNamedOp(t, pu, "loop", 0, "pager",
+		`WITH after = ._p.next EXEC "txco://pager" LOOP EVERY "2ms" UNTIL ._p.next in ["3", ""] MAX 10`)
+
+	out := runStage(t, context.Background(), pu, `{}`, "loop/0")
+
+	if got := p.hitCount(); got != 2 {
+		t.Fatalf("hits = %d, want 2 (out=%s)", got, out)
+	}
+	if got := rowsOf(out); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("rows = %v, want [1 2]", got)
+	}
+	if b := book(out, "pager"); b.Get("passes").Int() != 2 || b.Get("stop").String() != "done" {
+		t.Errorf("bookkeeping = %s, want passes 2 / stop done", b.Raw)
+	}
+}
+
+// TestLoopUntilExists: `exists` in UNTIL tests presence on the
+// accumulated view. Rows append one per pass, so `exists ._p.rows.2`
+// first holds after the third page.
+func TestLoopUntilExists(t *testing.T) {
+	pu := newLoopUnit(t)
+	p := &pager{} // endless
+	pu.Handle([]byte("txco://pager"), p.handler())
+	seedNamedOp(t, pu, "loop", 0, "pager",
+		`EXEC "txco://pager" LOOP EVERY "2ms" UNTIL exists ._p.rows.2 MAX 10`)
+
+	out := runStage(t, context.Background(), pu, `{}`, "loop/0")
+
+	if got := p.hitCount(); got != 3 {
+		t.Fatalf("hits = %d, want 3 (out=%s)", got, out)
+	}
+	if b := book(out, "pager"); b.Get("passes").Int() != 3 || b.Get("stop").String() != "done" {
+		t.Errorf("bookkeeping = %s, want passes 3 / stop done", b.Raw)
+	}
+}
+
 // TestLoopDefaults: LOOP UNTIL alone runs at most 10 passes, paced at
 // the default pause — the two-line poll behaves like a poll.
 func TestLoopDefaults(t *testing.T) {

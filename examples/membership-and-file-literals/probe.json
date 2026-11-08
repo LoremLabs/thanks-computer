@@ -1,0 +1,71 @@
+{
+  "note": "Membership, presence and file-backed literals: /check classifies its query with `in` against an inline array and against $[../_data/statuses.json], tests presence with `exists` / `!exists`, and answers with an object literal read from _data/config.json. Binds localhost → membership (the _sys/boot/75 path auto-route also exists for bare `txco dev` use).",
+  "bind": [
+    { "host": "localhost", "stack": "membership" }
+  ],
+  "checks": [
+    {
+      "name": "a status from the JSON file is known",
+      "method": "GET",
+      "path": "/check?status=running&noun=run&tag=",
+      "status": 200,
+      "contains": "\"known\":true"
+    },
+    {
+      "name": "a noun from the inline array is known",
+      "method": "GET",
+      "path": "/check?status=running&noun=run&tag=",
+      "status": 200,
+      "contains": "\"noun\":\"known\""
+    },
+    {
+      "name": "an empty tag still exists",
+      "method": "GET",
+      "path": "/check?status=running&noun=run&tag=",
+      "status": 200,
+      "contains": "\"tagged\":true"
+    },
+    {
+      "name": "an unknown status is not a member (and \"1\" would not be 1)",
+      "method": "GET",
+      "path": "/check?status=bogus&noun=fly",
+      "status": 200,
+      "contains": "\"known\":false"
+    },
+    {
+      "name": "an unknown noun",
+      "method": "GET",
+      "path": "/check?status=bogus&noun=fly",
+      "status": 200,
+      "contains": "\"noun\":\"unknown\""
+    },
+    {
+      "name": "no tag parameter means !exists",
+      "method": "GET",
+      "path": "/check?status=bogus&noun=fly",
+      "status": 200,
+      "contains": "\"tagged\":false"
+    },
+    {
+      "name": "the config object kept its JSON shape",
+      "method": "GET",
+      "path": "/check?status=pending",
+      "status": 200,
+      "contains": "\"limits\":{\"max\":10,\"tags\":[\"a\",\"b\"]}"
+    },
+    {
+      "name": "null stayed null",
+      "method": "GET",
+      "path": "/check?status=pending",
+      "status": 200,
+      "contains": "\"optional\":null"
+    },
+    {
+      "name": "the statuses array is the file's array",
+      "method": "GET",
+      "path": "/check?status=pending",
+      "status": 200,
+      "contains": "\"statuses\":[\"pending\",\"running\",\"complete\"]"
+    }
+  ]
+}

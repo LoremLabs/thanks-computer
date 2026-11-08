@@ -1,0 +1,182 @@
+{
+  "name": "file-literal-and-words",
+  "input": "WHEN .x in $[inspect-nouns.json] \u0026\u0026 exists .y \u0026\u0026 .s == \"$[not.json]\" # $[c.json]\nWITH schema = $[schemas/reply.json], up = $[../shared/x.json], in = 1, d = $\nSET .a = [$[a.json], 1], .u = $[open\nEMIT .z = 2",
+  "tokens": [
+    {
+      "type": "WHEN",
+      "literal": "WHEN"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".x"
+    },
+    {
+      "type": "IDENT",
+      "literal": "in"
+    },
+    {
+      "type": "FILELIT",
+      "literal": "inspect-nouns.json"
+    },
+    {
+      "type": "\u0026\u0026",
+      "literal": "\u0026\u0026"
+    },
+    {
+      "type": "IDENT",
+      "literal": "exists"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".y"
+    },
+    {
+      "type": "\u0026\u0026",
+      "literal": "\u0026\u0026"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".s"
+    },
+    {
+      "type": "==",
+      "literal": "=="
+    },
+    {
+      "type": "STRING",
+      "literal": "$[not.json]"
+    },
+    {
+      "type": "WITH",
+      "literal": "WITH"
+    },
+    {
+      "type": "IDENT",
+      "literal": "schema"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "FILELIT",
+      "literal": "schemas/reply.json"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "IDENT",
+      "literal": "up"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "FILELIT",
+      "literal": "../shared/x.json"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "IDENT",
+      "literal": "in"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "INT",
+      "literal": "1"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "IDENT",
+      "literal": "d"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "ILLEGAL",
+      "literal": "$"
+    },
+    {
+      "type": "SET",
+      "literal": "SET"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".a"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "[",
+      "literal": "["
+    },
+    {
+      "type": "FILELIT",
+      "literal": "a.json"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "INT",
+      "literal": "1"
+    },
+    {
+      "type": "]",
+      "literal": "]"
+    },
+    {
+      "type": ",",
+      "literal": ","
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".u"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "FILELIT",
+      "literal": "open"
+    },
+    {
+      "type": "EMIT",
+      "literal": "EMIT"
+    },
+    {
+      "type": "BRANCH",
+      "literal": ".z"
+    },
+    {
+      "type": "=",
+      "literal": "="
+    },
+    {
+      "type": "INT",
+      "literal": "2"
+    },
+    {
+      "type": "EOF",
+      "literal": ""
+    }
+  ]
+}

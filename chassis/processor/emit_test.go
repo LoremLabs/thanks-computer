@@ -80,6 +80,23 @@ func TestOverlayResponseOverwriteSemantics(t *testing.T) {
 				"meta.added":    `"yes"`,
 			},
 		},
+		{
+			// `EMIT .o = {"k": …}, .n = null` — the object and null literals
+			// land as a JSON object and JSON null, not as strings.
+			name: "object and null literals keep their JSON types",
+			in:   `{}`,
+			overrides: []resonator.BranchValue{
+				{Path: ".o", Value: ast.Literal{V: map[string]interface{}{
+					"k": int64(1), "nested": map[string]interface{}{"t": []interface{}{"a", nil}},
+				}}},
+				{Path: ".n", Value: ast.Literal{V: nil}},
+			},
+			checks: map[string]string{
+				"o.k":        "1",
+				"o.nested.t": `["a",null]`,
+				"n":          "null",
+			},
+		},
 	}
 
 	for _, tc := range cases {

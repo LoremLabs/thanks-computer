@@ -257,6 +257,11 @@ func TestLintLoopPolarityTrap(t *testing.T) {
 		`EXEC "txco://x" LOOP UNTIL ._p.more != true`,
 		`EXEC "txco://x" LOOP UNTIL !(._p.more == true)`,
 		`EXEC "txco://x" LOOP UNTIL ._p.next == "" || ._p.more == false`,
+		// Presence and membership are false on a missing path, so only
+		// their negations are traps.
+		`EXEC "txco://x" LOOP UNTIL !exists ._p.next`,
+		`EXEC "txco://x" LOOP UNTIL !(._p.status in ["running", "queued"])`,
+		`EXEC "txco://x" LOOP UNTIL ._p.n >= 3 || !exists ._p.cursor`,
 	}
 	for _, txcl := range traps {
 		if got := lintLoopClause(loopOp(txcl)); !containsSubstring(got, "exits after the first pass") {
@@ -268,6 +273,9 @@ func TestLintLoopPolarityTrap(t *testing.T) {
 		`EXEC "txco://x" LOOP UNTIL ._p.more != false`,
 		`EXEC "txco://x" LOOP UNTIL !(._p.more != true)`,
 		`EXEC "txco://x" LOOP UNTIL ._p.next == ""`,
+		`EXEC "txco://x" LOOP UNTIL exists ._p.done`,
+		`EXEC "txco://x" LOOP UNTIL ._p.status in ["done", "failed"]`,
+		`EXEC "txco://x" LOOP UNTIL !(!exists ._p.done)`,
 	}
 	for _, txcl := range safe {
 		if got := lintLoopClause(loopOp(txcl)); containsSubstring(got, "exits after the first pass") {

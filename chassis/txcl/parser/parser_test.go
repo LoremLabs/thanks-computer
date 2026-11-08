@@ -199,14 +199,139 @@ SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"
 			0,
 			[]string{},
 		},
+		// --- null and object literals (JSON-complete values) ---
 		{
-			// null isn't a scalar the SET gate accepts today, so it's
-			// also rejected inside arrays. If we ever lift the gate to
-			// allow null, this case becomes an accept.
 			`SET .x = [null]`,
+			&resonator.Resonator{
+				SetPre: &resonator.Set{Overrides: []resonator.BranchValue{
+					{Path: ".x", Value: ast.Literal{V: []interface{}{nil}}},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			`SET .x = null`,
+			&resonator.Resonator{
+				SetPre: &resonator.Set{Overrides: []resonator.BranchValue{
+					{Path: ".x", Value: ast.Literal{V: nil}},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			`SET .o = {}`,
+			&resonator.Resonator{
+				SetPre: &resonator.Set{Overrides: []resonator.BranchValue{
+					{Path: ".o", Value: ast.Literal{V: map[string]interface{}{}}},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			`SET .o = {"enabled": true, "limits": {"max": 10, "tags": ["a", "b"]}, "optional": null}`,
+			&resonator.Resonator{
+				SetPre: &resonator.Set{Overrides: []resonator.BranchValue{
+					{Path: ".o", Value: ast.Literal{V: map[string]interface{}{
+						"enabled": true,
+						"limits": map[string]interface{}{
+							"max":  int64(10),
+							"tags": []interface{}{"a", "b"},
+						},
+						"optional": nil,
+					}}},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			// An object inside an array, and an object spread over lines.
+			`EMIT .rows = [{"id": 1,
+			                "ok": false}, {}]`,
+			&resonator.Resonator{
+				Emit: &resonator.Set{Overrides: []resonator.BranchValue{
+					{Path: ".rows", Value: ast.Literal{V: []interface{}{
+						map[string]interface{}{"id": int64(1), "ok": false},
+						map[string]interface{}{},
+					}}},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			`EXEC "ai://chat" WITH schema = {"type": "object", "required": ["reply"]}, fallback = null`,
+			&resonator.Resonator{
+				Exec: "ai://chat",
+				With: map[string]ast.Value{
+					"schema": ast.Literal{V: map[string]interface{}{
+						"type":     "object",
+						"required": []interface{}{"reply"},
+					}},
+					"fallback": ast.Literal{V: nil},
+				},
+			},
+			0,
+			[]string{},
+		},
+		{
+			`WHEN * SELECT @a AS .x DEFAULT null`,
+			&resonator.Resonator{
+				When: starWhen(),
+				Select: &resonator.Select{Assignments: []resonator.SelectAssignment{
+					{From: "._txc.a", To: ".x", Default: ast.Literal{V: nil}, HasDefault: true},
+				}},
+			},
+			0,
+			[]string{},
+		},
+		{
+			// JSON shape only: keys are quoted.
+			`SET .o = {a: 1}`,
 			&resonator.Resonator{},
 			1,
-			[]string{`Expecting bool, int, float, string, or array, received null`},
+			[]string{`Expecting a quoted object key, received a`},
+		},
+		{
+			`SET .o = {"a" 1}`,
+			&resonator.Resonator{},
+			1,
+			[]string{`Expecting ':' after object key, received 1`},
+		},
+		{
+			// Arrays tolerate a trailing comma (above); objects do not.
+			`SET .o = {"a": 1,}`,
+			&resonator.Resonator{},
+			1,
+			[]string{`Expecting a quoted object key after ',' (an object takes no trailing comma), received }`},
+		},
+		{
+			`SET .o = {"a": 1, "a": 2}`,
+			&resonator.Resonator{},
+			1,
+			[]string{`duplicate object key "a"`},
+		},
+		{
+			// Values are static data: no paths, no calls.
+			`SET .o = {"a": .b}`,
+			&resonator.Resonator{},
+			1,
+			[]string{`Expecting bool, int, float, string, null, array, or object, received .b`},
+		},
+		{
+			`SET .o = {"a": &now()}`,
+			&resonator.Resonator{},
+			1,
+			[]string{`Expecting bool, int, float, string, null, array, or object, received now`},
+		},
+		{
+			`SET .o = {"a": 1 "b": 2}`,
+			&resonator.Resonator{},
+			1,
+			[]string{`Expecting ',' or '}', received b`},
 		},
 		{
 			// Sanity: an unterminated array hits the comma/bracket
@@ -348,7 +473,7 @@ SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"
 			`WITH a = SELECT`,
 			&resonator.Resonator{},
 			1,
-			[]string{`Expecting bool, int, float, string, or array, received SELECT`},
+			[]string{`Expecting bool, int, float, string, null, array, or object, received SELECT`},
 		},
 		{
 			`SET a = 7`,
@@ -366,7 +491,7 @@ SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"
 			`SET .a = SELECT`,
 			&resonator.Resonator{},
 			1,
-			[]string{`Expecting bool, int, float, string, or array, received SELECT`},
+			[]string{`Expecting bool, int, float, string, null, array, or object, received SELECT`},
 		},
 		{
 			`SELECT @x AS .y SET a`,
@@ -396,7 +521,7 @@ SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"
 				}},
 			},
 			1,
-			[]string{`Expecting bool, int, float, string, or array, received SELECT`},
+			[]string{`Expecting bool, int, float, string, null, array, or object, received SELECT`},
 		},
 		{
 			`SELECT`,
@@ -496,7 +621,7 @@ SELECT @web.req.url.query.q.0 AS .q DEFAULT "fallback"
 			`WHEN >=`,
 			&resonator.Resonator{},
 			1,
-			[]string{`WHEN expected branch or '(', got '>='`},
+			[]string{`WHEN expected branch, exists, or '(', got '>='`},
 		},
 		{
 			`WHEN .a != null`,
@@ -1037,7 +1162,7 @@ func TestParserWhenBooleanExpressions(t *testing.T) {
 			input:   `WHEN )`,
 			res:     &resonator.Resonator{},
 			errs:    1,
-			errmsgs: []string{`WHEN expected branch or '(', got ')'`},
+			errmsgs: []string{`WHEN expected branch, exists, or '(', got ')'`},
 		},
 		{
 			name:    "empty group",
@@ -1353,7 +1478,7 @@ func TestParserLoopClause(t *testing.T) {
 			name:    "predicate must be a predicate",
 			input:   `EXEC "txco://pager" LOOP UNTIL true`,
 			res:     &resonator.Resonator{Exec: "txco://pager"},
-			errmsgs: []string{`LOOP UNTIL expects a predicate (.path == value, composable with &&, ||, !, parentheses), got 'true'`},
+			errmsgs: []string{`LOOP UNTIL expects a predicate (.path == value, exists .path, composable with &&, ||, !, parentheses), got 'true'`},
 		},
 		{
 			name:    "path-vs-path is rejected like WHEN",
@@ -1365,7 +1490,7 @@ func TestParserLoopClause(t *testing.T) {
 			name:    "missing comparison names the clause",
 			input:   `EXEC "txco://pager" LOOP UNTIL ._p.a`,
 			res:     &resonator.Resonator{Exec: "txco://pager"},
-			errmsgs: []string{`LOOP UNTIL expected =~, !~, ==, !=, >, <, >=, or <= (EOF)`},
+			errmsgs: []string{`LOOP UNTIL expected =~, !~, ==, !=, >, <, >=, <=, or in (EOF)`},
 		},
 		{
 			name:    "SET needs an assignment",
@@ -1460,6 +1585,297 @@ func orEmpty(errs []string) []string {
 // TestParseGotoTarget: `EXEC "goto://…"` takes a stage or a scope in this
 // stack, and a bad target is a parse error in both modes, so `txco apply`
 // refuses it rather than the jump failing at dispatch.
+// TestParserWhenIn covers the `in` membership operator: array literal
+// and literal-args call right-hand sides, composition, the contextual
+// word's casing, the parenthesized negation rule, and every refusal.
+func TestParserWhenIn(t *testing.T) {
+	parse := func(input string) (*resonator.Resonator, []string) {
+		l := lexer.New(input)
+		p := parser.New(l)
+		return p.ParseEvent(), p.Errors()
+	}
+	inLeaf := func(path string, items ...interface{}) resonator.WhenExpr {
+		if items == nil {
+			items = []interface{}{}
+		}
+		return resonator.WhenExpr{Leaf: resonator.Condition{
+			Branch: &resonator.Branch{Path: path}, MatchType: resonator.MatchType("in"), MatchValue: items,
+		}, HasLeaf: true}
+	}
+	eqLeaf := func(path string, v interface{}) resonator.WhenExpr {
+		return resonator.WhenExpr{Leaf: resonator.Condition{
+			Branch: &resonator.Branch{Path: path}, MatchType: resonator.MatchType("eq"), MatchValue: v,
+		}, HasLeaf: true}
+	}
+	when := func(e resonator.WhenExpr) *resonator.Resonator {
+		return &resonator.Resonator{When: &resonator.When{Expr: &e}}
+	}
+	arrayCall := ast.FunctionCall{Name: "array", Args: []ast.Value{ast.Literal{V: "a"}, ast.Literal{V: "b"}}}
+
+	cases := []struct {
+		name    string
+		input   string
+		res     *resonator.Resonator
+		errmsgs []string
+	}{
+		{
+			name:  "strings",
+			input: `WHEN .status in ["pending", "running", "complete"]`,
+			res:   when(inLeaf(".status", "pending", "running", "complete")),
+		},
+		{
+			name:  "numbers, upper-case word",
+			input: `WHEN .code IN [200, 201, 202]`,
+			res:   when(inLeaf(".code", int64(200), int64(201), int64(202))),
+		},
+		{
+			name:  "mixed scalars incl. null, mixed-case word",
+			input: `WHEN .x In [1.5, true, null, "s"]`,
+			res:   when(inLeaf(".x", float64(1.5), true, nil, "s")),
+		},
+		{
+			name:  "empty collection parses (never matches)",
+			input: `WHEN .x in []`,
+			res:   when(inLeaf(".x")),
+		},
+		{
+			name:  "literal-args call on the right",
+			input: `WHEN .role in &array("a", "b")`,
+			res: when(resonator.WhenExpr{Leaf: resonator.Condition{
+				Branch: &resonator.Branch{Path: ".role"}, MatchType: resonator.MatchType("in"), MatchCall: &arrayCall,
+			}, HasLeaf: true}),
+		},
+		{
+			name:  "@ sugar on the left",
+			input: `WHEN @inspect.noun in ["seed", "run"]`,
+			res:   when(inLeaf("._txc.inspect.noun", "seed", "run")),
+		},
+		{
+			name:  "parenthesized negation composes with &&",
+			input: `WHEN !(.x in [1]) && .y == 2`,
+			res: when(resonator.WhenExpr{And: []resonator.WhenExpr{
+				{Not: func() *resonator.WhenExpr { l := inLeaf(".x", int64(1)); return &l }()},
+				eqLeaf(".y", int64(2)),
+			}}),
+		},
+		{
+			name:  "group and ||",
+			input: `WHEN (.x in [1]) || .y == 2`,
+			res:   when(resonator.WhenExpr{Or: []resonator.WhenExpr{inLeaf(".x", int64(1)), eqLeaf(".y", int64(2))}}),
+		},
+		{
+			name:  "comma is AND",
+			input: `WHEN .a == 1, .x in ["q"]`,
+			res:   when(resonator.WhenExpr{And: []resonator.WhenExpr{eqLeaf(".a", int64(1)), inLeaf(".x", "q")}}),
+		},
+		{
+			// `in` and `exists` are contextual words: WITH keys and path
+			// segments spelled that way are untouched.
+			name:  "in and exists stay usable as WITH keys and path segments",
+			input: `WHEN .tokens.in >= 0 && .exists != null EXEC "txco://noop" WITH in = 1, exists = "y"`,
+			res: &resonator.Resonator{
+				When: &resonator.When{Expr: &resonator.WhenExpr{And: []resonator.WhenExpr{
+					{Leaf: resonator.Condition{Branch: &resonator.Branch{Path: ".tokens.in"}, MatchType: resonator.MatchType("gteq"), MatchValue: int64(0)}, HasLeaf: true},
+					{Leaf: resonator.Condition{Branch: &resonator.Branch{Path: ".exists"}, MatchType: resonator.MatchType("ne"), MatchValue: ""}, HasLeaf: true},
+				}}},
+				Exec: "txco://noop",
+				With: map[string]ast.Value{"in": ast.Literal{V: int64(1)}, "exists": ast.Literal{V: "y"}},
+			},
+		},
+
+		// --- refusals ---
+		{
+			name:    "bare negation is ambiguous to a reader",
+			input:   `WHEN !.x in [1]`,
+			errmsgs: []string{`WHEN negated membership needs parentheses: write !(.x in [...])`},
+		},
+		{
+			name:    "string right-hand side",
+			input:   `WHEN .status in "pending"`,
+			errmsgs: []string{`WHEN in expects an array literal [...] or an &function(...) returning one, got 'pending'`},
+		},
+		{
+			name:    "number right-hand side",
+			input:   `WHEN .status in 42`,
+			errmsgs: []string{`WHEN in expects an array literal [...] or an &function(...) returning one, got '42'`},
+		},
+		{
+			name:    "object right-hand side",
+			input:   `WHEN .status in {"pending": true}`,
+			errmsgs: []string{`WHEN in expects an array literal [...] or an &function(...) returning one, got '{'`},
+		},
+		{
+			name:    "path right-hand side",
+			input:   `WHEN .role in .user.allowed_roles`,
+			errmsgs: []string{`WHEN in takes a collection independent of the envelope, not path .user.allowed_roles — EMIT a flag in an earlier scope and test it here instead`},
+		},
+		{
+			name:    "call that reads the envelope",
+			input:   `WHEN .role in &get(.user, "allowed_roles")`,
+			errmsgs: []string{`WHEN function arguments must be literals, but &get references path ".user" — EMIT the computed value in an earlier scope and compare it here instead`},
+		},
+		{
+			name:    "nested array element",
+			input:   `WHEN .x in [[1]]`,
+			errmsgs: []string{`WHEN in: elements must be scalars (string, number, bool, null); nested arrays and objects are not supported`},
+		},
+		{
+			name:    "object element",
+			input:   `WHEN .x in [{"a": 1}]`,
+			errmsgs: []string{`WHEN in: elements must be scalars (string, number, bool, null); nested arrays and objects are not supported`},
+		},
+		{
+			name:    "== against an array names in",
+			input:   `WHEN .x == [1, 2]`,
+			errmsgs: []string{"WHEN == compares a path to a scalar; use `.x in [...]` for membership"},
+		},
+		{
+			name:    "!= against an object names in",
+			input:   `WHEN .x != {"a": 1}`,
+			errmsgs: []string{"WHEN != compares a path to a scalar; use `.x in [...]` for membership"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, errs := parse(tc.input)
+			if tc.errmsgs != nil {
+				test.Equals(t, tc.errmsgs, errs)
+				return
+			}
+			test.Equals(t, []string{}, errs)
+			test.Equals(t, tc.res, res)
+		})
+	}
+}
+
+// TestParserWhenExists covers the unary `exists .path` predicate.
+func TestParserWhenExists(t *testing.T) {
+	parse := func(input string) (*resonator.Resonator, []string) {
+		l := lexer.New(input)
+		p := parser.New(l)
+		return p.ParseEvent(), p.Errors()
+	}
+	exists := func(path string) resonator.WhenExpr {
+		return resonator.WhenExpr{Leaf: resonator.Condition{
+			Branch: &resonator.Branch{Path: path}, MatchType: resonator.MatchType("exists"),
+		}, HasLeaf: true}
+	}
+	not := func(e resonator.WhenExpr) resonator.WhenExpr { return resonator.WhenExpr{Not: &e} }
+	when := func(e resonator.WhenExpr) *resonator.Resonator {
+		return &resonator.Resonator{When: &resonator.When{Expr: &e}}
+	}
+	ready := resonator.WhenExpr{Leaf: resonator.Condition{
+		Branch: &resonator.Branch{Path: ".status"}, MatchType: resonator.MatchType("eq"), MatchValue: "ready",
+	}, HasLeaf: true}
+
+	cases := []struct {
+		name    string
+		input   string
+		res     *resonator.Resonator
+		errmsgs []string
+	}{
+		{name: "plain", input: `WHEN exists .user.email`, res: when(exists(".user.email"))},
+		{name: "upper-case word, @ sugar", input: `WHEN EXISTS @call.input.run`, res: when(exists("._txc.call.input.run"))},
+		{name: "negated, no parentheses needed", input: `WHEN !exists @call.input.run`, res: when(not(exists("._txc.call.input.run")))},
+		// The lexer drops the quotes from a segment that needs none.
+		{name: "quoted segment and index", input: `WHEN exists .headers."content-type".0`, res: when(exists(`.headers.content-type.0`))},
+		{
+			name:  "composes with &&",
+			input: `WHEN exists .a && .status == "ready"`,
+			res:   when(resonator.WhenExpr{And: []resonator.WhenExpr{exists(".a"), ready}}),
+		},
+		{
+			name:  "comma is AND, exists second",
+			input: `WHEN .status == "ready", exists .a`,
+			res:   when(resonator.WhenExpr{And: []resonator.WhenExpr{ready, exists(".a")}}),
+		},
+		{
+			name:  "negated group",
+			input: `WHEN !(exists .a || exists .b)`,
+			res:   when(not(resonator.WhenExpr{Or: []resonator.WhenExpr{exists(".a"), exists(".b")}})),
+		},
+		{
+			name:  "after ||",
+			input: `WHEN .status == "ready" || exists .b`,
+			res:   when(resonator.WhenExpr{Or: []resonator.WhenExpr{ready, exists(".b")}}),
+		},
+		{
+			name:    "call operand",
+			input:   `WHEN exists &get(.user, "email")`,
+			errmsgs: []string{`WHEN exists takes a branch path (.a.b or @a.b), got 'get'`},
+		},
+		{
+			name:    "string operand",
+			input:   `WHEN exists "user.email"`,
+			errmsgs: []string{`WHEN exists takes a branch path (.a.b or @a.b), got 'user.email'`},
+		},
+		{
+			name:    "nothing after exists",
+			input:   `WHEN exists`,
+			errmsgs: []string{`WHEN exists takes a branch path (.a.b or @a.b), got ''`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, errs := parse(tc.input)
+			if tc.errmsgs != nil {
+				test.Equals(t, tc.errmsgs, errs)
+				return
+			}
+			test.Equals(t, []string{}, errs)
+			test.Equals(t, tc.res, res)
+		})
+	}
+}
+
+// TestParserLoopClauseMembership: LOOP UNTIL shares WHEN's grammar, so
+// `in` and `exists` work there, with the same parenthesized-negation rule.
+func TestParserLoopClauseMembership(t *testing.T) {
+	parse := func(input string) (*resonator.Resonator, []string) {
+		l := lexer.New(input)
+		p := parser.New(l)
+		return p.ParseEvent(), p.Errors()
+	}
+	statusIn := resonator.WhenExpr{Leaf: resonator.Condition{
+		Branch: &resonator.Branch{Path: ".status"}, MatchType: resonator.MatchType("in"), MatchValue: []interface{}{"done", "failed"},
+	}, HasLeaf: true}
+	nextExists := resonator.WhenExpr{Leaf: resonator.Condition{
+		Branch: &resonator.Branch{Path: "._p.next"}, MatchType: resonator.MatchType("exists"),
+	}, HasLeaf: true}
+
+	t.Run("until in", func(t *testing.T) {
+		res, errs := parse(`EXEC "https://api.example.com/jobs/42" LOOP UNTIL .status in ["done", "failed"] MAX 3`)
+		test.Equals(t, []string{}, errs)
+		test.Equals(t, &resonator.Resonator{
+			Exec: "https://api.example.com/jobs/42",
+			Loop: &resonator.Loop{Until: &statusIn, Max: 3},
+		}, res)
+	})
+	t.Run("until not exists", func(t *testing.T) {
+		res, errs := parse(`EXEC "txco://pager" LOOP UNTIL !exists ._p.next`)
+		test.Equals(t, []string{}, errs)
+		test.Equals(t, &resonator.Resonator{
+			Exec: "txco://pager",
+			Loop: &resonator.Loop{Until: &resonator.WhenExpr{Not: &nextExists}},
+		}, res)
+	})
+	t.Run("until negated membership needs parentheses", func(t *testing.T) {
+		_, errs := parse(`EXEC "txco://pager" LOOP UNTIL !._p.s in ["a"]`)
+		test.Equals(t, []string{`LOOP UNTIL negated membership needs parentheses: write !(._p.s in [...])`}, errs)
+		res, errs := parse(`EXEC "txco://pager" LOOP UNTIL !(._p.s in ["a"])`)
+		test.Equals(t, []string{}, errs)
+		inner := resonator.WhenExpr{Leaf: resonator.Condition{
+			Branch: &resonator.Branch{Path: "._p.s"}, MatchType: resonator.MatchType("in"), MatchValue: []interface{}{"a"},
+		}, HasLeaf: true}
+		test.Equals(t, &resonator.Resonator{
+			Exec: "txco://pager",
+			Loop: &resonator.Loop{Until: &resonator.WhenExpr{Not: &inner}},
+		}, res)
+	})
+}
+
 func TestParseGotoTarget(t *testing.T) {
 	for _, exec := range []string{"goto://billing/100", "goto://300", "goto://website/canary/0"} {
 		for _, strict := range []bool{false, true} {

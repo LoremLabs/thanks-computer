@@ -382,8 +382,56 @@ func evalLeaf(cond *Condition, input string) bool {
 		if re != nil {
 			return re.MatchString(val.String()) == (cond.MatchType == "=~")
 		}
+	case "exists":
+		// Presence, regardless of value: gjson's Exists is true for an
+		// explicit null (Raw "null") and false for a missing path, which
+		// is the distinction `== null` cannot make.
+		return val.Exists()
 	default:
 		return compareTyped(val, cond.MatchType, cond.MatchValue)
+	}
+	return false
+}
+
+// inSet is the `in` comparison: val is a member of the array mv. Strict
+// by type, unlike the coercing scalar comparisons above: the string "1"
+// is not the number 1, true is not "true", a missing path is a member
+// of nothing, and only an explicit null matches a null element. Numbers
+// compare as float64, which is how they travel in the envelope, so 1
+// matches 1.0. An array or object on either side never matches, and a
+// non-array mv (a call that returned something else) is no-match.
+func inSet(val gjson.Result, mv interface{}) bool {
+	items, ok := mv.([]interface{})
+	if !ok || !val.Exists() {
+		return false
+	}
+	for _, it := range items {
+		switch x := it.(type) {
+		case nil:
+			if val.Type == gjson.Null {
+				return true
+			}
+		case string:
+			if val.Type == gjson.String && val.Str == x {
+				return true
+			}
+		case bool:
+			if (x && val.Type == gjson.True) || (!x && val.Type == gjson.False) {
+				return true
+			}
+		case int64:
+			if val.Type == gjson.Number && val.Num == float64(x) {
+				return true
+			}
+		case int:
+			if val.Type == gjson.Number && val.Num == float64(x) {
+				return true
+			}
+		case float64:
+			if val.Type == gjson.Number && val.Num == x {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -396,6 +444,8 @@ func evalLeaf(cond *Condition, input string) bool {
 // returns false.
 func compareTyped(val gjson.Result, matchType MatchType, mv interface{}) bool {
 	switch matchType {
+	case "in":
+		return inSet(val, mv)
 	case "eq":
 		switch v := mv.(type) {
 		case int64:

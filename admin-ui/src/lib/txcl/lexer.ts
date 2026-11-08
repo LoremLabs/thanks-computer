@@ -187,6 +187,17 @@ export class Lexer {
                     tok = { type: TokenType.ILLEGAL, literal: '|', start, end: start + 1 }
                 }
                 break
+            case CH_DOLLAR:
+                // `$[path]` file-backed literal — one token, literal =
+                // the path (mirrors lexer.go `case '$'`). A bare `$` is
+                // ILLEGAL as before.
+                if (this.peekChar() === CH_LBRACK) {
+                    const literal = this.readFileLiteral()
+                    tok = { type: TokenType.FILELIT, literal, start, end: this.position + 1 }
+                } else {
+                    tok = { type: TokenType.ILLEGAL, literal: '$', start, end: start + 1 }
+                }
+                break
             case 0:
                 tok = { type: TokenType.EOF, literal: '', start, end: start }
                 break
@@ -363,6 +374,25 @@ export class Lexer {
         return this.input.slice(start, this.position).replace(/\\\//g, '/')
     }
 
+    // readFileLiteral reads `$[path]` with ch on the `$` and returns the
+    // path between the brackets; on return ch is on the closing `]`, or on
+    // the newline/EOF that ended an unterminated literal (mirrors
+    // lexer.go readFileLiteral; the Go side also records a lexical error,
+    // which this port has no channel for).
+    private readFileLiteral(): string {
+        this.readChar() // onto '['
+        const position = this.position + 1
+        for (;;) {
+            this.readChar()
+            if (this.ch === CH_RBRACK) {
+                return this.input.slice(position, this.position)
+            }
+            if (this.ch === 0 || this.ch === CH_LF) {
+                return this.input.slice(position, Math.min(this.position, this.input.length))
+            }
+        }
+    }
+
     private readString(): string {
         let out = ''
         for (;;) {
@@ -462,6 +492,7 @@ const CH_SPACE = 32
 const CH_BANG = 33
 const CH_QUOTE = 34
 const CH_HASH = 35
+const CH_DOLLAR = 36
 const CH_AMP = 38
 const CH_LPAREN = 40
 const CH_RPAREN = 41

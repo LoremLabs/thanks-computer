@@ -1,0 +1,5 @@
+# GET /check?noun=<n> — step 1b: membership against an inline array.
+# Before `in`, this was `=~ /^(seed|run|wake)$/`.
+WHEN @src == "http" && @web.req.url.path == "/check"
+  && @web.req.url.query.noun.0 in ["seed", "run", "wake"]
+  EMIT ._noun_ok = true

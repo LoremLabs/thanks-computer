@@ -82,6 +82,12 @@ const (
 	// function-call value. Literal carries the identifier (no `&`).
 	// See internal docs/todo-txcl-expressions.md.
 	AMP_IDENT = "AMP_IDENT"
+
+	// File-backed literal `$[path.json]`. Literal carries the path between
+	// the brackets. Like `&include`, it is a compile-time directive: the
+	// txco CLI replaces it with the file's JSON as a txcl literal before an
+	// op is uploaded, so one reaching the chassis parser is an error.
+	FILELIT = "FILELIT"
 )
 
 type Token struct {

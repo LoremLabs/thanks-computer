@@ -216,6 +216,13 @@ func (l *Lexer) NextToken() token.Token {
 		} else {
 			tok = newToken(token.ILLEGAL, l.ch)
 		}
+	case '$':
+		if l.peekChar() == '[' {
+			tok.Type = token.FILELIT
+			tok.Literal = l.readFileLiteral()
+		} else {
+			tok = newToken(token.ILLEGAL, l.ch)
+		}
 	case 0:
 		tok.Literal = ""
 		tok.Type = token.EOF
@@ -446,6 +453,33 @@ func (l *Lexer) readString() string {
 		b.WriteByte(l.ch)
 	}
 	return b.String()
+}
+
+// readFileLiteral reads `$[path]` with l.ch on the `$` and returns the
+// path between the brackets, verbatim. On return l.ch is on the closing
+// `]`, so the caller's trailing readChar steps past it and Span covers
+// `$[` through `]`. A newline or EOF before the `]` ends the literal and
+// is recorded as a lexical error: strict validation reports it, the
+// lenient runtime path ignores errs, as for an unterminated string. One
+// token, so a `$[` inside a string, a regex or a comment is never seen
+// here.
+func (l *Lexer) readFileLiteral() string {
+	l.readChar() // onto '['
+	position := l.position + 1
+	for {
+		l.readChar()
+		if l.ch == ']' {
+			return l.input[position:l.position]
+		}
+		if l.ch == 0 || l.ch == '\n' {
+			l.errs = append(l.errs, "unterminated $[...] file literal")
+			end := l.position
+			if end > len(l.input) {
+				end = len(l.input)
+			}
+			return l.input[position:end]
+		}
+	}
 }
 
 func isBranchChar(ch byte) bool {

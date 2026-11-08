@@ -91,4 +91,24 @@ EXEC "mcp+https://x" WITH timeout = "60s", debug = true
         expect(inWhen.find((s) => s.text === '*')?.name).toBe('controlOperator')
         expect(inExpr.find((s) => s.text === '*')?.name).toBe('operator')
     })
+
+    it('tags in / exists as contextual words, and $[...] / &include as directives', () => {
+        const spans = highlightSpans(
+            'WHEN .x in $[nouns.json] && exists .y || !exists @z, .w in ["a"]\n' +
+                'EXEC "txco://noop" WITH in = 1, exists = "k", s = &include("x.sh"), f = &now()\n' +
+                'SET .o = {"k": null}, .bad = $',
+        )
+        const tagsFor = (text: string) => spans.filter((s) => s.text === text).map((s) => s.name)
+
+        // `in` after a branch is the operator; as a WITH key it is a plain identifier.
+        expect(tagsFor('in')).toEqual(['operator', 'operator', 'variableName'])
+        // `exists` after WHEN / && / ! / , starts a predicate; as a WITH key it is plain.
+        expect(tagsFor('exists')).toEqual(['keyword', 'keyword', 'variableName'])
+        expect(tagsFor('$[nouns.json]')).toEqual(['directive'])
+        expect(tagsFor('&include')).toEqual(['directive'])
+        expect(tagsFor('&now')).toEqual(['function'])
+        expect(tagsFor('null')).toEqual(['null'])
+        // A bare `$` is still invalid.
+        expect(tagsFor('$')).toEqual(['invalid'])
+    })
 })

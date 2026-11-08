@@ -271,12 +271,29 @@ func (p *Parser) parseLiteralValue() (interface{}, bool) {
 		return v, true
 	case token.STRING:
 		return p.curToken.Literal, true
+	case token.NULL:
+		return nil, true
 	case token.LBRACKET:
 		return p.parseArrayLiteral()
+	case token.LBRACE:
+		return p.parseObjectLiteral()
+	case token.FILELIT:
+		p.unexpandedFileLiteral()
+		return nil, false
 	default:
-		p.wrongTypeParseError("bool, int, float, string, or array")
+		p.wrongTypeParseError("bool, int, float, string, null, array, or object")
 		return nil, false
 	}
+}
+
+// unexpandedFileLiteral reports a `$[path]` that reached the parser. The
+// txco CLI expands the directive into a literal when it reads OPS/, so
+// one arriving here means an op was uploaded by an older txco or by the
+// API directly. An error in lenient mode too: a bare `$` was already a
+// parse error before the token existed, and the directive has no
+// runtime meaning to fall back to.
+func (p *Parser) unexpandedFileLiteral() {
+	p.errors = append(p.errors, fmt.Sprintf("$[%s] is expanded by txco before upload; this op reached the parser unexpanded — apply it with a current txco", p.curToken.Literal))
 }
 
 // parseValueExpr is the top-level RHS-value parser. Returns an
@@ -410,6 +427,60 @@ func (p *Parser) parseArrayLiteral() (interface{}, bool) {
 	}
 }
 
+// parseObjectLiteral parses `{"k": v, …}` starting at LBRACE. The shape
+// is JSON's, no more: keys are quoted strings, values are literals
+// (scalars, null, arrays, nested objects — never a path or a call), no
+// trailing comma, no duplicate keys. On success returns
+// (map[string]interface{}, true) with the parser positioned on the
+// closing RBRACE, so call sites treat it exactly like an array literal.
+func (p *Parser) parseObjectLiteral() (interface{}, bool) {
+	obj := map[string]interface{}{}
+	if p.peekTokenIs(token.RBRACE) {
+		p.nextToken()
+		return obj, true
+	}
+	for {
+		p.nextToken() // onto the key
+		if !p.curTokenIs(token.STRING) {
+			p.wrongTypeParseError("a quoted object key")
+			return nil, false
+		}
+		key := p.curToken.Literal
+		if _, dup := obj[key]; dup {
+			p.errors = append(p.errors, fmt.Sprintf("duplicate object key %q", key))
+			return nil, false
+		}
+		if !p.peekTokenIs(token.COLON) {
+			p.nextToken()
+			p.wrongTypeParseError("':' after object key")
+			return nil, false
+		}
+		p.nextToken() // onto ':'
+		p.nextToken() // onto the value
+		v, ok := p.parseLiteralValue()
+		if !ok {
+			return nil, false
+		}
+		obj[key] = v
+		switch {
+		case p.peekTokenIs(token.COMMA):
+			p.nextToken() // onto the comma; the loop steps onto the next key
+			if p.peekTokenIs(token.RBRACE) {
+				p.nextToken()
+				p.wrongTypeParseError("a quoted object key after ',' (an object takes no trailing comma)")
+				return nil, false
+			}
+		case p.peekTokenIs(token.RBRACE):
+			p.nextToken()
+			return obj, true
+		default:
+			p.nextToken()
+			p.wrongTypeParseError("',' or '}'")
+			return nil, false
+		}
+	}
+}
+
 // parse tokens for With Phrase (WITH foo = "bar", moo = 1)
 func (p *Parser) parseWithPhrase() *resonator.Phrase {
 	withs := make(map[string]ast.Value)
@@ -491,9 +562,9 @@ func (p *Parser) parseLoopPhrase() *resonator.Phrase {
 		switch {
 		case p.peekTokenIs(token.UNTIL):
 			p.nextToken() // curToken = UNTIL
-			if !p.isWhenPrimaryStart(p.peekToken.Type) {
+			if !p.isWhenPrimaryStart(p.peekToken) {
 				p.errors = append(p.errors, fmt.Sprintf(
-					"LOOP UNTIL expects a predicate (.path == value, composable with &&, ||, !, parentheses), got '%s'",
+					"LOOP UNTIL expects a predicate (.path == value, exists .path, composable with &&, ||, !, parentheses), got '%s'",
 					p.peekToken.Literal))
 				return nil
 			}
@@ -551,6 +622,19 @@ func (p *Parser) parseLoopPhrase() *resonator.Phrase {
 // `word` (an identifier, any letter case).
 func (p *Parser) peekIsWord(word string) bool {
 	return p.peekTokenIs(token.IDENT) && strings.EqualFold(p.peekToken.Literal, word)
+}
+
+// curIsWord is peekIsWord for the current token.
+func (p *Parser) curIsWord(word string) bool {
+	return p.curTokenIs(token.IDENT) && strings.EqualFold(p.curToken.Literal, word)
+}
+
+// isWord reports whether t is the contextual word `word`. `in` and
+// `exists` are words of this kind, like LOOP's EVERY and MAX: they are
+// recognised only where a predicate expects them, so a WITH key or a
+// path segment spelled `in` or `exists` is untouched.
+func isWord(t token.Token, word string) bool {
+	return t.Type == token.IDENT && strings.EqualFold(t.Literal, word)
 }
 
 // parseLoopSet parses the assignment list after LOOP's SET:
@@ -933,7 +1017,7 @@ func (p *Parser) parseWhenOr() *resonator.WhenExpr {
 	parts := []resonator.WhenExpr{*first}
 	for p.peekTokenIs(token.LOR) {
 		p.nextToken() // curToken = ||
-		if !p.isWhenPrimaryStart(p.peekToken.Type) {
+		if !p.isWhenPrimaryStart(p.peekToken) {
 			p.errors = append(p.errors, p.exprKeyword()+" expected expression after '||'")
 			return nil
 		}
@@ -960,7 +1044,7 @@ func (p *Parser) parseWhenAnd() *resonator.WhenExpr {
 	for p.peekTokenIs(token.LAND) || p.peekTokenIs(token.COMMA) {
 		opLit := p.peekToken.Literal
 		p.nextToken() // curToken = && or ,
-		if !p.isWhenPrimaryStart(p.peekToken.Type) {
+		if !p.isWhenPrimaryStart(p.peekToken) {
 			p.errors = append(p.errors,
 				fmt.Sprintf("%s expected expression after '%s'", p.exprKeyword(), opLit))
 			return nil
@@ -979,15 +1063,25 @@ func (p *Parser) parseWhenAnd() *resonator.WhenExpr {
 }
 
 // parseWhenNot = "!" parseWhenNot | parseWhenPrimary
+//
+// Negated membership must be parenthesized: `!(.x in [...])`. A bare
+// `!.x in [...]` reads two ways to a person (`!(.x in …)` or
+// `(!.x) in …`), so it is refused with the parenthesized form in the
+// message. `!exists .x` needs no parentheses: exists is unary.
 func (p *Parser) parseWhenNot() *resonator.WhenExpr {
 	if p.curTokenIs(token.BANG) {
-		if !p.isWhenPrimaryStart(p.peekToken.Type) {
+		if !p.isWhenPrimaryStart(p.peekToken) {
 			p.errors = append(p.errors, p.exprKeyword()+" expected expression after '!'")
 			return nil
 		}
+		bareLeaf := p.peekTokenIs(token.BRANCH)
 		p.nextToken()
 		inner := p.parseWhenNot()
 		if inner == nil {
+			return nil
+		}
+		if bareLeaf && inner.HasLeaf && inner.Leaf.MatchType == "in" {
+			p.errors = append(p.errors, p.exprKeyword()+" negated membership needs parentheses: write !("+inner.Leaf.Branch.Path+" in [...])")
 			return nil
 		}
 		return &resonator.WhenExpr{Not: inner}
@@ -1017,11 +1111,30 @@ func (p *Parser) parseWhenPrimary() *resonator.WhenExpr {
 	return p.parseWhenLeaf()
 }
 
-// parseWhenLeaf = <branch> <cmp> <scalar>. The body is the original
-// leaf-parsing logic lifted unchanged from the flat-AND parseWhenPhrase.
+// parseWhenLeaf = "exists" <branch> | <branch> <cmp> <scalar> |
+// <branch> "in" <array>. The comparison body is the original leaf-parsing
+// logic lifted unchanged from the flat-AND parseWhenPhrase.
 func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
+	// `exists .path` — presence, regardless of value. Unary, so it has no
+	// right-hand side; the operand is a branch and nothing else (a call
+	// or a literal here would be a computed predicate, which WHEN
+	// doesn't do).
+	if p.curIsWord("exists") {
+		p.nextToken()
+		if !p.curTokenIs(token.BRANCH) {
+			p.errors = append(p.errors, fmt.Sprintf("%s exists takes a branch path (.a.b or @a.b), got '%s'",
+				p.exprKeyword(), p.curToken.Literal))
+			return nil
+		}
+		leaf := resonator.Condition{
+			Branch:    &resonator.Branch{Path: p.curToken.Literal},
+			MatchType: resonator.MatchType("exists"),
+		}
+		return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
+	}
+
 	if !p.curTokenIs(token.BRANCH) {
-		msg := fmt.Sprintf("%s expected branch or '(', got '%s'",
+		msg := fmt.Sprintf("%s expected branch, exists, or '(', got '%s'",
 			p.exprKeyword(), p.curToken.Literal)
 		p.errors = append(p.errors, msg)
 		return nil
@@ -1029,15 +1142,23 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 	branch := &resonator.Branch{Path: p.curToken.Literal}
 	p.nextToken()
 
+	// `.path in [...]` — membership. `in` is a contextual word, not a
+	// keyword (see isWord), accepted only in this operator position.
+	if p.curIsWord("in") {
+		p.nextToken()
+		return p.parseWhenInRHS(branch)
+	}
+
 	if !p.curTokenIsComparison() {
-		msg := fmt.Sprintf("%s expected =~, !~, ==, !=, >, <, >=, or <= (%s)",
+		msg := fmt.Sprintf("%s expected =~, !~, ==, !=, >, <, >=, <=, or in (%s)",
 			p.exprKeyword(), p.curToken.Type)
 		p.errors = append(p.errors, msg)
 		return nil
 	}
 
+	opLiteral := p.curToken.Literal
 	var matchtype resonator.MatchType
-	switch p.curToken.Literal {
+	switch opLiteral {
 	case "==":
 		matchtype = resonator.MatchType("eq")
 	case ">=":
@@ -1071,30 +1192,21 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 			p.errors = append(p.errors, p.exprKeyword()+" regex comparisons (=~, !~) take a regex literal, not a function call")
 			return nil
 		}
-		call, ok := p.parseFunctionCall()
-		if !ok {
-			return nil
-		}
-		fc := call.(ast.FunctionCall)
-		if path, found := firstPathArg(fc); found {
-			p.errors = append(p.errors, fmt.Sprintf("%s function arguments must be literals, but &%s references path %q — EMIT the computed value in an earlier scope and compare it here instead", p.exprKeyword(), fc.Name, "."+path))
-			return nil
-		}
-		if p.strict && !funcs.Has(fc.Name) {
-			// Lenient parsing accepts unknown names (a rule authored
-			// for a newer chassis must not fail to load on an older
-			// one); at runtime an unknown name evaluates to no-match.
-			// Strict mode surfaces the silent-false at authoring time.
-			p.errors = append(p.errors, fmt.Sprintf("unknown function &%s in %s (would evaluate to no-match at runtime)", fc.Name, p.exprKeyword()))
-		}
-		leaf := resonator.Condition{
-			Branch:    branch,
-			MatchType: matchtype,
-			MatchCall: &fc,
-		}
-		return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
+		return p.parseWhenCall(branch, matchtype)
 	}
 
+	if p.curTokenIs(token.FILELIT) {
+		p.unexpandedFileLiteral()
+		return nil
+	}
+	// An array or object is not a scalar: `==` against one could never be
+	// true (compareTyped has no case for it), so name the operator that
+	// does take a collection.
+	if p.curTokenIs(token.LBRACKET) || p.curTokenIs(token.LBRACE) {
+		p.errors = append(p.errors, fmt.Sprintf("%s %s compares a path to a scalar; use `%s in [...]` for membership",
+			p.exprKeyword(), opLiteral, branch.Path))
+		return nil
+	}
 	if !p.curTokenIs(token.TRUE) && !p.curTokenIs(token.FALSE) && !p.curTokenIs(token.FLOAT) && !p.curTokenIs(token.INT) && !p.curTokenIs(token.STRING) && !p.curTokenIs(token.NULL) && !p.curTokenIs(token.REGEX) {
 		p.wrongTypeParseError("bool, int, float, string, null, regex, or &function(...)")
 		return nil
@@ -1132,6 +1244,76 @@ func (p *Parser) parseWhenLeaf() *resonator.WhenExpr {
 	return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
 }
 
+// parseWhenCall parses a `&fn(...)` right-hand side with curToken on the
+// AMP_IDENT and returns the call leaf for branch/matchtype.
+func (p *Parser) parseWhenCall(branch *resonator.Branch, matchtype resonator.MatchType) *resonator.WhenExpr {
+	call, ok := p.parseFunctionCall()
+	if !ok {
+		return nil
+	}
+	fc := call.(ast.FunctionCall)
+	if path, found := firstPathArg(fc); found {
+		p.errors = append(p.errors, fmt.Sprintf("%s function arguments must be literals, but &%s references path %q — EMIT the computed value in an earlier scope and compare it here instead", p.exprKeyword(), fc.Name, "."+path))
+		return nil
+	}
+	if p.strict && !funcs.Has(fc.Name) {
+		// Lenient parsing accepts unknown names (a rule authored
+		// for a newer chassis must not fail to load on an older
+		// one); at runtime an unknown name evaluates to no-match.
+		// Strict mode surfaces the silent-false at authoring time.
+		p.errors = append(p.errors, fmt.Sprintf("unknown function &%s in %s (would evaluate to no-match at runtime)", fc.Name, p.exprKeyword()))
+	}
+	leaf := resonator.Condition{
+		Branch:    branch,
+		MatchType: matchtype,
+		MatchCall: &fc,
+	}
+	return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
+}
+
+// parseWhenInRHS parses what follows `<branch> in`, with curToken on
+// its first token: an array literal of scalars, or a literal-argument
+// &function(...) that returns an array (the runtime treats a non-array
+// result as no-match). A scalar, an object or a path is refused —
+// membership takes a collection, and WHEN compares a path only to
+// values independent of the envelope.
+func (p *Parser) parseWhenInRHS(branch *resonator.Branch) *resonator.WhenExpr {
+	kw := p.exprKeyword()
+	switch {
+	case p.curTokenIs(token.AMP_IDENT):
+		return p.parseWhenCall(branch, resonator.MatchType("in"))
+	case p.curTokenIs(token.LBRACKET):
+		arr, ok := p.parseArrayLiteral()
+		if !ok {
+			return nil
+		}
+		items := arr.([]interface{})
+		for _, it := range items {
+			switch it.(type) {
+			case nil, string, bool, int64, float64:
+			default:
+				p.errors = append(p.errors, kw+" in: elements must be scalars (string, number, bool, null); nested arrays and objects are not supported")
+				return nil
+			}
+		}
+		leaf := resonator.Condition{
+			Branch:     branch,
+			MatchType:  resonator.MatchType("in"),
+			MatchValue: items,
+		}
+		return &resonator.WhenExpr{Leaf: leaf, HasLeaf: true}
+	case p.curTokenIs(token.BRANCH):
+		p.errors = append(p.errors, fmt.Sprintf("%s in takes a collection independent of the envelope, not path %s — EMIT a flag in an earlier scope and test it here instead", kw, p.curToken.Literal))
+		return nil
+	case p.curTokenIs(token.FILELIT):
+		p.unexpandedFileLiteral()
+		return nil
+	default:
+		p.errors = append(p.errors, fmt.Sprintf("%s in expects an array literal [...] or an &function(...) returning one, got '%s'", kw, p.curToken.Literal))
+		return nil
+	}
+}
+
 // firstPathArg walks a FunctionCall's args (recursively, through
 // nested calls) and returns the first PathRef it finds. Used by the
 // WHEN parser to enforce literal-only arguments.
@@ -1149,12 +1331,14 @@ func firstPathArg(fc ast.FunctionCall) (string, bool) {
 	return "", false
 }
 
-func (p *Parser) isWhenPrimaryStart(t token.TokenType) bool {
-	switch t {
+// isWhenPrimaryStart reports whether t can begin a predicate primary: a
+// branch, a group, a negation, or the unary word `exists`.
+func (p *Parser) isWhenPrimaryStart(t token.Token) bool {
+	switch t.Type {
 	case token.BRANCH, token.LPAREN, token.BANG:
 		return true
 	}
-	return false
+	return isWord(t, "exists")
 }
 
 func (p *Parser) isStopForWhen(t token.TokenType) bool {

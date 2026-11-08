@@ -8,10 +8,12 @@
     { "include": "#regex-after-binding" },
     { "include": "#string" },
     { "include": "#number" },
+    { "include": "#file-literal" },
     { "include": "#include-directive" },
     { "include": "#amp-ident" },
     { "include": "#at-branch" },
     { "include": "#dot-branch" },
+    { "include": "#word-operator" },
     { "include": "#keyword" },
     { "include": "#constant" },
     { "include": "#operator-multi" },
@@ -62,10 +64,25 @@
       "name": "constant.numeric.txcl",
       "match": "(?<![A-Za-z0-9_.])-?(?:\\d+\\.\\d+|\\d+)\\b"
     },
+    "file-literal": {
+      "comment": "$[path.json] is replaced by the file's JSON, as a literal, when txco reads OPS/ (not a runtime value), so it reads as a directive, like &include.",
+      "name": "keyword.control.directive.file.txcl",
+      "match": "(\\$\\[)([^\\]\\n]*)(\\])",
+      "captures": {
+        "1": { "name": "punctuation.definition.directive.begin.txcl" },
+        "2": { "name": "string.unquoted.path.txcl" },
+        "3": { "name": "punctuation.definition.directive.end.txcl" }
+      }
+    },
     "include-directive": {
       "comment": "&include(\"file\") is replaced by the file's text when txco reads OPS/ (not a runtime function), so it reads as a directive.",
       "name": "keyword.control.directive.include.txcl",
       "match": "&include\\b"
+    },
+    "word-operator": {
+      "comment": "in (membership) and exists (presence) are contextual words of the predicate grammar, like EVERY/MAX in LOOP. Branch rules run first, so a path segment spelled .in or .exists stays a member; a WITH key spelled in or exists is colored too, for simplicity.",
+      "name": "keyword.operator.word.txcl",
+      "match": "\\b(in|IN|exists|EXISTS)\\b"
     },
     "amp-ident": {
       "name": "entity.name.function.txcl",

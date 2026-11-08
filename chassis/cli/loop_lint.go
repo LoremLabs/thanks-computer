@@ -298,16 +298,36 @@ const defaultOpLoopMax = 1000
 
 // loopPolarityTrap walks a LOOP UNTIL expression and returns the
 // spelling of the first leaf that is TRUE when its path is missing —
-// `.x == false` / `.x != true`, or their negated forms under `!` — since
-// WHEN coerces a missing path to the zero value. Empty when none.
+// `.x == false` / `.x != true`, or their negated forms under `!`, since
+// WHEN coerces a missing path to the zero value; and `!exists .x` or
+// `!(.x in [...])`, which say so outright. Empty when none.
 func loopPolarityTrap(e *resonator.WhenExpr, negated bool) string {
 	if e == nil {
 		return ""
 	}
 	switch {
 	case e.HasLeaf:
+		if e.Leaf.Branch == nil {
+			return ""
+		}
+		switch e.Leaf.MatchType {
+		case resonator.MatchType("exists"):
+			// Presence is false on a missing path; only its negation
+			// holds there.
+			if negated {
+				return "`!exists " + e.Leaf.Branch.Path + "`"
+			}
+			return ""
+		case resonator.MatchType("in"):
+			// Membership is strict: a missing path is in nothing, so
+			// only the negated form holds there.
+			if negated {
+				return "`!(" + e.Leaf.Branch.Path + " in [...])`"
+			}
+			return ""
+		}
 		b, ok := e.Leaf.MatchValue.(bool)
-		if !ok || e.Leaf.Branch == nil {
+		if !ok {
 			return ""
 		}
 		eq := e.Leaf.MatchType == resonator.MatchType("eq")

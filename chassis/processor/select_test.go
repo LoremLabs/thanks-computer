@@ -78,6 +78,22 @@ func TestSelectUsesDefaultOnEmptyString(t *testing.T) {
 	}
 }
 
+// TestSelectDefaultNullAndObject — `DEFAULT null` writes a JSON null and
+// `DEFAULT {…}` a JSON object (the JSON-complete literal forms), not the
+// empty string the no-default path writes.
+func TestSelectDefaultNullAndObject(t *testing.T) {
+	pu, _ := newTestUnit(t)
+	seedRule(t, pu, "sel/nullobj", "nullobj", `SELECT .absent AS .n DEFAULT null, .missing AS .o DEFAULT {"k": [1, null]}`)
+
+	p := runOne(t, pu, `{}`, "sel/nullobj/0")
+	if got := gjson.Get(p.Raw, "n").Raw; got != "null" {
+		t.Errorf("n = %s, want null; body=%s", got, p.Raw)
+	}
+	if got := gjson.Get(p.Raw, "o.k").Raw; got != "[1,null]" {
+		t.Errorf("o.k = %s, want [1,null]; body=%s", got, p.Raw)
+	}
+}
+
 // TestSelectDefaultSkippedWhenSourcePresent — DEFAULT must NOT clobber
 // a populated source.
 func TestSelectDefaultSkippedWhenSourcePresent(t *testing.T) {

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+The first release since 0.2.0 on the Marketplace, so it carries the
+0.3.0 changes below as well.
+
+- `in` (membership: `WHEN .status in ["a", "b"]`) and `exists` (presence:
+  `WHEN exists .x`, `WHEN !exists .x`) highlighted as operators. They are
+  contextual words in the chassis parser, like `EVERY` and `MAX`, so a
+  `WITH in = …` key is unaffected by the language; the grammar colors
+  them everywhere for simplicity.
+- `$[path.json]` file-backed literal highlighted as a directive, like
+  `&include`: txco replaces it with the file's JSON, as a literal, when
+  it reads `OPS/`.
+- JSON-complete literals — `{"k": v}` objects and `null` in value
+  positions — are colored by the existing string, constant and
+  punctuation rules; noted so the grammar's version tracks the language.
+- Snippets: `in`, `exists`, `filelit`.
+
 ## 0.3.0
 
 - `&include("file")` highlighted as a directive (`keyword.control.directive.include`)

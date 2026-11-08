@@ -1,0 +1,4 @@
+# step 2, the other half: a flag that was never set. `!exists` says
+# exactly that — the `!= true` idiom works too, but reads as a value test.
+WHEN @web.req.url.path == "/check" && !exists ._known
+  EMIT .known = false

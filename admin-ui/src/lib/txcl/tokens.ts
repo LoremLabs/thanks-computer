@@ -73,6 +73,11 @@ export const TokenType = {
     // Function-call sigil: `&fn(args...)`. Literal carries the identifier
     // (no leading `&`). Mirrors token.go:AMP_IDENT.
     AMP_IDENT: 'AMP_IDENT',
+
+    // File-backed literal `$[path.json]`. Literal carries the path between
+    // the brackets. A compile-time directive txco expands before upload,
+    // like `&include`. Mirrors token.go:FILELIT.
+    FILELIT: 'FILELIT',
 } as const
 
 export type TokenType = (typeof TokenType)[keyof typeof TokenType]

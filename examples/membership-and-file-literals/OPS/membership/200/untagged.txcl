@@ -1,0 +1,2 @@
+WHEN @web.req.url.path == "/check" && !exists ._tagged
+  EMIT .tagged = false

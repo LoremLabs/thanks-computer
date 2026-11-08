@@ -93,7 +93,7 @@ Spaces, tabs, newlines, and carriage returns are equivalent. A resonator on mult
 
 ### Keywords
 
-Case-insensitive. Both `WHEN` and `when` work; both `SELECT` and `select`; etc. `EVERY` and `MAX` are recognized only inside a `LOOP` clause, so `every` and `max` stay usable as WITH keys.
+Written in lower case or in capitals: both `WHEN` and `when` work, both `SELECT` and `select`, and so on (`When` does not). Four words are recognized only where the grammar expects them, in any letter case, and are ordinary identifiers everywhere else: `EVERY` and `MAX` inside a `LOOP` clause, `in` after a path in a predicate, `exists` at the start of one. So `every`, `max`, `in` and `exists` stay usable as WITH keys and path segments.
 
 ### Strings
 
@@ -124,16 +124,69 @@ Negatives are accepted via a leading `-` directly preceding a digit.
 WHEN .enabled == true
 WHEN .draft == false
 WHEN .ref == null
+SET .cleared = null
 ```
+
+`null` is a value anywhere a literal goes. In a `WHEN` it is compared as the empty string, so `.ref == null` also matches a missing path and `""`; to test presence itself, use [`exists`](#exists--presence).
+
+### Arrays and objects
+
+Literals are JSON-shaped: arrays in `[...]`, objects in `{...}` with quoted keys, nested as deep as you like, holding strings, numbers, booleans, `null`, arrays and objects.
+
+```txcl
+SET .tags = ["a", "b"]
+WITH schema = {"type": "object", "required": ["reply"]}
+EMIT .config = {"enabled": true, "limits": {"max": 10, "tags": ["a", "b"]}, "optional": null}
+```
+
+An object is static data: its values are literals, never a path or a function call (`{"owner": .owner}` is a parse error; build such a value with `&object`). Keys are quoted, no key repeats, and there is no trailing comma. A large or shared value is better kept in a file and pulled in with [`$[path.json]`](#file-backed-literals--pathjson).
 
 ## Conditions
 
-- `==  !=  <  <=  >  >=` (numbers, lexical strings), 
-- `=~` / `!~` (regex, `/pattern/` literals), 
-- `&&` and `||`, 
-- prefix `!`, parentheses for grouping. 
+- `==  !=  <  <=  >  >=` (numbers, lexical strings),
+- `=~` / `!~` (regex, `/pattern/` literals),
+- `in` (membership: `.status in ["a", "b"]`),
+- `exists` (presence: `exists .path`, `!exists .path`),
+- `&&` and `||`,
+- prefix `!`, parentheses for grouping.
 
 A comma in `WHEN` is an AND.
+
+### `in` — membership
+
+```txcl
+WHEN .status in ["pending", "running", "complete"]
+WHEN .code in [200, 201, 202]
+WHEN @inspect.noun in $[inspect-nouns.json]
+WHEN .role in &array("admin", "owner")
+```
+
+True when the path's value equals one element of the array. The array is a literal (scalars only: strings, numbers, booleans, `null`), a [file-backed literal](#file-backed-literals--pathjson), or a literal-arguments function call that returns an array; never a path (`.role in .allowed` is a parse error, for the same reason `WHEN` never compares two paths).
+
+Membership is strict about types, unlike `==`: `"1"` is not `1`, `"true"` is not `true`, `1` equals `1.0`, strings compare exactly and case-sensitively, `null` matches only an explicit `null`, and a missing path is a member of nothing. An array or object on either side never matches.
+
+Negate it in parentheses: `!(.x in [...])`. A bare `!.x in [...]` reads two ways, so it is a parse error.
+
+### `exists` — presence
+
+```txcl
+WHEN exists .user.email
+WHEN !exists @call.input.run
+WHEN exists .a && .status == "ready"
+```
+
+True when the path is present, whatever its value: `null`, `""`, `0`, `false`, `[]` and `{}` all exist; only a missing path does not. The operand is a path and nothing else; `!exists` needs no parentheses.
+
+This is not what `=~ /./` tests. That regex is true for a non-empty *string*; `exists` is true for presence. The two answer differently for `""`, `null`, `false` and `0`, so change an existing `=~ /./` to `exists` only where presence is what was meant — op by op, never by search-and-replace.
+
+| envelope | `exists .x` | `.x =~ /./` | `.x != null` |
+| --- | --- | --- | --- |
+| `{}` | false | false | false |
+| `{"x": null}` | true | false | false |
+| `{"x": ""}` | true | false | false |
+| `{"x": false}` | true | true | true |
+| `{"x": 0}` | true | true | true |
+| `{"x": "a"}` | true | true | true |
 
 
 ### Branch paths
@@ -239,6 +292,28 @@ The rules:
 Where the file ends up still matters. `ai://chat` treats `{{…}}` in `prompt` and `system` as template markers, and an included prompt gets the same treatment. A script passed in `args` is subject to the operating system's argument limit (128 KiB for one argument on Linux), so feed a large one on `stdin`. Since the chassis never sees the directive, `txco pull` and the admin UI show the expanded text. Keep the file as the source and `txco apply` from it.
 
 `txco dev` watches the files your ops include and re-pushes the stack's draft when one changes. Keep included files outside `FILES/`, which the watcher skips by default and which is also uploaded and served as static assets.
+
+## File-backed literals — `$[path.json]`
+
+`$[path.json]` is `&include` for a value: the named JSON file, written into the op as a literal with its JSON type kept — an array, an object, a string, a number, a boolean or `null`. It goes anywhere a literal goes.
+
+```txcl
+WHEN @inspect.noun in $[inspect-nouns.json]      # ["seed", "run", "wake", …]
+EXEC "ai://chat"
+  WITH schema = $[schemas/reply.json]            # {"type": "object", …}
+EMIT .defaults = $[defaults.json]
+```
+
+The rules of `&include` apply (relative to the `.txcl`, inside the stack directory, a regular file, UTF-8, at most 1 MiB, not recursive, expanded by `txco` before upload so `txco pull` and the admin UI show the value), and:
+
+- **The name is a plain `*.json`**: letters, digits, `.`, `_`, `-` and `/`, ending in `.json` in lower case.
+- **The JSON is parsed when `txco` reads your `OPS/` tree.** A typo fails `txco apply` naming the op, the file, and the line and column, instead of a `WHEN` quietly evaluating false at runtime.
+- **The value is written compactly on one line**, keys in the file's order, so the same bytes always expand to the same text. Whitespace and line endings in the file don't matter; key order does.
+- **Numbers must be lossless.** The envelope carries float64 and txcl has no exponent syntax, so an integer must be within ±2^53 (9,007,199,254,740,992) and a non-integer must be 0 or between 1e-15 and 2^53 in magnitude. `1e5` becomes `100000.0`; `9007199254740993`, `1e300` and `1e-16` are errors, never approximations.
+- **Strings become txcl strings.** `é` becomes `é`; a lone surrogate escape and `\u0000` are errors. A `$[...]` or `&include(...)` inside a JSON string stays text.
+- **Not for secrets.** The value becomes part of the op and shows wherever the op does. Use the secret store.
+
+`txco dev` watches these files like included ones.
 
 ## Functions
 
@@ -381,6 +456,8 @@ Precision ceiling: envelope numbers travel as float64, so integers beyond ±2^53
 | `>=`     | greater than or equal | string, int, float           |
 | `=~`     | regex matches         | regex literal                |
 | `!~`     | regex does not match  | regex literal                |
+| `in`     | member of an array (strict types) | array literal of scalars, `$[file.json]`, or `&fn(...)` returning an array |
+| `exists` | path is present (unary: `exists .x`, `!exists .x`) | a path |
 
 ## WHEN — filter
 
@@ -389,15 +466,17 @@ A resonator with no `WHEN` clause fires for every input. Equivalent to `WHEN *`.
 ```txcl
 WHEN *                        # always
 WHEN .src == "cron"           # equality
-WHEN .x != null               # any non-null
+WHEN .x != null               # present and not "" (null compares as "")
+WHEN exists .x                # present, whatever the value
 WHEN .priority < 5            # comparison
 WHEN .url =~ /\.json$/        # regex
+WHEN .status in ["a", "b"]    # membership
 WHEN .src == "cron", .x == 1  # AND: all must match
 ```
 
 Comma-separated conditions are conjunctive (every condition must match).
 
-The **left side is always a path**. The right side is a literal — a string, number, bool, null, or regex — or a function call whose arguments are **all literals** (nested calls included):
+The **left side is always a path**. The right side is a literal — a string, number, bool, null, or regex; after `in`, an array — or a function call whose arguments are **all literals** (nested calls included):
 
 ```txcl
 WHEN @cron.hour   == &tz("Asia/Kolkata", "hour", 9)
@@ -701,7 +780,7 @@ LOOP [EVERY <duration>] [SET <path> = <value>, …] UNTIL <predicate> [MAX <n>]
 
 | part | meaning | default |
 | --- | --- | --- |
-| `UNTIL <predicate>` | The exit condition, checked after every pass against the **view**: the envelope plus everything the loop has merged so far. WHEN's grammar exactly — `.path <op> literal`, `&&`, `\|\|`, `!`, parentheses, comma as AND. | required |
+| `UNTIL <predicate>` | The exit condition, checked after every pass against the **view**: the envelope plus everything the loop has merged so far. WHEN's grammar exactly — `.path <op> literal`, `.path in [...]`, `exists .path`, `&&`, `\|\|`, `!`, parentheses, comma as AND. | required |
 | `MAX <n>` | Pass ceiling; capped by `--op-loop-max` (1000). | 10 |
 | `EVERY <duration>` | Pause between passes, paid only when the loop continues (never after the last pass). `"2s"`, `"50ms"`, or a number of milliseconds. Floor 2ms. | 50ms |
 | `SET <path> = <value>, …` | Applied before every repeat, never before the first pass: resolved against the view, written onto the op's input and the view. Same value forms as SET. Assignments apply in order and each sees the writes before it, so a counter can drive a lookup (`SET ._n = &add(._n, 1), ._cell = &get(._cells, &concat("", ._n))`). How a pass feeds a cursor or counter to the next one. | none |
@@ -710,7 +789,7 @@ The parts may be written in any order; `EVERY` and `MAX` are words the parser re
 
 **Two rules of thumb.**
 
-- **A missing path reads as the zero value**, as in WHEN. `._page.next == ""` is exactly the cursor-drain exit; `.more == false` is already true before the op has written anything and exits after the first pass. `txco apply` warns.
+- **A missing path reads as the zero value**, as in WHEN. `._page.next == ""` is exactly the cursor-drain exit; `.more == false` is already true before the op has written anything and exits after the first pass, as are `!exists ._p.next` and `!(._p.status in [...])`. `txco apply` warns about all of them.
 - **Passes merge with the scope-merge rules**: scalars overwrite, objects deep-merge, **arrays append**. A paged op that returns one page's rows per pass accumulates all of them; an op that returns a cumulative array would double up — return the delta.
 
 ### Feeding the next pass

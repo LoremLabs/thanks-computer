@@ -40,11 +40,31 @@ const MaxBytes = 1 << 20
 // fn is the directive's name after the `&`.
 const fn = "include"
 
-// Ref is one `&include("path")` in a txcl source.
+// Kind says which directive a Ref is.
+type Kind int
+
+const (
+	// Include is `&include("path")`: the file's text as a string literal.
+	Include Kind = iota
+	// FileLiteral is `$[path.json]`: the file's JSON as a txcl literal.
+	FileLiteral
+)
+
+// Ref is one directive in a txcl source: an `&include("path")` or a
+// `$[path.json]`.
 type Ref struct {
-	Start, End int    // byte span of the whole call, `&include` through `)`
-	Path       string // the argument as written
-	Line       int    // 1-based line of the `&`
+	Start, End int    // byte span of the whole directive: `&include` through `)`, or `$[` through `]`
+	Path       string // the path as written
+	Line       int    // 1-based line of the `&` or `$`
+	Kind       Kind
+}
+
+// spelling is the directive as the author wrote it, for error messages.
+func (r Ref) spelling() string {
+	if r.Kind == FileLiteral {
+		return "$[" + r.Path + "]"
+	}
+	return fmt.Sprintf("&include(%q)", r.Path)
 }
 
 // SyntaxError is a malformed directive, or source that does not lex.
@@ -73,16 +93,33 @@ func lex(src string) ([]spanTok, []string) {
 	}
 }
 
-// Find returns every `&include("path")` in src, in order. A malformed one
-// (no parentheses, not exactly one plain string argument) is an error, as
-// is source that does not lex, since a broken string could hide one.
+// mayHaveDirective is the cheap pre-check before lexing a source.
+func mayHaveDirective(src string) bool {
+	return strings.Contains(src, "&"+fn) || strings.Contains(src, "$[")
+}
+
+// Find returns every `&include("path")` and `$[path.json]` in src, in
+// order. A malformed one (no parentheses, not exactly one plain string
+// argument; a `$[...]` path that is not a plain *.json name) is an error,
+// as is source that does not lex, since a broken string could hide one.
 func Find(src string) ([]Ref, error) {
-	if !strings.Contains(src, "&"+fn) {
+	if !mayHaveDirective(src) {
 		return nil, nil
 	}
 	toks, lexErrs := lex(src)
 	var refs []Ref
 	for i, t := range toks {
+		if t.tok.Type == token.FILELIT {
+			line := 1 + strings.Count(src[:t.start], "\n")
+			if len(lexErrs) > 0 {
+				return nil, &SyntaxError{line, "$[" + t.tok.Literal + "]: " + lexErrs[0]}
+			}
+			if err := checkLiteralPath(t.tok.Literal); err != nil {
+				return nil, &SyntaxError{line, "$[" + t.tok.Literal + "]: " + err.Error()}
+			}
+			refs = append(refs, Ref{Start: t.start, End: t.end, Path: t.tok.Literal, Line: line, Kind: FileLiteral})
+			continue
+		}
 		if t.tok.Type != token.AMP_IDENT || t.tok.Literal != fn {
 			continue
 		}
@@ -100,21 +137,31 @@ func Find(src string) ([]Ref, error) {
 	return refs, nil
 }
 
-// Has reports whether src still contains an &include directive: the
-// admin API's guard against an op uploaded without expansion. Token-based,
-// so text that merely mentions `&include(` inside a string (an expanded
-// include, say) does not count.
+// Has reports whether src still contains a directive (`&include` or
+// `$[...]`): the admin API's guard against an op uploaded without
+// expansion. Token-based, so text that merely mentions one inside a
+// string (an expanded include, say) or a comment does not count.
 func Has(src string) bool {
-	if !strings.Contains(src, "&"+fn) {
-		return false
+	_, ok := Unexpanded(src)
+	return ok
+}
+
+// Unexpanded is Has naming the first directive found, as the author would
+// spell it: `&include` or `$[...]`.
+func Unexpanded(src string) (directive string, ok bool) {
+	if !mayHaveDirective(src) {
+		return "", false
 	}
 	toks, _ := lex(src)
 	for _, t := range toks {
 		if t.tok.Type == token.AMP_IDENT && t.tok.Literal == fn {
-			return true
+			return "&" + fn, true
+		}
+		if t.tok.Type == token.FILELIT {
+			return "$[...]", true
 		}
 	}
-	return false
+	return "", false
 }
 
 // Quote writes s as a txcl string literal that lexes back to exactly s.
@@ -147,10 +194,12 @@ func Quote(s string) string {
 }
 
 // Expand replaces each `&include("path")` in src, the .txcl at txclPath,
-// with the file's contents as a string literal. Paths are fsys paths;
-// stackDir is the op's stack directory (e.g. "OPS/ingest"), which every
-// included file must stay inside. deps lists the files read, once each.
-// Errors read `<txclPath>:<line>: &include("<path>"): <reason>`.
+// with the file's contents as a string literal, and each `$[path.json]`
+// with the file's JSON as a txcl literal (see filelit.go). Paths are fsys
+// paths; stackDir is the op's stack directory (e.g. "OPS/ingest"), which
+// every included file must stay inside. deps lists the files read, once
+// each. Errors read `<txclPath>:<line>: &include("<path>"): <reason>` or
+// `<txclPath>:<line>: $[<path>]: <reason>`.
 func Expand(fsys fs.FS, stackDir, txclPath, src string) (out string, deps []string, err error) {
 	refs, err := Find(src)
 	if err != nil {
@@ -169,10 +218,19 @@ func Expand(fsys fs.FS, stackDir, txclPath, src string) (out string, deps []stri
 	for _, r := range refs {
 		p, text, err := read(fsys, stackDir, path.Dir(txclPath), r.Path)
 		if err != nil {
-			return "", nil, fmt.Errorf("%s:%d: &include(%q): %w", txclPath, r.Line, r.Path, err)
+			return "", nil, fmt.Errorf("%s:%d: %s: %w", txclPath, r.Line, r.spelling(), err)
+		}
+		lit := ""
+		if r.Kind == FileLiteral {
+			lit, err = jsonToTxcl(text)
+			if err != nil {
+				return "", nil, fmt.Errorf("%s:%d: %s: %w", txclPath, r.Line, r.spelling(), err)
+			}
+		} else {
+			lit = Quote(text)
 		}
 		b.WriteString(src[last:r.Start])
-		b.WriteString(Quote(text))
+		b.WriteString(lit)
 		last = r.End
 		if !seen[p] {
 			seen[p] = true

@@ -42,18 +42,22 @@ import { keywords, TokenType } from './tokens'
 //    that mean something only inside a LOOP clause), so they are
 //    highlighted as keywords only there — `WITH max = 5` stays a plain
 //    key.
+//  - `inPredicate`: true from WHEN or UNTIL until the next clause
+//    keyword. `exists` is the presence predicate only there, so the
+//    comma in `WITH a = 1, exists = 2` doesn't make a keyword of a key.
 interface State {
     lastType: string | null
     inString: boolean
     inLoop: boolean
+    inPredicate: boolean
 }
 
 function startState(): State {
-    return { lastType: null, inString: false, inLoop: false }
+    return { lastType: null, inString: false, inLoop: false, inPredicate: false }
 }
 
 function copyState(s: State): State {
-    return { lastType: s.lastType, inString: s.inString, inLoop: s.inLoop }
+    return { lastType: s.lastType, inString: s.inString, inLoop: s.inLoop, inPredicate: s.inPredicate }
 }
 
 // Clause keywords that end a LOOP clause's contextual-word window. SET
@@ -61,6 +65,21 @@ function copyState(s: State): State {
 const LOOP_ENDERS = new Set<string>([
     TokenType.WHEN, TokenType.SELECT, TokenType.WITH, TokenType.PRIORITY,
     TokenType.EXEC, TokenType.EMIT,
+])
+
+// `exists` is a contextual word (like EVERY/MAX): the unary presence
+// predicate when it starts a WHEN / LOOP UNTIL primary, i.e. after one
+// of these; a plain identifier anywhere else (`WITH exists = 1`). `in`
+// is the membership operator only directly after a branch path.
+const EXISTS_PRECEDERS = new Set<string>([
+    TokenType.WHEN, TokenType.UNTIL, TokenType.LAND, TokenType.LOR,
+    TokenType.BANG, TokenType.LPAREN, TokenType.COMMA,
+])
+
+// Clause keywords that end a predicate (WHEN …, LOOP … UNTIL …).
+const PREDICATE_ENDERS = new Set<string>([
+    TokenType.SET, TokenType.SELECT, TokenType.WITH, TokenType.PRIORITY,
+    TokenType.EXEC, TokenType.EMIT, TokenType.LOOP,
 ])
 
 // Tag names map directly to @lezer/highlight tags via the theme's
@@ -78,6 +97,7 @@ const TAG = {
     propertyName: 'propertyName', // BRANCH (.foo, @web.req...)
     variableName: 'variableName', // bare IDENT
     function: 'function', // AMP_IDENT (&fn function-call sigil)
+    directive: 'directive', // &include and $[path.json]: expanded by txco before upload
     punctuation: 'punctuation',
     controlOperator: 'controlOperator', // STAR after WHEN
     invalid: 'invalid',
@@ -98,6 +118,7 @@ const parser: StreamParser<State> = {
     // `t.function(...)` aren't in that table, so we wire them here.
     tokenTable: {
         function: t.function(t.variableName),
+        directive: t.macroName,
     },
 
     token(stream, state) {
@@ -218,9 +239,24 @@ const parser: StreamParser<State> = {
                             break
                         }
                     }
-                    return remember(state, TokenType.AMP_IDENT, TAG.function)
+                    // `&include` is a compile-time directive, not a
+                    // runtime call: txco replaces it with the file's
+                    // text before upload. Colour it as one.
+                    const tag = stream.current() === '&include' ? TAG.directive : TAG.function
+                    return remember(state, TokenType.AMP_IDENT, tag)
                 }
                 return remember(state, TokenType.ILLEGAL, TAG.invalid)
+            }
+
+            case '$': {
+                // `$[path.json]` file-backed literal: one token through
+                // the closing `]` (or the end of the line, when it never
+                // closes). A bare `$` stays invalid.
+                if (!stream.eat('[')) return remember(state, TokenType.ILLEGAL, TAG.invalid)
+                while (!stream.eol()) {
+                    if (stream.next() === ']') break
+                }
+                return remember(state, TokenType.FILELIT, TAG.directive)
             }
             case '|':
                 if (stream.eat('|')) return remember(state, TokenType.LOR, TAG.operator)
@@ -347,10 +383,31 @@ function readIdentifier(stream: StringStream, state: State, first: string): stri
         } else if (LOOP_ENDERS.has(kw)) {
             state.inLoop = false
         }
+        if (kw === TokenType.WHEN || kw === TokenType.UNTIL) {
+            state.inPredicate = true
+        } else if (PREDICATE_ENDERS.has(kw)) {
+            state.inPredicate = false
+        }
         state.lastType = kw
         return TAG.keyword
     }
     if (state.inLoop && /^(every|max)$/i.test(lit)) {
+        state.lastType = TokenType.IDENT
+        return TAG.keyword
+    }
+    // Contextual words of the predicate grammar: `.path in [...]` and
+    // `exists .path`. Anywhere else (a WITH key, say) they are plain
+    // identifiers, as in the chassis parser.
+    if (/^in$/i.test(lit) && state.lastType === TokenType.BRANCH) {
+        state.lastType = TokenType.IDENT
+        return TAG.operator
+    }
+    if (
+        /^exists$/i.test(lit) &&
+        state.inPredicate &&
+        state.lastType !== null &&
+        EXISTS_PRECEDERS.has(state.lastType)
+    ) {
         state.lastType = TokenType.IDENT
         return TAG.keyword
     }

@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "limits": {
+    "max": 10,
+    "tags": ["a", "b"]
+  },
+  "optional": null
+}

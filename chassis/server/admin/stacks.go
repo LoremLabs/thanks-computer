@@ -2357,16 +2357,18 @@ func (c *Controller) materialiseStackVersion(ctx context.Context, tx *sql.Tx,
 					"hint":  "define it under operations: in txco.yaml and run `txco apply`, or use an explicit http(s):// URL",
 				}}
 			}
-			// Guardrail: `&include("…")` is expanded by the txco CLI when it
-			// reads the OPS/ tree; one arriving bare (an older txco, or the
-			// API driven directly) would fail at runtime as an unknown
-			// function. Refuse it here; the deferred rollback aborts.
-			if include.Has(rf.content) {
-				return currentActiveID, targetVersionID, &materialiseError{http.StatusUnprocessableEntity, "unexpanded_include", map[string]any{
+			// Guardrail: `&include("…")` and `$[path.json]` are expanded by
+			// the txco CLI when it reads the OPS/ tree; one arriving bare
+			// (an older txco, or the API driven directly) would fail at
+			// runtime — as an unknown function, or as a parse error.
+			// Refuse it here; the deferred rollback aborts.
+			if directive, ok := include.Unexpanded(rf.content); ok {
+				code, hint := unexpandedDirective(directive)
+				return currentActiveID, targetVersionID, &materialiseError{http.StatusUnprocessableEntity, code, map[string]any{
 					"stack": stackName,
 					"scope": pf.scope,
 					"name":  pf.name,
-					"hint":  unexpandedIncludeHint,
+					"hint":  hint,
 				}}
 			}
 			// Guardrail: every compute://<alg>/<digest> a rule references
@@ -2978,9 +2980,10 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 			resp.Errors = append(resp.Errors, validateError{Path: f.Path, Err: strings.Join(bad, ", ") + ": " + oprefs.MalformedHint})
 			continue
 		}
-		if include.Has(f.Content) {
+		if directive, ok := include.Unexpanded(f.Content); ok {
 			resp.OK = false
-			resp.Errors = append(resp.Errors, validateError{Path: f.Path, Err: "unexpanded &include — " + unexpandedIncludeHint})
+			_, hint := unexpandedDirective(directive)
+			resp.Errors = append(resp.Errors, validateError{Path: f.Path, Err: "unexpanded " + directive + " — " + hint})
 			continue
 		}
 		// Strict validation: catches unterminated strings, unknown
@@ -3047,6 +3050,19 @@ func (c *Controller) handleValidateVersion(w http.ResponseWriter, r *http.Reques
 // unexpandedIncludeHint explains an op that still carries `&include`.
 const unexpandedIncludeHint = "&include is expanded by the txco CLI when it reads your OPS/ tree; " +
 	"this op was uploaded without it (an older txco, or the admin API directly) — run `txco apply` with a current txco"
+
+// unexpandedFileLiteralHint explains an op that still carries `$[path.json]`.
+const unexpandedFileLiteralHint = "$[path.json] is expanded by the txco CLI when it reads your OPS/ tree; " +
+	"this op was uploaded without it (a txco from before file literals, or the admin API directly) — run `txco apply` with a current txco"
+
+// unexpandedDirective maps what include.Unexpanded found to the 422 code
+// and the hint an author sees.
+func unexpandedDirective(directive string) (code, hint string) {
+	if directive == "&include" {
+		return "unexpanded_include", unexpandedIncludeHint
+	}
+	return "unexpanded_file_literal", unexpandedFileLiteralHint
+}
 
 // handleDiffVersions: GET /v1/tenants/{t}/stacks/{name}/diff?v1=&v2=
 //

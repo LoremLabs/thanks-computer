@@ -2,7 +2,7 @@
   "name": "txcl",
   "displayName": "txcl",
   "description": "Syntax highlighting for thanks, computer. txcl rule files.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "loremlabs",
   "license": "MIT",
   "repository": {

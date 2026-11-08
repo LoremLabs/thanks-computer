@@ -1,0 +1,8 @@
+# GET /check?status=<s> — step 1a: is the status one we know? The list
+# lives in _data/statuses.json; `$[…]` writes it into this op as an
+# array literal when txco reads OPS/, so a typo in the file fails
+# `txco apply` instead of a WHEN that is quietly never true. `in` is
+# strict: the query value "running" matches "running", nothing else.
+WHEN @src == "http" && @web.req.url.path == "/check"
+  && @web.req.url.query.status.0 in $[../_data/statuses.json]
+  EMIT ._known = true
