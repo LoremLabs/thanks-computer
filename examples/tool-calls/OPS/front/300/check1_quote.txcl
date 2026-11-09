@@ -1,0 +1,7 @@
+# A second call in the same answer (the /order path), checked beside the
+# first: the checks are independent, so they run in one scope.
+WHEN ._turn.tool_calls.1.name == "price_quote" && !exists ._turn.tool_calls.1.problem
+  WITH schema = ._tools.tools.0.parameters,
+       value  = ._turn.tool_calls.1.arguments,
+       into   = "_check1"
+  EXEC "txco://schema/check"

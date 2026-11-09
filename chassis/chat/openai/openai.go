@@ -20,15 +20,14 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/chat"
+	"github.com/loremlabs/thanks-computer/chassis/chat/openaicompat"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 )
 
@@ -61,6 +60,17 @@ func (b *backend) Name() string              { return "openai" }
 func (b *backend) Capabilities() []string    { return []string{"public_execution"} }
 func (b *backend) RequiredSecrets() []string { return []string{secretName} }
 
+// ToolFeatures: OpenAI takes tools, lets a request bound parallel calls,
+// and decodes strictly when asked.
+func (b *backend) ToolFeatures() chat.ToolFeatures {
+	return chat.ToolFeatures{Tools: true, Parallel: true, Strict: true}
+}
+
+// options are the dialect fields OpenAI's endpoint takes beyond the shared
+// shape: JSON mode for a qualifying schema call, the prompt cache key, and
+// strict decoding of tool arguments and of a schema answer when asked.
+var options = openaicompat.Options{JSONMode: true, PromptCacheKey: true, ToolStrictField: true, JSONSchemaFormat: true}
+
 // Run executes one chat completion against OpenAI. Retries once on transient
 // errors (HTTP 5xx + network/timeout); does not retry on 4xx. The schema itself
 // is NOT sent — ExecAI post-validates Response.Text against req.Schema, so the
@@ -80,19 +90,8 @@ func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.Secret
 		model = defaultModel
 	}
 
-	outbound := map[string]any{
-		"model":    model,
-		"messages": req.Messages,
-	}
-	if jsonMode(req) {
-		outbound["response_format"] = map[string]string{"type": "json_object"}
-	}
-	if req.CacheKey != "" {
-		// OpenAI routes same-key requests to the same cache; omitted when
-		// unset so the body stays byte-identical to before.
-		outbound["prompt_cache_key"] = req.CacheKey
-	}
-	bodyBytes, err := json.Marshal(outbound)
+	// The body is the OpenAI-compatible dialect's (chat/openaicompat).
+	bodyBytes, err := openaicompat.BuildBody(req, model, options)
 	if err != nil {
 		return chat.Response{}, fmt.Errorf("openai: marshal request: %w", err)
 	}
@@ -116,31 +115,15 @@ func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.Secret
 			&chat.ProviderHTTPError{StatusCode: resp.StatusCode, Body: sanitizeBody(respBody)}
 	}
 
-	return parseOpenAICompatResponse(respBody, b.Name(), model, latencyMS, retries)
-}
-
-// jsonMode reports whether a call asks OpenAI for JSON mode (response_format
-// json_object), under which the reply is always well-formed JSON. Without it a
-// model can break the syntax (on 2026-10-20 a schema call answered invalid JSON
-// twice running), and the schema check can only refuse the answer. Only for a
-// schema whose top level is an object, since JSON mode answers nothing else, and
-// only when a message mentions JSON: OpenAI refuses JSON mode (400) otherwise.
-func jsonMode(req chat.Request) bool {
-	if len(req.Schema) == 0 {
-		return false
+	out, perr := parseOpenAICompatResponse(respBody, b.Name(), model, latencyMS, retries)
+	if perr != nil {
+		return out, perr
 	}
-	var top struct {
-		Type any `json:"type"`
-	}
-	if json.Unmarshal(req.Schema, &top) != nil || top.Type != "object" {
-		return false
-	}
-	for _, m := range req.Messages {
-		if strings.Contains(strings.ToLower(m.Content), "json") {
-			return true
-		}
-	}
-	return false
+	// Undo the nullable wrapping strict decoding needed, and say how the
+	// schema went out.
+	openaicompat.ApplyStrict(req, options, &out)
+	out.SchemaMode = openaicompat.SchemaMode(req, options)
+	return out, nil
 }
 
 // doWithSimpleRetry runs the request once and retries once on HTTP 5xx or
@@ -180,71 +163,11 @@ func (b *backend) doWithSimpleRetry(ctx context.Context, apiKey []byte, body []b
 	return resp2, 1, nil
 }
 
-// parseOpenAICompatResponse decodes an OpenAI-shaped chat completion body into a
-// chat.Response. Empty/malformed body surfaces as a coded ProviderParseError.
-// Resilient to absent choices/usage. (Same logic as the openrouter backend —
-// each backend is self-contained, like the embed backends.)
+// parseOpenAICompatResponse and sanitizeBody are the dialect's
+// (chat/openaicompat), kept under their old names so the backend reads as
+// before and its tests call them as before.
 func parseOpenAICompatResponse(body []byte, provider, model string, latencyMS int64, retries int) (chat.Response, error) {
-	partial := chat.Response{Provider: provider, Model: model, LatencyMS: latencyMS, Retries: retries}
-	if len(body) == 0 {
-		return partial, &chat.ProviderParseError{Reason: "empty body", BodyLen: 0}
-	}
-
-	var raw struct {
-		Model   string `json:"model"`
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage struct {
-			PromptTokens        int64 `json:"prompt_tokens"`
-			CompletionTokens    int64 `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int64 `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-			CompletionTokensDetails struct {
-				ReasoningTokens int64 `json:"reasoning_tokens"`
-			} `json:"completion_tokens_details"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return partial, &chat.ProviderParseError{Reason: err.Error(), BodyLen: len(body)}
-	}
-
-	out := chat.Response{
-		Provider:        provider,
-		Model:           raw.Model, // prefer the provider's echo (the resolved model)
-		TokensIn:        raw.Usage.PromptTokens,
-		TokensOut:       raw.Usage.CompletionTokens,
-		TokensCached:    raw.Usage.PromptTokensDetails.CachedTokens,
-		TokensReasoning: raw.Usage.CompletionTokensDetails.ReasoningTokens,
-		LatencyMS:       latencyMS,
-		Retries:         retries,
-	}
-	if out.Model == "" {
-		out.Model = model
-	}
-	if len(raw.Choices) > 0 {
-		out.Text = raw.Choices[0].Message.Content
-	}
-	return out, nil
+	return openaicompat.ParseResponse(body, provider, model, latencyMS, retries)
 }
 
-// sanitizeBody scrubs error responses that may quote a prefix of the submitted
-// API key, and bounds the size. (Mirrors the openrouter backend.)
-func sanitizeBody(body []byte) string {
-	low := strings.ToLower(string(body))
-	if strings.Contains(low, "api_key") ||
-		strings.Contains(low, "api key") ||
-		strings.Contains(low, "bearer ") ||
-		strings.Contains(low, "invalid_api_key") ||
-		strings.Contains(low, "incorrect api key") ||
-		strings.Contains(low, "unauthorized") {
-		return `{"error":"authentication or key-related provider error (body sanitized)"}`
-	}
-	if len(body) > 2048 {
-		return string(body[:2048]) + `...(truncated)`
-	}
-	return string(body)
-}
+func sanitizeBody(body []byte) string { return openaicompat.SanitizeBody(body) }

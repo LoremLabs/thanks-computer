@@ -2,6 +2,7 @@ package capdecl
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/tidwall/gjson"
 	yaml "go.yaml.in/yaml/v3"
+
+	"github.com/loremlabs/thanks-computer/chassis/jsonschemax"
 )
 
 // Ceilings on one declaration.
@@ -30,10 +33,43 @@ const (
 	MaxTimeout = 3600000
 )
 
-// Field is one input a capability takes, or one output it answers with.
+// Field is one input a capability takes, or one output it answers with:
+// what a caller reads (the description), whether a call must carry it, and
+// optionally its shape, with the keys JSON Schema uses (field.go). A field
+// with no typed key accepts any value.
+//
+//	query:
+//	  type: string                 # or [string, "null"] for a value that may be null
+//	  max_length: 500
+//	  description: a few words
+//	  required: true
+//	count:
+//	  type: integer
+//	  minimum: 1
+//	  maximum: 20
+//	  default: 10                  # an annotation: what the stack assumes; never filled in
+//	tags:
+//	  type: array
+//	  items: {type: string}
+//	options:
+//	  type: object
+//	  fields: {verbose: {type: boolean}}
+//	part:
+//	  schema: {anyOf: [{type: integer}, {type: string, enum: [last]}]}   # raw JSON Schema, alone
 type Field struct {
-	Description string `yaml:"description" json:"description,omitempty"`
-	Required    bool   `yaml:"required" json:"required,omitempty"`
+	Description string           `yaml:"description" json:"description,omitempty"`
+	Required    bool             `yaml:"required" json:"required,omitempty"`
+	Type        TypeList         `yaml:"type" json:"type,omitempty"`
+	Enum        []any            `yaml:"enum" json:"enum,omitempty"`
+	Default     any              `yaml:"default" json:"default,omitempty"`
+	Minimum     *float64         `yaml:"minimum" json:"minimum,omitempty"`
+	Maximum     *float64         `yaml:"maximum" json:"maximum,omitempty"`
+	MinLength   *int             `yaml:"min_length" json:"min_length,omitempty"`
+	MaxLength   *int             `yaml:"max_length" json:"max_length,omitempty"`
+	Pattern     string           `yaml:"pattern" json:"pattern,omitempty"`
+	Items       *Field           `yaml:"items" json:"items,omitempty"`
+	Fields      map[string]Field `yaml:"fields" json:"fields,omitempty"`
+	Schema      map[string]any   `yaml:"schema" json:"schema,omitempty"`
 }
 
 // InputField is the name Field had when a declaration named inputs only.
@@ -77,6 +113,12 @@ type Decl struct {
 	Input       map[string]Field `yaml:"input"`
 	Output      map[string]Field `yaml:"output"`
 	Timeout     int              `yaml:"timeout"`
+
+	// The derived schemas (field.go), filled at parse so a declaration that
+	// yields a schema the compiler refuses is a deploy error, and reused by
+	// every catalogue read of the cached declaration.
+	inputSchema  json.RawMessage
+	outputSchema json.RawMessage
 }
 
 // ErrNotDeclared: no active stack of the tenant has a CAPS/<name>.yaml.
@@ -116,18 +158,38 @@ func ParseDeclAs(kind string, data []byte) (*Decl, error) {
 	if len(d.Output) > MaxOutputs {
 		return nil, fmt.Errorf("%s: output names %d fields, at most %d", kind, len(d.Output), MaxOutputs)
 	}
-	for which, fields := range map[string]map[string]Field{"input": d.Input, "output": d.Output} {
-		for name, f := range fields {
+	for _, which := range []string{"input", "output"} {
+		fields := d.Input
+		if which == "output" {
+			fields = d.Output
+		}
+		names := make([]string, 0, len(fields))
+		for name := range fields {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
 			if !ValidInput(name) {
 				return nil, fmt.Errorf("%s: %s.%s: a field is a lowercase letter, then lowercase letters, digits and _ (1-64 chars)", kind, which, name)
 			}
-			if len(f.Description) > MaxInputDescription {
-				return nil, fmt.Errorf("%s: %s.%s: description is longer than %d characters", kind, which, name, MaxInputDescription)
+			if err := checkField(kind, which+"."+name, fields[name], 0); err != nil {
+				return nil, err
 			}
 		}
 	}
 	if d.Timeout < 0 || d.Timeout > MaxTimeout {
 		return nil, fmt.Errorf("%s: timeout is %d, want milliseconds between 0 and %d", kind, d.Timeout, MaxTimeout)
+	}
+	// The derived schemas must compile: a `schema:` hatch or a pattern the
+	// compiler refuses is caught here, at lint, apply and activation.
+	for _, which := range []string{"input", "output"} {
+		raw := d.InputSchema()
+		if which == "output" {
+			raw = d.OutputSchema()
+		}
+		if _, err := jsonschemax.Compile(raw); err != nil {
+			return nil, fmt.Errorf("%s: %s: the derived schema does not compile: %v", kind, which, err)
+		}
 	}
 	return &d, nil
 }
@@ -153,16 +215,19 @@ func names(fields map[string]Field) []string {
 }
 
 // Missing is the sorted list of the required fields that doc, a JSON
-// object, lacks: absent, or present as null. An empty list means doc has
-// every field the declaration requires; it says nothing about their shape,
-// which a declaration does not describe.
+// object, lacks: absent, or present as null, unless the field's type
+// allows null (`type: [string, "null"]`), in which case an explicit null is
+// a value. An empty list means doc has every field the declaration
+// requires; it says nothing else about their shape, which is a schema
+// check's (InputSchema with jsonschemax).
 func Missing(fields map[string]Field, doc string) []string {
 	var out []string
 	for name, f := range fields {
 		if !f.Required {
 			continue
 		}
-		if v := gjson.Get(doc, name); !v.Exists() || v.Type == gjson.Null {
+		v := gjson.Get(doc, name)
+		if !v.Exists() || (v.Type == gjson.Null && !f.Type.Has("null")) {
 			out = append(out, name)
 		}
 	}

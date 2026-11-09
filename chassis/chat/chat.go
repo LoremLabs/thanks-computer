@@ -24,14 +24,20 @@
 //     the bound. USD-denominated cost reporting (deferred) sources from
 //     token counts × per-model pricing, not from fuel.
 //
-// **v1 is intentionally boring.** No tool-call loop (Backend has no Tools()
-// method; Request has no Tools field; Response has no ToolCalls). No
-// capability-matched routing across multiple backends (Resolve is
-// provider-override-or-first-registered). No sophisticated retry policy
-// (the OpenRouter backend retries once on 5xx + network). No raw
-// `{{!@field}}` template insertion (rejected with a clear error so v1.1
-// can land it without silent semantic drift). Each escalation belongs to
-// its own focused PR.
+// **Tools, without a loop.** A request may offer tool definitions
+// (tools.go) and a response carries the calls the model made; a backend
+// that takes them implements ToolCapable. The chassis never runs a call:
+// the stack that made the request dispatches each one (`cap://`, usually)
+// and sends the results back as `tool` messages on its next request. That
+// keeps every call decided at the gateway, visible as its own step, and
+// able to end a run (a hold). The dialect a backend speaks lives beside it
+// (chat/openaicompat for the OpenAI-compatible endpoints).
+//
+// **Still deliberately absent.** Capability-matched routing across several
+// backends (Resolve is provider-override-or-first-registered); a
+// sophisticated retry policy (one retry on 5xx + network); raw `{{!@field}}`
+// template insertion (rejected with a clear error). Each belongs to its own
+// focused change.
 package chat
 
 import (
@@ -130,14 +136,43 @@ type Request struct {
 	// whose provider has no such field ignores it. Never read by the
 	// chassis itself.
 	CacheKey string `json:"cache_key,omitempty"`
+
+	// Tools are the definitions the model is offered (tools.go). Empty
+	// means a plain chat call, whose wire body is unchanged from before
+	// tools existed. A backend that does not implement ToolCapable is
+	// refused a request with tools before anything is sent.
+	Tools []Tool `json:"tools,omitempty"`
+	// ToolChoice is "auto" (the default when tools are offered), "none",
+	// "required", or the name of one offered tool to force. Ignored
+	// without Tools.
+	ToolChoice string `json:"tool_choice,omitempty"`
+	// Parallel, when set, asks the model for several calls per answer
+	// (true) or at most one (false). Nil leaves it to the model.
+	Parallel *bool `json:"parallel,omitempty"`
+	// Strict is "off" (the default), "prefer" or "require": whether the
+	// provider should decode tool arguments (and a schema answer) with
+	// its strict grammar. "prefer" falls back to ordinary decoding where
+	// strict cannot be honoured; "require" refuses the request instead.
+	Strict string `json:"strict,omitempty"`
 }
 
-// Message is one turn in the conversation. JSON shapes match the
-// OpenAI-compatible API every v1 provider speaks.
+// Message is one turn in the conversation, in the chassis's neutral shape.
+// A backend translates it to its provider's wire form; the JSON tags here
+// are what a rule writes in `WITH messages` and what the envelope's
+// `message` carries back. Content is always a string: see UnmarshalJSON
+// (message.go) for what a tool message may carry.
 type Message struct {
-	Role    string `json:"role"` // "system" | "user" | "assistant"
+	Role    string `json:"role"` // "system" | "user" | "assistant" | "tool"
 	Content string `json:"content"`
 	Name    string `json:"name,omitempty"`
+	// ToolCalls are the calls an assistant turn made.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID, on a tool turn, names the call this message answers.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// IsError, on a tool turn, marks a failed call. Providers with an error
+	// flag receive it; the rest receive the content alone, which should
+	// then say what failed.
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // Limits caps per-call work. Zero values mean "backend default."
@@ -148,13 +183,26 @@ type Limits struct {
 
 // Response is the chassis-normalized chat completion result. Backends
 // translate the provider's on-wire shape into this struct.
-//
-// Tool-loop fields (AssistantMessage, ToolCalls) are intentionally absent
-// in v1 — the tool-loop PR adds them as a non-breaking extension along
-// with a Tools() method on the Backend interface.
 type Response struct {
-	// Text is the assistant's final message content.
+	// Text is the assistant's message content; empty when the answer is
+	// tool calls alone.
 	Text string `json:"text"`
+
+	// ToolCalls are the calls the model made, in the neutral shape, with
+	// Arguments or Raw filled by the backend. Problem and Binding are the
+	// handler's to set. Empty on a plain answer.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// Finish says how the answer ended (FinishStop, FinishToolCalls, ...),
+	// or "" when the provider did not say.
+	Finish string `json:"finish,omitempty"`
+	// ResponseID is the provider's id for the response, when it gave one.
+	ResponseID string `json:"response_id,omitempty"`
+	// SchemaMode says how a schema call was sent, when the backend reports
+	// it: "json_schema" (the provider decoded strictly against the schema)
+	// or "json_object" (JSON mode: well-formed JSON, the schema checked by
+	// the chassis). Empty when no schema was sent, or the backend does not
+	// say.
+	SchemaMode string `json:"schema_mode,omitempty"`
 
 	// SchemaValidated, when non-nil, is the schema-validated payload
 	// (Text parsed as JSON against Request.Schema). Present when

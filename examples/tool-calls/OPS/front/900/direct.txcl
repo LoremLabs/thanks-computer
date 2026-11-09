@@ -1,0 +1,6 @@
+# The model answered without a tool (a live run may): its text is the
+# answer.
+WHEN ._turn.text =~ /./ && !exists ._turn.tool_calls.0
+  EMIT .answer = ._turn.text,
+       @web.res.status = 200,
+       @halt = true

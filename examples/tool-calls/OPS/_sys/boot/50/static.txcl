@@ -1,0 +1,28 @@
+# _sys/boot scope 50 — serve layered static files.
+#
+# Gated to web requests only (@src == "http"): static files are an HTTP
+# concern, so non-web sources (cron, etc.) skip this op entirely rather
+# than dispatching it to no-op against a missing _txc.web.req — keeps
+# their traces clean. Within http, the path gate is no longer a hand-
+# maintained regex but txco://static's in-memory index. The op self-
+# gates — a non-static request returns {} (no _txc.web.res, no halt) and
+# flows on to scope 100 (route) / 1000 (404) exactly as if this rule
+# weren't here; a hit emits the file bytes and halts. The lookup is pure
+# memory: the bytes are loaded at boot and rebuilt on config-apply
+# (dbcache reload), never off the request's disk path.
+#
+# Layered, first-match-wins:
+#   1. the routed stack's own  OPS/<stack>/FILES/<path>
+#   2. the chassis-wide        FILES/<path>
+#   3. the embedded default    (favicon.ico)
+# It runs at scope 50 — after detect-tenant@0 wrote the inert
+# _txc.route.stack proposal (readable here; tenant isn't pinned until
+# route@100) and before route@100 — so a hit short-circuits before
+# routing and works for unrouted hosts too (chassis/embedded layers).
+#
+# Trade: "which paths are static" is the filesystem (the files that
+# exist) + the visible _txc.route.stack proposal, not an editable WHEN.
+# Still transparent and traced (this op shows on every web request); the
+# implicitness is deliberate and accepted for this op.
+WHEN @src == "http"
+  EXEC "txco://static"

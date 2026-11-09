@@ -1,0 +1,8 @@
+{
+  "_final": {
+    "text": "Yes: SKU abc is in stock.",
+    "finish": "stop",
+    "tool_calls": [],
+    "message": {"role": "assistant", "content": "Yes: SKU abc is in stock."}
+  }
+}

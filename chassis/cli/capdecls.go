@@ -104,6 +104,7 @@ func checkCapDecls(ops []bundle.Op, dir string) []string {
 	sort.Strings(stacks)
 	var msgs []string
 	owner := map[string]string{}
+	toolOwner := map[string]string{} // derived tool name → "<stack>/<capability>"
 	for _, stack := range stacks {
 		stackDir := filepath.Join(dir, "OPS", filepath.FromSlash(stack))
 		decls, derrs := loadCapDecls(stackDir)
@@ -123,6 +124,15 @@ func checkCapDecls(ops []bundle.Op, dir string) []string {
 				continue
 			}
 			owner[n] = stack
+			// Two capabilities that become one tool name (dots as
+			// underscores) cannot both be offered to a model; activation
+			// refuses the same collision.
+			tool := capdecl.ToolName(n)
+			if other, dup := toolOwner[tool]; dup {
+				msgs = append(msgs, fmt.Sprintf("%s: capabilities %q and %s both become the tool %q (dots as underscores): rename one", path, n, other, tool))
+				continue
+			}
+			toolOwner[tool] = stack + "/" + n
 		}
 	}
 	sort.Strings(msgs)

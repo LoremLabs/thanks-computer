@@ -58,7 +58,7 @@ func TestParseDecl(t *testing.T) {
 		"bad input name":     "entry: 7000\ninput:\n  To: {}\n",
 		"dashed input":       "entry: 7000\ninput:\n  fetch-url: {}\n",
 		"input not a map":    "entry: 7000\ninput: [to, subject]\n",
-		"unknown input key":  "entry: 7000\ninput:\n  to:\n    type: string\n",
+		"unknown input key":  "entry: 7000\ninput:\n  to:\n    typo: string\n",
 		"negative timeout":   "entry: 7000\ntimeout: -5\n",
 		"huge timeout":       "entry: 7000\ntimeout: 3600001\n",
 		"long description":   "entry: 7000\ndescription: " + strings.Repeat("x", MaxDescription+1) + "\n",
@@ -178,7 +178,12 @@ func TestMissing(t *testing.T) {
 }
 
 func TestParseDeclOutputUnknownKey(t *testing.T) {
-	if _, err := ParseDecl([]byte("output:\n  mid:\n    type: string\n")); err == nil || !strings.Contains(err.Error(), "type not found") {
+	if _, err := ParseDecl([]byte("output:\n  mid:\n    typo: string\n")); err == nil || !strings.Contains(err.Error(), "typo not found") {
 		t.Errorf("unknown output key: %v", err)
+	}
+	// `type` is a key now, on output as on input.
+	d, err := ParseDecl([]byte("output:\n  mid:\n    type: string\n    required: true\n"))
+	if err != nil || !d.Output["mid"].Type.Has("string") {
+		t.Errorf("typed output: %+v %v", d, err)
 	}
 }

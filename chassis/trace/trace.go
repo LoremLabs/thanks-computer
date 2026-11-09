@@ -174,6 +174,12 @@ type ModelFacts struct {
 	Retries         int    `json:"retries,omitempty"`
 	Routing         string `json:"routing,omitempty"`
 	ErrorCode       string `json:"error_code,omitempty"`
+	// ToolsOffered, ToolCalls and Finish describe a chat call with tools:
+	// how many definitions the model was handed, the names it called (never
+	// the arguments), and how the answer ended. Absent on a plain call.
+	ToolsOffered int      `json:"tools_offered,omitempty"`
+	ToolCalls    []string `json:"tool_calls,omitempty"`
+	Finish       string   `json:"finish,omitempty"`
 }
 
 // TimelineEvent is a single line in timeline.jsonl. Event values are

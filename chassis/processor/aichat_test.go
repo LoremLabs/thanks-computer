@@ -34,12 +34,17 @@ type testBackend struct {
 	sawKey       string
 	sawMessages  []chat.Message
 	sawCacheKey  string
-	mu           sync.Mutex
+	sawReq       chat.Request
+	// features is what the backend states about tools; zero means it takes
+	// none, which is what every pre-tools test expects.
+	features chat.ToolFeatures
+	mu       sync.Mutex
 }
 
-func (b *testBackend) Name() string              { return b.name }
-func (b *testBackend) Capabilities() []string    { return b.capabilities }
-func (b *testBackend) RequiredSecrets() []string { return b.required }
+func (b *testBackend) Name() string                    { return b.name }
+func (b *testBackend) Capabilities() []string          { return b.capabilities }
+func (b *testBackend) RequiredSecrets() []string       { return b.required }
+func (b *testBackend) ToolFeatures() chat.ToolFeatures { return b.features }
 
 func (b *testBackend) Run(ctx context.Context, req chat.Request, bag *secrets.SecretBag) (chat.Response, error) {
 	atomic.AddInt32(&b.calls, 1)
@@ -51,6 +56,7 @@ func (b *testBackend) Run(ctx context.Context, req chat.Request, bag *secrets.Se
 	}
 	b.sawMessages = append([]chat.Message(nil), req.Messages...)
 	b.sawCacheKey = req.CacheKey
+	b.sawReq = req
 	b.mu.Unlock()
 	return b.resp, b.err
 }

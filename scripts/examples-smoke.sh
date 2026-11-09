@@ -172,8 +172,15 @@ app_ports() {
 #   DEVFLAG<TAB>flag
 #   DEVENV<TAB>KEY=value
 #   BIND<TAB>host<TAB>stack
+#   CHECKHDR<TAB>headers
 #   CHECK<TAB>name<TAB>method<TAB>host<TAB>path<TAB>status<TAB>contains<TAB>body
-# (body is the only field that can be empty; none of the fields contain tabs.)
+# (body is the only CHECK field that can be empty; none of the fields
+# contain tabs. A CHECKHDR line, when present, precedes the CHECK it
+# belongs to and carries the check's optional `headers` object as
+# `Name: value` pairs joined by `;`, e.g. "X-Txco-Mocks: front/200/*,front/400/*"
+# for a check that asks the chassis to serve mock fixtures in place of named
+# ops. It is its own line because `read` with a tab IFS collapses empty
+# fields, so a trailing field after an empty body would shift into it.)
 # DEVFLAG lines are extra `txco dev` flags the example needs (e.g. "--imap"
 # for a head that is off by default); DEVENV lines are environment variables
 # the chassis needs (dev passes its env down); both are read before dev is
@@ -189,6 +196,9 @@ for e in p.get("dev_env", []):
 for b in p.get("bind", []):
     print("BIND\t%s\t%s" % (b["host"], b["stack"]))
 for c in p.get("checks", []):
+    headers = ";".join("%s: %s" % (k, v) for k, v in sorted((c.get("headers") or {}).items()))
+    if headers:
+        print("CHECKHDR\t%s" % headers)
     print("CHECK\t%s\t%s\t%s\t%s\t%s\t%s\t%s" % (
         c.get("name", ""),
         c.get("method", "GET"),
@@ -201,16 +211,26 @@ for c in p.get("checks", []):
 PY
 }
 
-# fire_once <method> <url> <host> <body> <body_file> <hdr_file> → echoes
-# the HTTP status code. Response body lands in body_file, headers in
-# hdr_file (so the caller can read Location for continuation polling).
-# No -L: we follow continuations explicitly, not HTTP redirects.
+# fire_once <method> <url> <host> <body> <body_file> <hdr_file> [headers]
+# → echoes the HTTP status code. Response body lands in body_file, headers
+# in hdr_file (so the caller can read Location for continuation polling).
+# headers is the probe's `Name: value;Name: value` string, each pair sent
+# as a request header. No -L: we follow continuations explicitly, not HTTP
+# redirects.
 fire_once() {
-    local method="$1" url="$2" host="$3" body="$4" body_file="$5" hdr_file="$6"
+    local method="$1" url="$2" host="$3" body="$4" body_file="$5" hdr_file="$6" headers="${7:-}"
     local -a args=(-sS -o "${body_file}" -D "${hdr_file}" -w '%{http_code}'
         -X "${method}" "${url}" -H "Host: ${host}")
     if [[ -n "${body}" ]]; then
         args+=(-H 'Content-Type: application/json' -d "${body}")
+    fi
+    if [[ -n "${headers}" ]]; then
+        # Split on `;` without word splitting or globbing: a header value
+        # such as "front/200/*" must reach curl as written.
+        local h
+        while IFS= read -r -d ';' h || [[ -n "${h}" ]]; do
+            [[ -n "${h}" ]] && args+=(-H "${h}")
+        done <<<"${headers};"
     fi
     curl "${args[@]}" 2>/dev/null
 }
@@ -308,8 +328,13 @@ run_checks() {
 
     # Apply hostname bindings + run checks from the probe.
     local kind a b c d e f g
+    local next_headers=
     while IFS=$'\t' read -r kind a b c d e f g; do
         case "${kind}" in
+        CHECKHDR)
+            # The headers of the CHECK that follows.
+            next_headers="${a}"
+            ;;
         BIND)
             # a=host b=stack
             local code
@@ -323,11 +348,14 @@ run_checks() {
             fi
             ;;
         CHECK)
-            # a=name b=method c=host d=path e=status f=contains g=body
-            local body_file hdr_file out status
+            # a=name b=method c=host d=path e=status f=contains g=body;
+            # the headers came on the CHECKHDR line before this one.
+            local body_file hdr_file out status headers
+            headers="${next_headers}"
+            next_headers=
             body_file="${LOG_DIR}/${name}.body"
             hdr_file="${LOG_DIR}/${name}.hdr"
-            status="$(fire_once "${b}" "${WEB_URL}${d}" "${c}" "${g}" "${body_file}" "${hdr_file}")"
+            status="$(fire_once "${b}" "${WEB_URL}${d}" "${c}" "${g}" "${body_file}" "${hdr_file}" "${headers}")"
 
             # Follow an async continuation to its terminal result. A
             # pipeline with a `mode = "async"` op returns 202 + a poll

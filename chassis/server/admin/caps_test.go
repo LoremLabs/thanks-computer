@@ -78,6 +78,11 @@ func TestDeepValidateCaps(t *testing.T) {
 		"CAPS/start.yaml":     "description: enters at the stack's start\n",
 		"CAPS/noscope.yaml":   "entry: 7100\n",
 		"CAPS/mail.send.yaml": "entry: 7000\n",
+		// A different name that becomes the same tool as the other stack's
+		// card.note (card_note), and one that collides within this stack
+		// (ai.chat → ai_chat).
+		"CAPS/card_note.yaml": "entry: 7000\n",
+		"CAPS/ai_chat.yaml":   "entry: 7000\n",
 		"100/plain.txcl":      `EXEC "txco://copy" WITH from = "a", to = "b"`,
 		"7000/run.txcl":       `EXEC "txco://copy" WITH from = "a", to = "b"`,
 	} {
@@ -92,6 +97,8 @@ func TestDeepValidateCaps(t *testing.T) {
 		"CAPS/negative.yaml":  "want a scope of this stack",
 		"CAPS/noscope.yaml":   "entry 7100 names no scope of this stack",
 		"CAPS/mail.send.yaml": `already declared by the active stack "other"`,
+		"CAPS/card_note.yaml": `both become the tool "card_note"`,
+		"CAPS/ai_chat.yaml":   `both become the tool "ai_chat"`,
 	}
 	if len(issues) != len(want) {
 		t.Fatalf("want %d issues, got %+v", len(want), issues)

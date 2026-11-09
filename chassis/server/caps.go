@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"strings"
-
-	"github.com/tidwall/gjson"
+	"encoding/json"
 
 	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/event"
@@ -58,6 +56,10 @@ type capOut struct {
 	Params      []string                      `json:"params"`
 	Returns     []string                      `json:"returns"`
 	Timeout     int                           `json:"timeout"`
+	// Parameters is the input as a JSON Schema object (capdecl
+	// InputSchema): what a model is handed as a tool's parameters, what
+	// txco://schema/check checks a call's arguments against.
+	Parameters json.RawMessage `json:"parameters"`
 }
 
 type capBrokenOut struct {
@@ -67,9 +69,10 @@ type capBrokenOut struct {
 }
 
 type capsOut struct {
-	Count  int            `json:"count"`
-	Items  []capOut       `json:"items"`
-	Broken []capBrokenOut `json:"broken,omitempty"`
+	Count   int            `json:"count"`
+	Items   []capOut       `json:"items"`
+	Broken  []capBrokenOut `json:"broken,omitempty"`
+	Missing []string       `json:"missing,omitempty"`
 }
 
 func capsList(ctx context.Context, d capsDeps, _ []byte) (event.Payload, error) {
@@ -86,10 +89,16 @@ func capsList(ctx context.Context, d capsDeps, _ []byte) (event.Payload, error) 
 	if err != nil {
 		return identityErr(into, "caps", "store", err.Error()), nil
 	}
-	prefix := strings.TrimSpace(gjson.GetBytes(meta, "prefix").String())
+	filter, ferr := capsFilterFrom(meta)
+	if ferr != nil {
+		return identityErr(into, "caps", "invalid_arg", ferr.Error()), nil
+	}
+	if filter.format == "tools" {
+		return capsListTools(into, entries, filter), nil
+	}
 	out := capsOut{Items: []capOut{}}
 	for _, e := range entries {
-		if prefix != "" && !strings.HasPrefix(e.Name, prefix) {
+		if !filter.keep(e.Name) {
 			continue
 		}
 		if e.Err != nil || e.Decl == nil {
@@ -112,8 +121,10 @@ func capsList(ctx context.Context, d capsDeps, _ []byte) (event.Payload, error) 
 			Name: e.Name, Stack: e.Stack, Entry: e.Decl.Entry, Stage: e.Decl.Stage(e.Stack),
 			Description: e.Decl.Description, Input: input, Output: output,
 			Params: e.Decl.Params(), Returns: e.Decl.Returns(), Timeout: e.Decl.Timeout,
+			Parameters: e.Decl.InputSchema(),
 		})
 	}
 	out.Count = len(out.Items)
+	out.Missing = filter.missing()
 	return identityOK(into, out), nil
 }

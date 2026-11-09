@@ -20,6 +20,16 @@ const (
 	CodeProviderParse  = "txco_chat_provider_parse"
 	CodeSchemaFailed   = "txco_chat_schema_failed"
 	CodeUnsupportedSub = "txco_chat_unsupported_sub_op"
+	// CodeUnknown is what an error without a code of its own reports.
+	CodeUnknown = "txco_chat_unknown"
+	// The tool-related codes are `txco_chat_<kind>` for the kinds in
+	// tools.go: tool_invalid, tool_names, tools_unsupported,
+	// strict_unsupported, pending_tool_result.
+	CodeToolInvalid       = "txco_chat_" + KindToolInvalid
+	CodeToolNames         = "txco_chat_" + KindToolNames
+	CodeToolsUnsupported  = "txco_chat_" + KindToolsUnsupported
+	CodeStrictUnsupported = "txco_chat_" + KindStrictUnsupported
+	CodePendingToolResult = "txco_chat_" + KindPendingToolResult
 )
 
 // MissingSecretError signals one of the backend's RequiredSecrets() could

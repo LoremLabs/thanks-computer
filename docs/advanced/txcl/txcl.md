@@ -907,7 +907,8 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `trace_tags` | continuable | Strings naming what the trace is about, shown on both traces of a run and in the list: `trace_tags = &object("pony", ._p.slug)`. See [Trace logs](../trace.md#naming-a-trace) |
 | `redact` / `omit` | any | Scrub paths from [trace](../trace.md) artifacts (runtime data untouched) |
 | `debug = true` | any | Surface extra op debug detail to the trace |
-| `prompt`, `system`, `messages`, `model`, `provider`, `schema`, `intent`, `limits.*` | ai://chat | The chat request — see [ai](../../ai.md) |
+| `prompt`, `system`, `messages`, `model`, `provider`, `schema`, `intent`, `cache_key`, `limits.*` | ai://chat | The chat request — see [ai](../../ai.md) |
+| `tools`, `tool_choice`, `parallel`, `strict`, `repair`, `into` | ai://chat | Tool calling: the definitions offered, how the model may choose, where the answer lands — see [tools](../../ai.md#tools--the-model-calls-your-capabilities) |
 | `workspace` | workspace:// | Pick the workspace from data (`WITH workspace = ._in.slug`); replaces the ref's name — see [workspaces](../../workspaces.md) |
 | `command` / `args` | workspace:// | The command: a shell line, or an argv array (no shell). One or the other |
 | `stdin`, `cwd`, `env` | workspace:// | Bytes fed to the process; where the command starts (beneath the workspace, `$TXCO_STACK_DIR/…` for the stack's own files, or an absolute path; see [Where a command starts](../../workspaces.md#where-a-command-starts-cwd)); extra environment (an object) |

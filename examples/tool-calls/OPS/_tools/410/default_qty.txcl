@@ -1,0 +1,3 @@
+# The call left qty out: the stack's own default, as the declaration said.
+WHEN @src == "cap" && @cap.name == "price.quote" && !exists @cap.input.qty
+  EMIT ._cap.output.qty = 1

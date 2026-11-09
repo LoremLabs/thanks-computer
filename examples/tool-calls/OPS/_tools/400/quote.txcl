@@ -1,0 +1,8 @@
+# Capability `price.quote`, entered at 400. The declaration's `default: 1`
+# for qty is an annotation: the chassis never fills it in, so the rule that
+# answers applies it when the call left qty out.
+WHEN @src == "cap" && @cap.name == "price.quote" && @cap.input.sku =~ /./
+  EMIT ._cap.output.sku = @cap.input.sku,
+       ._cap.output.qty = @cap.input.qty,
+       ._cap.output.unit_price = 12.5,
+       ._cap.output.currency = "EUR"

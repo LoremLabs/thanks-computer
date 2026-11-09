@@ -1,0 +1,28 @@
+{
+  "_turn": {
+    "text": "",
+    "finish": "tool_calls",
+    "tool_calls": [
+      {
+        "id": "call_stock_2",
+        "name": "stock_check",
+        "arguments": {"sku": "abc"},
+        "binding": {"capability": "stock.check"}
+      },
+      {
+        "id": "call_quote_2",
+        "name": "price_quote",
+        "arguments": {"sku": "abc", "qty": 3},
+        "binding": {"capability": "price.quote"}
+      }
+    ],
+    "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {"id": "call_stock_2", "name": "stock_check", "arguments": {"sku": "abc"}},
+        {"id": "call_quote_2", "name": "price_quote", "arguments": {"sku": "abc", "qty": 3}}
+      ]
+    }
+  }
+}

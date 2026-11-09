@@ -1,0 +1,7 @@
+# The second call, after the first: sequential, so a later call can depend
+# on an earlier one's effect.
+WHEN ._check1.ok == true
+  WITH name  = ._turn.tool_calls.1.binding.capability,
+       input = ._turn.tool_calls.1.arguments,
+       into  = "_res1"
+  EXEC "cap://tool"

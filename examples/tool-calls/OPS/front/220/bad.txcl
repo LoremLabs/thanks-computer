@@ -1,0 +1,9 @@
+# Step 2, GET /order-bad: the same ask; the mocked answer calls price_quote
+# with arguments that do not match its schema (qty is not an integer). The
+# check at 300 refuses them and the capability never runs.
+WHEN @src == "http" && @web.req.url.path == "/order-bad" && ._tools.count == 2
+  WITH prompt   = "Quote SKU {{@web.req.url.query.sku.0}}.",
+       tools    = ._tools.tools,
+       provider = "openai",
+       into     = "_turn"
+  EXEC "ai://chat"

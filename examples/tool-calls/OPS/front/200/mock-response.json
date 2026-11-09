@@ -1,0 +1,21 @@
+{
+  "_turn": {
+    "text": "",
+    "finish": "tool_calls",
+    "tool_calls": [
+      {
+        "id": "call_stock_1",
+        "name": "stock_check",
+        "arguments": {"sku": "abc"},
+        "binding": {"capability": "stock.check"}
+      }
+    ],
+    "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {"id": "call_stock_1", "name": "stock_check", "arguments": {"sku": "abc"}}
+      ]
+    }
+  }
+}

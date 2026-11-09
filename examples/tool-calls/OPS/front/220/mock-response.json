@@ -1,0 +1,21 @@
+{
+  "_turn": {
+    "text": "",
+    "finish": "tool_calls",
+    "tool_calls": [
+      {
+        "id": "call_quote_bad",
+        "name": "price_quote",
+        "arguments": {"sku": "abc", "qty": "x"},
+        "binding": {"capability": "price.quote"}
+      }
+    ],
+    "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {"id": "call_quote_bad", "name": "price_quote", "arguments": {"sku": "abc", "qty": "x"}}
+      ]
+    }
+  }
+}

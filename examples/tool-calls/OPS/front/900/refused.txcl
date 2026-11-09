@@ -1,0 +1,12 @@
+# The arguments did not match the tool's schema: the capability was never
+# called, and the problems say where. A loop would hand these back to the
+# model as an error tool result; this door answers 422.
+#
+# `exists` first: a missing path compares equal to false in txcl, so a bare
+# `._check0.ok == false` would fire on every request that ran no check.
+WHEN exists ._check0 && ._check0.ok != true
+  EMIT .error    = "the arguments do not match the tool's schema",
+       .problems = ._check0.errors,
+       .call     = ._turn.tool_calls.0,
+       @web.res.status = 422,
+       @halt = true

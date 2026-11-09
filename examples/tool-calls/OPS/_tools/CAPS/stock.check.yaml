@@ -1,0 +1,17 @@
+# A capability with a typed input. The catalogue derives a JSON Schema from
+# it, so `txco://caps/list WITH format = "tools"` can hand it to a model as
+# the tool `stock_check`, and `txco://schema/check` can check the model's
+# arguments against it before the call runs.
+description: Say whether a SKU is in stock.
+entry: 300
+input:
+  sku:
+    type: string
+    min_length: 1
+    description: the SKU to check
+    required: true
+output:
+  in_stock:
+    type: boolean
+    description: whether it can be sold now
+    required: true

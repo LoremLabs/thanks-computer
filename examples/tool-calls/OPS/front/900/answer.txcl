@@ -1,0 +1,11 @@
+# Step 6: the final answer, with what the round trip did. `_`-prefixed keys
+# never reach the body on their own, so copy what the reader should see:
+# the model's text, the calls it made (with their bindings), and the
+# capabilities' answers.
+WHEN ._final.text =~ /./
+  EMIT .answer = ._final.text,
+       .calls  = ._turn.tool_calls,
+       .stock  = ._res0,
+       .quote  = ._res1,
+       @web.res.status = 200,
+       @halt = true

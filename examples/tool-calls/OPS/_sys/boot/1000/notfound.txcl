@@ -1,0 +1,22 @@
+# _sys/boot scope 1000 — unrouted fallback (HTTP 404).
+#
+# Reached only when no route executed: scope 0's detect-tenant found
+# nothing (no _txc.route proposal), so the gated route rule at scope
+# 100 didn't fire, no _txc.goto/_txc.tenant was set, and the pin is
+# still "_sys". Emit the same minimal 404 the chassis used to
+# synthesize in Go (emitNoRouteResponse), now editable — swap this for
+# a branded landing page, a redirect, an onboarding stack, etc.
+#
+# Gated on @src == "http": a 404 web response only makes sense for an
+# HTTP request. Other unrouted sources — the cron system tick, tcp,
+# lmtp — fall through to the end of the stack and halt silently rather
+# than synthesize a web-shaped response for a non-web transport. (Web
+# requests are tagged src "http", not "web".)
+#
+# @ is sugar for ._txc. ; b64"..." encodes the body the web inlet
+# expects base64-encoded.
+WHEN @tenant == "_sys" && @src == "http"
+  EMIT @web.res.status = 404,
+       @web.res.headers.content-type.0 = "text/plain; charset=utf-8",
+       @web.res.body = b64"404 not found\n",
+       @halt = true

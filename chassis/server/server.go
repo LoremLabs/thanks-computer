@@ -59,6 +59,8 @@ import (
 	_ "github.com/loremlabs/thanks-computer/chassis/feed/nop"        // registers the "nop" backend
 	"github.com/loremlabs/thanks-computer/chassis/filecas"
 	_ "github.com/loremlabs/thanks-computer/chassis/filecas/filestore" // registers the "file" backend
+	gitcore "github.com/loremlabs/thanks-computer/chassis/git"
+	"github.com/loremlabs/thanks-computer/chassis/gitstore"
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 	chimap "github.com/loremlabs/thanks-computer/chassis/imap"
 	chipp "github.com/loremlabs/thanks-computer/chassis/ipp"
@@ -90,8 +92,6 @@ import (
 	contactsp "github.com/loremlabs/thanks-computer/chassis/server/personality/contacts"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
 	dnsp "github.com/loremlabs/thanks-computer/chassis/server/personality/dns"
-	gitcore "github.com/loremlabs/thanks-computer/chassis/git"
-	"github.com/loremlabs/thanks-computer/chassis/gitstore"
 	gitp "github.com/loremlabs/thanks-computer/chassis/server/personality/git"
 	imapp "github.com/loremlabs/thanks-computer/chassis/server/personality/imap"
 	ippp "github.com/loremlabs/thanks-computer/chassis/server/personality/ipp"
@@ -2206,6 +2206,13 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	pu.Handle([]byte("txco://caps/list"), event.OpsHandlerFunc(
 		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 			return capsList(ctx, capsDeps{decls: capDecls}, in)
+		}))
+	// A JSON value against a JSON Schema (chassis/server/schema_check.go):
+	// what an executor runs on a model's tool-call arguments against the
+	// tool's parameters before the cap://. Pure; no deps.
+	pu.Handle([]byte("txco://schema/check"), event.OpsHandlerFunc(
+		func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+			return schemaCheck(ctx, in)
 		}))
 	// The entries the tenant's stacks declare under CALLS/ (chassis/calldecl):
 	// what `WITH entry` on a call:// resolves through, and the list a rule

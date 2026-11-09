@@ -1,0 +1,5 @@
+# GET /tools: the definitions as the model receives them.
+WHEN @src == "http" && @web.req.url.path == "/tools" && ._tools.count == 2
+  EMIT .tools = ._tools.tools,
+       @web.res.status = 200,
+       @halt = true

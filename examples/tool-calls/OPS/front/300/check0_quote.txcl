@@ -1,0 +1,7 @@
+# The first call is price_quote (the /order-bad path): checked against its
+# own schema.
+WHEN ._turn.tool_calls.0.name == "price_quote" && !exists ._turn.tool_calls.0.problem
+  WITH schema = ._tools.tools.0.parameters,
+       value  = ._turn.tool_calls.0.arguments,
+       into   = "_check0"
+  EXEC "txco://schema/check"

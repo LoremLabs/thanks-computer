@@ -1,0 +1,71 @@
+{
+  "note": "Native tool calls through public ops only: caps/list → ai://chat WITH tools → schema/check → cap:// → ai://chat → answer. The model's answers are the scopes' mock fixtures, asked for with X-Txco-Mocks (dev runs with --web-mock-header); without the header the same stack asks OpenAI. /order makes two calls in one turn and answers them both; /order-bad has arguments the schema refuses, so the capability never runs.",
+  "dev_env": ["TXCO_WEB_MOCK_HEADER=true"],
+  "bind": [
+    { "host": "localhost", "stack": "front" }
+  ],
+  "checks": [
+    {
+      "name": "the catalogue as tool definitions: a derived name, a schema and a binding",
+      "method": "GET",
+      "path": "/tools",
+      "status": 200,
+      "contains": "\"binding\":{\"capability\":\"stock.check\"}"
+    },
+    {
+      "name": "the tool's parameters are the declaration's typed input",
+      "method": "GET",
+      "path": "/tools",
+      "status": 200,
+      "contains": "\"qty\":{\"default\":1,\"description\":\"how many\",\"maximum\":100,\"minimum\":1,\"type\":\"integer\"}"
+    },
+    {
+      "name": "one call: checked, run through cap://, answered",
+      "method": "GET",
+      "path": "/ask?sku=abc",
+      "status": 200,
+      "contains": "\"answer\":\"Yes: SKU abc is in stock.\"",
+      "headers": { "X-Txco-Mocks": "front/200/*,front/400/*" }
+    },
+    {
+      "name": "the capability's answer rode back as the tool result",
+      "method": "GET",
+      "path": "/ask?sku=abc",
+      "status": 200,
+      "contains": "\"stock\":{\"in_stock\":true,\"sku\":\"abc\"}",
+      "headers": { "X-Txco-Mocks": "front/200/*,front/400/*" }
+    },
+    {
+      "name": "the call carries the offered tool's binding, never the model's",
+      "method": "GET",
+      "path": "/ask?sku=abc",
+      "status": 200,
+      "contains": "\"binding\":{\"capability\":\"stock.check\"}",
+      "headers": { "X-Txco-Mocks": "front/200/*,front/400/*" }
+    },
+    {
+      "name": "two calls in one turn, both run and both answered",
+      "method": "GET",
+      "path": "/order?sku=abc&qty=3",
+      "status": 200,
+      "contains": "\"quote\":{\"currency\":\"EUR\",\"qty\":3,\"sku\":\"abc\",\"unit_price\":12.5}",
+      "headers": { "X-Txco-Mocks": "front/210/*,front/410/*" }
+    },
+    {
+      "name": "the two-call answer",
+      "method": "GET",
+      "path": "/order?sku=abc&qty=3",
+      "status": 200,
+      "contains": "\"answer\":\"Yes: SKU abc is in stock, and 3 cost 37.50 EUR at 12.50 each.\"",
+      "headers": { "X-Txco-Mocks": "front/210/*,front/410/*" }
+    },
+    {
+      "name": "arguments the schema refuses never reach the capability",
+      "method": "GET",
+      "path": "/order-bad?sku=abc",
+      "status": 422,
+      "contains": "\"path\":\"/qty\"",
+      "headers": { "X-Txco-Mocks": "front/220/*" }
+    }
+  ]
+}

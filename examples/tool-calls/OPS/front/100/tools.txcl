@@ -1,0 +1,11 @@
+# Step 1: the tools the model may call, from the catalogue. `format =
+# "tools"` answers one definition per capability — the name the model sees
+# (dots as underscores), the description, the input as a JSON Schema, and a
+# binding that names the capability — so no rule here carries a copy of
+# what `_tools` declares. The definitions are data in the envelope, visible
+# in the trace, and the same whichever model is asked.
+WHEN @src == "http" && @web.req.url.path in ["/tools", "/ask", "/order", "/order-bad"]
+  WITH names  = ["stock.check", "price.quote"],
+       format = "tools",
+       into   = "_tools"
+  EXEC "txco://caps/list"

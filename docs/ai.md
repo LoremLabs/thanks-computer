@@ -65,6 +65,136 @@ turns on OpenAI's JSON mode, so the reply is always well-formed JSON
 mode only when the messages mention JSON, so say so in the system text
 ("Respond with JSON only"); without it the call goes out as before.
 
+Add `WITH strict = "prefer"` and, on OpenAI, a schema that qualifies
+([strict decoding](#tools--the-model-calls-your-capabilities)) is sent as
+`response_format: json_schema` with `strict: true`: the reply can only
+match the schema. `_txc.chat.schema_mode` then says which went out,
+`json_schema` or `json_object`. The chassis validates the reply either
+way.
+
+## Tools — the model calls your capabilities
+
+A model can be offered **tools**: named operations with a JSON Schema for
+their arguments, which it asks for by name instead of describing what it
+wants in prose. `ai://chat` sends the definitions in the provider's own
+tool-calling form and hands back the calls the model made. It never
+*runs* a call: your stack does, with `cap://`, under the same gateway as
+any other call, and sends the result back on the next request. The loop
+stays in txcl, where every call is decided, traced and able to end a run.
+
+```txcl
+# 1. offer two capabilities as tools (their definitions come from the catalogue)
+WHEN ._ask.text =~ /./
+  WITH names = ["stock.check", "price.quote"], format = "tools", into = "_tools"
+  EXEC "txco://caps/list"
+
+# 2. ask the model
+WHEN ._tools.count > 0
+  WITH prompt = "{{@_ask.text}}",
+       tools  = ._tools.tools,
+       into   = "_turn"
+  EXEC "ai://chat"
+
+# 3. run the call it made, through the capability its binding names
+WHEN ._turn.tool_calls.0.name =~ /./ && !exists ._turn.tool_calls.0.problem
+  WITH name  = ._turn.tool_calls.0.binding.capability,
+       input = ._turn.tool_calls.0.arguments,
+       into  = "_res"
+  EXEC "cap://tool"
+
+# 4. give the result back and get the answer
+WHEN ._res.in_stock != null
+  WITH messages = &array(&object("role", "user", "content", ._ask.text),
+                         ._turn.message,
+                         &object("role", "tool", "tool_call_id", ._turn.tool_calls.0.id, "content", ._res)),
+       tools    = ._tools.tools,
+       into     = "_final"
+  EXEC "ai://chat"
+```
+
+**A tool is a definition, not a name.** `WITH tools` takes an array of
+`{name, description, parameters, binding?}`: `parameters` is an object
+JSON Schema, `name` is letters, digits, `_` and `-` (at most 64: what
+every provider accepts), and `binding` is yours — the chassis never reads
+it and never sends it, it copies it onto each call to that tool so one
+dispatch rule needs no lookup. A string where a definition belongs is an
+error: `ai://chat` resolves nothing against the catalogue. The canonical
+source of definitions is `txco://caps/list WITH format = "tools"`, which
+derives one from each capability's declaration with
+`binding = {capability: <its name>}` ([capabilities](./advanced/capabilities.md#the-catalogue));
+an executor writes its own for tools it found elsewhere (an MCP server's,
+an OpenAPI operation), binding them to the capability that runs them.
+
+**What comes back** (at the top level, or under `WITH into`):
+
+| field | |
+|---|---|
+| `text` | The model's text; empty when the answer is calls alone |
+| `finish` | `stop`, `tool_calls`, `length`, `filtered` or `other`; absent when the provider did not say |
+| `tool_calls[]` | Each `{id, name, arguments, binding}`. `arguments` is the JSON object the model wrote, or `null` with `raw` holding its text when it was not one. `binding` is the offered tool's, never the provider's |
+| `tool_calls[].problem` | Set when a call must not run as it is: `not_offered` (a name this request did not offer), `not_json`, `truncated` (the answer hit the output limit, so every call's arguments may be cut off), `duplicate_id`. Answer such a call with an error `tool` message and the model corrects itself |
+| `message` | The assistant turn as a message, ready to append to the next request's `messages` |
+| `response_id` | The provider's id for the response, when it gave one |
+
+`chat.error` and the `_txc.chat.*` stamps stay at the top level whatever
+`into` says, so `WHEN @chat.error` works the same on every call. Several
+calls in one answer are normal: run them in order and send every result
+before asking again.
+
+**The chassis checks shape, not meaning.** It refuses a call to a tool
+that was not offered and marks arguments that are not an object, but it
+does not check arguments against the tool's schema: your rule does, with
+`txco://schema/check`, before the `cap://` — the executor knows where a
+schema came from, and the gateway is the authorization boundary either way.
+A call may run only if it was offered on that turn *and* is permitted for
+that run, wherever its capability is answered.
+
+**A transcript must be complete.** Every call in an assistant turn needs
+its `tool` message (`{role: "tool", tool_call_id, content}`, `content`
+any JSON) before the next turn, in any order. One that is missing is not
+a mistake the chassis repairs: the request is refused with
+`chat.error.code = "txco_chat_pending_tool_result"` and the unanswered ids
+in `chat.error.detail.ids`, and your rule decides — write the result,
+wait for an approval, settle an uncertain effect. `WITH repair =
+"error_results"` answers every unanswered call with a synthetic error
+result instead; it is for importing a historical transcript, never for
+resuming a live run. A malformed transcript (a result for a call that was
+never made, an id repeated within one turn) is the author's bug and the
+op is dropped, as for any bad `WITH`.
+
+| `WITH` | |
+|---|---|
+| `tools` | The definitions, as above. Allowed with `prompt` or `messages` |
+| `tool_choice` | `auto` (default), `none`, `required`, or one offered tool's name to force it |
+| `parallel` | `false` asks the model for at most one call per answer; absent leaves it to the model |
+| `repair` | `error_results`: see above |
+| `strict` | `off` (default), `prefer` or `require`: strict decoding, below |
+| `into` | Where the answer lands; the default is the top level. Not under `_txc` and not `chat` |
+
+**Strict decoding.** With `strict = "prefer"` a provider that can (OpenAI)
+decodes a tool's arguments with a grammar built from its schema, so they
+can only match it; a tool whose schema cannot be decoded that way is sent
+as it is. `require` refuses the request instead (`txco_chat_strict_unsupported`),
+so a stack that depends on it never silently gets less. A schema qualifies
+when every field is typed, no object is open to unknown keys, no optional
+field allows null (its absence could not be told from a null), and it uses
+no `$ref`; the typed declarations the catalogue derives qualify by
+construction once their fields have types. The chassis sends an optional
+field as required-and-nullable and removes the null the model returns for
+it, so the executor sees the field absent, as the declaration meant; a null
+at a field the declaration itself allows stays. Strict decoding is a
+decoding aid: validate the arguments with `txco://schema/check` either way.
+
+| `chat.error.code` | |
+|---|---|
+| `txco_chat_tools_unsupported` | The backend takes no tools, or cannot bound parallel calls when asked to. Refused before any secret is read or anything is sent |
+| `txco_chat_pending_tool_result` | The transcript has unanswered calls (`detail.ids`) |
+| `txco_chat_tool_invalid`, `txco_chat_tool_names` | A malformed definition or transcript, a choice naming no offered tool, `parallel` without `tools`, two definitions with one name. The author's; the op is dropped |
+
+The step's model facts record `tools_offered`, the `tool_calls` names and
+`finish`, never the arguments. Tool definitions are input tokens like any
+other: counted, cached by the provider when the prefix holds, never fuel.
+
 ## Embeddings — `EXEC "ai://embed"`
 
 Where `ai://chat` returns prose, `ai://embed` returns a **vector** — the numeric
@@ -239,14 +369,15 @@ provision its own key.
   chassis materializes it per tenant. Cleartext is contained by construction — it
   can't reach traces, logs, or continuations.
 - **Telemetry rides the envelope.** Every call stamps
-  `_txc.chat.{provider, model, tokens.in, tokens.out, latency_ms,
-  retries}` — visible in the [trace](./visibility.md), aggregatable for
-  cost reporting. Token counts are *not* charged to
+  `_txc.chat.{provider, model, tokens.{in, out, cached, reasoning},
+  latency_ms, retries}` — visible in the [trace](./visibility.md),
+  aggregatable for cost reporting. Token counts are *not* charged to
   [fuel](./advanced/fuel.md): provider compute is its own dimension.
-- **Limits per call.** `WITH limits.timeout_ms` and
-  `limits.max_cost_usd` cap one call; the chassis-wide default timeout
-  for AI ops is `--ai-default-timeout` (60s — deliberately longer than
-  the 5s op default).
+- **Time per call.** The op's `WITH timeout` bounds a call; without one,
+  the chassis-wide default for AI ops is `--ai-default-timeout` (60s —
+  deliberately longer than the 5s op default). `WITH limits.timeout_ms`
+  and `limits.max_cost_usd` are accepted but enforced by no backend
+  today: use `timeout`, and do not count on a cost ceiling.
 
 ## The other direction
 

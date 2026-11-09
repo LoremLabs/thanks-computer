@@ -1,0 +1,14 @@
+# Step 5: the result goes back to the model as a `tool` message under the
+# call's id, after the assistant turn that made the call (`_turn.message`,
+# as ai://chat handed it back). The transcript is complete — every call
+# answered — so the model can answer the question. ai://chat refuses a
+# transcript with a call left unanswered (txco_chat_pending_tool_result),
+# so a stack cannot forget one.
+WHEN exists ._res0.in_stock && !exists ._turn.tool_calls.1
+  WITH messages = &array(&object("role", "user", "content", &concat("Is SKU ", @web.req.url.query.sku.0, " in stock?")),
+                         ._turn.message,
+                         &object("role", "tool", "tool_call_id", ._turn.tool_calls.0.id, "content", ._res0)),
+       tools    = ._tools.tools,
+       provider = "openai",
+       into     = "_final"
+  EXEC "ai://chat"

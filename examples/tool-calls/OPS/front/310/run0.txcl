@@ -1,0 +1,12 @@
+# Step 4: run the first call through the capability its binding names. The
+# binding is the catalogue's, copied onto the call by ai://chat from the
+# definition this request offered (never from the model's answer), so one
+# rule dispatches every tool. The capability is declared on this chassis, so
+# `cap://` answers it here, in process; from a node it would go up to the
+# parent and through the grant gateway. Either way the capability's own
+# rules decide what they accept.
+WHEN ._check0.ok == true
+  WITH name  = ._turn.tool_calls.0.binding.capability,
+       input = ._turn.tool_calls.0.arguments,
+       into  = "_res0"
+  EXEC "cap://tool"

@@ -1,0 +1,11 @@
+# Step 3: before a call runs, its arguments are checked against the tool's
+# schema — the executor's job, not the model adapter's: this rule knows
+# which definition the call names. The catalogue listed the tools sorted by
+# name, so price_quote is `.0` and stock_check is `.1`; a rule per (call,
+# tool) keeps the lookup explicit. A call the chassis flagged (`problem`)
+# is not checked: it must not run as it is.
+WHEN ._turn.tool_calls.0.name == "stock_check" && !exists ._turn.tool_calls.0.problem
+  WITH schema = ._tools.tools.1.parameters,
+       value  = ._turn.tool_calls.0.arguments,
+       into   = "_check0"
+  EXEC "txco://schema/check"

@@ -9,17 +9,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
 	"github.com/loremlabs/thanks-computer/chassis/chat"
 	"github.com/loremlabs/thanks-computer/chassis/event"
+	"github.com/loremlabs/thanks-computer/chassis/jsonschemax"
 	"github.com/loremlabs/thanks-computer/chassis/jsonx"
 	"github.com/loremlabs/thanks-computer/chassis/operation"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 	"github.com/loremlabs/thanks-computer/chassis/trace"
+	"github.com/loremlabs/thanks-computer/chassis/txcguard"
 )
 
 // aiSchemePrefix is the EXEC-value prefix this handler claims.
@@ -104,6 +105,22 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 		return chatErrorPayload(op, "", "", "", err), err
 	}
 
+	// A transcript with tool calls must be complete before it is sent: a
+	// malformed one (an orphan result, a repeated id) is the author's bug;
+	// one whose calls have no results yet is the executor's to settle,
+	// answered as data (txco_chat_pending_tool_result) before any backend
+	// is touched.
+	if withCfg.useMessages {
+		checked, pending, invalid := checkTranscript(withCfg.messages, withCfg.repair)
+		if invalid != nil {
+			return chatErrorPayload(op, "", "", "", invalid), invalid
+		}
+		if pending != nil {
+			return chatErrorPayload(op, "", "", "", pending), nil
+		}
+		withCfg.messages = checked
+	}
+
 	// Build chat.Config (the chassis-owned http.Client routes through
 	// the configured egress.Guard).
 	cfg := chat.Config{HTTPClient: pu.HTTPClient}
@@ -111,6 +128,12 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 	backend, routingDecision, err := chat.Resolve(withCfg.provider, cfg)
 	if err != nil {
 		return chatErrorPayload(op, "", "", routingDecision, err), nil
+	}
+
+	// What the backend guarantees, before a secret is materialized or a
+	// byte is sent: tools, parallel control, strict decoding.
+	if gerr := gateToolFeatures(backend, withCfg); gerr != nil {
+		return chatErrorPayload(op, backend.Name(), "", routingDecision, gerr), nil
 	}
 
 	// Materialize backend-declared secrets (in addition to any
@@ -147,12 +170,16 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 	}
 
 	req := chat.Request{
-		Messages: buildMessages(withCfg),
-		Schema:   withCfg.schema,
-		Model:    withCfg.model,
-		Limits:   withCfg.limits,
-		Intent:   withCfg.intent,
-		CacheKey: withCfg.cacheKey,
+		Messages:   buildMessages(withCfg),
+		Schema:     withCfg.schema,
+		Model:      withCfg.model,
+		Limits:     withCfg.limits,
+		Intent:     withCfg.intent,
+		CacheKey:   withCfg.cacheKey,
+		Tools:      withCfg.tools,
+		ToolChoice: withCfg.toolChoice,
+		Parallel:   withCfg.parallel,
+		Strict:     withCfg.strict,
 	}
 
 	resp, runErr := backend.Run(ctx, req, &op.Secrets)
@@ -160,10 +187,18 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 	// WHEN @chat.error EXEC. Carry through resp partial fields
 	// (LatencyMS, Retries) for observability even on failure.
 
-	// Schema validation (binary ok / failed in v1).
+	// The calls the model made: bindings from the offered definitions, a
+	// problem where the transport shape is wrong. Never from the provider.
+	if runErr == nil && len(resp.ToolCalls) > 0 {
+		annotateToolCalls(&resp, withCfg.tools)
+	}
+
+	// Schema validation (binary ok / failed in v1). An answer that is tool
+	// calls has no payload to validate: the schema applies to the final
+	// answer, once the calls are done.
 	schemaStatus := ""
 	var validatedPayload json.RawMessage
-	if len(withCfg.schema) > 0 && runErr == nil {
+	if len(withCfg.schema) > 0 && runErr == nil && len(resp.ToolCalls) == 0 {
 		validated, verr := validateChatSchema(resp.Text, withCfg.schema)
 		if verr != nil {
 			runErr = &chat.SchemaFailedError{Reason: verr.Error()}
@@ -175,10 +210,18 @@ func (pu *Unit) ExecAI(ctx context.Context, op operation.Operation) (event.Paylo
 	}
 
 	// Trace event — open-ended Fields per trace.TimelineEvent contract.
-	emitChatCompletionEvent(ctx, backend.Name(), resp, routingDecision, schemaStatus, runErr)
+	emitChatCompletionEvent(ctx, backend.Name(), resp, routingDecision, schemaStatus, runErr, len(withCfg.tools))
 
-	// Build response envelope.
-	raw := buildChatResponseEnvelope(resp, runErr, schemaStatus, validatedPayload, routingDecision)
+	// Build response envelope. Without tools, calls or `into` this is the
+	// envelope the op has always produced, byte for byte.
+	ext := chatEnvelopeExt{
+		into:  withCfg.into,
+		tools: len(withCfg.tools) > 0 || len(resp.ToolCalls) > 0,
+	}
+	if withCfg.strict != "" && withCfg.strict != chat.StrictOff {
+		ext.schemaMode = resp.SchemaMode
+	}
+	raw := buildChatEnvelope(resp, runErr, schemaStatus, validatedPayload, routingDecision, ext)
 	// Stamp the chassis-wide _txc_op_debug field when the rule opted
 	// in. The chassis post-Exec strip in processor.go consumes this
 	// field BEFORE the envelope merge, emits it as an op.debug trace
@@ -223,6 +266,16 @@ type chatWith struct {
 	cacheKey    string // WITH cache_key = "..." → Request.CacheKey (provider prompt cache)
 	limits      chat.Limits
 	debug       bool // WITH debug = true → stamp _txc_op_debug; chassis surfaces to trace
+
+	// The tool half (aichat_tools.go). tools are definitions, never names:
+	// the catalogue resolves a name (`txco://caps/list WITH format =
+	// "tools"`), this handler does not.
+	tools      []chat.Tool
+	toolChoice string // auto | none | required | <an offered tool's name>
+	parallel   *bool
+	strict     string // off | prefer | require
+	repair     string // "" | error_results
+	into       string // where the answer lands; "" is the top level
 }
 
 // decodeChatWith reads op.Meta (JSON produced by the chassis's WITH
@@ -242,7 +295,8 @@ func decodeChatWith(meta string) (chatWith, error) {
 	f := gjson.GetMany(meta,
 		"prompt", "system", "messages", "schema", "model",
 		"provider", "intent", "limits.timeout_ms", "limits.max_cost_usd",
-		"debug", "cache_key")
+		"debug", "cache_key",
+		"tools", "tool_choice", "parallel", "strict", "repair", "into")
 
 	if r := f[0]; r.Exists() {
 		out.prompt = r.String()
@@ -297,7 +351,94 @@ func decodeChatWith(meta string) (chatWith, error) {
 		}
 	}
 
+	if err := decodeChatToolsWith(f[11:], &out); err != nil {
+		return out, err
+	}
 	return out, nil
+}
+
+// decodeChatToolsWith reads the tool half of the WITH clause (positions 11
+// onward of decodeChatWith's scan: tools, tool_choice, parallel, strict,
+// repair, into). A mistake here is the author's and returns an error the
+// op is dropped for: a definition that is not an object, an illegal name, a
+// choice naming no offered tool, parallel without tools, a bad mode, or an
+// `into` under `_txc` or `chat`.
+func decodeChatToolsWith(f []gjson.Result, out *chatWith) error {
+	if r := f[0]; r.Exists() {
+		if !r.IsArray() {
+			return &chat.ToolRequestError{Kind: chat.KindToolInvalid, Reason: "WITH tools must be an array of tool definitions"}
+		}
+		for i, e := range r.Array() {
+			if !e.IsObject() {
+				return &chat.ToolRequestError{Kind: chat.KindToolInvalid, Reason: fmt.Sprintf("tools[%d]: a tool is a definition {name, description, parameters, binding?}; names are not resolved here — read the catalogue with txco://caps/list WITH format = \"tools\"", i)}
+			}
+			var t chat.Tool
+			if err := json.Unmarshal([]byte(e.Raw), &t); err != nil {
+				return &chat.ToolRequestError{Kind: chat.KindToolInvalid, Reason: fmt.Sprintf("tools[%d]: %v", i, err)}
+			}
+			out.tools = append(out.tools, t)
+		}
+		if err := chat.ValidateTools(out.tools); err != nil {
+			return err
+		}
+	}
+	if r := f[1]; r.Exists() {
+		out.toolChoice = r.String()
+		if len(out.tools) == 0 {
+			return &chat.ToolRequestError{Kind: chat.KindToolInvalid, Reason: "WITH tool_choice needs WITH tools"}
+		}
+		switch out.toolChoice {
+		case chat.ToolChoiceAuto, chat.ToolChoiceNone, chat.ToolChoiceRequired:
+		default:
+			found := false
+			for _, t := range out.tools {
+				if t.Name == out.toolChoice {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return &chat.ToolRequestError{Kind: chat.KindToolInvalid, Reason: fmt.Sprintf("WITH tool_choice %q names no offered tool (auto, none, required, or one of the tools' names)", out.toolChoice)}
+			}
+		}
+	}
+	if r := f[2]; r.Exists() {
+		if r.Type != gjson.True && r.Type != gjson.False {
+			return &chat.ToolRequestError{Kind: chat.KindToolInvalid, Reason: "WITH parallel is true or false"}
+		}
+		if len(out.tools) == 0 {
+			return &chat.ToolRequestError{Kind: chat.KindToolInvalid, Reason: "WITH parallel needs WITH tools"}
+		}
+		v := r.Bool()
+		out.parallel = &v
+	}
+	if r := f[3]; r.Exists() {
+		switch r.String() {
+		case chat.StrictOff, chat.StrictPrefer, chat.StrictRequire:
+			out.strict = r.String()
+		default:
+			return &chat.InvalidWithError{Reason: `WITH strict is "off", "prefer" or "require"`}
+		}
+	}
+	if r := f[4]; r.Exists() {
+		switch r.String() {
+		case "", chatRepairErrorResults:
+			out.repair = r.String()
+		default:
+			return &chat.InvalidWithError{Reason: `WITH repair is "error_results" (an import utility: it answers every unanswered call with a synthetic error result)`}
+		}
+	}
+	if r := f[5]; r.Exists() {
+		target, ok := txcguard.AuthorTarget(r.String())
+		if !ok || target == "" {
+			return &chat.InvalidWithError{Reason: "WITH into must be a plain envelope path outside _txc"}
+		}
+		if first := strings.SplitN(target, ".", 2)[0]; first == "chat" || first == opDebugField {
+			return &chat.InvalidWithError{Reason: fmt.Sprintf("WITH into must not start at %q: the chat op writes its own `chat.error` and debug fields there", first)}
+		}
+		out.into = target
+	}
+	return nil
 }
 
 // buildMessages constructs the message array fed to the provider.
@@ -375,18 +516,17 @@ func (pu *Unit) lookupChatSecret(ctx context.Context, op operation.Operation, te
 }
 
 // validateChatSchema parses text as JSON and validates against schema.
-// Returns the validated raw bytes (re-marshalled compact) or an error.
+// Returns the validated raw bytes (re-marshalled compact) or an error. The
+// schema is compiled through jsonschemax, which pins the draft and refuses a
+// `$ref` to any document but the schema itself (a tenant's schema must not
+// make the chassis read a file or fetch a URL).
 func validateChatSchema(text string, schemaJSON json.RawMessage) (json.RawMessage, error) {
 	var parsed any
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
 		return nil, fmt.Errorf("response is not valid JSON: %w", err)
 	}
 
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource("inline://chat-schema", strings.NewReader(string(schemaJSON))); err != nil {
-		return nil, fmt.Errorf("schema compile: %w", err)
-	}
-	sch, err := compiler.Compile("inline://chat-schema")
+	sch, err := jsonschemax.Compile(schemaJSON)
 	if err != nil {
 		return nil, fmt.Errorf("schema compile: %w", err)
 	}
@@ -405,15 +545,18 @@ func validateChatSchema(text string, schemaJSON json.RawMessage) (json.RawMessag
 // counts ride this event for downstream observability/billing — but are
 // NOT charged to the chassis fuel meter (provider compute is a separate
 // dimension; see chassis/processor/budget.go's fuel cost rationale).
-func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat.Response, routing, schemaStatus string, runErr error) {
+func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat.Response, routing, schemaStatus string, runErr error, toolsOffered int) {
 	facts := trace.ModelFacts{
 		Kind: aiSubOpChat, Provider: providerName, Model: resp.Model, Routing: routing,
 		TokensIn: resp.TokensIn, TokensOut: resp.TokensOut,
 		TokensCached: resp.TokensCached, TokensReasoning: resp.TokensReasoning,
 		LatencyMS: resp.LatencyMS, Retries: resp.Retries,
+		// Tools: how many were offered, which were called (names only, never
+		// arguments), how the answer ended. All absent on a plain call.
+		ToolsOffered: toolsOffered, ToolCalls: toolCallNames(resp.ToolCalls), Finish: resp.Finish,
 	}
 	if runErr != nil {
-		facts.ErrorCode = "txco_chat_unknown"
+		facts.ErrorCode = chat.CodeUnknown
 		if coded, ok := runErr.(chat.CodedError); ok {
 			facts.ErrorCode = coded.Code()
 		}
@@ -437,11 +580,18 @@ func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat
 	if schemaStatus != "" {
 		fields["schema_validation"] = schemaStatus
 	}
+	if toolsOffered > 0 || len(resp.ToolCalls) > 0 {
+		fields["tools_offered"] = toolsOffered
+		fields["tool_calls"] = toolCallNames(resp.ToolCalls)
+		if resp.Finish != "" {
+			fields["finish"] = resp.Finish
+		}
+	}
 	if runErr != nil {
 		if coded, ok := runErr.(chat.CodedError); ok {
 			fields["error_code"] = coded.Code()
 		} else {
-			fields["error_code"] = "txco_chat_unknown"
+			fields["error_code"] = chat.CodeUnknown
 		}
 	}
 	tr.Event(trace.TimelineEvent{
@@ -470,41 +620,12 @@ func emitChatCompletionEvent(ctx context.Context, providerName string, resp chat
 //
 // `chat.error` is top-level (not under _txc) so rule authors can dispatch
 // uniformly with `WHEN @chat.error EXEC ...`.
+//
+// This is the plain shape: buildChatEnvelope (aichat_tools.go) with no
+// extension, which is what a request without tools gets. Kept under its
+// name so the frozen-copy test pins the bytes.
 func buildChatResponseEnvelope(resp chat.Response, runErr error, schemaStatus string, validatedPayload json.RawMessage, routing string) string {
-	b := jsonx.NewObject()
-
-	if runErr == nil {
-		b.Set("text", resp.Text)
-		if len(validatedPayload) > 0 {
-			b.SetRaw("schema_validated_payload", string(validatedPayload))
-		}
-	} else {
-		errBody := map[string]any{"message": runErr.Error()}
-		if coded, ok := runErr.(chat.CodedError); ok {
-			errBody["code"] = coded.Code()
-		} else {
-			errBody["code"] = "txco_chat_unknown"
-		}
-		b.Set("chat.error", errBody)
-	}
-
-	// Metadata always present, even on error, so the trace + envelope
-	// agree.
-	b.Set("_txc.chat.provider", resp.Provider)
-	b.Set("_txc.chat.model", resp.Model)
-	b.Set("_txc.chat.tokens.in", resp.TokensIn)
-	b.Set("_txc.chat.tokens.out", resp.TokensOut)
-	b.Set("_txc.chat.tokens.cached", resp.TokensCached)
-	b.Set("_txc.chat.tokens.reasoning", resp.TokensReasoning)
-	b.Set("_txc.chat.latency_ms", resp.LatencyMS)
-	b.Set("_txc.chat.retries", resp.Retries)
-	if routing != "" {
-		b.Set("_txc.chat.routing_decision", routing)
-	}
-	if schemaStatus != "" {
-		b.Set("_txc.chat.schema_validation", schemaStatus)
-	}
-	return b.String()
+	return buildChatEnvelope(resp, runErr, schemaStatus, validatedPayload, routing, chatEnvelopeExt{})
 }
 
 // stampChatOpDebug attaches `_txc_op_debug` to raw with chat-flavored
@@ -547,11 +668,25 @@ func stampChatOpDebug(raw string, cfg chatWith, req chat.Request, resp chat.Resp
 		"intent":          req.Intent,
 		"schema_present":  len(req.Schema) > 0,
 	}
+	// Tools, in the neutral shape the handler saw (the wire form is the
+	// backend's and never comes back here): the definitions offered, the
+	// choice asked, and how the answer ended.
+	if len(req.Tools) > 0 {
+		toolsBytes, _ := json.Marshal(req.Tools)
+		debugObj["tools_sent"] = json.RawMessage(toolsBytes)
+		debugObj["tool_choice_sent"] = req.ToolChoice
+		if req.Strict != "" {
+			debugObj["strict_sent"] = req.Strict
+		}
+	}
+	if resp.Finish != "" {
+		debugObj["finish"] = resp.Finish
+	}
 	if runErr != nil {
 		if coded, ok := runErr.(chat.CodedError); ok {
 			debugObj["error_code"] = coded.Code()
 		} else {
-			debugObj["error_code"] = "txco_chat_unknown"
+			debugObj["error_code"] = chat.CodeUnknown
 		}
 	}
 
@@ -573,13 +708,7 @@ func stampChatOpDebug(raw string, cfg chatWith, req chat.Request, resp chat.Resp
 // but without a successful Response to draw metadata from.
 func chatErrorPayload(op operation.Operation, providerName, model, routing string, err error) event.Payload {
 	b := jsonx.NewObject()
-	errBody := map[string]any{"message": err.Error()}
-	if coded, ok := err.(chat.CodedError); ok {
-		errBody["code"] = coded.Code()
-	} else {
-		errBody["code"] = "txco_chat_unknown"
-	}
-	b.Set("chat.error", errBody)
+	b.Set("chat.error", chatErrorBody(err))
 	if providerName != "" {
 		b.Set("_txc.chat.provider", providerName)
 	}

@@ -58,7 +58,7 @@ timeout: 30000
 |---|---|
 | **The name** | The file's stem: lowercase words joined by dots (`crm.lookup`, `mail.send`), each word `[a-z][a-z0-9_-]*`. It is what a node calls, what a sandbox and a standing grant name, and what the `_grant` stack sees. |
 | **`description`** | Optional. What a caller reads to decide whether to call: a person, or a model choosing a tool. At most 2048 characters. |
-| **`input`** | Optional. The fields a call carries: `<field>: {description, required}`. A field is `[a-z][a-z0-9_]*`; at most 32. It is published in [the catalogue](#the-catalogue); the chassis does not check a call against it — the stack that answers checks its own input. |
+| **`input`** | Optional. The fields a call carries: `<field>: {description, required}`, and optionally the field's shape ([typed fields](#typed-fields)). A field is `[a-z][a-z0-9_]*`; at most 32. It is published in [the catalogue](#the-catalogue), and as a JSON Schema a model can be handed; the chassis does not check a call against it — the stack that answers checks its own input (`txco://schema/check` does it in one op). |
 | **`output`** | Optional. The fields the answer carries, in the same shape; at most 32. Published in the catalogue, and **checked**: an answer that lacks a `required` output is a bad answer (`invalid_output`, 502, with what the stack did write), from the inlet and when the capability is [answered here](#answered-here). |
 | **`timeout`** | Optional, milliseconds. It can only shorten how long the chassis waits for the answer (`--op-timeout-max` is the ceiling). |
 | **`entry`** | Optional. See below. |
@@ -84,6 +84,63 @@ timeout: 30000
   apply` check the same things first.
 - **It deploys with the stack**, like a sandbox or an outlet: `txco apply`
   uploads it, and deactivating the stack withdraws the capability.
+
+### Typed fields
+
+A field may say what shape its value has, with the keys JSON Schema uses.
+A field that says nothing accepts any value, so every declaration written
+before types existed still means what it meant.
+
+```yaml
+# OPS/tools-web/CAPS/web.search.yaml
+description: Search the public web.
+input:
+  query:
+    type: string
+    max_length: 500
+    description: a few words, as you would type them into a search box
+    required: true
+  kind:
+    type: string
+    enum: [web, news]
+    default: web
+  count:
+    type: integer
+    minimum: 1
+    maximum: 20
+    default: 10
+  tags:
+    type: array
+    items: {type: string}
+  options:
+    type: object
+    fields:
+      verbose: {type: boolean}
+  part:
+    description: which part, from 1, or "last"
+    schema: {anyOf: [{type: integer, minimum: 1}, {type: string, enum: [last]}]}
+```
+
+| key | |
+|---|---|
+| `type` | `string`, `integer`, `number`, `boolean`, `array`, `object`, `null`, or a list of them: `[string, "null"]` is a value that may be explicitly null |
+| `enum` | The allowed values |
+| `default` | An annotation, as in JSON Schema: what the answering stack assumes when the field is absent. Shown to a caller and a model; neither the chassis nor a model fills it in |
+| `minimum`, `maximum` | For `number` and `integer` |
+| `min_length`, `max_length`, `pattern` | For `string`; the pattern is RE2 |
+| `items` | For `array`: one field shape, with the same keys |
+| `fields` | For `object`: its fields, each with the same keys, `required` included |
+| `schema` | Raw JSON Schema for this field, for what the keys cannot say. Used alone: with it, the other typed keys are an error |
+
+Fields nest at most three levels. `txco lint` and `txco apply` compile the
+schema a declaration derives and refuse one that does not compile, or a
+`$ref` that points outside it.
+
+**Absent, null and a value are three cases.** A key that is missing is
+absent, and the answering stack applies its own default. A key that is
+`null` is allowed only when the field's `type` includes `"null"`; for a
+`required` field with such a type, an explicit null satisfies `required`.
+Anything else is a value, checked against the field's shape.
 
 ## Answering a call
 
@@ -277,24 +334,55 @@ txco caps list
 ```
 
 ```text
-NAME        ENTERS     TIMEOUT  INPUT   DESCRIPTION
-card.note   desk/7000  -        text*   Note something on the card.
-crm.lookup  crm/0      30000ms  email*  Look a customer up by email address.
+NAME        ENTERS     TIMEOUT  INPUT   OUTPUT  DESCRIPTION
+card.note   desk/7000  -        text*   -       Note something on the card.
+crm.lookup  crm/0      30000ms  email*  -       Look a customer up by email address.
 ```
 
 A rule reads the same list, so a stack that offers capabilities to a model
 — a tool list — carries no copy of it:
 
 ```txcl
-# prefix is optional: it narrows the list by name
+# prefix narrows the list by name; names picks exactly these
 WHEN ._task.id =~ /./
   WITH into = "_caps", prefix = "crm."
   EXEC "txco://caps/list"
 # → _caps = {count, items: [{name, stack, entry, stage, description,
-#                            input: {<field>: {description, required}},
-#                            params: [<field>, …], timeout}]}
+#                            input: {<field>: {description, required, type, …}},
+#                            output: {…}, params: [<field>, …], returns: [<field>, …],
+#                            parameters: <the input as a JSON Schema object>, timeout}],
+#            broken?: [{name, stack, error}], missing?: [<name>, …]}
 ```
 
+**As a tool list.** `WITH format = "tools"` answers the same capabilities
+in the shape [`ai://chat WITH tools`](../ai.md#tools--the-model-calls-your-capabilities)
+takes, one definition each:
+
+```txcl
+WHEN ._task.id =~ /./
+  WITH into = "_tools", names = ["crm.lookup", "mail.send"], format = "tools"
+  EXEC "txco://caps/list"
+# → _tools = {count, tools: [{name: "crm_lookup", description,
+#                             parameters: <JSON Schema>,
+#                             binding: {capability: "crm.lookup"}}, …],
+#             broken?, missing?}
+```
+
+- **The tool's name is the capability's with dots as underscores**
+  (`crm.lookup` → `crm_lookup`): what every provider accepts, derived
+  deterministically, so a stack never maps names itself. Two capabilities
+  that would become one tool (`web.search` and `web_search`) are refused by
+  lint, by activation and by this op (`txco_caps_tool_names`).
+- **`parameters` is the input as a JSON Schema**: one property per field,
+  typed as the declaration says ([typed fields](#typed-fields)), the
+  required ones listed, unknown keys refused.
+- **`binding` says what runs the tool**: the capability, called with the
+  model's arguments as its input. It is the executor's to keep and act on
+  (`cap://` from `binding.capability`); `ai://chat` carries it onto each call
+  and never reads it. An executor may bind tools of its own to a capability
+  the same way (an MCP server's tool to `mcp.call`, say).
+- **`missing`** lists the `names` the catalogue does not hold: data, so a
+  stack offers what exists.
 - **`stage` is where a call enters**: `<stack>/0`, or `<stack>/<entry>`. A
   stack on the same chassis can run a capability by routing there; one on
   another chassis calls it by `cap://`.

@@ -1,0 +1,7 @@
+# The model call failed (no key, a provider error, a refused transcript):
+# `chat.error` is at the top level whatever `into` says, so one rule catches
+# every chat failure.
+WHEN @src == "http" && exists .chat.error
+  EMIT .error = .chat.error,
+       @web.res.status = 502,
+       @halt = true

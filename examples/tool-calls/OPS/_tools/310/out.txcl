@@ -1,0 +1,3 @@
+# SKUs starting with "x" are out of stock: a later scope overwrites.
+WHEN @src == "cap" && @cap.name == "stock.check" && @cap.input.sku =~ /^x/
+  EMIT ._cap.output.in_stock = false

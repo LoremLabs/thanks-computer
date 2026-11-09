@@ -21,15 +21,14 @@ package openrouter
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/chat"
+	"github.com/loremlabs/thanks-computer/chassis/chat/openaicompat"
 	"github.com/loremlabs/thanks-computer/chassis/secrets"
 )
 
@@ -63,6 +62,17 @@ func (b *backend) Name() string              { return "openrouter" }
 func (b *backend) Capabilities() []string    { return []string{"public_execution"} }
 func (b *backend) RequiredSecrets() []string { return []string{secretName} }
 
+// ToolFeatures: OpenRouter passes tools and parallel_tool_calls through to
+// its upstreams; strict decoding is not promised, since a gateway that
+// normalizes tool schemas can drop or mangle the field.
+func (b *backend) ToolFeatures() chat.ToolFeatures {
+	return chat.ToolFeatures{Tools: true, Parallel: true, Strict: false}
+}
+
+// options: nothing beyond the shared shape except, when tools are offered,
+// the routing field that keeps the request on an upstream that takes them.
+var options = openaicompat.Options{RequireParameters: true}
+
 // Run executes one chat completion against OpenRouter. Retries once on
 // transient errors (HTTP 5xx + network/timeout); does not retry on 4xx.
 // Sophisticated retry semantics (rate-limit-aware backoff, context-
@@ -84,19 +94,13 @@ func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.Secret
 		model = defaultModel
 	}
 
-	// Build OpenAI-compatible body. Schema is intentionally NOT sent as
-	// `response_format` in v1 — ExecAI post-validates Response.Text
-	// against req.Schema. Keeping the backend dumb here makes provider
-	// swap-out trivial (the same body is what every OpenAI-compatible
-	// endpoint accepts) and pushes schema concerns into one place.
-	// req.CacheKey is NOT sent: OpenRouter's chat-completions API does not
-	// document `prompt_cache_key` (its OpenAI caching is automatic), and an
-	// unknown field could be refused or silently dropped per upstream.
-	outbound := map[string]any{
-		"model":    model,
-		"messages": req.Messages,
-	}
-	bodyBytes, err := json.Marshal(outbound)
+	// The body is the OpenAI-compatible dialect's (chat/openaicompat) with
+	// no optional field on: the schema is not sent as `response_format`
+	// (ExecAI post-validates Response.Text against req.Schema), and
+	// req.CacheKey is not sent, since OpenRouter's chat-completions API does
+	// not document `prompt_cache_key` (its OpenAI caching is automatic) and
+	// an unknown field could be refused or silently dropped upstream.
+	bodyBytes, err := openaicompat.BuildBody(req, model, options)
 	if err != nil {
 		return chat.Response{}, fmt.Errorf("openrouter: marshal request: %w", err)
 	}
@@ -122,7 +126,16 @@ func (b *backend) Run(ctx context.Context, req chat.Request, bag *secrets.Secret
 			&chat.ProviderHTTPError{StatusCode: resp.StatusCode, Body: sanitizeBody(respBody)}
 	}
 
-	return parseOpenAICompatResponse(respBody, b.Name(), model, latencyMS, retries)
+	out, perr := parseOpenAICompatResponse(respBody, b.Name(), model, latencyMS, retries)
+	if perr != nil {
+		return out, perr
+	}
+	// No strict decoding through OpenRouter (options leave both strict
+	// fields off), so this changes nothing today; it keeps the two
+	// backends the same shape.
+	openaicompat.ApplyStrict(req, options, &out)
+	out.SchemaMode = openaicompat.SchemaMode(req, options)
+	return out, nil
 }
 
 // doWithSimpleRetry runs the request once and retries once on HTTP 5xx
@@ -174,88 +187,20 @@ func (b *backend) doWithSimpleRetry(ctx context.Context, apiKey []byte, body []b
 	return resp2, 1, nil
 }
 
-// parseOpenAICompatResponse decodes an OpenAI-shaped chat completion
-// body into a chat.Response. Empty body or malformed JSON surfaces as
-// a coded ProviderParseError (txco_chat_provider_parse) so rule authors
-// can distinguish upstream-flake from a real reply. v1 does NOT retry
-// on parse errors — that's a sophistication for the broader retry-
-// policy PR. Resilient to absent `choices` / `usage` within otherwise-
-// valid JSON: returns a partial Response with an empty Text so rule
-// authors can WHEN-handle the empty case.
+// parseOpenAICompatResponse is the dialect's (chat/openaicompat), kept
+// under its old name. An empty 2xx body (seen on the free tier's rate
+// limit, which answers 200 with no content instead of a 429) and malformed
+// JSON are coded ProviderParseErrors (txco_chat_provider_parse), so authors
+// can tell an upstream flake from a real reply and fall back to a paid
+// model; absent `choices` or `usage` give a partial Response with an empty
+// Text that a WHEN can handle.
 func parseOpenAICompatResponse(body []byte, provider, model string, latencyMS int64, retries int) (chat.Response, error) {
-	partial := chat.Response{Provider: provider, Model: model, LatencyMS: latencyMS, Retries: retries}
-
-	// Empty 2xx body — seen on :free-tier rate-limit; upstream returns
-	// 200 with no content instead of a 429. Surface clearly so authors
-	// can fall back to a paid model.
-	if len(body) == 0 {
-		return partial, &chat.ProviderParseError{Reason: "empty body", BodyLen: 0}
-	}
-
-	var raw struct {
-		Model   string `json:"model"`
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage struct {
-			PromptTokens        int64 `json:"prompt_tokens"`
-			CompletionTokens    int64 `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int64 `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-			CompletionTokensDetails struct {
-				ReasoningTokens int64 `json:"reasoning_tokens"`
-			} `json:"completion_tokens_details"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return partial, &chat.ProviderParseError{Reason: err.Error(), BodyLen: len(body)}
-	}
-
-	out := chat.Response{
-		Provider:        provider,
-		Model:           raw.Model, // prefer the provider's echo (may be a more specific routed model)
-		TokensIn:        raw.Usage.PromptTokens,
-		TokensOut:       raw.Usage.CompletionTokens,
-		TokensCached:    raw.Usage.PromptTokensDetails.CachedTokens,
-		TokensReasoning: raw.Usage.CompletionTokensDetails.ReasoningTokens,
-		LatencyMS:       latencyMS,
-		Retries:         retries,
-	}
-	if out.Model == "" {
-		out.Model = model
-	}
-	if len(raw.Choices) > 0 {
-		out.Text = raw.Choices[0].Message.Content
-	}
-	return out, nil
+	return openaicompat.ParseResponse(body, provider, model, latencyMS, retries)
 }
 
-// sanitizeBody scrubs common patterns that may quote a prefix of the
-// submitted API key in error responses. Matches Anthropic / OpenAI /
-// OpenRouter shapes; falls back to discarding any body whose lowered
-// form contains "api_key" / "api key" / "bearer ".
-//
-// The chassis's defense in depth: the SecretBag panic-on-marshal makes
-// JSON exfiltration impossible; this function reduces the chance of a
-// non-JSON path (logged via zap.String somewhere downstream) reaching
-// a key prefix.
-func sanitizeBody(body []byte) string {
-	low := strings.ToLower(string(body))
-	if strings.Contains(low, "api_key") ||
-		strings.Contains(low, "api key") ||
-		strings.Contains(low, "bearer ") ||
-		strings.Contains(low, "invalid_api_key") ||
-		strings.Contains(low, "incorrect api key") ||
-		strings.Contains(low, "unauthorized") {
-		return `{"error":"authentication or key-related provider error (body sanitized)"}`
-	}
-	// Bound the size to keep envelopes small even when the provider
-	// returns a verbose error.
-	if len(body) > 2048 {
-		return string(body[:2048]) + `...(truncated)`
-	}
-	return string(body)
-}
+// sanitizeBody is the dialect's (chat/openaicompat), kept under its old
+// name: it scrubs an error body that may quote a prefix of the key and
+// bounds its size. The chassis's defense in depth: the SecretBag
+// panic-on-marshal makes JSON exfiltration impossible; this reduces the
+// chance of a non-JSON path reaching a key prefix.
+func sanitizeBody(body []byte) string { return openaicompat.SanitizeBody(body) }

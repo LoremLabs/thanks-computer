@@ -1,0 +1,11 @@
+# Step 2, GET /order?sku=abc&qty=3: the same ask, for a question that
+# needs two tools. The mocked first answer makes two calls in one turn,
+# stock_check then price_quote; the stack runs them one after the other
+# and gives both results back before asking again.
+WHEN @src == "http" && @web.req.url.path == "/order" && ._tools.count == 2
+  WITH system   = "You answer questions about a small shop. Use the tools for facts; never guess stock or prices.",
+       prompt   = "Can I order {{@web.req.url.query.qty.0}} of SKU {{@web.req.url.query.sku.0}}, and what would it cost?",
+       tools    = ._tools.tools,
+       provider = "openai",
+       into     = "_turn"
+  EXEC "ai://chat"

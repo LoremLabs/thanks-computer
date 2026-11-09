@@ -49,9 +49,11 @@ func TestCheckCapDecls(t *testing.T) {
 	writeFile(t, filepath.Join(root, "OPS/loop/CAPS/broken.yaml"), "entry: 7000\nextra: 1\n")
 	writeFile(t, filepath.Join(root, "OPS/loop/CAPS/card.note.yaml"), "entry: 7100\n")
 	writeFile(t, filepath.Join(root, "OPS/other/CAPS/mail.send.yaml"), "entry: 100\n")
+	// A different name that becomes the same tool name as local.shell.
+	writeFile(t, filepath.Join(root, "OPS/other/CAPS/local_shell.yaml"), "entry: 100\n")
 	msgs := checkCapDecls(ops, root)
-	if len(msgs) != 3 {
-		t.Fatalf("want 3 messages, got %d:\n%s", len(msgs), strings.Join(msgs, "\n"))
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d:\n%s", len(msgs), strings.Join(msgs, "\n"))
 	}
 	all := strings.Join(msgs, "\n")
 	for _, want := range []string{
@@ -59,6 +61,7 @@ func TestCheckCapDecls(t *testing.T) {
 		"field extra not found",
 		"loop/CAPS/card.note.yaml: capability declaration: entry 7100 names no scope of this stack",
 		`other/CAPS/mail.send.yaml: capability "mail.send" is already declared by stack "loop"`,
+		`other/CAPS/local_shell.yaml: capabilities "local_shell" and other/local.shell both become the tool "local_shell"`,
 	} {
 		if !strings.Contains(all, want) {
 			t.Errorf("missing %q in:\n%s", want, all)

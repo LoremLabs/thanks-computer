@@ -1,0 +1,15 @@
+# Step 2, GET /ask?sku=abc: ask the model, offering the tools. The answer
+# lands under `_turn`: `text`, `finish`, `tool_calls` (each with its
+# arguments and the offered tool's binding) and `message` (the assistant
+# turn, ready to append to the next request).
+#
+# The scope's mock-response.json is the model's first answer when the
+# request asks for mocks (X-Txco-Mocks: front/200/*): one call to
+# stock_check. Without the header the same rule asks OpenAI (OPENAI_KEY).
+WHEN @src == "http" && @web.req.url.path == "/ask" && ._tools.count == 2
+  WITH system   = "You answer questions about a small shop. Use the tools for facts; never guess stock.",
+       prompt   = "Is SKU {{@web.req.url.query.sku.0}} in stock?",
+       tools    = ._tools.tools,
+       provider = "openai",
+       into     = "_turn"
+  EXEC "ai://chat"

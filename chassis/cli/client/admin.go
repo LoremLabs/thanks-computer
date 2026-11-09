@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/loremlabs/thanks-computer/chassis/capdecl"
 	"github.com/loremlabs/thanks-computer/chassis/cli/signer"
 )
 
@@ -1434,11 +1435,11 @@ func (c *Client) ListHostnames(ctx context.Context, history bool) ([]Hostname, e
 	return out.Hostnames, nil
 }
 
-// CapInput is one input a capability takes.
-type CapInput struct {
-	Description string `json:"description,omitempty"`
-	Required    bool   `json:"required,omitempty"`
-}
+// CapInput is one input a capability takes, or one output it answers
+// with: the declaration's own field shape (chassis/capdecl), so the typed
+// keys (type, enum, bounds, items, fields, schema) round-trip through
+// `--json` as the admin plane sends them.
+type CapInput = capdecl.Field
 
 // Cap is one capability of the tenant's catalogue: what an active stack
 // declares under CAPS/ (chassis/capdecl). Err is set, and the declaration's
@@ -1452,7 +1453,10 @@ type Cap struct {
 	Input       map[string]CapInput `json:"input,omitempty"`
 	Output      map[string]CapInput `json:"output,omitempty"`
 	Timeout     int                 `json:"timeout,omitempty"`
-	Err         string              `json:"err,omitempty"`
+	// Parameters is the input as a JSON Schema object, derived from the
+	// declaration: what a model is handed as a tool's parameters.
+	Parameters json.RawMessage `json:"parameters,omitempty"`
+	Err        string          `json:"err,omitempty"`
 }
 
 type listCapsResponse struct {

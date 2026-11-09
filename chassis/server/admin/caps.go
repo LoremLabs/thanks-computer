@@ -11,6 +11,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -92,6 +93,18 @@ func (c *Controller) deepValidateCaps(ctx context.Context, tenantID, stackID str
 	}
 	orows.Close()
 
+	// The tool names the other stacks' capabilities derive (capdecl
+	// ToolName): two capabilities that become one tool cannot both be
+	// offered to a model, so the collision is refused here as a duplicate
+	// name is.
+	takenTool := map[string]string{} // tool name → "<stack>: <capability>"
+	for path, stack := range taken {
+		if n := capdecl.Name(path); n != "" {
+			takenTool[capdecl.ToolName(n)] = stack + ": " + n
+		}
+	}
+	mineTool := map[string]string{} // tool name → this stack's capability
+
 	var issues []datasetIssue
 	for _, f := range decls {
 		name := capdecl.Name(f.Path)
@@ -112,14 +125,23 @@ func (c *Controller) deepValidateCaps(ctx context.Context, tenantID, stackID str
 		if eerr := capdecl.CheckEntry(d, scopes); eerr != nil {
 			issues = append(issues, datasetIssue{Path: f.Path, Err: eerr.Error()})
 		}
+		tool := capdecl.ToolName(name)
 		if other, dup := taken[f.Path]; dup {
 			issues = append(issues, datasetIssue{Path: f.Path, Err: fmt.Sprintf("capability %q is already declared by the active stack %q: one stack answers a capability", name, other)})
+		} else if other, dup := takenTool[tool]; dup {
+			// The same name is reported above; this is a different name
+			// that becomes the same tool.
+			issues = append(issues, datasetIssue{Path: f.Path, Err: fmt.Sprintf("capability %q and the active stack's %s both become the tool %q (dots as underscores): rename one", name, other, tool)})
 		}
+		if other, dup := mineTool[tool]; dup {
+			issues = append(issues, datasetIssue{Path: f.Path, Err: fmt.Sprintf("capabilities %q and %q both become the tool %q (dots as underscores): rename one", name, other, tool)})
+		}
+		mineTool[tool] = name
 	}
 	return issues
 }
 
-const capIssuesHint = `capabilities are validated before activation: every CAPS/<name>.yaml parses — an optional description, input, timeout and entry (a scope of this stack; omitted, a call enters at the stack's start), nothing else — and no other active stack of the tenant declares the same name`
+const capIssuesHint = `capabilities are validated before activation: every CAPS/<name>.yaml parses — an optional description, input and output (each field a description, required, and optionally its type and bounds), timeout and entry (a scope of this stack; omitted, a call enters at the stack's start), nothing else — no other active stack of the tenant declares the same name, and no two capabilities become one tool name (dots as underscores)`
 
 // capRecord is one capability of a tenant's catalogue.
 type capRecord struct {
@@ -131,6 +153,9 @@ type capRecord struct {
 	Input       map[string]capdecl.InputField `json:"input,omitempty"`
 	Output      map[string]capdecl.Field      `json:"output,omitempty"`
 	Timeout     int                           `json:"timeout,omitempty"`
+	// Parameters is the input as a JSON Schema object (capdecl InputSchema),
+	// as the catalogue op answers it.
+	Parameters json.RawMessage `json:"parameters,omitempty"`
 	// Err is set instead of the declaration's fields when the active row
 	// does not parse (it deployed before a rule tightened, or its bytes are
 	// missing from the CAS).
@@ -204,6 +229,7 @@ func (c *Controller) handleListCaps(w http.ResponseWriter, r *http.Request) {
 		}
 		rec.Entry, rec.Stage = d.Entry, d.Stage(rw.stack)
 		rec.Description, rec.Input, rec.Output, rec.Timeout = d.Description, d.Input, d.Output, d.Timeout
+		rec.Parameters = d.InputSchema()
 		caps = append(caps, rec)
 	}
 	writeJSON(w, http.StatusOK, listCapsResponse{Caps: caps, Count: len(caps)})

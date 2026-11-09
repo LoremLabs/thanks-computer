@@ -1,0 +1,21 @@
+# A second typed capability, the tool `price_quote`. `qty` is optional with a
+# default: an annotation the model reads; when the call leaves it out, the
+# answering rule below applies it.
+description: Quote a unit price for a SKU.
+entry: 400
+input:
+  sku:
+    type: string
+    min_length: 1
+    description: the SKU to quote
+    required: true
+  qty:
+    type: integer
+    minimum: 1
+    maximum: 100
+    default: 1
+    description: how many
+output:
+  unit_price:
+    type: number
+    required: true

@@ -1,0 +1,7 @@
+# Capability `stock.check`, entered at 300 (its declared entry). The input
+# was checked against the declaration's schema by the caller
+# (txco://schema/check) before the call; the stack still gates on what it
+# needs, as every capability does: the input is untrusted.
+WHEN @src == "cap" && @cap.name == "stock.check" && @cap.input.sku =~ /./
+  EMIT ._cap.output.in_stock = true,
+       ._cap.output.sku = @cap.input.sku
