@@ -179,14 +179,16 @@ True when the path is present, whatever its value: `null`, `""`, `0`, `false`, `
 
 This is not what `=~ /./` tests. That regex is true for a non-empty *string*; `exists` is true for presence. The two answer differently for `""`, `null`, `false` and `0`, so change an existing `=~ /./` to `exists` only where presence is what was meant — op by op, never by search-and-replace.
 
-| envelope | `exists .x` | `.x =~ /./` | `.x != null` |
-| --- | --- | --- | --- |
-| `{}` | false | false | false |
-| `{"x": null}` | true | false | false |
-| `{"x": ""}` | true | false | false |
-| `{"x": false}` | true | true | true |
-| `{"x": 0}` | true | true | true |
-| `{"x": "a"}` | true | true | true |
+| envelope | `exists .x` | `.x =~ /./` | `.x != null` | `.x == false` | `.x == 0` | `.x != true` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `{}` | false | false | false | **true** | **true** | true |
+| `{"x": null}` | true | false | false | true | true | true |
+| `{"x": ""}` | true | false | false | true | true | true |
+| `{"x": false}` | true | true | true | true | true | true |
+| `{"x": 0}` | true | true | true | true | true | true |
+| `{"x": "a"}` | true | true | true | false | false | true |
+
+**A missing path compares as the zero value** of whatever it is compared to: `""` against a string, `0` against a number, `false` against a boolean. So `.x == false`, `.x == 0` and `.x == ""` are true for a path that was never written, not only for one written with that value, and a rule meant to catch "the step ran and said no" also fires on every run where the step never ran. Say what you mean: `exists .x && .x == false` for "written, and false"; `.x != true` for "anything but true, including absent", which is the common intent. `txco lint` warns on a bare `== false`, `== 0` or `== ""` in a `WHEN`.
 
 
 ### Branch paths

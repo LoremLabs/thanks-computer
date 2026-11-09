@@ -574,6 +574,11 @@ func applyOps(cmd string, ws *localWorkspace, opts applyOpts, onlyStack string, 
 	for _, w := range lintLoopClause(ops) {
 		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
 	}
+	// A WHEN comparison that holds when its path is missing (`== false`,
+	// `== 0`): the same kind of warning (when_lint.go).
+	for _, w := range lintWhenZeroEquality(ops) {
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, w)
+	}
 
 	// Mock policy: when the target denies mocks, drop mock_res only.
 	// mock_req is documentation/test-fixture metadata, never consulted by

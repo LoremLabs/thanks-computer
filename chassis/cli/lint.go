@@ -113,6 +113,9 @@ Flags:
 	// apply (see loop_lint.go) — they don't flip the exit code.
 	loopWarns := lintStackLoops(ops)
 	loopWarns = append(loopWarns, lintLoopClause(ops)...)
+	// A WHEN that holds when its path is missing (`== false`, `== 0`):
+	// a warning, since the rule may mean it (when_lint.go).
+	loopWarns = append(loopWarns, lintWhenZeroEquality(ops)...)
 	loopWarns = append(loopWarns, lintCalls(ops)...)
 	loopWarns = append(loopWarns, lintCallEntries(ops, dir)...)
 	// Web ABI builds: their own warnings, and author ops in the producer band.
