@@ -14,7 +14,7 @@ import (
 )
 
 // vector.go holds the handler bodies for the durable vector store ops
-// (txco://vector/{collection,upsert,search,delete}). Storage is the configured
+// (txco://vector/{collection,upsert,search,get,update,delete}). Storage is the configured
 // vector backend (sqlite-vec bundled; pgvector behind the same interface for
 // HA). This layer adds the txcl surface: WITH params in, JSON in/out of the
 // envelope.
@@ -138,6 +138,84 @@ func vectorSearch(ctx context.Context, vs vector.Store, in []byte) (event.Payloa
 	}
 	mj, _ := json.Marshal(matches)
 	resp, _ := sjson.SetRaw(`{}`, into, string(mj))
+	return event.Payload{Raw: resp, Type: event.JSON}, nil
+}
+
+// vectorGet reads items the caller already knows, without a query vector:
+// by `ids` (or a single `id`), or by `filter` (the search grammar, at least
+// one condition) with `limit` and `after` to page in id order. The answer
+// lands at `into` (default `_vector.got`) as {items, more}, plus `missing` by
+// ids; each item is {id, metadata, text}, never the vector.
+func vectorGet(ctx context.Context, vs vector.Store, in []byte) (event.Payload, error) {
+	tenant, ok := vecTenant(ctx)
+	if !ok {
+		return vecErr("txco_vector_no_tenant", "no tenant in request scope"), nil
+	}
+	meta := []byte(operation.MetaFromContext(ctx))
+	name := gjson.GetBytes(meta, "collection").String()
+	if name == "" {
+		return vecErr("txco_vector_invalid_arg", "missing `collection`"), nil
+	}
+
+	var sel vector.Selector
+	idsGiven := false
+	if r := gjson.GetBytes(meta, "ids"); r.Exists() {
+		if !r.IsArray() {
+			return vecErr("txco_vector_invalid_arg", "`ids` must be an array of item ids"), nil
+		}
+		idsGiven = true
+		for _, v := range r.Array() {
+			sel.IDs = append(sel.IDs, v.String())
+		}
+	} else if r := gjson.GetBytes(meta, "id"); r.Exists() {
+		idsGiven = true
+		sel.IDs = []string{r.String()}
+	}
+	filterGiven := gjson.GetBytes(meta, "filter").Exists()
+	filter, ferr := parseFilter(meta)
+	if ferr != nil {
+		return vecErrFrom(ferr), nil
+	}
+	sel.Filter = filter
+
+	switch {
+	case idsGiven && filterGiven:
+		return vecErr("txco_vector_invalid_arg", "name items by `ids` or by `filter`, not both"), nil
+	case idsGiven && len(sel.IDs) == 0:
+		return vecErr("txco_vector_invalid_arg", "`ids` is empty"), nil
+	case filterGiven && len(filter.Conditions) == 0:
+		return vecErr("txco_vector_invalid_arg", "`filter` must name at least one condition"), nil
+	case !idsGiven && !filterGiven:
+		return vecErr("txco_vector_invalid_arg", "missing `ids` or `filter` (the items to read)"), nil
+	}
+
+	after := gjson.GetBytes(meta, "after").String()
+	limit := 0
+	if r := gjson.GetBytes(meta, "limit"); r.Exists() {
+		limit = int(r.Int())
+		if limit < 1 {
+			return vecErr("txco_vector_invalid_arg", "`limit` must be at least 1"), nil
+		}
+	}
+
+	res, gerr := vs.Get(ctx, tenant, name, sel, after, limit)
+	if gerr != nil {
+		return vecErrFrom(gerr), nil
+	}
+	if res.Items == nil {
+		res.Items = []vector.Record{}
+	}
+	b, err := json.Marshal(res)
+	if err != nil {
+		return vecErr("txco_vector_unknown", "the items could not be encoded"), nil
+	}
+	out := string(b)
+	if idsGiven && len(res.Missing) == 0 {
+		// A get by ids always says what was missing, an empty list included,
+		// so `WHEN ._got.missing.0 =~ /./` reads the same either way.
+		out, _ = sjson.SetRaw(out, "missing", "[]")
+	}
+	resp, _ := sjson.SetRaw(`{}`, intoPath(meta, "_vector.got"), out)
 	return event.Payload{Raw: resp, Type: event.JSON}, nil
 }
 

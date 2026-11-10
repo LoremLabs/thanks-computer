@@ -181,6 +181,104 @@ func TestVectorErrorsSurfaceOnEnvelope(t *testing.T) {
 	}
 }
 
+// TestVectorGet drives txco://vector/get through its handler: items read
+// back by ids and by filter with no query vector, the answer at `into`, the
+// vector never in it, and every refusal on the envelope.
+func TestVectorGet(t *testing.T) {
+	vs, err := sqlitevec.New(filepath.Join(t.TempDir(), "vec.db"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer vs.Close()
+	in := []byte("{}")
+	vectorCollection(vctx(`{"collection":"chunks","dimensions":3}`), vs, in)
+	pl, _ := vectorUpsert(vctx(`{"collection":"chunks","items":[
+		{"id":"p:doc:0","vector":[1,0,0],"metadata":{"slug":"p","doc":"notes.md","idx":0,"audience":"anyone"},"text":"zero"},
+		{"id":"p:doc:1","vector":[0,1,0],"metadata":{"slug":"p","doc":"notes.md","idx":1,"audience":"anyone"},"text":"one"},
+		{"id":"p:doc:2","vector":[0,0,1],"metadata":{"slug":"p","doc":"notes.md","idx":2,"audience":"anyone"},"text":"two"},
+		{"id":"p:doc:3","vector":[1,1,0],"metadata":{"slug":"p","doc":"notes.md","idx":3,"audience":"owner"},"text":"private"}]}`), vs, in)
+	if got := gjson.Get(pl.Raw, "_vector.upserted").Int(); got != 4 {
+		t.Fatalf("upserted=%d (%s)", got, pl.Raw)
+	}
+
+	// By ids, at a custom into: the order asked, missing listed, no vector.
+	pl, e := vectorGet(vctx(`{"collection":"chunks","ids":["p:doc:2","p:doc:9","p:doc:0"],"into":"_near"}`), vs, in)
+	if e != nil {
+		t.Fatalf("get: %v", e)
+	}
+	if got := matchIDs(gjson.Get(pl.Raw, "_near.items")); len(got) != 2 || got[0] != "p:doc:2" || got[1] != "p:doc:0" {
+		t.Fatalf("by ids: %v, want [p:doc:2 p:doc:0] (%s)", got, pl.Raw)
+	}
+	if got := gjson.Get(pl.Raw, "_near.missing").Raw; got != `["p:doc:9"]` {
+		t.Fatalf("missing=%s, want [\"p:doc:9\"]", got)
+	}
+	if gjson.Get(pl.Raw, "_near.more").Bool() || gjson.Get(pl.Raw, "_near.items.0.vector").Exists() || gjson.Get(pl.Raw, "_near.items.0.distance").Exists() {
+		t.Fatalf("by ids: no more, no vector, no distance (%s)", pl.Raw)
+	}
+	if got := gjson.Get(pl.Raw, "_near.items.0.text").String(); got != "two" {
+		t.Fatalf("text=%q, want two", got)
+	}
+	if got := gjson.Get(pl.Raw, "_near.items.0.metadata.idx").Int(); got != 2 {
+		t.Fatalf("metadata.idx=%d, want 2", got)
+	}
+
+	// A single id, nothing missing: `missing` is still there, empty.
+	pl, _ = vectorGet(vctx(`{"collection":"chunks","id":"p:doc:1"}`), vs, in)
+	if got := matchIDs(gjson.Get(pl.Raw, "_vector.got.items")); len(got) != 1 || got[0] != "p:doc:1" {
+		t.Fatalf("one id: %v (%s)", got, pl.Raw)
+	}
+	if got := gjson.Get(pl.Raw, "_vector.got.missing").Raw; got != "[]" {
+		t.Fatalf("one id: missing=%q, want [] (%s)", got, pl.Raw)
+	}
+
+	// By filter, the way a passage read asks for its neighbours: the lane's
+	// audience filter keeps the private chunk out; limit and after page.
+	pl, _ = vectorGet(vctx(`{"collection":"chunks","filter":{"slug":"p","doc":"notes.md","idx":{"in":[1,2,3]},"audience":"anyone"}}`), vs, in)
+	if got := matchIDs(gjson.Get(pl.Raw, "_vector.got.items")); len(got) != 2 || got[0] != "p:doc:1" || got[1] != "p:doc:2" {
+		t.Fatalf("neighbours: %v, want [p:doc:1 p:doc:2] (%s)", got, pl.Raw)
+	}
+	if gjson.Get(pl.Raw, "_vector.got.missing").Exists() {
+		t.Fatalf("a filter get has no missing (%s)", pl.Raw)
+	}
+	pl, _ = vectorGet(vctx(`{"collection":"chunks","filter":{"doc":"notes.md"},"limit":2,"after":"p:doc:0"}`), vs, in)
+	if got := matchIDs(gjson.Get(pl.Raw, "_vector.got.items")); len(got) != 2 || got[0] != "p:doc:1" || got[1] != "p:doc:2" || !gjson.Get(pl.Raw, "_vector.got.more").Bool() {
+		t.Fatalf("page: %v more=%v, want [p:doc:1 p:doc:2] true (%s)", got, gjson.Get(pl.Raw, "_vector.got.more").Bool(), pl.Raw)
+	}
+	// A filter that matches nothing answers an empty list, not null.
+	pl, _ = vectorGet(vctx(`{"collection":"chunks","filter":{"doc":"other.md"}}`), vs, in)
+	if got := gjson.Get(pl.Raw, "_vector.got.items").Raw; got != "[]" {
+		t.Fatalf("no match: items=%q, want [] (%s)", got, pl.Raw)
+	}
+
+	// Refusals surface on the envelope, never as a Go error.
+	for _, tc := range []struct{ name, meta, code string }{
+		{"no collection", `{"ids":["a"]}`, "txco_vector_invalid_arg"},
+		{"neither", `{"collection":"chunks"}`, "txco_vector_invalid_arg"},
+		{"both", `{"collection":"chunks","ids":["a"],"filter":{"doc":"x"}}`, "txco_vector_invalid_arg"},
+		{"an empty filter", `{"collection":"chunks","filter":{}}`, "txco_vector_invalid_arg"},
+		{"empty ids", `{"collection":"chunks","ids":[]}`, "txco_vector_invalid_arg"},
+		{"ids not an array", `{"collection":"chunks","ids":"a"}`, "txco_vector_invalid_arg"},
+		{"limit zero", `{"collection":"chunks","filter":{"doc":"x"},"limit":0}`, "txco_vector_invalid_arg"},
+		{"limit too large", `{"collection":"chunks","filter":{"doc":"x"},"limit":501}`, "txco_vector_invalid_arg"},
+		{"limit with ids", `{"collection":"chunks","ids":["a"],"limit":5}`, "txco_vector_invalid_arg"},
+		{"unknown op", `{"collection":"chunks","filter":{"idx":{"near":1}}}`, "txco_vector_invalid_arg"},
+		{"missing collection", `{"collection":"ghost","ids":["a"]}`, "txco_vector_collection_not_found"},
+	} {
+		pl, e := vectorGet(vctx(tc.meta), vs, in)
+		if e != nil {
+			t.Fatalf("%s: want an envelope error, got %v", tc.name, e)
+		}
+		if got := gjson.Get(pl.Raw, "vector.error.code").String(); got != tc.code {
+			t.Fatalf("%s: code=%q, want %s (%s)", tc.name, got, tc.code, pl.Raw)
+		}
+	}
+	// No tenant in scope.
+	pl, _ = vectorGet(operation.WithMeta(context.Background(), `{"collection":"chunks","ids":["a"]}`), vs, in)
+	if got := gjson.Get(pl.Raw, "vector.error.code").String(); got != "txco_vector_no_tenant" {
+		t.Fatalf("no tenant: code=%q (%s)", got, pl.Raw)
+	}
+}
+
 // TestEmbedUpsertSearchLive is the MVP vertical end-to-end: embed real text
 // with local nomic (768-dim), store the vectors, and confirm a semantic query
 // ranks the on-topic document first. Skipped when Ollama isn't reachable.

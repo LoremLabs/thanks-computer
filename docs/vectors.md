@@ -89,6 +89,51 @@ straight to the store without the floats ever riding through the sandbox; a
 count mismatch is `txco_vector_invalid_arg`) and `txco://vector/delete`
 (`ids = [ … ]`). Errors surface at `vector.error`.
 
+## Reading items you know
+
+`txco://vector/get` reads stored items back without a query vector, when you
+already know which ones you want: the chunks either side of a search hit, every
+chunk of one section, a document's chunks in order. It never ranks, so no
+`ai://embed` call is needed. Name the items by `ids`:
+
+```txcl
+WITH collection = "chunks",
+     ids        = &array("acme:dr_9x:3", "acme:dr_9x:4", "acme:dr_9x:5"),
+     into       = "._near"
+EXEC "txco://vector/get"
+#   _near.items   = [{id, metadata, text}, …]   in the order asked
+#   _near.missing = [the ids the collection does not hold]
+#   _near.more    = false
+```
+
+or by `filter`, the search grammar above, which must name at least one
+condition:
+
+```txcl
+WITH collection = "chunks",
+     filter     = &object("doc", "handbook.md", "heading", "Parking",
+                          "audience", "anyone"),
+     limit      = 40,
+     into       = "._section"
+EXEC "txco://vector/get"
+#   _section.items = [{id, metadata, text}, …]   in ascending id order
+#   _section.more  = true when the filter admits more than came back
+```
+
+Items carry their metadata and text, never their vector. A filter get returns
+`limit` items (default 50, at most 500) in ascending id order; pass the last id
+you got as `after` to read the next page. Ids sort bytewise, so `doc:10` comes
+before `doc:2`: sort by a metadata field in an op when order matters. A get by
+ids takes at most 500 ids and reads a repeated id once. Either way an answer
+stops at a whole item once its text passes 1 MiB, and says `more`; an item is
+never cut. The answer lands at `into` (default `_vector.got`), and a refusal at
+`vector.error` (`txco_vector_invalid_arg` for ids and a filter together, an
+empty filter, or a bound passed).
+
+A get sees what a search in the same tenant sees. Isolation inside a
+collection, such as a per-customer or per-audience field, is the filter's job,
+as it is for search.
+
 ## Re-labelling without re-embedding
 
 `txco://vector/update` merges `merge` into the metadata of every item that

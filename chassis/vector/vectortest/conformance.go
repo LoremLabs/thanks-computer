@@ -6,6 +6,8 @@ package vectortest
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/loremlabs/thanks-computer/chassis/vector"
@@ -221,6 +223,166 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) vector.Store) {
 		}
 	})
 
+	t.Run("Get", func(t *testing.T) {
+		const gc = "gets"
+		if err := s.EnsureCollection(ctx, tenant, vector.Collection{Name: gc, Dimensions: dim, Metric: vector.MetricCosine}); err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		var items []vector.Item
+		for i := 0; i < 5; i++ {
+			heading := "A"
+			if i >= 3 {
+				heading = "B"
+			}
+			items = append(items, vector.Item{
+				ID: fmt.Sprintf("d:%d", i), Vector: []float32{1, float32(i), 0, 0}, Text: fmt.Sprintf("t%d", i),
+				Metadata: map[string]any{"doc": "x", "idx": i, "heading": heading},
+			})
+		}
+		items = append(items, vector.Item{ID: "e:0", Vector: []float32{0, 0, 1, 0}, Text: "other", Metadata: map[string]any{"doc": "y", "idx": 0}})
+		if _, err := s.Upsert(ctx, tenant, gc, items); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		get := func(sel vector.Selector, after string, limit int) vector.GetResult {
+			t.Helper()
+			res, err := s.Get(ctx, tenant, gc, sel, after, limit)
+			if err != nil {
+				t.Fatalf("get %+v after=%q limit=%d: %v", sel, after, limit, err)
+			}
+			return res
+		}
+		where := func(conds ...vector.Condition) vector.Selector {
+			return vector.Selector{Filter: vector.Filter{Conditions: conds}}
+		}
+		docX := vector.Condition{Field: "doc", Op: vector.OpEq, Value: "x"}
+
+		// By ids: the order asked, a duplicate once, an absent id in Missing,
+		// metadata and text whole.
+		res := get(vector.Selector{IDs: []string{"d:3", "nope", "d:1", "d:3"}}, "", 0)
+		if got := recIDs(res.Items); !equal(got, []string{"d:3", "d:1"}) || !equal(res.Missing, []string{"nope"}) || res.More {
+			t.Fatalf("by ids: items=%v missing=%v more=%v, want [d:3 d:1] [nope] false", got, res.Missing, res.More)
+		}
+		if r := res.Items[0]; r.Text != "t3" || r.Metadata["doc"] != "x" || fmt.Sprint(r.Metadata["idx"]) != "3" {
+			t.Fatalf("by ids: record not whole: %+v", r)
+		}
+
+		// By filter: ascending id, the limit, More, and paging with after.
+		res = get(where(docX), "", 2)
+		if got := recIDs(res.Items); !equal(got, []string{"d:0", "d:1"}) || !res.More || len(res.Missing) != 0 {
+			t.Fatalf("filter page 1: %v more=%v, want [d:0 d:1] true", got, res.More)
+		}
+		res = get(where(docX), "d:1", 2)
+		if got := recIDs(res.Items); !equal(got, []string{"d:2", "d:3"}) || !res.More {
+			t.Fatalf("filter page 2: %v more=%v, want [d:2 d:3] true", got, res.More)
+		}
+		res = get(where(docX), "d:3", 2)
+		if got := recIDs(res.Items); !equal(got, []string{"d:4"}) || res.More {
+			t.Fatalf("filter page 3: %v more=%v, want [d:4] false", got, res.More)
+		}
+		// The default limit covers a small match whole.
+		res = get(where(docX), "", 0)
+		if got := recIDs(res.Items); len(got) != 5 || res.More {
+			t.Fatalf("default limit: %v more=%v, want 5 items, false", got, res.More)
+		}
+		// Every operator the search grammar has, a number included.
+		for _, tc := range []struct {
+			name string
+			sel  vector.Selector
+			want []string
+		}{
+			{"in number", where(docX, vector.Condition{Field: "idx", Op: vector.OpIn, Value: []any{1, 2}}), []string{"d:1", "d:2"}},
+			{"gte/lt", where(vector.Condition{Field: "idx", Op: vector.OpGte, Value: 3}, vector.Condition{Field: "idx", Op: vector.OpLt, Value: 5}), []string{"d:3", "d:4"}},
+			{"not_in", where(vector.Condition{Field: "heading", Op: vector.OpNotIn, Value: []any{"A"}}), []string{"d:3", "d:4", "e:0"}},
+			{"id field", where(vector.Condition{Field: "id", Op: vector.OpIn, Value: []any{"d:0", "e:0", "nope"}}), []string{"d:0", "e:0"}},
+			{"a section", where(docX, vector.Condition{Field: "heading", Op: vector.OpEq, Value: "B"}), []string{"d:3", "d:4"}},
+			{"no match", where(vector.Condition{Field: "doc", Op: vector.OpEq, Value: "z"}), []string{}},
+		} {
+			res := get(tc.sel, "", 0)
+			if got := recIDs(res.Items); !equal(got, tc.want) || res.More {
+				t.Fatalf("filter %s: %v more=%v, want %v false", tc.name, got, res.More, tc.want)
+			}
+		}
+
+		// Refusals: the selector's rules, the same for every backend.
+		for _, tc := range []struct {
+			name  string
+			sel   vector.Selector
+			after string
+			limit int
+		}{
+			{"neither", vector.Selector{}, "", 0},
+			{"both", vector.Selector{IDs: []string{"d:0"}, Filter: vector.Filter{Conditions: []vector.Condition{docX}}}, "", 0},
+			{"an empty id", vector.Selector{IDs: []string{"d:0", ""}}, "", 0},
+			{"too many ids", vector.Selector{IDs: make501()}, "", 0},
+			{"after with ids", vector.Selector{IDs: []string{"d:0"}}, "d:0", 0},
+			{"limit with ids", vector.Selector{IDs: []string{"d:0"}}, "", 5},
+			{"limit too large", where(docX), "", vector.MaxGetLimit + 1},
+		} {
+			if _, err := s.Get(ctx, tenant, gc, tc.sel, tc.after, tc.limit); err == nil {
+				t.Fatalf("get %s: want an error", tc.name)
+			} else if _, ok := err.(*vector.InvalidArgError); !ok {
+				t.Fatalf("get %s: want InvalidArgError, got %T %v", tc.name, err, err)
+			}
+		}
+		if _, err := s.Get(ctx, tenant, "nope", vector.Selector{IDs: []string{"d:0"}}, "", 0); err == nil {
+			t.Fatal("get from a missing collection: want an error")
+		} else if _, ok := err.(*vector.CollectionNotFoundError); !ok {
+			t.Fatalf("want CollectionNotFoundError, got %T", err)
+		}
+
+		// Tenant isolation: the same collection name in another tenant holds
+		// only its own items.
+		const other = "globex"
+		if err := s.EnsureCollection(ctx, other, vector.Collection{Name: gc, Dimensions: dim, Metric: vector.MetricCosine}); err != nil {
+			t.Fatalf("ensure other: %v", err)
+		}
+		if _, err := s.Upsert(ctx, other, gc, []vector.Item{{ID: "g:0", Vector: []float32{1, 0, 0, 0}, Metadata: map[string]any{"doc": "x"}}}); err != nil {
+			t.Fatalf("upsert other: %v", err)
+		}
+		res, err := s.Get(ctx, other, gc, vector.Selector{IDs: []string{"d:0", "g:0"}}, "", 0)
+		if err != nil || !equal(recIDs(res.Items), []string{"g:0"}) || !equal(res.Missing, []string{"d:0"}) {
+			t.Fatalf("other tenant by ids: %+v err=%v, want [g:0] missing [d:0]", res, err)
+		}
+		res, err = s.Get(ctx, other, gc, where(docX), "", 0)
+		if err != nil || !equal(recIDs(res.Items), []string{"g:0"}) {
+			t.Fatalf("other tenant by filter: %+v err=%v, want [g:0]", res, err)
+		}
+	})
+
+	t.Run("GetTextBound", func(t *testing.T) {
+		const bc = "bigtext"
+		if err := s.EnsureCollection(ctx, tenant, vector.Collection{Name: bc, Dimensions: dim, Metric: vector.MetricCosine}); err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		big := strings.Repeat("x", 600<<10)                   // two of these pass the 1 MiB bound
+		huge := strings.Repeat("y", vector.MaxGetTextBytes+1) // larger than the bound alone
+		if _, err := s.Upsert(ctx, tenant, bc, []vector.Item{
+			{ID: "b:0", Vector: []float32{1, 0, 0, 0}, Text: big, Metadata: map[string]any{"k": "big"}},
+			{ID: "b:1", Vector: []float32{1, 0, 0, 0}, Text: big, Metadata: map[string]any{"k": "big"}},
+			{ID: "b:2", Vector: []float32{1, 0, 0, 0}, Text: "small", Metadata: map[string]any{"k": "big"}},
+			{ID: "h:0", Vector: []float32{1, 0, 0, 0}, Text: huge, Metadata: map[string]any{"k": "huge"}},
+		}); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+		// By filter: the second big item would pass the bound, so the answer
+		// stops at the first, whole, and says More.
+		res, err := s.Get(ctx, tenant, bc, vector.Selector{Filter: vector.Filter{Conditions: []vector.Condition{{Field: "k", Op: vector.OpEq, Value: "big"}}}}, "", 0)
+		if err != nil || !equal(recIDs(res.Items), []string{"b:0"}) || !res.More || len(res.Items[0].Text) != len(big) {
+			t.Fatalf("filter bound: ids=%v more=%v err=%v, want [b:0] true, text whole", recIDs(res.Items), res.More, err)
+		}
+		// By ids the same, and an id past the bound is neither returned nor
+		// missing.
+		res, err = s.Get(ctx, tenant, bc, vector.Selector{IDs: []string{"b:0", "b:1", "nope"}}, "", 0)
+		if err != nil || !equal(recIDs(res.Items), []string{"b:0"}) || !res.More || !equal(res.Missing, []string{"nope"}) {
+			t.Fatalf("ids bound: %v more=%v missing=%v err=%v, want [b:0] true [nope]", recIDs(res.Items), res.More, res.Missing, err)
+		}
+		// An item larger than the bound comes back alone, never cut.
+		res, err = s.Get(ctx, tenant, bc, vector.Selector{IDs: []string{"h:0", "b:2"}}, "", 0)
+		if err != nil || !equal(recIDs(res.Items), []string{"h:0"}) || !res.More || len(res.Items[0].Text) != len(huge) {
+			t.Fatalf("huge item: %v more=%v err=%v, want [h:0] alone, whole", recIDs(res.Items), res.More, err)
+		}
+	})
+
 	t.Run("DimensionMismatch", func(t *testing.T) {
 		mustEnsure()
 		if _, err := s.Upsert(ctx, tenant, coll, []vector.Item{{ID: "z", Vector: []float32{1, 2}}}); err == nil {
@@ -310,6 +472,36 @@ func ids(ms []vector.Match) []string {
 	out := make([]string, len(ms))
 	for i, m := range ms {
 		out[i] = m.ID
+	}
+	return out
+}
+
+func recIDs(rs []vector.Record) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.ID
+	}
+	return out
+}
+
+// equal compares in order (a Get's order is part of its contract); nil and
+// empty are the same.
+func equal(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func make501() []string {
+	out := make([]string, vector.MaxGetIDs+1)
+	for i := range out {
+		out[i] = fmt.Sprintf("id-%d", i)
 	}
 	return out
 }

@@ -1,6 +1,6 @@
 // Package vector is the chassis-owned vector store: a durable, tenant-scoped
-// place to upsert embeddings and find nearest neighbours, exposed to txcl as
-// txco://vector/{upsert,search,delete,collection}.
+// place to upsert embeddings, find nearest neighbours and read items back,
+// exposed to txcl as txco://vector/{collection,upsert,search,get,update,delete}.
 //
 // **Separation of concerns.** This package stores and searches vectors and
 // nothing else — it never talks to an embedding provider. Producing the
@@ -66,6 +66,48 @@ type Match struct {
 	Text     string         `json:"text,omitempty"`
 }
 
+// Record is a stored item as Get reads it back: its id, metadata and text, and
+// never its vector (a reader of items has no use for 1,536 floats, and they
+// would swamp the envelope and the trace).
+type Record struct {
+	ID       string         `json:"id"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+	Text     string         `json:"text,omitempty"`
+}
+
+// Selector names the items a Get reads: by IDs or by Filter, exactly one of
+// the two.
+type Selector struct {
+	IDs    []string
+	Filter Filter
+}
+
+// GetResult is what a Get answers. Items are in the order the IDs were asked
+// (an absent id is skipped and listed in Missing), or in ascending id order
+// for a Filter. More reports that the answer stopped short: the filter admits
+// items past the limit, or the bound on the answer's text was reached.
+type GetResult struct {
+	Items   []Record `json:"items"`
+	Missing []string `json:"missing,omitempty"`
+	More    bool     `json:"more"`
+}
+
+// The bounds on one Get (txco://vector/get). The op handler refuses a request
+// past them with the same numbers; the backends enforce them too.
+const (
+	// MaxGetIDs is the most ids one Get may name.
+	MaxGetIDs = 500
+	// DefaultGetLimit is a filter Get's limit when none is given.
+	DefaultGetLimit = 50
+	// MaxGetLimit is the largest limit a filter Get may ask for.
+	MaxGetLimit = 500
+	// MaxGetTextBytes bounds the text of one answer: past it the answer stops
+	// at a whole item and says More. An item is never cut, and the first item
+	// always comes back, so a single item larger than the bound comes back
+	// alone. 1 MiB stays far under the op payload ceiling.
+	MaxGetTextBytes = 1 << 20
+)
+
 // Op is a filter comparison operator.
 type Op string
 
@@ -129,6 +171,17 @@ type Store interface {
 	// at least one condition — an unconditional rewrite is refused with
 	// InvalidArgError. Returns the number of items matched.
 	UpdateMetadata(ctx context.Context, tenant, collection string, filter Filter, set map[string]any) (int, error)
+
+	// Get reads the items sel names, without ranking and without a query
+	// vector. By IDs (at most MaxGetIDs, none empty, a duplicate read once):
+	// in the order asked, an absent id listed in Missing. By Filter (at least
+	// one condition, the search grammar): ascending id, only ids after
+	// `after` when it is set, at most limit (≤ 0 means DefaultGetLimit; more
+	// than MaxGetLimit is refused). Either way the answer stops at a whole
+	// item once its text would pass MaxGetTextBytes, and says More. Returns
+	// CollectionNotFoundError if the collection doesn't exist, and
+	// InvalidArgError for a selector that names both or neither.
+	Get(ctx context.Context, tenant, collection string, sel Selector, after string, limit int) (GetResult, error)
 
 	// ListIDs returns the IDs of every item currently in the collection (order
 	// unspecified). The store-seed reconciler uses it to compute which managed

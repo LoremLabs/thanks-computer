@@ -380,6 +380,78 @@ func (s *Store) UpdateMetadata(ctx context.Context, tenant, collection string, f
 	return int(n), nil
 }
 
+// Get reads items without ranking: the same table and WHERE a search uses,
+// without the distance. The selector's rules and the answer's order and
+// bounds are vector.NormalizeGet / ResultByIDs / ResultByFilter, shared with
+// every backend.
+func (s *Store) Get(ctx context.Context, tenant, collection string, sel vector.Selector, after string, limit int) (vector.GetResult, error) {
+	sel, limit, err := vector.NormalizeGet(sel, after, limit)
+	if err != nil {
+		return vector.GetResult{}, err
+	}
+	_, table, err := s.lookup(ctx, tenant, collection)
+	if err != nil {
+		return vector.GetResult{}, err
+	}
+
+	if len(sel.IDs) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(sel.IDs)), ",")
+		args := make([]any, len(sel.IDs))
+		for i, id := range sel.IDs {
+			args[i] = id
+		}
+		// table is a hex-only identifier (tableNameFor) — safe to interpolate.
+		rows, err := s.queryRecords(ctx, fmt.Sprintf("SELECT id, metadata, text FROM %s WHERE id IN (%s)", table, placeholders), args...)
+		if err != nil {
+			return vector.GetResult{}, err
+		}
+		found := make(map[string]vector.Record, len(rows))
+		for _, r := range rows {
+			found[r.ID] = r
+		}
+		return vector.ResultByIDs(sel.IDs, found), nil
+	}
+
+	where, args, err := buildWhere(sel.Filter)
+	if err != nil {
+		return vector.GetResult{}, err
+	}
+	if after != "" {
+		where += " AND id > ?"
+		args = append(args, after)
+	}
+	args = append(args, limit+1) // one past the limit tells More
+	rows, err := s.queryRecords(ctx, fmt.Sprintf("SELECT id, metadata, text FROM %s%s ORDER BY id LIMIT ?", table, where), args...)
+	if err != nil {
+		return vector.GetResult{}, err
+	}
+	return vector.ResultByFilter(rows, limit), nil
+}
+
+// queryRecords runs a SELECT of (id, metadata, text) and decodes the rows.
+func (s *Store) queryRecords(ctx context.Context, q string, args ...any) ([]vector.Record, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlitevec: get: %w", err)
+	}
+	defer rows.Close()
+	var out []vector.Record
+	for rows.Next() {
+		var (
+			r      vector.Record
+			mdJSON string
+		)
+		if err := rows.Scan(&r.ID, &mdJSON, &r.Text); err != nil {
+			return nil, err
+		}
+		if mdJSON != "" {
+			_ = json.Unmarshal([]byte(mdJSON), &r.Metadata)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListIDs(ctx context.Context, tenant, collection string) ([]string, error) {
 	_, table, err := s.lookup(ctx, tenant, collection)
 	if err != nil {

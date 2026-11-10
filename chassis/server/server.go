@@ -2429,7 +2429,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		}))
 
 	// Durable tenant vector store (txco://vector/{collection,upsert,search,
-	// delete}). The backend is selected by --vector-store (default "sqlite",
+	// get,update,delete}). The backend is selected by --vector-store (default "sqlite",
 	// the bundled SQLite + sqlite-vec file). Tenant-scoped via
 	// processor.TenantScope; collections are tenant-level (shared across
 	// stacks), unlike the per-stack KV namespace. On open failure the ops stay
@@ -2454,6 +2454,10 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		pu.Handle([]byte("txco://vector/search"), event.OpsHandlerFunc(
 			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
 				return vectorSearch(ctx, vstore, in)
+			}))
+		pu.Handle([]byte("txco://vector/get"), event.OpsHandlerFunc(
+			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
+				return vectorGet(ctx, vstore, in)
 			}))
 		pu.Handle([]byte("txco://vector/delete"), event.OpsHandlerFunc(
 			func(ctx context.Context, opName string, in, out []byte) (event.Payload, error) {
