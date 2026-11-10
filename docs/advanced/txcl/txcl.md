@@ -911,6 +911,7 @@ From there, prefix fallback handles per-scope inheritance automatically. There's
 | `debug = true` | any | Surface extra op debug detail to the trace |
 | `prompt`, `system`, `messages`, `model`, `provider`, `schema`, `intent`, `cache_key`, `limits.*` | ai://chat | The chat request — see [ai](../../ai.md) |
 | `tools`, `tool_choice`, `parallel`, `strict`, `repair`, `into` | ai://chat | Tool calling: the definitions offered, how the model may choose, where the answer lands — see [tools](../../ai.md#tools--the-model-calls-your-capabilities) |
+| `input`, `into`, `name`, `cap_into` | cap:// | What the capability is asked, where its output lands, the capability picked from data, and where the facts about the call land when several are made in one scope. See [`cap://`](../capabilities.md#cap) |
 | `workspace` | workspace:// | Pick the workspace from data (`WITH workspace = ._in.slug`); replaces the ref's name — see [workspaces](../../workspaces.md) |
 | `command` / `args` | workspace:// | The command: a shell line, or an argv array (no shell). One or the other |
 | `stdin`, `cwd`, `env` | workspace:// | Bytes fed to the process; where the command starts (beneath the workspace, `$TXCO_STACK_DIR/…` for the stack's own files, or an absolute path; see [Where a command starts](../../workspaces.md#where-a-command-starts-cwd)); extra environment (an object) |

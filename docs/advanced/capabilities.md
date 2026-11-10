@@ -254,14 +254,19 @@ WHEN ._draft.ready == true
 | `into` | Where the answer's output lands. Default `_cap`. |
 | `timeout` | The whole round trip, in milliseconds. |
 | `name` | Replaces the name in the ref, as `WITH url` does for an `http` op: a rule that picks the capability from data writes `EXEC "cap://any.name" WITH name = ._call.name`. |
+| `cap_into` | Where the facts about the call land. Default `cap`. See [calls side by side](#calls-side-by-side). |
 
-What comes back, beside `into`:
+What comes back, beside `into`, at `cap` (or at the path `cap_into` names):
 
 | | |
 |---|---|
 | `cap.name`, `cap.status`, `cap.ms` | The capability, the answer's status, the round trip in milliseconds |
 | `cap.rid` | The parent's request id for the call: its trace of the decision and the run. Absent when the capability was answered here. |
 | `cap.error.{code, message, status}` | Set when the call did not get an answer. `into` is `{}` then. |
+
+A call that got an answer writes no `error`, and does not clear one an
+earlier call left at the same path: a rule that calls again and tests
+`exists .cap.error` deletes `cap` first (`EMIT @delete = "cap"`).
 
 **Every failure is data**, so a rule can gate on it and the run goes on:
 
@@ -284,6 +289,46 @@ What comes back, beside `into`:
   envelope and no trace.
 - **A run that arrived without a grant can call nothing on the parent.** It can
   still call a capability declared on this chassis, which is answered here.
+
+### Calls side by side
+
+Ops of one scope run together and their outputs merge. Each `cap://` writes
+its facts at `cap` unless told otherwise, so of two calls in one scope only
+one name, one status and one error can be read afterwards: the last merged.
+A call that failed beside one that did not cannot be told from it.
+
+`WITH cap_into` gives a call a path of its own for those facts:
+
+```txcl
+# 0300: both asked for at once
+WHEN exists ._want.search
+  WITH input = ._want.search, into = "_found", cap_into = "_found_cap"
+  EXEC "cap://web.search"
+
+WHEN exists ._want.page
+  WITH input = ._want.page, into = "_page", cap_into = "_page_cap"
+  EXEC "cap://web.read"
+```
+
+```txcl
+# 0310: each read by its own facts
+WHEN exists ._page_cap.error
+  EMIT ._page_failed = ._page_cap.error.code
+```
+
+- **The shape is the same**: `<cap_into>.name`, `.status`, `.ms`, `.rid`,
+  `.error.{code, message, status}`. Only the place moves, and a call that
+  names one writes nothing at `cap`.
+- **It is a path apart from `into`.** One inside the other, either way
+  round, is refused: a field of the output could then be read as a fact of
+  the call.
+- **A `cap_into` that cannot be used drops the op** as an authoring error
+  (empty, not a string, under `_txc`, overlapping `into`). It never falls
+  back to `cap`, where it would be overwritten.
+- **Name the paths with words, not numbers.** A key in digits is an array
+  index (`_m.1`), and arrays append when outputs merge.
+- **Each call still costs one request** of the run grant's budget, and each
+  is decided on its own.
 
 ### Answered here
 

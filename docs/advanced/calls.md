@@ -345,7 +345,7 @@ the answer:
 | Enters at | the ref's scope (default 0) | the declaration's `entry` |
 | The callee sees | `@src == "call"`, `@call.input`, `@call.caller`, `@call.depth` | `@src == "cap"`, `@cap.name`, `@cap.input`, `@cap.caller`, `@cap.depth`, `@cap.impl` |
 | The callee answers at | `._call.output` / `._call.error` | `._cap.output` / `._cap.error`, as it would a call from a node |
-| The caller gets | one result object under `into` | cap://'s shape: the output under `into`, `cap.name`, `cap.status`, `cap.ms`, failures at `cap.error` |
+| The caller gets | one result object under `into` | cap://'s shape: the output under `into`, `cap.name`, `cap.status`, `cap.ms`, failures at `cap.error` (all at another path with [`WITH cap_into`](./capabilities.md#calls-side-by-side), for calls made in one scope) |
 | Bounded by | `WITH timeout` | `WITH timeout`, and the declared `timeout` when shorter |
 | No answer | `ok: true, output: {}` | `txco_cap_unknown` (the inlet's contract: no rule answered) |
 

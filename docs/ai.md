@@ -138,8 +138,9 @@ an OpenAPI operation), binding them to the capability that runs them.
 
 `chat.error` and the `_txc.chat.*` stamps stay at the top level whatever
 `into` says, so `WHEN @chat.error` works the same on every call. Several
-calls in one answer are normal: run them in order and send every result
-before asking again.
+calls in one answer are normal: run them in order, or side by side in one
+scope with a [`cap_into`](./advanced/capabilities.md#calls-side-by-side)
+each, and send every result before asking again.
 
 **The chassis checks shape, not meaning.** It refuses a call to a tool
 that was not offered and marks arguments that are not an object, but it

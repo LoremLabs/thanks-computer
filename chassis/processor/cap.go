@@ -87,17 +87,65 @@ var capClient = &http.Client{Transport: &http.Transport{
 	DisableCompression: true,
 }}
 
+// capFactsDefault is where the facts about a call land when the op names no
+// `WITH cap_into`: one path every cap:// op of a request shares.
+const capFactsDefault = "cap"
+
+// capPlace is where one call's answer lands in the caller's envelope: the
+// output at `into`, and the facts about the call (name, status, ms, rid and,
+// when it did not get an answer, error) at `facts`: `cap`, or the path
+// `WITH cap_into` names. Ops of one scope run side by side and their outputs
+// merge, so two calls that share `cap` cannot both be read: which name, and
+// whose error, is the last one merged. A call that names its own `cap_into`
+// writes nothing at `cap`, and so shares nothing with its neighbours.
+type capPlace struct{ into, facts string }
+
+// fact is the path of one fact about the call.
+func (at capPlace) fact(key string) string { return at.facts + "." + key }
+
+// capPlaceOf reads `WITH into` and `WITH cap_into`. A `cap_into` that cannot
+// be used is an authoring error, never a quiet fall back to `cap`: the op
+// asked for facts of its own, and at the shared path it would overwrite a
+// neighbour's and be overwritten.
+func capPlaceOf(meta string) (capPlace, error) {
+	at := capPlace{into: boundedInto(gjson.Get(meta, "into").String()), facts: capFactsDefault}
+	if at.into == "" {
+		at.into = capDefaultInto
+	}
+	v := gjson.Get(meta, "cap_into")
+	if !v.Exists() {
+		return at, nil
+	}
+	if v.Type != gjson.String || strings.TrimSpace(v.String()) == "" {
+		return at, fmt.Errorf("WITH cap_into must be an envelope path, a non-empty string")
+	}
+	facts := boundedInto(v.String())
+	switch {
+	case facts == "":
+		return at, fmt.Errorf("WITH cap_into %q is not a usable envelope path", v.String())
+	case facts == "_txc" || strings.HasPrefix(facts, "_txc."):
+		return at, fmt.Errorf("WITH cap_into %q is under _txc, which an op's answer cannot write", v.String())
+	case facts == at.into || strings.HasPrefix(facts, at.into+".") || strings.HasPrefix(at.into, facts+"."):
+		// One inside the other, either way round, and a key of the output
+		// could be read as a fact of the call (an output field named
+		// `error`), or a fact written over the output.
+		return at, fmt.Errorf("WITH cap_into %q and into %q overlap: the facts about the call and its output need a path each", v.String(), at.into)
+	}
+	at.facts = facts
+	return at, nil
+}
+
 // capFailure is the in-band shape of a call that did not get an answer.
-func capFailure(into, name, code, message string, status int, rid string) event.Payload {
-	raw, _ := sjson.SetRaw("{}", into, "{}")
-	raw, _ = sjson.Set(raw, "cap.name", name)
-	raw, _ = sjson.Set(raw, "cap.error.code", code)
-	raw, _ = sjson.Set(raw, "cap.error.message", message)
+func capFailure(at capPlace, name, code, message string, status int, rid string) event.Payload {
+	raw, _ := sjson.SetRaw("{}", at.into, "{}")
+	raw, _ = sjson.Set(raw, at.fact("name"), name)
+	raw, _ = sjson.Set(raw, at.fact("error.code"), code)
+	raw, _ = sjson.Set(raw, at.fact("error.message"), message)
 	if status > 0 {
-		raw, _ = sjson.Set(raw, "cap.error.status", status)
+		raw, _ = sjson.Set(raw, at.fact("error.status"), status)
 	}
 	if rid != "" {
-		raw, _ = sjson.Set(raw, "cap.rid", rid)
+		raw, _ = sjson.Set(raw, at.fact("rid"), rid)
 	}
 	return event.Payload{Raw: raw, Type: event.JSON}
 }
@@ -109,9 +157,9 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 	if !sandbox.ValidCapability(name) {
 		return empty, fmt.Errorf("malformed capability ref %q; want cap://<name>, lowercase words joined by dots", op.Resonator.Exec)
 	}
-	into := boundedInto(gjson.Get(op.Meta, "into").String())
-	if into == "" {
-		into = capDefaultInto
+	at, perr := capPlaceOf(op.Meta)
+	if perr != nil {
+		return empty, perr
 	}
 	// `WITH name` names the capability from data; the ref's name is the
 	// static default. A name that is not one is data too, not an authoring
@@ -119,7 +167,7 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 	if v := gjson.Get(op.Meta, "name"); v.Exists() {
 		name = strings.TrimSpace(v.String())
 		if !sandbox.ValidCapability(name) {
-			return capFailure(into, name, "txco_cap_unknown", "WITH name is not a capability name (lowercase words joined by dots)", 0, ""), nil
+			return capFailure(at, name, "txco_cap_unknown", "WITH name is not a capability name (lowercase words joined by dots)", 0, ""), nil
 		}
 	}
 	// Resolution is a lookup, never a search: a name a stack of THIS
@@ -140,30 +188,30 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 			// before; so is a run on a node that opened no identity store
 			// (its token is its parent's, which only the parent can check).
 			if token := RunGrantFrom(ctx); token != "" && pu.Grants != nil {
-				return pu.execCapDecided(ctx, op, name, into, stack, d, tenant, token), nil
+				return pu.execCapDecided(ctx, op, name, at, stack, d, tenant, token), nil
 			}
-			return pu.execCapLocal(ctx, op, name, into, stack, d, nil), nil
+			return pu.execCapLocal(ctx, op, name, at, stack, d, nil), nil
 		case errors.Is(lerr, capdecl.ErrNotDeclared):
 			// Not here: the parent, below.
 		default:
 			pu.Logger.Warn("cap: the capability's declaration could not be read",
 				zap.String("tenant", tenant), zap.String("capability", name), zap.Error(lerr))
-			return capFailure(into, name, "txco_cap_unavailable",
+			return capFailure(at, name, "txco_cap_unavailable",
 				"the capability's declaration could not be read", http.StatusServiceUnavailable, ""), nil
 		}
 	}
 	parent := strings.TrimRight(strings.TrimSpace(pu.Conf.ParentURL), "/")
 	if parent == "" {
-		return capFailure(into, name, "txco_cap_unconfigured",
+		return capFailure(at, name, "txco_cap_unconfigured",
 			"this chassis has no parent (--parent-url): nothing answers cap:// here", 0, ""), nil
 	}
 	if !strings.HasPrefix(parent, "http://") && !strings.HasPrefix(parent, "https://") {
-		return capFailure(into, name, "txco_cap_unconfigured",
+		return capFailure(at, name, "txco_cap_unconfigured",
 			"--parent-url must be http(s)://…", 0, ""), nil
 	}
 	token := RunGrantFrom(ctx)
 	if token == "" {
-		return capFailure(into, name, "txco_cap_denied",
+		return capFailure(at, name, "txco_cap_denied",
 			"this run was dispatched with no run grant: nothing to present to the parent", 0, ""), nil
 	}
 
@@ -177,7 +225,7 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parent+"/v1/cap/"+name, bytes.NewBufferString(body))
 	if err != nil {
-		return capFailure(into, name, "txco_cap_request", err.Error(), 0, ""), nil
+		return capFailure(at, name, "txco_cap_request", err.Error(), 0, ""), nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(RunGrantHeader, token)
@@ -199,7 +247,7 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 		}
 		pu.Logger.Warn("cap: the call to the parent failed",
 			zap.String("capability", name), zap.String("code", code), zap.Error(err))
-		return capFailure(into, name, code, scrubToken(err.Error(), token), 0, ""), nil
+		return capFailure(at, name, code, scrubToken(err.Error(), token), 0, ""), nil
 	}
 	defer resp.Body.Close()
 	limit := int64(pu.Conf.OpPayloadMax)
@@ -209,10 +257,10 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 	answer, rerr := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	rid := resp.Header.Get("X-Request-ID")
 	if rerr != nil {
-		return capFailure(into, name, "txco_cap_transport", "reading the parent's answer: "+rerr.Error(), resp.StatusCode, rid), nil
+		return capFailure(at, name, "txco_cap_transport", "reading the parent's answer: "+rerr.Error(), resp.StatusCode, rid), nil
 	}
 	if int64(len(answer)) > limit {
-		return capFailure(into, name, "txco_cap_too_large", "the parent's answer is over --op-payload-max", resp.StatusCode, rid), nil
+		return capFailure(at, name, "txco_cap_too_large", "the parent's answer is over --op-payload-max", resp.StatusCode, rid), nil
 	}
 	ms := time.Since(start).Milliseconds()
 
@@ -242,22 +290,22 @@ func (pu *Unit) ExecCap(ctx context.Context, op operation.Operation) (event.Payl
 		}
 		pu.Logger.Info("cap: refused or failed",
 			zap.String("capability", name), zap.Int("status", status), zap.String("code", code), zap.Int64("ms", ms))
-		return capFailure(into, name, code, scrubToken(message, token), status, rid), nil
+		return capFailure(at, name, code, scrubToken(message, token), status, rid), nil
 	}
 	output := gjson.GetBytes(answer, "output")
 	out := "{}"
 	if output.Exists() {
 		out = output.Raw
 	}
-	raw, werr := sjson.SetRaw("{}", into, out)
+	raw, werr := sjson.SetRaw("{}", at.into, out)
 	if werr != nil {
-		return capFailure(into, name, "txco_cap_answer", "the parent's output could not be placed at into", resp.StatusCode, rid), nil
+		return capFailure(at, name, "txco_cap_answer", "the parent's output could not be placed at into", resp.StatusCode, rid), nil
 	}
-	raw, _ = sjson.Set(raw, "cap.name", name)
-	raw, _ = sjson.Set(raw, "cap.status", resp.StatusCode)
-	raw, _ = sjson.Set(raw, "cap.ms", ms)
+	raw, _ = sjson.Set(raw, at.fact("name"), name)
+	raw, _ = sjson.Set(raw, at.fact("status"), resp.StatusCode)
+	raw, _ = sjson.Set(raw, at.fact("ms"), ms)
 	if rid != "" {
-		raw, _ = sjson.Set(raw, "cap.rid", rid)
+		raw, _ = sjson.Set(raw, at.fact("rid"), rid)
 	}
 	return event.Payload{Raw: raw, Type: event.JSON}, nil
 }
@@ -342,7 +390,7 @@ type CapLookup interface {
 // envelope — `@src == "cap"`, `@cap.name`, `@cap.input`, `@cap.caller`,
 // `@cap.depth`, `@cap.impl` — so one implementation serves both ways in,
 // and nothing of the caller's envelope but the input.
-func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, into, stack string, d *capdecl.Decl, grant map[string]any) event.Payload {
+func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name string, at capPlace, stack string, d *capdecl.Decl, grant map[string]any) event.Payload {
 	spec := frameSpec{
 		stack: stack, scope: d.Entry, source: "cap", channel: capDefaultInto,
 		input: metaInput(op.Meta), what: name,
@@ -415,23 +463,23 @@ func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, 
 		pu.Logger.Info("cap: refused or failed here",
 			zap.String("capability", name), zap.String("stack", stack), zap.Int("status", status),
 			zap.String("code", code), zap.Int64("ms", out.ms))
-		p := capFailure(into, name, code, message, status, "")
+		p := capFailure(at, name, code, message, status, "")
 		if out.stopped != nil {
-			p.Raw, _ = sjson.Set(p.Raw, "cap.error.stopped", *out.stopped)
+			p.Raw, _ = sjson.Set(p.Raw, at.fact("error.stopped"), *out.stopped)
 			if len(out.running) > 0 {
-				p.Raw, _ = sjson.Set(p.Raw, "cap.error.running", out.running)
+				p.Raw, _ = sjson.Set(p.Raw, at.fact("error.running"), out.running)
 			}
 		}
-		p.Raw, _ = sjson.Set(p.Raw, "cap.ms", out.ms)
+		p.Raw, _ = sjson.Set(p.Raw, at.fact("ms"), out.ms)
 		return p
 	}
-	raw, werr := sjson.SetRaw(`{}`, into, out.output)
+	raw, werr := sjson.SetRaw(`{}`, at.into, out.output)
 	if werr != nil {
-		return capFailure(into, name, "txco_cap_answer", "the output could not be placed at into", http.StatusOK, "")
+		return capFailure(at, name, "txco_cap_answer", "the output could not be placed at into", http.StatusOK, "")
 	}
-	raw, _ = sjson.Set(raw, "cap.name", name)
-	raw, _ = sjson.Set(raw, "cap.status", http.StatusOK)
-	raw, _ = sjson.Set(raw, "cap.ms", out.ms)
+	raw, _ = sjson.Set(raw, at.fact("name"), name)
+	raw, _ = sjson.Set(raw, at.fact("status"), http.StatusOK)
+	raw, _ = sjson.Set(raw, at.fact("ms"), out.ms)
 	trace.FromContext(ctx).Event(trace.TimelineEvent{
 		Ts: time.Now(), Event: "cap.answered",
 		Fields: map[string]any{"capability": name, "stack": stack, "here": true, "ms": out.ms},
@@ -447,7 +495,7 @@ func (pu *Unit) execCapLocal(ctx context.Context, op operation.Operation, name, 
 // held (a rule kept it for a person), unavailable (the chassis could not
 // decide). A grant of another tenant than the request's is denied: a name
 // declared here is this tenant's.
-func (pu *Unit) execCapDecided(ctx context.Context, op operation.Operation, name, into, stack string, d *capdecl.Decl, tenant, token string) event.Payload {
+func (pu *Unit) execCapDecided(ctx context.Context, op operation.Operation, name string, at capPlace, stack string, d *capdecl.Decl, tenant, token string) event.Payload {
 	start := time.Now()
 	input := json.RawMessage(metaInput(op.Meta))
 	dec := pu.Grants.Decide(ctx, token, name, input)
@@ -459,8 +507,8 @@ func (pu *Unit) execCapDecided(ctx context.Context, op operation.Operation, name
 			Ts: time.Now(), Event: "cap.decided",
 			Fields: map[string]any{"capability": name, "stack": stack, "here": true, "code": code, "run": dec.Run},
 		})
-		p := capFailure(into, name, code, why, status, "")
-		p.Raw, _ = sjson.Set(p.Raw, "cap.ms", time.Since(start).Milliseconds())
+		p := capFailure(at, name, code, why, status, "")
+		p.Raw, _ = sjson.Set(p.Raw, at.fact("ms"), time.Since(start).Milliseconds())
 		return p
 	}
 	switch {
@@ -490,5 +538,5 @@ func (pu *Unit) execCapDecided(ctx context.Context, op operation.Operation, name
 		Ts: time.Now(), Event: "cap.decided",
 		Fields: map[string]any{"capability": name, "stack": stack, "here": true, "allowed": true, "run": dec.Run},
 	})
-	return pu.execCapLocal(ctx, op, name, into, stack, d, facts)
+	return pu.execCapLocal(ctx, op, name, at, stack, d, facts)
 }
