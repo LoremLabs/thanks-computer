@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -134,6 +135,30 @@ func TestParseDeclCapabilities(t *testing.T) {
 		if _, err := ParseDecl([]byte(body)); err == nil {
 			t.Errorf("%s: parsed, want an error", name)
 		}
+	}
+}
+
+// The ceiling on one sandbox's capabilities is generous (a product names all
+// it declares in one sandbox, and that list only grows) and it is still a
+// ceiling: one name over is a deploy error.
+func TestParseDeclCapabilitiesCeiling(t *testing.T) {
+	list := func(n int) []byte {
+		var b strings.Builder
+		b.WriteString("capabilities:\n")
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "  - tool.n%d\n", i)
+		}
+		return []byte(b.String())
+	}
+	if MaxCapabilities < 256 {
+		t.Fatalf("MaxCapabilities = %d: a sandbox must hold a product's whole tool list", MaxCapabilities)
+	}
+	d, err := ParseDecl(list(MaxCapabilities))
+	if err != nil || len(d.Capabilities) != MaxCapabilities {
+		t.Fatalf("%d capabilities: %v", MaxCapabilities, err)
+	}
+	if _, err := ParseDecl(list(MaxCapabilities + 1)); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Errorf("one over the ceiling: %v", err)
 	}
 }
 

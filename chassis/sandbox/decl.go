@@ -16,8 +16,13 @@ import (
 const (
 	// MaxEnv bounds the variables one sandbox sets.
 	MaxEnv = 32
-	// MaxCapabilities bounds the capabilities one sandbox names.
-	MaxCapabilities = 32
+	// MaxCapabilities bounds the capabilities one sandbox names. A name
+	// costs the grant's row a few bytes and its decision one comparison, so
+	// the ceiling is generous: a product whose runs may call everything it
+	// declares names them all in one sandbox, and the list only grows (it
+	// was 32 until a tenant reached it). authn.MaxRunAllow is the ceiling
+	// on what one grant names in all, and is kept above this one.
+	MaxCapabilities = 256
 	// MaxDescription bounds the free-text note.
 	MaxDescription = 256
 	// MaxFiles bounds the files one sandbox serves.

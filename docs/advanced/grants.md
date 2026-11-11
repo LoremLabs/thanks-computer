@@ -172,7 +172,7 @@ dotenv: run.env                           # the env entries, also as a file
 | **`env`** | Each entry sets one variable to one value. A variable is `[A-Za-z_][A-Za-z0-9_]*`. A reference is `secret:<NAME>`, a tenant secret, or `connection:<provider>`, the principal's current token at that provider ([connections](#a-connection-as-a-value)). One secret may fill several variables. A name starting `TXCO_` is the chassis's own. At most 32. |
 | **`files`** | Each entry serves one value as a file: the whole value, so a multi-line key is a file, not a variable. A path is relative to the directory it is served in, or under `~/`; its parts are letters, digits and `. _ @ + -`, never `.` or `..`. At most 8. |
 | **`dotenv`** | A path at which the `env` entries are also served, as `NAME=value` lines, for a program that reads a `.env` file. |
-| **`capabilities`** | A list of [capability](./capabilities.md) names a run whose grant names this sandbox may call on this chassis: `crm.lookup`, `mail.send`. Nothing is handed over for one; each call is decided when it is made. At most 32. |
+| **`capabilities`** | A list of [capability](./capabilities.md) names a run whose grant names this sandbox may call on this chassis: `crm.lookup`, `mail.send`. Nothing is handed over for one; each call is decided when it is made. At most 256 in one sandbox, and a run grant names at most 512 things in all (its sandboxes, and every capability and secret they name). |
 | **`description`** | Optional, for whoever reads the file. |
 | **`env`, `files` or `capabilities`** | At least one. |
 | **Anything else** | A deploy error. Only what the chassis enforces is declared. |

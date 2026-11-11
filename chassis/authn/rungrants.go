@@ -52,8 +52,12 @@ const (
 )
 
 const (
-	// MaxRunAllow bounds one run grant's allowlist.
-	MaxRunAllow = 64
+	// MaxRunAllow bounds one run grant's allowlist: every sandbox it
+	// names, and every capability and secret those name, each once. It is
+	// kept above sandbox.MaxCapabilities, so a grant can name a full
+	// sandbox and others beside it (it was 64, with a sandbox's ceiling at
+	// 32). The list is on the grant's row and is read once a decision.
+	MaxRunAllow = 512
 	// MaxRunSandboxes bounds the sandboxes one run grant names.
 	MaxRunSandboxes = 16
 	// MaxRunDepth bounds how many times a grant may be narrowed into
