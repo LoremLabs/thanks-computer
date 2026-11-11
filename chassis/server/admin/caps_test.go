@@ -142,7 +142,7 @@ func TestHandleListCaps(t *testing.T) {
 	const fleetHash = "f1ee7"
 	c.fcas = &mapStore{m: map[string][]byte{fleetHash: []byte("description: Finish the run.\nentry: 7000\n")}}
 
-	putCapFile(t, c, 10, "CAPS/mail.send.yaml", "description: Send a message.\nentry: 100\ninput:\n  to:\n    required: true\ntimeout: 60000\n", "")
+	putCapFile(t, c, 10, "CAPS/mail.send.yaml", "description: Send a message.\nentry: 100\neffect: write\ninput:\n  to:\n    required: true\ntimeout: 60000\n", "")
 	putCapFile(t, c, 10, "CAPS/run.finish.yaml", "", fleetHash)
 	putCapFile(t, c, 10, "CAPS/broken.yaml", "entry: 100\nextra: 1\n", "")
 	putCapFile(t, c, 10, "SANDBOXES/workstation.yaml", "capabilities: [mail.send]\n", "")
@@ -172,6 +172,10 @@ func TestHandleListCaps(t *testing.T) {
 	if mail.Name != "mail.send" || mail.Stack != "other" || mail.Entry != 100 || mail.Stage != "other/100" ||
 		mail.Description != "Send a message." || !mail.Input["to"].Required || mail.Timeout != 60000 || mail.Err != "" {
 		t.Errorf("mail.send row: %+v", mail)
+	}
+	// The declaration's effect is listed as written, and is absent for one that says none.
+	if mail.Effect != "write" || finish.Effect != "" {
+		t.Errorf("effects: mail.send %q, run.finish %q", mail.Effect, finish.Effect)
 	}
 	if finish.Name != "run.finish" || finish.Stage != "other/7000" || finish.Description != "Finish the run." {
 		t.Errorf("run.finish (CAS) row: %+v", finish)

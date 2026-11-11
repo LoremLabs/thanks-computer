@@ -53,7 +53,7 @@ func (s *stubCapGrants) Decide(_ context.Context, token, name string, _ json.Raw
 }
 
 func allowedFor(run string) CapDecision {
-	d := CapDecision{Allowed: true, Identified: true, Tenant: "acme", Run: run, Grant: "rgr_9", Generation: 2, Stack: "loop", Workspace: "ws_pony", Trace: "tr_1"}
+	d := CapDecision{Allowed: true, Identified: true, Tenant: "acme", Run: run, Grant: "rgr_9", Generation: 2, Stack: "loop", Workspace: "ws_pony", Trace: "tr_1", Decision: "dec_" + run}
 	d.Principal.ID, d.Principal.Kind = "service:pony-x", "service"
 	return d
 }
@@ -72,7 +72,7 @@ func TestExecCapUnderAGrantIsDecidedFirst(t *testing.T) {
 	pu.Grants = stub
 	seedAcmeOp(t, pu, "svc", 7000, "send", `WHEN @src == "cap" AND @cap.name == "mail.send" `+
 		`EMIT ._cap.output = &object("run", @cap.run, "grant", @cap.grant, "gen", @cap.generation, "who", @cap.principal.id, `+
-		`"kind", @cap.principal.kind, "minted", @cap.stack, "ws", @cap.workspace, "trace", @cap.trace, "to", @cap.input.to)`)
+		`"kind", @cap.principal.kind, "minted", @cap.stack, "ws", @cap.workspace, "trace", @cap.trace, "decision", @cap.decision, "to", @cap.input.to)`)
 	seedAcmeOp(t, pu, "slow", 0, "never", `EMIT ._cap.output.ran = true`)
 	seedAcmeOp(t, pu, "quiet", 0, "never", `EMIT ._cap.output.ran = true`)
 	seedAcmeOp(t, pu, "outer", 0, "never", `EMIT ._cap.output.ran = true`)
@@ -85,7 +85,8 @@ func TestExecCapUnderAGrantIsDecidedFirst(t *testing.T) {
 	sent := gjson.Get(final, "_sent")
 	if sent.Get("run").String() != "run-9" || sent.Get("grant").String() != "rgr_9" || sent.Get("gen").Int() != 2 ||
 		sent.Get("who").String() != "service:pony-x" || sent.Get("kind").String() != "service" || sent.Get("minted").String() != "loop" ||
-		sent.Get("ws").String() != "ws_pony" || sent.Get("trace").String() != "tr_1" || sent.Get("to").String() != "a@b.example" {
+		sent.Get("ws").String() != "ws_pony" || sent.Get("trace").String() != "tr_1" || sent.Get("decision").String() != "dec_run-9" ||
+		sent.Get("to").String() != "a@b.example" {
 		t.Errorf("the allowed call ran without the grant's facts: %s", sent.Raw)
 	}
 	// Each refusal is the inlet's: the code, the status; no output, no run.

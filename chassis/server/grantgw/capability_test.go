@@ -89,6 +89,16 @@ func TestInvokeCapabilityProposalStands(t *testing.T) {
 	if gjson.Get(env, "@this").String() == "" || contains(env, r.token(g)) {
 		t.Errorf("the token reached the envelope")
 	}
+	// The verdict names the decision by the id its `_grant` run was given:
+	// what the deciding run and the answering run both know of this call.
+	if rid := gjson.Get(env, "_txc.rid").String(); rid == "" || v.Decision != rid {
+		t.Errorf("verdict.Decision = %q, want the _grant run's rid %q", v.Decision, rid)
+	}
+	// A second call is a second decision, with an id of its own.
+	v2 := r.call(g, "card.note", `{"text":"again"}`)
+	if v2.Decision == "" || v2.Decision == v.Decision || v2.Decision != gjson.Get(r.seen[1], "_txc.rid").String() {
+		t.Errorf("the second call's decision = %q (the first's %q)", v2.Decision, v.Decision)
+	}
 }
 
 func contains(s, sub string) bool { return len(sub) > 0 && len(s) >= len(sub) && indexOf(s, sub) >= 0 }

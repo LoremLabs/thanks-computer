@@ -534,6 +534,9 @@ func (pu *Unit) execCapDecided(ctx context.Context, op operation.Operation, name
 	if dec.Trace != "" {
 		facts["trace"] = dec.Trace
 	}
+	if dec.Decision != "" {
+		facts["decision"] = dec.Decision
+	}
 	trace.FromContext(ctx).Event(trace.TimelineEvent{
 		Ts: time.Now(), Event: "cap.decided",
 		Fields: map[string]any{"capability": name, "stack": stack, "here": true, "allowed": true, "run": dec.Run},

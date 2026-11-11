@@ -65,6 +65,7 @@ Only `@cap.input` is the caller's.
 | `@cap.principal.id`, `.kind` | Whom the work acts for |
 | `@cap.stack`, `@cap.workspace` | The stack that minted the grant, and the workspace it was minted for |
 | `@cap.trace` | The trace the grant was minted in |
+| `@cap.decision` | The id of this call's decision: the request id the tenant's [`_grant`](../grants.md) stack ran under when it decided the call (its `@rid`). The deciding run and this one share nothing else about a call, so a stack that records the request there and the result here joins the two by it, however many calls a run makes at once. Absent when no decision was made (a rule of the tenant's own code, calling with no grant) |
 | `@cap.caller.rid` | The node's request id, when the caller sent one |
 | `@cap.impl.stack`, `@cap.impl.to` | The declaring stack, and where the run entered |
 

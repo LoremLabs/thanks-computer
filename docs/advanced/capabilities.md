@@ -62,6 +62,7 @@ timeout: 30000
 | **`output`** | Optional. The fields the answer carries, in the same shape; at most 32. Published in the catalogue, and **checked**: an answer that lacks a `required` output is a bad answer (`invalid_output`, 502, with what the stack did write), from the inlet and when the capability is [answered here](#answered-here). |
 | **`timeout`** | Optional, milliseconds. It can only shorten how long the chassis waits for the answer (`--op-timeout-max` is the ceiling). |
 | **`entry`** | Optional. See below. |
+| **`effect`** | Optional: `read` or `write`. What a call does outside the run that makes it. See [effect](#effect). |
 | **Anything else** | A deploy error. Only what the chassis reads is declared. |
 
 - **The file's existence is the declaration.** Every key is optional; an
@@ -236,6 +237,37 @@ WHEN ._task.id =~ /./
 - **Ending the grant ends the calls.** A revoked, closed or expired grant
   is refused on the node's next call.
 
+### Effect
+
+A caller that makes several calls at once, or makes one again after a
+failure, needs to know what a call does to the world outside its run. The
+declaration says it in one word:
+
+```yaml
+# CAPS/crm.lookup.yaml
+description: Look up a customer by email.
+effect: read
+```
+
+| `effect` | The stack's promise |
+|---|---|
+| `read` | The call can run beside other calls, and it can run again. It changes nothing that a second call, or a neighbour's call, would see: no record written, nothing sent, nothing marked as seen. It may cost fuel. |
+| `write` | Anything else: it sends, stores, schedules or changes something. A capability that keeps only one of the two promises of `read` is a `write`. |
+
+- **It is a promise, not a check.** The chassis reads the key nowhere:
+  every call is decided and run the same whichever it says. It is for the
+  caller, which decides how to make its calls from it (side by side or in
+  order, again or not).
+- **Absent means nothing was said.** The catalogue then reports no
+  `effect`. What silence means is the reader's to decide; a careful one
+  treats it as `write`.
+- **A capability only.** A call's entry (`CALLS/`) is not a tool, and a
+  declaration there that carries `effect` is refused.
+- **Every node must know the key before a declaration uses it.** A
+  declaration is parsed strictly by `txco` and by each chassis that reads
+  it, so an older binary refuses a file that says `effect:`. Upgrade the
+  fleet and the CLI first.
+
 ## `cap://`
 
 On the node, a rule calls a capability the way it calls any op:
@@ -395,7 +427,8 @@ WHEN ._task.id =~ /./
 # → _caps = {count, items: [{name, stack, entry, stage, description,
 #                            input: {<field>: {description, required, type, …}},
 #                            output: {…}, params: [<field>, …], returns: [<field>, …],
-#                            parameters: <the input as a JSON Schema object>, timeout}],
+#                            parameters: <the input as a JSON Schema object>, timeout,
+#                            effect?: "read" | "write"}],
 #            broken?: [{name, stack, error}], missing?: [<name>, …]}
 ```
 
@@ -409,7 +442,8 @@ WHEN ._task.id =~ /./
   EXEC "txco://caps/list"
 # → _tools = {count, tools: [{name: "crm_lookup", description,
 #                             parameters: <JSON Schema>,
-#                             binding: {capability: "crm.lookup"}}, …],
+#                             binding: {capability: "crm.lookup"},
+#                             effect?: "read" | "write"}, …],
 #             broken?, missing?}
 ```
 

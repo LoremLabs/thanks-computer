@@ -41,6 +41,7 @@ package calldecl
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -72,7 +73,20 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 func ValidName(s string) bool { return nameRe.MatchString(s) }
 
 // ParseDecl strictly decodes and validates a declaration body.
-func ParseDecl(data []byte) (*Decl, error) { return capdecl.ParseDeclAs(kind, data) }
+//
+// `effect` is a capability's key (capdecl): it tells a caller that makes
+// several calls of tools how to make them. A call's entry is not a tool, so
+// the key is refused here and never silently accepted.
+func ParseDecl(data []byte) (*Decl, error) {
+	d, err := capdecl.ParseDeclAs(kind, data)
+	if err != nil {
+		return nil, err
+	}
+	if d.Effect != "" {
+		return nil, fmt.Errorf("%s: effect is a capability's key (CAPS/), not a call entry's: remove it", kind)
+	}
+	return d, nil
+}
 
 // CheckEntry reports whether the declaration's entry names a scope the
 // stack has.

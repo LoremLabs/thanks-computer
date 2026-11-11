@@ -433,6 +433,11 @@ type CapDecision struct {
 	Stack       string // the stack that minted the grant
 	Workspace   string
 	Trace       string
+	// Decision is the id of this call's decision at the gateway (the
+	// `_grant` run's request id): stamped on the answering run as
+	// `@cap.decision`, so the request a stack recorded while deciding and
+	// the result it records while answering can be joined exactly.
+	Decision string
 }
 
 // handGrant resolves `WITH grant` and `WITH sandbox` for an exec: the

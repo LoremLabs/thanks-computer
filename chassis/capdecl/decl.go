@@ -106,6 +106,23 @@ type InputField = Field
 // when the answer comes; `input` is what a caller reads, and the stack's
 // own rules decide what a call without it gets.
 //
+// `effect` says what a call of the capability does to the world outside the
+// run that makes it: `read` or `write`. It is what a caller that makes
+// several calls needs to know before it decides how to make them, and it is
+// a PROMISE of the stack's, not something the chassis checks:
+//
+//	read   the call can run beside other calls, and it can run again. It
+//	       changes nothing a second call, or a neighbour's call, would see:
+//	       no record written, nothing sent, nothing marked as seen.
+//	write  anything else. A capability that keeps only one of the two
+//	       promises of `read` is a write.
+//
+// Absent, the declaration says nothing, and the catalogue reports nothing:
+// what silence means is the reader's to decide (a careful one reads it as
+// write). The chassis itself reads the key nowhere: every call is decided
+// and run the same whichever it says. A call entry (CALLS/) is not a tool
+// and takes no `effect` (calldecl refuses it).
+//
 // Parsed strictly: an unknown key is a deploy error, not a silent ignore.
 type Decl struct {
 	Description string           `yaml:"description"`
@@ -113,6 +130,7 @@ type Decl struct {
 	Input       map[string]Field `yaml:"input"`
 	Output      map[string]Field `yaml:"output"`
 	Timeout     int              `yaml:"timeout"`
+	Effect      string           `yaml:"effect"`
 
 	// The derived schemas (field.go), filled at parse so a declaration that
 	// yields a schema the compiler refuses is a deploy error, and reused by
@@ -120,6 +138,12 @@ type Decl struct {
 	inputSchema  json.RawMessage
 	outputSchema json.RawMessage
 }
+
+// The two things a declaration's `effect` may say.
+const (
+	EffectRead  = "read"
+	EffectWrite = "write"
+)
 
 // ErrNotDeclared: no active stack of the tenant has a CAPS/<name>.yaml.
 var ErrNotDeclared = errors.New("cap: not declared")
@@ -179,6 +203,9 @@ func ParseDeclAs(kind string, data []byte) (*Decl, error) {
 	}
 	if d.Timeout < 0 || d.Timeout > MaxTimeout {
 		return nil, fmt.Errorf("%s: timeout is %d, want milliseconds between 0 and %d", kind, d.Timeout, MaxTimeout)
+	}
+	if d.Effect != "" && d.Effect != EffectRead && d.Effect != EffectWrite {
+		return nil, fmt.Errorf("%s: effect is %q, want %q or %q (omit it to say nothing)", kind, d.Effect, EffectRead, EffectWrite)
 	}
 	// The derived schemas must compile: a `schema:` hatch or a pattern the
 	// compiler refuses is caught here, at lint, apply and activation.

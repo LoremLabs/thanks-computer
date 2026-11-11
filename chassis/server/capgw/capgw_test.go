@@ -49,7 +49,7 @@ func newFake(t *testing.T) *fake {
 
 func allowed() grantgw.Verdict {
 	who, _ := authn.ParsePrincipal("service:pony-research")
-	return grantgw.Verdict{Allowed: true, Tenant: "acme", Grant: authn.RunGrant{
+	return grantgw.Verdict{Allowed: true, Tenant: "acme", Decision: "dec_1", Grant: authn.RunGrant{
 		ID: "rgr_1", Run: "t1/run-9", Generation: 2, Principal: who, Stack: "loop", Workspace: "pony/research", TraceID: "tr_1",
 	}}
 }
@@ -97,6 +97,8 @@ func TestHandleAnswers(t *testing.T) {
 		"_txc.cap.grant": "rgr_1", "_txc.cap.generation": "2", "_txc.cap.principal.id": "service:pony-research",
 		"_txc.cap.principal.kind": "service", "_txc.cap.stack": "loop", "_txc.cap.workspace": "pony/research",
 		"_txc.cap.trace": "tr_1", "_txc.cap.caller.rid": "rid-node-1", "_txc.cap.input.text": "hi",
+		// the id of this call's decision at the gateway, for a stack to join its request record to this run
+		"_txc.cap.decision": "dec_1",
 	} {
 		if got := gjson.Get(env, path).String(); got != want {
 			t.Errorf("%s = %q, want %q", path, got, want)

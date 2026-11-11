@@ -121,8 +121,11 @@ dispatch rule needs no lookup. A string where a definition belongs is an
 error: `ai://chat` resolves nothing against the catalogue. The canonical
 source of definitions is `txco://caps/list WITH format = "tools"`, which
 derives one from each capability's declaration with
-`binding = {capability: <its name>}` ([capabilities](./advanced/capabilities.md#the-catalogue));
-an executor writes its own for tools it found elsewhere (an MCP server's,
+`binding = {capability: <its name>}` ([capabilities](./advanced/capabilities.md#the-catalogue)),
+and with the declaration's [`effect`](./advanced/capabilities.md#effect) when it has one. That key is the
+executor's too: `ai://chat` does not read it and does not send it. It says whether the calls of
+one answer may be run side by side, or again. An executor writes its own
+definitions for tools it found elsewhere (an MCP server's,
 an OpenAPI operation), binding them to the capability that runs them.
 
 **What comes back** (at the top level, or under `WITH into`):

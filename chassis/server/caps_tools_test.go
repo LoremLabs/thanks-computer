@@ -57,9 +57,9 @@ func TestCapsListParametersAndNames(t *testing.T) {
 
 func TestCapsListFormatTools(t *testing.T) {
 	d := capsDeps{decls: fakeCaps{
-		"web.search": "description: Search the web.\ninput:\n  query:\n    type: string\n    required: true\n  count:\n    type: integer\n    minimum: 1\n    default: 10\n",
+		"web.search": "description: Search the web.\neffect: read\ninput:\n  query:\n    type: string\n    required: true\n  count:\n    type: integer\n    minimum: 1\n    default: 10\n",
 		"docs.read":  "description: Read a document.\ninput:\n  name: {type: string}\n",
-		"run.finish": "description: Finish.\n",
+		"run.finish": "description: Finish.\neffect: write\n",
 		"broken":     "entry: []\n",
 	}}
 	out := callCaps(t, d, "acme", "loop", `{"format":"tools","into":"_tools"}`)
@@ -83,6 +83,15 @@ func TestCapsListFormatTools(t *testing.T) {
 	if rf.Get("parameters.type").String() != "object" || rf.Get("parameters.additionalProperties").Bool() != false {
 		t.Errorf("run_finish parameters = %s", rf.Get("parameters").Raw)
 	}
+	// The declaration's effect rides beside the binding, for the executor:
+	// read or write as declared, and ABSENT when the declaration says
+	// nothing (never a default the declaration did not write).
+	if ws.Get("effect").String() != "read" || rf.Get("effect").String() != "write" {
+		t.Errorf("effects: web_search %s, run_finish %s", ws.Get("effect").Raw, rf.Get("effect").Raw)
+	}
+	if dr := tools.Get(`tools.#(name=="docs_read")`); dr.Get("effect").Exists() {
+		t.Errorf("a declaration with no effect reports one: %s", dr.Raw)
+	}
 	// Nothing a tool definition does not need: no stack, entry or stage.
 	if ws.Get("stack").Exists() || ws.Get("stage").Exists() || ws.Get("input").Exists() {
 		t.Errorf("tool carries catalogue fields: %s", ws.Raw)
@@ -94,6 +103,12 @@ func TestCapsListFormatTools(t *testing.T) {
 	out = callCaps(t, d, "acme", "loop", `{"format":"tools","names":["web.search","mail.send"]}`)
 	if gjson.Get(out, "_caps.count").Int() != 1 || gjson.Get(out, "_caps.missing").Raw != `["mail.send"]` {
 		t.Errorf("tools with names: %s", out)
+	}
+	// The catalogue's own listing says the effect too, and is silent where the declaration is.
+	items := gjson.Get(callCaps(t, d, "acme", "loop", `{}`), "_caps.items")
+	if items.Get(`#(name=="web.search").effect`).String() != "read" || items.Get(`#(name=="run.finish").effect`).String() != "write" ||
+		items.Get(`#(name=="docs.read").effect`).Exists() {
+		t.Errorf("the listing's effects: %s", items.Get("#.effect").Raw)
 	}
 }
 

@@ -17,8 +17,12 @@ import (
 
 const searchParams = `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`
 
+// The definition is as txco://caps/list WITH format = "tools" answers it,
+// the declaration's `effect` included: that key is the executor's, as the
+// binding is, and every test here holds ai://chat to taking a definition
+// that carries it (it is read nowhere and sent to no provider).
 func toolsMeta(extra string) string {
-	return `"tools":[{"name":"web_search","description":"Search the web.","parameters":` + searchParams + `,"binding":{"capability":"web.search"}}]` + extra
+	return `"tools":[{"name":"web_search","description":"Search the web.","parameters":` + searchParams + `,"binding":{"capability":"web.search"},"effect":"read"}]` + extra
 }
 
 func toolUnit(t *testing.T, name string, stub *testBackend) *Unit {

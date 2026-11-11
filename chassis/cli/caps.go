@@ -97,10 +97,10 @@ Flags:
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tENTERS\tTIMEOUT\tINPUT\tOUTPUT\tDESCRIPTION")
+	fmt.Fprintln(tw, "NAME\tENTERS\tTIMEOUT\tEFFECT\tINPUT\tOUTPUT\tDESCRIPTION")
 	for _, cp := range caps {
 		if cp.Err != "" {
-			fmt.Fprintf(tw, "%s\t%s\t-\t-\t-\tBROKEN: %s\n", cp.Name, cp.Stack, cp.Err)
+			fmt.Fprintf(tw, "%s\t%s\t-\t-\t-\t-\tBROKEN: %s\n", cp.Name, cp.Stack, cp.Err)
 			continue
 		}
 		timeout := "-"
@@ -109,7 +109,12 @@ Flags:
 		}
 		// Where a call enters: the declaring stack at its start (<stack>/0),
 		// or at the scope the declaration names.
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", cp.Name, cp.Stage, timeout, capInputLabel(cp.Input), capInputLabel(cp.Output), capDescLabel(cp.Description))
+		// What the declaration says a call does outside its run: read, write, or nothing said.
+		effect := "-"
+		if cp.Effect != "" {
+			effect = cp.Effect
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", cp.Name, cp.Stage, timeout, effect, capInputLabel(cp.Input), capInputLabel(cp.Output), capDescLabel(cp.Description))
 	}
 	_ = tw.Flush()
 	return 0

@@ -61,6 +61,13 @@ type Verdict struct {
 	// genuine: what the `_cap` run is stamped with.
 	Grant  authn.RunGrant
 	Tenant string // slug
+	// Decision is the id of THIS call's decision: the request id the
+	// tenant's `_grant` stack ran under (its `@rid`). It is the one thing
+	// the deciding run and the answering run both know about a call, so a
+	// stack that records the request there and the result here can join
+	// the two exactly, however many calls a run makes at once. Empty when
+	// no rule ran (a call refused on the hard checks).
+	Decision string
 }
 
 func (v Verdict) refused(reason string) Verdict {
@@ -156,6 +163,7 @@ func (g *Gateway) Invoke(ctx context.Context, c Call) Verdict {
 		rq: request{via: via}, input: c.Input, checks: ch, prop: propose(ch), at: now,
 	}
 	fields = append(fields, zap.String("rid", f.rid), zap.Bool("proposed", f.prop.allow))
+	v.Decision = f.rid
 
 	// The tenant's rules, as for a secret: a run of its own, off the
 	// gateway's context, ended when the caller gives up or at the deadline.
@@ -225,6 +233,7 @@ func (g *Gateway) Decide(ctx context.Context, token, name string, input json.Raw
 		d.Run, d.Grant, d.Generation = v.Grant.Run, v.Grant.ID, v.Grant.Generation
 		d.Principal.ID, d.Principal.Kind = v.Grant.Principal.ID, string(v.Grant.Principal.Kind)
 		d.Stack, d.Workspace, d.Trace = v.Grant.Stack, v.Grant.Workspace, v.Grant.TraceID
+		d.Decision = v.Decision
 	}
 	return d
 }

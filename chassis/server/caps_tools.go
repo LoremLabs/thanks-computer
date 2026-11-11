@@ -90,6 +90,11 @@ type capToolOut struct {
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
 	Binding     capToolBinding  `json:"binding"`
+	// Effect is the declaration's `effect` (read or write), absent when the
+	// declaration says nothing. For the executor, like the binding: how the
+	// calls of one answer may be made (beside each other, again) is its to
+	// decide, and this is what it decides from. A model is not shown it.
+	Effect string `json:"effect,omitempty"`
 }
 
 // capToolBinding says what runs the tool: the capability, called with the
@@ -136,6 +141,7 @@ func capsListTools(into string, entries []capEntry, filter *capsFilter) event.Pa
 			Description: e.Decl.Description,
 			Parameters:  e.Decl.InputSchema(),
 			Binding:     capToolBinding{Capability: e.Name},
+			Effect:      e.Decl.Effect,
 		})
 	}
 	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })

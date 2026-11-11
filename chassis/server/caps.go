@@ -56,6 +56,9 @@ type capOut struct {
 	Params      []string                      `json:"params"`
 	Returns     []string                      `json:"returns"`
 	Timeout     int                           `json:"timeout"`
+	// Effect is the declaration's `effect` (read or write); absent when it
+	// says nothing.
+	Effect string `json:"effect,omitempty"`
 	// Parameters is the input as a JSON Schema object (capdecl
 	// InputSchema): what a model is handed as a tool's parameters, what
 	// txco://schema/check checks a call's arguments against.
@@ -121,6 +124,7 @@ func capsList(ctx context.Context, d capsDeps, _ []byte) (event.Payload, error) 
 			Name: e.Name, Stack: e.Stack, Entry: e.Decl.Entry, Stage: e.Decl.Stage(e.Stack),
 			Description: e.Decl.Description, Input: input, Output: output,
 			Params: e.Decl.Params(), Returns: e.Decl.Returns(), Timeout: e.Decl.Timeout,
+			Effect:     e.Decl.Effect,
 			Parameters: e.Decl.InputSchema(),
 		})
 	}

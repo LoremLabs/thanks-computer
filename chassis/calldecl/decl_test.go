@@ -30,6 +30,13 @@ func TestParseDecl(t *testing.T) {
 	if err := CheckEntry(&Decl{Entry: 150}, map[int]bool{100: true}); err == nil || !strings.HasPrefix(err.Error(), "call declaration:") {
 		t.Fatalf("CheckEntry: %v", err)
 	}
+	// `effect` is a capability's key: a call's entry is not a tool, so the
+	// key is refused here, whatever it says, and never silently kept.
+	for _, e := range []string{"read", "write"} {
+		if _, err := ParseDecl([]byte("entry: 100\neffect: " + e + "\n")); err == nil || !strings.Contains(err.Error(), "a capability's key") {
+			t.Errorf("effect %s in a call declaration: %v", e, err)
+		}
+	}
 }
 
 func TestPaths(t *testing.T) {

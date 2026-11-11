@@ -311,6 +311,12 @@ func (g *Gateway) Handle(w http.ResponseWriter, r *http.Request) {
 	if v.Grant.TraceID != "" {
 		pb.Set("_txc.cap.trace", v.Grant.TraceID)
 	}
+	// The id of this call's decision (the `_grant` run's request id), as a
+	// call answered in process is stamped (processor execCapDecided): what
+	// joins the request a stack recorded while deciding to this run.
+	if v.Decision != "" {
+		pb.Set("_txc.cap.decision", v.Decision)
+	}
 	if caller := strings.TrimSpace(r.Header.Get(CallerRIDHeader)); caller != "" && len(caller) <= 64 {
 		pb.Set("_txc.cap.caller.rid", caller)
 	}

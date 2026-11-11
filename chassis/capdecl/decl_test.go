@@ -32,6 +32,26 @@ func TestParseDecl(t *testing.T) {
 	if err != nil || d.Description != "" || len(d.Input) != 0 || d.TimeoutDuration() != 0 {
 		t.Fatalf("description, input and timeout are optional: %+v %v", d, err)
 	}
+	// `effect` says what a call does outside its run: read, write, or
+	// nothing at all. Absent stays absent: what silence means is the
+	// reader's to decide, never the parser's.
+	if d.Effect != "" {
+		t.Fatalf("a declaration that says no effect has %q", d.Effect)
+	}
+	for _, e := range []string{EffectRead, EffectWrite} {
+		d, err := ParseDecl([]byte("description: x\neffect: " + e + "\n"))
+		if err != nil || d.Effect != e {
+			t.Fatalf("effect %s: %+v %v", e, d, err)
+		}
+	}
+	for _, bad := range []string{"effect: Read\n", "effect: none\n", "effect: [read]\n", "effect: true\n", "effect: \"read \"\n"} {
+		if _, err := ParseDecl([]byte(bad)); err == nil {
+			t.Errorf("%q should be refused: an effect is read or write", bad)
+		}
+	}
+	if _, err := ParseDecl([]byte("effect: maybe\n")); err == nil || !strings.Contains(err.Error(), `want "read" or "write"`) {
+		t.Errorf("the refusal says what an effect may be: %v", err)
+	}
 	if got := d.Params(); len(got) != 0 {
 		t.Fatalf("Params of no input = %v", got)
 	}

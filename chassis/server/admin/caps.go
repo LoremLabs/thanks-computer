@@ -141,7 +141,7 @@ func (c *Controller) deepValidateCaps(ctx context.Context, tenantID, stackID str
 	return issues
 }
 
-const capIssuesHint = `capabilities are validated before activation: every CAPS/<name>.yaml parses — an optional description, input and output (each field a description, required, and optionally its type and bounds), timeout and entry (a scope of this stack; omitted, a call enters at the stack's start), nothing else — no other active stack of the tenant declares the same name, and no two capabilities become one tool name (dots as underscores)`
+const capIssuesHint = `capabilities are validated before activation: every CAPS/<name>.yaml parses — an optional description, input and output (each field a description, required, and optionally its type and bounds), timeout, entry (a scope of this stack; omitted, a call enters at the stack's start) and effect (read or write), nothing else — no other active stack of the tenant declares the same name, and no two capabilities become one tool name (dots as underscores)`
 
 // capRecord is one capability of a tenant's catalogue.
 type capRecord struct {
@@ -153,6 +153,7 @@ type capRecord struct {
 	Input       map[string]capdecl.InputField `json:"input,omitempty"`
 	Output      map[string]capdecl.Field      `json:"output,omitempty"`
 	Timeout     int                           `json:"timeout,omitempty"`
+	Effect      string                        `json:"effect,omitempty"`
 	// Parameters is the input as a JSON Schema object (capdecl InputSchema),
 	// as the catalogue op answers it.
 	Parameters json.RawMessage `json:"parameters,omitempty"`
@@ -229,6 +230,7 @@ func (c *Controller) handleListCaps(w http.ResponseWriter, r *http.Request) {
 		}
 		rec.Entry, rec.Stage = d.Entry, d.Stage(rw.stack)
 		rec.Description, rec.Input, rec.Output, rec.Timeout = d.Description, d.Input, d.Output, d.Timeout
+		rec.Effect = d.Effect
 		rec.Parameters = d.InputSchema()
 		caps = append(caps, rec)
 	}

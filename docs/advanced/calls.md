@@ -139,6 +139,7 @@ output:
 | **The name** | The file's stem, `[a-z][a-z0-9_-]*`. An entry is the stack's own: two stacks may each have an `orient`. |
 | **`entry`** | The scope the call enters at (default 0, the stack's start). It must name a scope the stack has; `txco apply` refuses one that doesn't. |
 | **`timeout`** | Milliseconds. It can only shorten the call's own timeout. |
+| **`effect`** | Refused here. It is a [capability's key](./capabilities.md#effect): an entry is not a tool. |
 | **`input`**, **`output`** | The fields the call carries and the answer carries: `<field>: {description, required}`, each `[a-z][a-z0-9_]*`, at most 32, optionally with the field's shape ([typed fields](./capabilities.md#typed-fields)). The chassis checks names and `required` (an explicit `null` satisfies `required` only for a field whose `type` includes `"null"`), nothing else about shape: `txco://schema/check` with the entry's derived schema does, when a stack wants it. |
 
 The shape is the [capability declaration](./capabilities.md#declaring-one)'s,

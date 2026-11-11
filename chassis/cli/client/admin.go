@@ -1453,6 +1453,9 @@ type Cap struct {
 	Input       map[string]CapInput `json:"input,omitempty"`
 	Output      map[string]CapInput `json:"output,omitempty"`
 	Timeout     int                 `json:"timeout,omitempty"`
+	// Effect is the declaration's `effect`: read, write, or "" when it says
+	// nothing.
+	Effect string `json:"effect,omitempty"`
 	// Parameters is the input as a JSON Schema object, derived from the
 	// declaration: what a model is handed as a tool's parameters.
 	Parameters json.RawMessage `json:"parameters,omitempty"`
