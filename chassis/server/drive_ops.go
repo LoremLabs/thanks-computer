@@ -429,6 +429,12 @@ func driveList(ctx context.Context, d driveDeps, in []byte) (event.Payload, erro
 		Limit:          limit + 1,
 		After:          gjson.GetBytes(meta, "after").String(),
 	}
+	// `hidden` (default true): false leaves out dot entries below `path`
+	// (.history/, .DS_Store) before the limit, so a listing of what a person
+	// sees is not crowded out by them.
+	if h := gjson.GetBytes(meta, "hidden"); h.Exists() && !h.Bool() {
+		opts.SkipHidden = true
+	}
 	if opts.SinceModSeq > 0 && !gjson.GetBytes(meta, "recursive").Exists() {
 		opts.Recursive = true // a change feed is the whole subtree by default
 	}

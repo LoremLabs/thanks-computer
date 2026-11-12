@@ -343,6 +343,62 @@ func TestPreconditionsAndLimits(t *testing.T) {
 	}
 }
 
+// SkipHidden leaves out every resource with a dot segment below the listed
+// path, before the limit: a wiki's history copies never crowd out its pages.
+func TestListSkipHidden(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	c := newColl(t, s)
+	for _, d := range []string{"Wiki", "Wiki/.history", "Wiki/.history/a", "Wiki/people", "Wiki/people/.cache", "Wiki/café", ".trash"} {
+		if _, err := s.Mkdir(ctx, c.ID, d); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	for _, f := range []string{"Wiki/.history/a/e1.md", "Wiki/.history/a/e2.md", "Wiki/.DS_Store", "Wiki/a.md", "Wiki/people/bob.md",
+		"Wiki/people/.cache/x", "Wiki/people/.note", "Wiki/café/menu.md", "Wiki/café/.h", ".trash/old", "top.md"} {
+		put(t, s, c.ID, f, "x")
+	}
+	names := func(rs []drive.Resource) string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.Path)
+		}
+		return strings.Join(out, ",")
+	}
+	rs, err := s.List(ctx, c.ID, drive.ListOpts{Path: "Wiki", Recursive: true, SkipHidden: true})
+	if err != nil || names(rs) != "Wiki/a.md,Wiki/café,Wiki/café/menu.md,Wiki/people,Wiki/people/bob.md" {
+		t.Fatalf("recursive, hidden left out: %s %v", names(rs), err)
+	}
+	rs, _ = s.List(ctx, c.ID, drive.ListOpts{Path: "Wiki", Recursive: true})
+	if len(rs) != 14 {
+		t.Fatalf("recursive, everything as before: %d %s", len(rs), names(rs))
+	}
+	rs, _ = s.List(ctx, c.ID, drive.ListOpts{Path: "Wiki", Recursive: true, SkipHidden: true, Limit: 2})
+	if names(rs) != "Wiki/a.md,Wiki/café" {
+		t.Fatalf("the limit counts only what is shown: %s", names(rs))
+	}
+	rs, _ = s.List(ctx, c.ID, drive.ListOpts{Path: "Wiki", Recursive: true, SkipHidden: true, After: "Wiki/café"})
+	if names(rs) != "Wiki/café/menu.md,Wiki/people,Wiki/people/bob.md" {
+		t.Fatalf("the cursor still pages: %s", names(rs))
+	}
+	rs, _ = s.List(ctx, c.ID, drive.ListOpts{Path: "Wiki", SkipHidden: true})
+	if names(rs) != "Wiki/a.md,Wiki/café,Wiki/people" {
+		t.Fatalf("direct children, hidden left out: %s", names(rs))
+	}
+	rs, _ = s.List(ctx, c.ID, drive.ListOpts{Path: "Wiki/café", SkipHidden: true})
+	if names(rs) != "Wiki/café/menu.md" {
+		t.Fatalf("below a folder whose name is not ASCII: %s", names(rs))
+	}
+	rs, _ = s.List(ctx, c.ID, drive.ListOpts{Recursive: true, SkipHidden: true})
+	if names(rs) != "Wiki,Wiki/a.md,Wiki/café,Wiki/café/menu.md,Wiki/people,Wiki/people/bob.md,top.md" {
+		t.Fatalf("from the root: %s", names(rs))
+	}
+	rs, _ = s.List(ctx, c.ID, drive.ListOpts{Path: "Wiki/.history", Recursive: true, SkipHidden: true})
+	if names(rs) != "Wiki/.history/a,Wiki/.history/a/e1.md,Wiki/.history/a/e2.md" {
+		t.Fatalf("inside a dot folder, only what is below it counts: %s", names(rs))
+	}
+}
+
 func TestDirectoriesListDelete(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()

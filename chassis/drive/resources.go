@@ -12,6 +12,7 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/loremlabs/thanks-computer/chassis/hxid"
 )
@@ -90,6 +91,11 @@ type ListOpts struct {
 	// cursor of the previous page.
 	Limit int
 	After string
+	// SkipHidden leaves out every resource whose path below Path has a
+	// segment beginning with "." (a dot folder and everything in it, a dot
+	// file), before Limit is applied, so the page counts only what a person
+	// sees. The zero value lists everything, as before.
+	SkipHidden bool
 }
 
 const resourceCols = `resource_id, collection_id, path, parent_path, depth, kind, object_key, size, content_type, etag,
@@ -795,6 +801,16 @@ func (s *Store) List(ctx context.Context, collID string, opts ListOpts) ([]Resou
 	if opts.After != "" {
 		where = append(where, "path > ?")
 		args = append(args, opts.After)
+	}
+	if opts.SkipHidden {
+		// The part of the path below p, in characters (SQL's substr counts
+		// characters, Go's len bytes): no segment of it may begin with a dot.
+		from := 1
+		if p != "" {
+			from = utf8.RuneCountInString(p) + 2
+		}
+		where = append(where, "substr(path, ?) NOT LIKE '.%' AND substr(path, ?) NOT LIKE '%/.%'")
+		args = append(args, from, from)
 	}
 	q := `SELECT ` + resourceCols + ` FROM drive_resources WHERE ` + strings.Join(where, " AND ") + ` ORDER BY path`
 	if opts.Limit > 0 {

@@ -327,6 +327,41 @@ func TestDriveFileOps(t *testing.T) {
 	}
 }
 
+// `hidden: false` leaves dot entries out of a listing before its limit; an
+// absent or true `hidden` lists them, as before.
+func TestDriveListHidden(t *testing.T) {
+	d := newDriveDeps(t, map[string]string{"pony.example.com": "acme"})
+	callDrive(t, driveCollection, d, "acme", `{"name":"docs"}`)
+	for _, p := range []string{"Wiki/.history/a/e1.md", "Wiki/.history/a/e2.md", "Wiki/a.md", "Wiki/people/bob.md"} {
+		if out := callDrive(t, drivePut, d, "acme", `{"collection":"docs","path":"`+p+`","value":"x","encoding":"utf8","parents":true}`); gjson.Get(out, "_drive.error").Exists() {
+			t.Fatalf("put %s = %s", p, out)
+		}
+	}
+	paths := func(out string) string {
+		var ps []string
+		for _, it := range gjson.Get(out, "_drive.items").Array() {
+			ps = append(ps, it.Get("path").String())
+		}
+		return strings.Join(ps, ",")
+	}
+	out := callDrive(t, driveList, d, "acme", `{"collection":"docs","path":"Wiki","recursive":true,"hidden":false,"limit":2}`)
+	if paths(out) != "Wiki/a.md,Wiki/people" || gjson.Get(out, "_drive.next").String() != "Wiki/people" {
+		t.Errorf("hidden false, limit 2 = %s", out)
+	}
+	out = callDrive(t, driveList, d, "acme", `{"collection":"docs","path":"Wiki","recursive":true,"hidden":false,"after":"Wiki/people"}`)
+	if paths(out) != "Wiki/people/bob.md" {
+		t.Errorf("hidden false, next page = %s", out)
+	}
+	out = callDrive(t, driveList, d, "acme", `{"collection":"docs","path":"Wiki","recursive":true}`)
+	if gjson.Get(out, "_drive.count").Int() != 7 {
+		t.Errorf("no hidden: everything = %s", out)
+	}
+	out = callDrive(t, driveList, d, "acme", `{"collection":"docs","path":"Wiki","recursive":true,"hidden":true}`)
+	if gjson.Get(out, "_drive.count").Int() != 7 {
+		t.Errorf("hidden true: everything = %s", out)
+	}
+}
+
 // TestDrivePutFromShaAndParents: bytes the tenant already holds in the
 // blob store land in the drive by sha (ownership-checked, not through the
 // envelope), and `parents` makes the directories on the way.
