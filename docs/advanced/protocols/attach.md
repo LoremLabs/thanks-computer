@@ -239,3 +239,17 @@ hosts; it speaks HTTP and upgrades to a WebSocket.
 
 `txco dev --attach --allow-local-workspace` starts it on `:8090` for
 trying this on one machine.
+
+### More than one node
+
+A machine's link lands on one node, and an op may run on any. Two things
+make that work, and both are needed:
+
+- a **shared `--kvstore`** (redis), where the claim that names a link's
+  node lives;
+- **`--attach-relay`**, naming a relay backend that carries a request to
+  that node and its answer back.
+
+Without a relay, a workspace is reachable only from the node that holds
+its link, and reads `away` from every other. The bundled chassis defines
+the relay's seam and ships no backend, as for `--websocket-relay`.

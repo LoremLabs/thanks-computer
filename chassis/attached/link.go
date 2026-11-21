@@ -225,8 +225,8 @@ func (l *Link) request(ctx context.Context, h Header) Reply {
 	}
 	l.seen[h.ID] = now
 	rctx, cancel := context.WithCancel(ctx)
-	if !h.Deadline.IsZero() {
-		rctx, cancel = context.WithDeadline(ctx, h.Deadline)
+	if h.WithinMS > 0 {
+		rctx, cancel = context.WithTimeout(ctx, time.Duration(h.WithinMS)*time.Millisecond)
 	}
 	l.running[h.ID] = cancel
 	l.mu.Unlock()

@@ -31,7 +31,8 @@ type Service struct {
 	// knows where to go. Empty answers the code bare.
 	PublicURL string
 
-	now func() time.Time
+	relay Relay
+	now   func() time.Time
 }
 
 // NewService wires the three parts for the node named node.
@@ -270,10 +271,10 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 		return fail(&workspace.Error{Code: "bad_request", Message: "an exec on an attached workspace needs a deadline"})
 	}
 	remaining := time.Until(deadline)
-	theirs := deadline.Add(-replyMargin(remaining))
+	theirs := remaining - replyMargin(remaining)
 	payload, err := json.Marshal(ExecPayload{
 		Command: req.Command, Args: req.Args, Stdin: req.Stdin, Cwd: req.Cwd, Env: req.Env,
-		TimeoutMS: time.Until(theirs).Milliseconds(),
+		TimeoutMS: theirs.Milliseconds(),
 	})
 	if err != nil {
 		return fail(&workspace.Error{Code: "bad_request", Message: err.Error()})
@@ -283,7 +284,7 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 		return fail(&workspace.Error{Code: "provider", Message: err.Error()})
 	}
 	start := time.Now()
-	rep, err := c.svc.send(ctx, c.tenant, c.wid, Header{Kind: KindRequest, ID: id, Deadline: theirs, Payload: payload})
+	rep, err := c.svc.send(ctx, c.tenant, c.wid, Header{Kind: KindRequest, ID: id, WithinMS: theirs.Milliseconds(), Payload: payload})
 	if err != nil {
 		return fail(err)
 	}
@@ -326,8 +327,9 @@ func (c *computer) ExecAsync(ctx context.Context, req workspace.ExecRequest, lim
 	if err != nil {
 		return fail(&workspace.Error{Code: "provider", Message: err.Error()})
 	}
+	remaining := time.Until(deadline)
 	rep, err := c.svc.send(ctx, c.tenant, c.wid, Header{
-		Kind: KindRequest, ID: id, Deadline: deadline.Add(-replyMargin(time.Until(deadline))),
+		Kind: KindRequest, ID: id, WithinMS: (remaining - replyMargin(remaining)).Milliseconds(),
 		OPC: t.OPC, Token: t.Token, Payload: payload,
 	})
 	if err != nil {

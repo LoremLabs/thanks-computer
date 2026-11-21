@@ -285,6 +285,25 @@ func (s *Store) ListIdle(ctx context.Context, before time.Time, limit int) ([]Ro
 	return collect(rows)
 }
 
+// ListIdleFor is ListIdle for one provider's rows: what a reaper wants, so
+// that rows it would only skip — another provider's, or an attached
+// machine's, which nothing reaps — never fill its batch.
+func (s *Store) ListIdleFor(ctx context.Context, provider string, before time.Time, limit int) ([]Row, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, s.rb(
+		`SELECT `+rowCols+` FROM workspaces
+		  WHERE status <> ? AND provider = ? AND last_used_at < ?
+		  ORDER BY last_used_at ASC LIMIT ?`),
+		StatusDestroyed, provider, before.UTC().Format(time.RFC3339), limit)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: list idle: %w", err)
+	}
+	defer rows.Close()
+	return collect(rows)
+}
+
 // List returns rows, newest use first; tenant "" lists every tenant.
 func (s *Store) List(ctx context.Context, tenant string, includeDestroyed bool, limit int) ([]Row, error) {
 	if limit <= 0 {

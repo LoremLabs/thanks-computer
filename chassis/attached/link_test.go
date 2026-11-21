@@ -656,8 +656,8 @@ func TestExecAsyncHandsOverTheContinuation(t *testing.T) {
 		t.Fatalf("header %+v payload %+v", h, p)
 	}
 	// The request's own deadline is the handoff's, not the command's life.
-	if h.Deadline.IsZero() || time.Until(h.Deadline) > 10*time.Second {
-		t.Fatalf("request deadline = %s", h.Deadline)
+	if h.WithinMS <= 0 || h.WithinMS > 10_000 {
+		t.Fatalf("request must answer within %d ms", h.WithinMS)
 	}
 
 	// The machine's own stack ran it in place: the answer is the result.

@@ -1886,6 +1886,26 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			}
 			return pu.CompleteWorkspaceAsync(ctx, cred.Tenant, cred.WorkspaceID, cred.ID, opc, token, res)
 		}
+		// The hop between nodes (--attach-relay). The claim that says which
+		// node holds a link lives in the KV, so the KV must be the shared
+		// one: with a node-local store every other node would read "away".
+		if conf.AttachRelay != "" {
+			if conf.KVStore != redisstore.StoreName {
+				cancel()
+				return ctx, nil, fmt.Errorf("--attach-relay=%s needs a shared --kvstore (redis); the claim that names a link's node cannot live in a node-local store", conf.AttachRelay)
+			}
+			relay, rerr := attached.OpenRelay(conf.AttachRelay, attached.RelayConfig{
+				NodeID:  resolveUsageNodeID(conf.Fqdn),
+				Logger:  logger,
+				Handler: attachSvc.Local(),
+			})
+			if rerr != nil {
+				cancel()
+				return ctx, nil, fmt.Errorf("attach relay %q: %w", conf.AttachRelay, rerr)
+			}
+			attachSvc.SetRelay(relay)
+			logger.Info("attach relay enabled", zap.String("relay", conf.AttachRelay))
+		}
 		pu.Workspaces.SetAttached(attachSvc)
 	}
 	registerAttachOps(pu, attachDeps{svc: attachSvc})

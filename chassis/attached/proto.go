@@ -67,8 +67,11 @@ type Header struct {
 	Version    string `json:"version,omitempty"`
 
 	// request, cancel
-	ID       string    `json:"id,omitempty"`
-	Deadline time.Time `json:"deadline,omitzero"`
+	ID string `json:"id,omitempty"`
+	// WithinMS is how long the machine has to answer, counted from when it
+	// reads the request. A duration, never a time of day: the machine's
+	// clock is its owner's, and may be minutes off.
+	WithinMS int64 `json:"within_ms,omitempty"`
 	// A request made by an async op carries that op's continuation. The
 	// machine sends both back, unchanged, with the job's end (complete).
 	OPC   string `json:"opc,omitempty"`
