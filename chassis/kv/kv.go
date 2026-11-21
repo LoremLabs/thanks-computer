@@ -62,6 +62,11 @@ type Pair struct {
 // casAttempts bounds the compare-and-swap retry loop (Incr, CAS) under contention.
 const casAttempts = 5
 
+// ErrContention is what Incr and CAS return (wrapped) when every attempt of
+// that loop lost its race to another writer. Nothing was written; the caller
+// may simply try again.
+var ErrContention = errors.New("kv: contention")
+
 // DefaultListLimit / MaxListLimit bound a single ListKeysPage response. The
 // underlying store.List has no native cursor (it returns the whole namespace),
 // so the window caps the RESPONSE size, not the read. Requests above the max are
@@ -559,7 +564,7 @@ func (k *KV) Incr(ctx context.Context, tenant, ns, key string, delta int64, ttl 
 			return next, nil
 		}
 	}
-	return 0, fmt.Errorf("kv: incr contention on %q", key)
+	return 0, fmt.Errorf("kv: incr contention on %q: %w", key, ErrContention)
 }
 
 // CAS is check-and-set: write newVal at (tenant, ns, key) only if the current
@@ -626,7 +631,7 @@ func (k *KV) CAS(ctx context.Context, tenant, ns, key string, expectAbsent bool,
 			return true, newVal, nil
 		}
 	}
-	return false, nil, fmt.Errorf("kv: cas contention on %q", key)
+	return false, nil, fmt.Errorf("kv: cas contention on %q: %w", key, ErrContention)
 }
 
 // jsonEqual reports whether two JSON values are semantically equal (ignoring

@@ -98,6 +98,15 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 		return string(scrubValues(scrubSecrets([]byte(s), op.Secrets), grantScrub))
 	}
 
+	// A provider may serve only some tenants (workspace.TenantGate): on an
+	// attached machine, only the chassis's own `_attach` stack runs commands.
+	// The tenant asked about is the request's PINNED one, never a field of
+	// the envelope.
+	if g, ok := pu.Workspaces.Provider().(workspace.TenantGate); ok && !g.ServesTenant(tenant) {
+		return workspaceFailure(into, prov, "", "not_allowed",
+			"this chassis's workspace provider does not run commands for this stack", 0), nil
+	}
+
 	// `WITH grant` hands a run grant to ONE command, and `WITH sandbox` says
 	// which of the grant's sandboxes to open for it. Only exec runs one: an
 	// attached terminal or a connected service outlives the run it was
@@ -187,11 +196,43 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 			}
 			grantScrub = vals
 		}
+		// `WITH detach = true`: start the command and leave it running; the
+		// answer is its job, at once. Nothing waits for it here, so WITH
+		// timeout is not how long this op may take — it is the job's own
+		// life, which its wrapper enforces (chassis/workspace/detach).
+		if dv := gjson.Get(op.Meta, "detach"); dv.Exists() && dv.Type != gjson.Null {
+			if !dv.IsBool() {
+				return workspaceFailure(into, prov, "", "bad_request", "WITH detach must be a boolean", 0), nil
+			}
+			if dv.Bool() {
+				if streamed || req.TTY {
+					return workspaceFailure(into, prov, "", "bad_request",
+						"WITH detach cannot be combined with stream or tty: nothing stays to read the output", 0), nil
+				}
+				req.Timeout, _ = pu.opMetaTimeout(op)
+				start := time.Now()
+				job, h, runID, err := pu.Workspaces.ExecDetached(ctx, spec, req)
+				if h.Provider != "" {
+					prov = h.Provider
+				}
+				wall := time.Since(start).Milliseconds()
+				pu.workspaceAccount(ctx, rid, tenant, opID, wall, err, len(req.Stdin), 0)
+				if err != nil {
+					return workspaceFailure(into, prov, h.Ref, workspaceErrorCode(err), scrub(err.Error()), wall), nil
+				}
+				return workspaceDetached(into, prov, h.Ref, runID, job, wall), nil
+			}
+		}
 		if d, ok := ctx.Deadline(); ok {
 			req.Timeout = time.Until(d)
 		}
 		start := time.Now()
 		res, h, runID, err := pu.Workspaces.Exec(ctx, spec, req)
+		if h.Provider != "" {
+			// What ran it: the configured provider, or — for a name a machine
+			// holds — "attached".
+			prov = h.Provider
+		}
 		wall := res.WallMS
 		if wall == 0 {
 			wall = time.Since(start).Milliseconds()
@@ -596,6 +637,21 @@ func workspaceSuccess(into, provider, computer, run string, res workspace.ExecRe
 	raw = workspaceStamp(raw, provider, computer, run, wallMS)
 	raw, _ = sjson.Set(raw, "_txc.workspace.exit", res.Exit)
 	return event.Payload{Raw: raw, Type: event.JSON}
+}
+
+// workspaceDetached is the answer to `exec WITH detach = true`: the job the
+// command was left running in. Its exit is not here; it is on the machine,
+// in the job's directory, when the job ends.
+func workspaceDetached(into, provider, computer, run string, job workspace.DetachedJob, wallMS int64) event.Payload {
+	b := jsonx.NewObject()
+	b.Set("detached", true)
+	b.Set("job", job.ID)
+	b.Set("started_at", job.StartedAt.UTC().Format(time.RFC3339))
+	raw, err := sjson.SetRaw("{}", into, b.String())
+	if err != nil {
+		raw = "{}"
+	}
+	return event.Payload{Raw: workspaceStamp(raw, provider, computer, run, wallMS), Type: event.JSON}
 }
 
 func workspaceVerbDone(into, provider, state string, wallMS int64) event.Payload {

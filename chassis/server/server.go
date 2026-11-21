@@ -25,6 +25,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
 	"github.com/loremlabs/thanks-computer/chassis/attach"
+	"github.com/loremlabs/thanks-computer/chassis/attached"
 	"github.com/loremlabs/thanks-computer/chassis/authn"
 	"github.com/loremlabs/thanks-computer/chassis/bgservice"
 	"github.com/loremlabs/thanks-computer/chassis/blob"
@@ -88,6 +89,8 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/server/grantsock"
 	"github.com/loremlabs/thanks-computer/chassis/server/ingress"
 	"github.com/loremlabs/thanks-computer/chassis/server/llmgw"
+	attachp "github.com/loremlabs/thanks-computer/chassis/server/personality/attach"
+	attachlinkp "github.com/loremlabs/thanks-computer/chassis/server/personality/attachlink"
 	calendarp "github.com/loremlabs/thanks-computer/chassis/server/personality/calendar"
 	contactsp "github.com/loremlabs/thanks-computer/chassis/server/personality/contacts"
 	cronp "github.com/loremlabs/thanks-computer/chassis/server/personality/cron"
@@ -280,6 +283,19 @@ func detectTenantBody(resolver ingress.Resolver, in []byte) string {
 			b.Set("_txc.route.to", "_scheduled/0")
 			return b.String()
 		}
+	}
+	// A request down an attach link (`txco attach`, the attachlink
+	// personality). Every one enters the chassis's own `_attach` tenant, at
+	// its `exec` stack: the other chassis's payload is data under
+	// `_txc.attach.req`, and nothing in it can choose a stack or a tenant.
+	if src.String() == "attach" {
+		b := jsonx.NewObject()
+		b.Set("_txc.route.tenant", "_attach")
+		b.Set("_txc.route.stack", "exec")
+		b.Set("_txc.route.ingress", "attach")
+		b.Set("_txc.route.hostname_verified", true)
+		b.Set("_txc.route.to", "exec/0")
+		return b.String()
 	}
 	// Durable state event. The state dispatcher presents a committed
 	// transition, stamping the record's tenant in `_txc.state.tenant`
@@ -1253,6 +1269,7 @@ type Deps struct {
 	Calendar  *chcal.Store
 	Contacts  *chcon.Store
 	Workspace *workspace.Store
+	Attach    *attached.Store // codes and credentials of machines that dialed in (chassis/attached)
 	Notebook  *chnotebook.Store
 	Drive     *chdrive.Store
 	IPP       *chipp.Store
@@ -1806,6 +1823,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			wsProv, werr := workspace.Open(conf.WorkspaceProvider, workspace.Config{
 				LocalRoot:      conf.WorkspaceLocalRoot,
 				MaxOutputBytes: int64(conf.WorkspaceMaxOutputBytes),
+				AttachHome:     conf.AttachHome,
 			})
 			if werr != nil {
 				logger.Warn("workspace:// disabled: " + werr.Error())
@@ -1844,6 +1862,20 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 			}
 		}
 	}
+
+	// Attached workspaces (chassis/attached): a name held by a machine that
+	// dialed in with `txco attach`. The Manager consults this for a row whose
+	// provider is "attached", and never hands such a name to its provider.
+	// It needs the three things an attachment lives in: the workspace
+	// Manager, the runtime DB (who may hold a name) and the KV (who holds it
+	// now). Without them the ops answer txco_attach_disabled.
+	var attachSvc *attached.Service
+	if pu.Workspaces != nil && deps.Attach != nil && workspaceStore != nil && kv != nil {
+		attachSvc = attached.NewService(deps.Attach, attached.NewClaims(kvstore.New(kv, 0, 0)), resolveUsageNodeID(conf.Fqdn))
+		attachSvc.PublicURL = conf.AttachPublicURL
+		pu.Workspaces.SetAttached(attachSvc)
+	}
+	registerAttachOps(pu, attachDeps{svc: attachSvc})
 
 	// Register built-in core ops. `txco://noop` is the no-op handler:
 	// rule authors use it as a placeholder EXEC when their rule's
@@ -3040,6 +3072,14 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		// drift from a route decision. Off unless 'mailmap' is in
 		// --personalities AND --mailmap-listen-addrs is set.
 		mailmapp.NewController(ctx, pu, mailResolver),
+		// attach: the listener a machine dials with `txco attach`. Off
+		// unless 'attach' is in --personalities AND --attach-listen-addrs
+		// is set.
+		attachp.NewController(ctx, pu, attachSvc),
+		// attachlink: this chassis as an attached machine. No listener: it
+		// dials out. Off unless 'attachlink' is in --personalities AND
+		// --attach-home is set, as `txco attach` sets them.
+		attachlinkp.NewController(ctx, pu),
 		dnsCtrl,
 		imapCtrl,
 		calCtrl,

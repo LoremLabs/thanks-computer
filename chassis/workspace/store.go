@@ -147,8 +147,23 @@ func (s *Store) Get(ctx context.Context, tenant, stack, name string) (*Row, erro
 // with the provider's fresh environment, so the caller passes empty values
 // and they are written.
 func (s *Store) Upsert(ctx context.Context, r Row) error {
+	_, err := s.upsert(ctx, r, false)
+	return err
+}
+
+// UpsertUnlessAttached is Upsert for a provider recording a workspace it
+// just made: it leaves a live ATTACHED row alone and reports applied=false.
+// A machine may have been enrolled for the name between the caller's read of
+// the row and this write, and the row of an attached name is never given to
+// a provider.
+func (s *Store) UpsertUnlessAttached(ctx context.Context, r Row) (applied bool, err error) {
+	n, err := s.upsert(ctx, r, true)
+	return n > 0, err
+}
+
+func (s *Store) upsert(ctx context.Context, r Row, unlessAttached bool) (int64, error) {
 	if r.Tenant == "" || r.Stack == "" || r.Name == "" || r.Provider == "" || r.ProviderRef == "" {
-		return errors.New("workspace: upsert needs tenant, stack, name, provider, provider_ref")
+		return 0, errors.New("workspace: upsert needs tenant, stack, name, provider, provider_ref")
 	}
 	if r.Status == "" {
 		r.Status = StatusCreated
@@ -164,7 +179,12 @@ func (s *Store) Upsert(ctx context.Context, r Row) error {
 		r.LastUsedAt = now
 	}
 	id := ID(r.Tenant, r.Stack, r.Name)
-	_, err := s.db.ExecContext(ctx, s.rb(`
+	guard := ""
+	if unlessAttached {
+		guard = `
+		WHERE workspaces.provider <> '` + ProviderAttached + `' OR workspaces.status = '` + StatusDestroyed + `'`
+	}
+	res, err := s.db.ExecContext(ctx, s.rb(`
 		INSERT INTO workspaces
 			(workspace_id, tenant, stack, name, provider, provider_ref, runtime, network,
 			 status, run_id, checkpoint_ref, created_at, last_used_at, destroyed_at)
@@ -178,14 +198,15 @@ func (s *Store) Upsert(ctx context.Context, r Row) error {
 			run_id         = excluded.run_id,
 			checkpoint_ref = excluded.checkpoint_ref,
 			last_used_at   = excluded.last_used_at,
-			destroyed_at   = NULL`),
+			destroyed_at   = NULL`+guard),
 		id, r.Tenant, r.Stack, r.Name, r.Provider, r.ProviderRef, nullIfEmpty(r.Runtime), r.Network,
 		r.Status, nullIfEmpty(r.RunID), nullIfEmpty(r.CheckpointRef),
 		r.CreatedAt.UTC().Format(time.RFC3339), r.LastUsedAt.UTC().Format(time.RFC3339))
 	if err != nil {
-		return fmt.Errorf("workspace: upsert: %w", err)
+		return 0, fmt.Errorf("workspace: upsert: %w", err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // Touch records an exec: last_used_at, the run id it ran under, and the
@@ -225,6 +246,21 @@ func (s *Store) MarkDestroyed(ctx context.Context, id string, at time.Time) erro
 	_, err := s.db.ExecContext(ctx, s.rb(
 		`UPDATE workspaces SET status = ?, destroyed_at = ?, run_id = NULL WHERE workspace_id = ?`),
 		StatusDestroyed, at.UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return fmt.Errorf("workspace: mark destroyed: %w", err)
+	}
+	return nil
+}
+
+// MarkDestroyedFor is MarkDestroyed for a row that is still provider's own.
+// A row that has since become another provider's is left alone.
+func (s *Store) MarkDestroyedFor(ctx context.Context, id, provider string, at time.Time) error {
+	if at.IsZero() {
+		at = s.now()
+	}
+	_, err := s.db.ExecContext(ctx, s.rb(
+		`UPDATE workspaces SET status = ?, destroyed_at = ?, run_id = NULL WHERE workspace_id = ? AND provider = ?`),
+		StatusDestroyed, at.UTC().Format(time.RFC3339), id, provider)
 	if err != nil {
 		return fmt.Errorf("workspace: mark destroyed: %w", err)
 	}

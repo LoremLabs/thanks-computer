@@ -95,6 +95,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	uiDev := fs.Bool("ui", false, "also start the admin-ui Vite dev server on "+adminUIDevPort+" (HMR; opens admin-ui/ found by walking up from the workspace)")
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050; override with TXCO_TCP_LISTEN_ADDRS, e.g. 'irc=127.0.0.1:6697;self-signed' for a TLS/SNI listener). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
+	attachHead := fs.Bool("attach", false, "start the attach personality: the listener a machine dials with `txco attach <code>` to hold a workspace of this chassis. Disabled by default; listens on "+devAttachListenAddr+" unless TXCO_ATTACH_LISTEN_ADDRS names another. Needs a workspace provider (--allow-local-workspace).")
 	stateHead := fs.Bool("state", false, "start the state personality (the dispatcher behind txco://state/*; presents each committed transition into the tenant's _state stack). Disabled by default; the dev store lands at .txco/dev/state.db.")
 	grantHead := fs.Bool("grant", false, "start the grant personality: the Unix socket `txco sandbox` reaches the chassis on, so a program a command runs can open a sandbox itself. Disabled by default; without it a command holds only what `WITH sandbox` opened for it. Needs --allow-local-workspace to hand a grant to a command.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
@@ -307,7 +308,7 @@ Flags:
 			Heads: devHeads{
 				TCP: *tcpHead, DNS: *dnsHead, LMTP: *lmtpHead, Scheduled: *scheduledHead, Source: *sourceHead,
 				IMAP: *imapHead, Calendar: *calendarHead, Contacts: *contactsHead, WebDAV: *webdavHead,
-				Git: *gitHead, IPP: *ippHead, State: *stateHead, Grant: *grantHead,
+				Git: *gitHead, IPP: *ippHead, State: *stateHead, Grant: *grantHead, Attach: *attachHead,
 			},
 			AllowLocalWorkspace: *allowLocalWorkspace, LocalExec: *workspaceLocalExec, Verbose: *verbose,
 			Stdout: stdout, Stderr: stderr, Started: &started, Out: &chassisProc,
@@ -1178,7 +1179,12 @@ type devHeads struct {
 	TCP, DNS, LMTP, Scheduled, Source, IMAP, Calendar, Contacts, WebDAV, Git, IPP, State bool
 	// Grant is the launcher's socket: how a command opens a sandbox itself.
 	Grant bool
+	// Attach is the listener a machine dials with `txco attach`.
+	Attach bool
 }
+
+// devAttachListenAddr is where the dev chassis's attach head listens.
+const devAttachListenAddr = ":8090"
 
 // chassisOpts is what startChassis is asked for. A new switch is one field
 // here, never another parameter.
@@ -1477,6 +1483,14 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 		// temp dir, named for this workspace's database directory. A socket
 		// under .txco/dev could run past the 100 bytes a socket's path may be.
 		heads = append(heads, "grant")
+	}
+	if o.Heads.Attach {
+		heads = append(heads, "attach")
+		addr := devAddr("TXCO_ATTACH_LISTEN_ADDRS", devAttachListenAddr)
+		env = append(env, "TXCO_ATTACH_LISTEN_ADDRS="+addr)
+		// What a code is answered with, so `txco attach <code>` knows where
+		// to dial: this machine, in the clear.
+		env = append(env, "TXCO_ATTACH_PUBLIC_URL="+devAddr("TXCO_ATTACH_PUBLIC_URL", "http://localhost"+addr))
 	}
 	env = append(env, "TXCO_PERSONALITIES="+strings.Join(heads, ","))
 	if o.AllowLocalWorkspace {

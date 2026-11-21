@@ -169,7 +169,7 @@ func (m *Manager) dialOnce(ctx context.Context, spec Spec, svc Service) (net.Con
 	if err != nil {
 		return nil, Handle{}, "", err
 	}
-	comp, err := m.prov.Wake(ctx, e.h)
+	comp, err := m.wake(ctx, spec, e)
 	if err != nil {
 		m.forget(spec)
 		return nil, e.h, "", err

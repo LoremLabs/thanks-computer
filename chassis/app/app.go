@@ -31,6 +31,7 @@ import (
 	"github.com/loremlabs/thanks-computer/chassis/admission"
 	"github.com/loremlabs/thanks-computer/chassis/artifact"
 	_ "github.com/loremlabs/thanks-computer/chassis/artifact/filestore" // registers the "file" backend
+	"github.com/loremlabs/thanks-computer/chassis/attached"
 	"github.com/loremlabs/thanks-computer/chassis/auth/registry"
 	"github.com/loremlabs/thanks-computer/chassis/authn"
 	chcal "github.com/loremlabs/thanks-computer/chassis/calendar"
@@ -56,6 +57,7 @@ import (
 	chstate "github.com/loremlabs/thanks-computer/chassis/state"
 	"github.com/loremlabs/thanks-computer/chassis/sysops"
 	"github.com/loremlabs/thanks-computer/chassis/workspace"
+	"github.com/loremlabs/thanks-computer/chassis/workspace/detach"
 	dbschemas "github.com/loremlabs/thanks-computer/db"
 )
 
@@ -79,6 +81,13 @@ type BuildInfo struct {
 // normal-shutdown path. Fatal config/db errors still exit in place via
 // log.Fatalf / logger.Fatal exactly as before.
 func Run(bi BuildInfo) int {
+	// A detached job's wrapper (chassis/workspace/detach): `txco __job <dir>`.
+	// First of all, before the room alias and any configuration: the wrapper
+	// reads nothing but its job's directory.
+	if len(os.Args) >= 3 && os.Args[1] == detach.HiddenCommand {
+		return detach.RunJob(os.Args[2])
+	}
+
 	// `thanks` is the same binary as `txco`, dispatched by argv[0] into room
 	// mode: `thanks <args>` becomes `txco room <args>`. The second name is a
 	// symlink/hardlink (Homebrew bin.install_symlink, the installer's `ln -sf`),
@@ -798,6 +807,7 @@ func Run(bi BuildInfo) int {
 		Calendar:  calendarStore,
 		Contacts:  contactsStore,
 		Workspace: workspaceStore,
+		Attach:    attached.NewStore(runtimeDB, runtimeDialect),
 		Notebook:  notebookStore,
 		Drive:     driveStore,
 		IPP:       ippStore,

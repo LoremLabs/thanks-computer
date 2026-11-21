@@ -221,6 +221,16 @@ func Dispatch(args []string, stdout, stderr io.Writer) (status int, ok bool) {
 		return runWeb(rest, stdout, stderr), true
 	case "cron":
 		return runCron(rest, stdout, stderr), true
+	case "attach":
+		// Make this computer a workspace of another chassis — see
+		// chassis/cli/attach.go. After enrolling (or with nothing to
+		// enroll) it serves: the profile is in place and the process goes
+		// on to boot the small chassis, like `serve`.
+		status, serve := runAttach(rest, os.Stdin, stdout, stderr)
+		if serve {
+			return 0, false
+		}
+		return status, true
 	case "room":
 		// `thanks` is this command under another name (argv[0] dispatch in
 		// chassis/app.roomAlias). A room message becomes a normal
@@ -397,6 +407,7 @@ func printUsage(w io.Writer) {
 			{"notebook <command>", muted("Read a stack's notebooks (list/read/tail/export)")},
 			{"doctor", muted("Diagnose local setup + chassis reachability (auth/keys/version)")},
 			{"mcp <command>", muted("Talk to MCP-over-HTTP servers (use ") + hint("`txco mcp doctor`") + muted(" for discovery)")},
+			{"attach <code>", muted("Attach this computer to a workspace on another chassis, working in the current folder")},
 			{"room [--room N] <msg>", muted("Send a message into a room (also installed as ") + hint("thanks") + muted(")")},
 			{"inspect <stack> [noun] [id]", muted("Ask a stack to explain its current state (structured card)")},
 		}},

@@ -1,0 +1,14 @@
+# _attach/exec scope 0 — the same as command.txcl, for a request that gave
+# an argv instead of a shell line. One of the two fires for any request.
+#
+# @ is sugar for ._txc.
+WHEN @src == "attach" && @attach.req.shell == false
+  WITH workspace = @attach.credential,
+       args      = @attach.req.args,
+       stdin     = @attach.req.stdin,
+       cwd       = @attach.req.cwd,
+       env       = @attach.req.env,
+       timeout   = @attach.req.timeout_ms,
+       detach    = @attach.req.detach,
+       into      = "attach"
+  EXEC "workspace://machine/exec"

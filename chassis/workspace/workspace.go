@@ -220,6 +220,33 @@ type Starter interface {
 	Start(ctx context.Context, req ExecRequest, lim Limits) (ExecSession, error)
 }
 
+// TenantGate is the optional capability of a Provider that serves only
+// some tenants. The processor asks before any verb, with the request's
+// PINNED tenant, and refuses the rest as not_allowed. The owner provider on
+// an attached machine uses it: only the chassis's own `_attach` stack may run
+// a command there.
+type TenantGate interface {
+	ServesTenant(slug string) bool
+}
+
+// Detacher is the optional capability behind `exec WITH detach = true`,
+// implemented by a woken Computer: start the command so that it outlives
+// this process, and answer at once with the job that holds it
+// (chassis/workspace/detach).
+//
+// ctx bounds only the start. The job's life is req.Timeout, which is
+// required: a detached command has no caller left to give up on it, so it
+// carries its own deadline and its wrapper enforces it.
+type Detacher interface {
+	ExecDetached(ctx context.Context, req ExecRequest, lim Limits) (DetachedJob, error)
+}
+
+// DetachedJob names a command left running by Detacher.
+type DetachedJob struct {
+	ID        string
+	StartedAt time.Time
+}
+
 // ExecSession is one running process. The ctx handed to Start bounds it the
 // way an exec's ctx bounds an exec: when it ends the process is killed.
 //
@@ -369,6 +396,9 @@ type Config struct {
 	LocalRoot string
 	// MaxOutputBytes is the per-stream capture cap (--workspace-max-output-bytes).
 	MaxOutputBytes int64
+	// AttachHome is the folder `txco attach` keeps (--attach-home): where
+	// the owner provider finds the workspaces this machine holds.
+	AttachHome string
 }
 
 // Constructor builds a Provider from resolved config.
@@ -414,6 +444,33 @@ const CodeNotFound = "not_found"
 // stack tree and cannot have it: the provider cannot place one, the stack
 // version carries none, or its bundle could not be read.
 const CodeStackDirUnavailable = "stack_dir_unavailable"
+
+// ProviderAttached is the provider recorded on the row of a workspace held
+// by a machine that dialed in (chassis/attached). No Provider has this name:
+// the Manager never creates, wakes or destroys such a name through its
+// provider. The ROW is what says a name is attached; whether a machine is
+// connected right now is a separate, ephemeral fact (see Attached).
+const ProviderAttached = "attached"
+
+// CodeAway is the Error code for an attached workspace whose machine is not
+// connected: the command was NOT delivered. Nothing ran.
+const CodeAway = "away"
+
+// CodeUnknown is the Error code for a command that may have reached an
+// attached machine and was not seen to end. It may have run, in whole or in
+// part. The chassis never runs it again on its own.
+const CodeUnknown = "unknown"
+
+// Attached answers for the names machines hold. The Manager consults it for
+// a row whose provider is ProviderAttached, and for nothing else.
+type Attached interface {
+	// Wake returns the computer the machine holding spec offers, or a
+	// CodeAway error when none is connected. credential is the row's
+	// provider_ref: the credential enrolled for the name.
+	Wake(ctx context.Context, spec Spec, credential string) (Computer, error)
+	// Release ends the name's attachment: the workspace is being destroyed.
+	Release(ctx context.Context, spec Spec, credential string) error
+}
 
 // IsNotFound reports whether err says the workspace is gone.
 func IsNotFound(err error) bool {
@@ -684,6 +741,26 @@ type Manager struct {
 	mu       sync.Mutex
 	cache    map[string]entry
 	services *Services // the connect verb's name table; DefaultServices until SetServices
+	attached Attached  // the names machines hold; nil = none can be reached
+}
+
+// SetAttached wires the answer for attached names. Call it before the
+// Manager serves requests.
+func (m *Manager) SetAttached(a Attached) { m.attached = a }
+
+// isAttached reports whether e is a name a machine holds.
+func isAttached(e entry) bool { return e.h.Provider == ProviderAttached }
+
+// wake turns an entry into a computer: the machine's, for an attached name,
+// and the provider's otherwise.
+func (m *Manager) wake(ctx context.Context, spec Spec, e entry) (Computer, error) {
+	if !isAttached(e) {
+		return m.prov.Wake(ctx, e.h)
+	}
+	if m.attached == nil {
+		return nil, &Error{Code: CodeAway, Message: "this chassis does not serve attached workspaces"}
+	}
+	return m.attached.Wake(ctx, spec, e.h.Ref)
 }
 
 // NewManager builds a Manager over a Provider with per-exec limits. store
@@ -722,6 +799,13 @@ func (m *Manager) lookup(ctx context.Context, spec Spec) (entry, error) {
 		if err != nil {
 			return entry{}, &Error{Code: "provider", Message: err.Error()}
 		}
+		if row != nil && row.Status != StatusDestroyed && row.Provider == ProviderAttached {
+			// A machine holds this name. It is NEVER handed to the provider,
+			// connected or not, and never cached: the row is read each time,
+			// so a destroy or a new enrollment on another node is seen at
+			// the next call.
+			return entry{h: Handle{Provider: row.Provider, Ref: row.ProviderRef, Name: row.Name}, runID: row.RunID, lastUsed: row.LastUsedAt}, nil
+		}
 		if row != nil && row.Status != StatusDestroyed && row.Provider == m.prov.Name() {
 			e = entry{h: Handle{Provider: row.Provider, Ref: row.ProviderRef, Name: row.Name}, runID: row.RunID, lastUsed: row.LastUsedAt}
 			m.remember(key, e)
@@ -735,12 +819,23 @@ func (m *Manager) lookup(ctx context.Context, spec Spec) (entry, error) {
 	e = entry{h: h}
 	if m.store != nil {
 		now := m.now()
-		if err := m.store.Upsert(ctx, Row{
+		applied, err := m.store.UpsertUnlessAttached(ctx, Row{
 			Tenant: spec.Tenant, Stack: spec.Stack, Name: spec.Name,
 			Provider: h.Provider, ProviderRef: h.Ref, Runtime: spec.Runtime, Network: spec.Network,
 			Status: StatusCreated, CreatedAt: now, LastUsedAt: now,
-		}); err != nil {
+		})
+		if err != nil {
 			return entry{}, &Error{Code: "provider", Message: err.Error()}
+		}
+		if !applied {
+			// A machine was enrolled for this name while we were making it.
+			// The row is the machine's; what we made is not wanted.
+			_ = m.prov.Destroy(ctx, h)
+			row, err := m.store.Get(ctx, spec.Tenant, spec.Stack, spec.Name)
+			if err != nil || row == nil {
+				return entry{}, &Error{Code: "provider", Message: "workspace row changed underneath its creation"}
+			}
+			return entry{h: Handle{Provider: row.Provider, Ref: row.ProviderRef, Name: row.Name}, runID: row.RunID, lastUsed: row.LastUsedAt}, nil
 		}
 	}
 	m.remember(key, e)
@@ -748,6 +843,9 @@ func (m *Manager) lookup(ctx context.Context, spec Spec) (entry, error) {
 }
 
 func (m *Manager) remember(key string, e entry) {
+	if isAttached(e) {
+		return // never cached: see lookup
+	}
 	m.mu.Lock()
 	m.cache[key] = e
 	m.mu.Unlock()
@@ -783,7 +881,7 @@ func (m *Manager) runIDFor(e entry, comp Computer) string {
 // ExecResult.
 func (m *Manager) Exec(ctx context.Context, spec Spec, req ExecRequest) (ExecResult, Handle, string, error) {
 	res, h, runID, err := m.execOnce(ctx, spec, req)
-	if err != nil && IsNotFound(err) {
+	if err != nil && IsNotFound(err) && h.Provider != ProviderAttached {
 		// The workspace is gone at the provider but the identity row still
 		// points at it — an operator deleted it, another node reaped it, or
 		// the machine was lost. Without this the row would wedge every
@@ -809,7 +907,10 @@ func (m *Manager) Exec(ctx context.Context, spec Spec, req ExecRequest) (ExecRes
 func (m *Manager) dropIdentity(ctx context.Context, spec Spec) {
 	m.forget(spec)
 	if m.store != nil {
-		_ = m.store.MarkDestroyed(ctx, ID(spec.Tenant, spec.Stack, spec.Name), m.now())
+		// Only this provider's own row: a stale handle in this node's cache
+		// must not mark destroyed a row that has since become another
+		// provider's — an attached machine's, above all.
+		_ = m.store.MarkDestroyedFor(ctx, ID(spec.Tenant, spec.Stack, spec.Name), m.prov.Name(), m.now())
 	}
 }
 
@@ -818,7 +919,7 @@ func (m *Manager) execOnce(ctx context.Context, spec Spec, req ExecRequest) (Exe
 	if err != nil {
 		return ExecResult{Exit: -1}, Handle{}, "", err
 	}
-	comp, err := m.prov.Wake(ctx, e.h)
+	comp, err := m.wake(ctx, spec, e)
 	if err != nil {
 		// A handle that will not wake (destroyed out from under us) is
 		// dropped so the next exec recreates rather than retrying a corpse.
@@ -913,7 +1014,7 @@ func (m *Manager) startOnce(ctx context.Context, spec Spec, req ExecRequest) (Ex
 	if err != nil {
 		return nil, Handle{}, "", err
 	}
-	comp, err := m.prov.Wake(ctx, e.h)
+	comp, err := m.wake(ctx, spec, e)
 	if err != nil {
 		m.forget(spec)
 		return nil, e.h, "", err
@@ -955,8 +1056,8 @@ func (m *Manager) Wake(ctx context.Context, spec Spec) (Handle, string, error) {
 	if err != nil {
 		return Handle{}, "", err
 	}
-	comp, err := m.prov.Wake(ctx, e.h)
-	if err != nil && IsNotFound(err) {
+	comp, err := m.wake(ctx, spec, e)
+	if err != nil && IsNotFound(err) && !isAttached(e) {
 		// Gone at the provider: drop the stale identity and provision a
 		// fresh workspace (see Exec).
 		m.dropIdentity(ctx, spec)
@@ -985,6 +1086,9 @@ func (m *Manager) Sleep(ctx context.Context, spec Spec) error {
 	if err != nil {
 		return err
 	}
+	if isAttached(e) {
+		return &Error{Code: "unsupported", Message: "an attached workspace is not put to sleep: its machine is its owner's"}
+	}
 	return m.prov.Sleep(ctx, e.h)
 }
 
@@ -1000,6 +1104,9 @@ func (m *Manager) Checkpoint(ctx context.Context, spec Spec, comment string) (st
 	e, err := m.lookup(ctx, spec)
 	if err != nil {
 		return "", Handle{}, err
+	}
+	if isAttached(e) {
+		return "", e.h, &Error{Code: "unsupported", Message: "an attached workspace has no checkpoint capability"}
 	}
 	ref, err := cp.Checkpoint(ctx, e.h, comment)
 	if err != nil {
@@ -1019,6 +1126,18 @@ func (m *Manager) Destroy(ctx context.Context, spec Spec) error {
 		return err
 	}
 	m.forget(spec)
+	if isAttached(e) {
+		// The machine is its owner's: nothing is destroyed there. The
+		// attachment ends, and the name goes back to the provider.
+		var rerr error
+		if m.attached != nil {
+			rerr = m.attached.Release(ctx, spec, e.h.Ref)
+		}
+		if m.store != nil {
+			_ = m.store.MarkDestroyed(ctx, ID(spec.Tenant, spec.Stack, spec.Name), m.now())
+		}
+		return rerr
+	}
 	derr := m.prov.Destroy(ctx, e.h)
 	if m.store != nil {
 		_ = m.store.MarkDestroyed(ctx, ID(spec.Tenant, spec.Stack, spec.Name), m.now())
@@ -1026,11 +1145,46 @@ func (m *Manager) Destroy(ctx context.Context, spec Spec) error {
 	return derr
 }
 
+// ExecDetached starts req in the workspace spec names and leaves it running
+// there: lookup, wake, start, record. The answer is the job, at once. The
+// job's life is req.Timeout; ctx bounds only the start. A computer without
+// the capability reports "unsupported".
+func (m *Manager) ExecDetached(ctx context.Context, spec Spec, req ExecRequest) (DetachedJob, Handle, string, error) {
+	e, err := m.lookup(ctx, spec)
+	if err != nil {
+		return DetachedJob{}, Handle{}, "", err
+	}
+	comp, err := m.wake(ctx, spec, e)
+	if err != nil {
+		m.forget(spec)
+		return DetachedJob{}, e.h, "", err
+	}
+	d, ok := comp.(Detacher)
+	if !ok {
+		m.remember(identityKey(spec), e)
+		return DetachedJob{}, e.h, "", &Error{Code: "unsupported", Message: "this workspace cannot run a detached command"}
+	}
+	runID := m.runIDFor(e, comp)
+	job, err := d.ExecDetached(ctx, req, m.lim)
+	now := m.now()
+	e.runID, e.lastUsed = runID, now
+	m.remember(identityKey(spec), e)
+	if m.store != nil {
+		_ = m.store.Touch(ctx, ID(spec.Tenant, spec.Stack, spec.Name), now, runID, StatusRunning)
+	}
+	return job, e.h, runID, err
+}
+
 // Status reports the provider's view of the workspace.
 func (m *Manager) Status(ctx context.Context, spec Spec) (Status, error) {
 	e, err := m.lookup(ctx, spec)
 	if err != nil {
 		return Status{}, err
+	}
+	if isAttached(e) {
+		// The provider knows nothing of it. Connected or away is the
+		// attachment's own question (txco://attach/status).
+		return Status{State: ProviderAttached, LastUsed: e.lastUsed}, nil
 	}
 	return m.prov.Status(ctx, e.h)
 }

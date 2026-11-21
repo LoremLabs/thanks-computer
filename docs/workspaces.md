@@ -229,9 +229,37 @@ Codes: `timeout`, `provider`, `capacity`, `bad_request`, `not_allowed`,
 `unsupported_verb`. Top-level (not under `_txc`) so a rule can gate on it:
 `WHEN .workspace.error.code == "timeout"`.
 
+A workspace held by a machine that dialed in (see
+[attach](./advanced/protocols/attach.md)) adds two: `away`, the machine is
+not connected and nothing was delivered; and `unknown`, the request may
+have reached the machine and was not seen to end, so it may have run.
+
 The op is dropped — logged at ERROR, nothing merged — only on authoring
 errors: a malformed ref, a bad name, no provider configured, an
 untenanted request, or a malformed `secrets` block.
+
+## Leaving a command running: `detach`
+
+```txcl
+EXEC "workspace://tools/exec"
+  WITH command = "make all", detach = true, timeout = "2h", into = "build"
+```
+
+`detach = true` starts the command and answers at once:
+
+```json
+{ "build": { "detached": true, "job": "job_…", "started_at": "…" } }
+```
+
+The command runs on under a wrapper that does not depend on the chassis:
+it outlives a restart of the chassis, and the wrapper, not the chassis,
+ends it at its deadline. So `timeout` means something else here: it is the
+**job's life**, not how long the op waits, and it is required. Its output
+and exit are kept in the job's directory on the machine.
+
+Only a provider whose commands run on the chassis's own machine can
+detach: the local provider, and an attached machine. Elsewhere it answers
+`unsupported`. `stream` and `tty` cannot be combined with it.
 
 ## A TTY on exec
 

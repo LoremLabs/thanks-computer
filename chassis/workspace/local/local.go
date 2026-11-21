@@ -24,10 +24,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/workspace"
+	"github.com/loremlabs/thanks-computer/chassis/workspace/detach"
 )
 
 func init() {
@@ -43,6 +45,22 @@ func init() {
 type Provider struct {
 	root string
 	via  []string
+
+	jobsOnce sync.Once
+	jobs     *detach.Store
+	jobsErr  error
+}
+
+// jobsDir holds detached jobs under the root: <root>/.jobs/<job id>/. No
+// workspace can land on it, as none can on .stacks (dirFor).
+const jobsDir = ".jobs"
+
+// Jobs is the store of this provider's detached jobs, made on first use.
+func (p *Provider) Jobs() (*detach.Store, error) {
+	p.jobsOnce.Do(func() {
+		p.jobs, p.jobsErr = detach.New(filepath.Join(p.root, jobsDir), nil)
+	})
+	return p.jobs, p.jobsErr
 }
 
 // New creates (if needed) and resolves the root directory. Symlinks in the
@@ -132,7 +150,7 @@ func (p *Provider) Wake(_ context.Context, h workspace.Handle) (workspace.Comput
 		// Gone: the Manager recreates rather than wedging on a dead ref.
 		return nil, &workspace.Error{Code: workspace.CodeNotFound, Message: "workspace directory missing: " + h.Ref}
 	}
-	c := &computer{dir: h.Ref, trees: filepath.Join(p.root, treesDir)}
+	c := &computer{dir: h.Ref, trees: filepath.Join(p.root, treesDir), jobs: p.Jobs}
 	if len(p.via) > 0 {
 		// <root>/<tenant>/<stack>/<name…>: the handle's own path says whose
 		// machine the prefix should name.
@@ -192,6 +210,7 @@ type computer struct {
 	dir   string
 	trees string   // where stack trees are placed, shared by every workspace (tree.go)
 	via   []string // the command prefix for this workspace, placeholders filled; nil = run here
+	jobs  func() (*detach.Store, error)
 }
 
 // basePath is the only PATH a command sees unless the request sets its own.
@@ -278,6 +297,14 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 		argv, cwd, env = a, d, envFor(c.dir, tmp, req.Env)
 	}
 
+	return runCommand(ctx, argv, cwd, env, req, lim)
+}
+
+// runCommand runs one resolved command to its end, in a process group of
+// its own that is killed when ctx ends. It is the whole of an exec once the
+// argv, the directory and the environment are decided, shared by the two
+// ways of deciding them (this provider's, and the owner mode's).
+func runCommand(ctx context.Context, argv []string, cwd string, env []string, req workspace.ExecRequest, lim workspace.Limits) (workspace.ExecResult, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = env
@@ -311,6 +338,39 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 		WallMS:          time.Since(start).Milliseconds(),
 	}
 	return mapRunErr(ctx, cmd, runErr, res)
+}
+
+// ExecDetached implements workspace.Detacher: the command is started under
+// a wrapper in a session of its own and left running; the answer is its
+// job. Its life is req.Timeout, enforced by the wrapper, not by ctx.
+func (c *computer) ExecDetached(ctx context.Context, req workspace.ExecRequest, _ workspace.Limits) (workspace.DetachedJob, error) {
+	if len(c.via) > 0 {
+		return workspace.DetachedJob{}, errVia("detach")
+	}
+	if req.TTY || req.StdoutTo != nil {
+		return workspace.DetachedJob{}, &workspace.Error{Code: "bad_request", Message: "a detached exec has no terminal and no stream"}
+	}
+	if req.Timeout <= 0 {
+		return workspace.DetachedJob{}, &workspace.Error{Code: "bad_request", Message: "a detached exec needs a timeout: it is the job's life"}
+	}
+	argv, cwd, tmp, err := c.prepare(req)
+	if err != nil {
+		return workspace.DetachedJob{}, err
+	}
+	store, err := c.jobs()
+	if err != nil {
+		return workspace.DetachedJob{}, &workspace.Error{Code: "provider", Message: err.Error()}
+	}
+	job, err := store.Start(ctx, detach.Spec{
+		Argv:     argv,
+		Dir:      cwd,
+		Env:      envFor(c.dir, tmp, req.Env),
+		Deadline: time.Now().Add(req.Timeout),
+	}, req.Stdin)
+	if err != nil {
+		return workspace.DetachedJob{}, err
+	}
+	return workspace.DetachedJob{ID: job.ID, StartedAt: job.StartedAt}, nil
 }
 
 // prepare resolves a request's argv, working directory and tmp dir — the

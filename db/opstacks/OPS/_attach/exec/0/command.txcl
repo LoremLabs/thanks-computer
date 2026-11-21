@@ -1,0 +1,33 @@
+# _attach/exec scope 0 — run a command the other chassis asked for.
+#
+# This stack is what `txco attach` runs. A request comes down the link from
+# the chassis this machine is attached to, and the link hands it here as
+# data: the workspace exec that chassis's stack made, under @attach.req, and
+# the credential it came in under, at @attach.credential. Every request
+# enters this stack; nothing in a request can choose another.
+#
+# The exec below runs on THIS machine, through the owner workspace provider:
+# as you, with your environment, starting in the folder `txco attach <code>`
+# was run in. The workspace is named by the credential, which is how two
+# attached workspaces on one machine each get their own folder.
+#
+# What the link sends back is `.attach` (and `.workspace.error`, when the
+# exec could not run at all). Nothing else of this run leaves the machine.
+#
+# It is yours to change. Put a file of the same name under
+#   <txco home>/attach/OPS/_attach/exec/0/
+# to replace this rule, or one of another name, in this scope or another, to
+# add to it: a log line, a command policy, an environment. Only this stack
+# can run commands here.
+#
+# @ is sugar for ._txc.
+WHEN @src == "attach" && @attach.req.shell == true
+  WITH workspace = @attach.credential,
+       command   = @attach.req.command,
+       stdin     = @attach.req.stdin,
+       cwd       = @attach.req.cwd,
+       env       = @attach.req.env,
+       timeout   = @attach.req.timeout_ms,
+       detach    = @attach.req.detach,
+       into      = "attach"
+  EXEC "workspace://machine/exec"
