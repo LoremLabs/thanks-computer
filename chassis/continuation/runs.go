@@ -314,6 +314,9 @@ func opCreatedKey(runID, stage string, ordinal int, op string) string {
 func opAcceptedKey(runID, stage string, ordinal int, op string) string {
 	return opDir(runID, stage, ordinal, op) + "/op-accepted.json"
 }
+func opDispatchKey(runID, stage string, ordinal int, op string) string {
+	return opDir(runID, stage, ordinal, op) + "/dispatch.json"
+}
 func opTerminalKey(runID, stage string, ordinal int, op string) string {
 	return opDir(runID, stage, ordinal, op) + "/op-terminal.json"
 }
@@ -442,6 +445,26 @@ func (r *Runs) RecordAccepted(ctx context.Context, runID, stage string, ordinal 
 		"worker_job_id": workerJobID,
 		"accepted_at":   time.Now().UTC(),
 	}))
+}
+
+// RecordDispatch stores what the chassis itself knows about where it sent an
+// async op, for whoever records that op's terminal later, on whatever node:
+// the place its result belongs in the envelope, and who may deliver it.
+// Written once, BEFORE the op is dispatched, so it is there before any
+// result can arrive. It is the chassis's own record; nothing a worker sends
+// is ever read into it.
+func (r *Runs) RecordDispatch(ctx context.Context, runID, stage string, ordinal int, op string, doc any) error {
+	return ignoreExists(r.createJSON(ctx, opDispatchKey(runID, stage, ordinal, op), doc))
+}
+
+// ReadDispatch reads an op's dispatch record into doc. ErrNotFound when the
+// op was never dispatched that way.
+func (r *Runs) ReadDispatch(ctx context.Context, runID, stage string, ordinal int, op string, doc any) error {
+	b, _, err := r.s.Get(ctx, opDispatchKey(runID, stage, ordinal, op))
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, doc)
 }
 
 // RecordTerminal writes the op's result blob then the create-if-absent

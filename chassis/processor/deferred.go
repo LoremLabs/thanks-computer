@@ -87,7 +87,9 @@ func (pu *Unit) dispatchDeferred(ctx context.Context, raw, stage string, ops []o
 	var deferred []operation.Operation
 	remaining := make([]operation.Operation, 0, len(ops))
 	for _, op := range ops {
-		if j, ok := opJoinAtScope(op); ok && isAsyncOp(op) && j > curScope {
+		// A workspace async op is never deferred: its dispatch is the
+		// barrier's (workspace_async.go), and a join is not offered for it.
+		if j, ok := opJoinAtScope(op); ok && isAsyncOp(op) && !isWorkspaceAsyncOp(op) && j > curScope {
 			deferred = append(deferred, op)
 		} else {
 			remaining = append(remaining, op)
@@ -430,7 +432,13 @@ func (pu *Unit) DriveDeferredResume(runID, stage string) {
 	if cerr != nil || !won {
 		return
 	}
+	pu.runClaimedResume(runID, stage)
+}
 
+// runClaimedResume resumes a stage whose resume the caller has just claimed,
+// on a fresh background context, with its resume trace.
+func (pu *Unit) runClaimedResume(runID, stage string) {
+	bg := context.Background()
 	bg, tracer, runTenant := pu.BeginResumeTrace(bg, pu.Sink, runID, stage, ResumeTraceOptions{})
 	rerr := pu.Resume(bg, runID, stage)
 	if tracer != nil {

@@ -71,7 +71,10 @@ all); a slow one promotes, and the resumed flow runs the rest of the
 pipeline with no inlet clock. `mode = "async"` stays HTTP-shaped
 deliberately: async *is* the worker-callback contract (202 ack +
 `callback_url` + single-use token), which only an external worker that
-speaks it can honor. On transports where the timer can't plausibly win
+speaks it can honor. An [attached machine](./advanced/protocols/attach.md#long-commands-mode--async)
+is one such worker: `workspace://…/exec WITH mode = "async"` hands it the
+command with the same single-use token, and the machine's own link carries
+the result back in place of a callback URL. On transports where the timer can't plausibly win
 (a sub-millisecond `txco://` op), continuable is pointless but legal —
 the op just always completes synchronously. One transport-specific
 caveat: a `compute://` error under continuable records a failed

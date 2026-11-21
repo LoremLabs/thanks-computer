@@ -618,3 +618,115 @@ func TestOversizeOutputIsCutAgainByTheChassis(t *testing.T) {
 		t.Fatalf("stdout %d bytes truncated=%v, stderr %q truncated=%v", len(res.Stdout), res.StdoutTruncated, res.Stderr, res.StderrTruncated)
 	}
 }
+
+// An async exec goes down as a DETACHED request carrying the op's
+// continuation, and is answered at once with the job the machine started.
+func TestExecAsyncHandsOverTheContinuation(t *testing.T) {
+	r := newRig(t)
+	cred, key := r.enroll(testSpec)
+	got := make(chan Header, 4)
+	answer := ExecReply{Job: "job_0123456789abcdef0123456789abcdef"}
+	r.mustConnect(cred, key, handlerFunc{request: func(_ context.Context, h Header) Reply {
+		got <- h
+		b, _ := json.Marshal(answer)
+		return Reply{OK: true, Payload: b}
+	}})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	comp, err := r.svc.Wake(ctx, testSpec, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad, ok := comp.(workspace.AsyncDispatcher)
+	if !ok {
+		t.Fatal("an attached computer takes no async execs")
+	}
+	req := workspace.ExecRequest{Command: "make all", Cwd: "sub", Timeout: 59 * time.Minute}
+	ticket := workspace.AsyncTicket{OPC: "opc_1", Token: "tok_1"}
+
+	job, _, started, err := ad.ExecAsync(ctx, req, workspace.Limits{}, ticket)
+	if err != nil || !started || job != answer.Job {
+		t.Fatalf("job %q started %v err %v", job, started, err)
+	}
+	h := <-got
+	var p ExecPayload
+	_ = json.Unmarshal(h.Payload, &p)
+	if h.OPC != "opc_1" || h.Token != "tok_1" || !p.Detach || p.Command != "make all" || p.Cwd != "sub" ||
+		p.TimeoutMS != (59*time.Minute).Milliseconds() {
+		t.Fatalf("header %+v payload %+v", h, p)
+	}
+	// The request's own deadline is the handoff's, not the command's life.
+	if h.Deadline.IsZero() || time.Until(h.Deadline) > 10*time.Second {
+		t.Fatalf("request deadline = %s", h.Deadline)
+	}
+
+	// The machine's own stack ran it in place: the answer is the result.
+	answer = ExecReply{Exit: 4, Stdout: "in place"}
+	job, res, started, err := ad.ExecAsync(ctx, req, workspace.Limits{}, ticket)
+	if err != nil || started || job != "" || res.Exit != 4 || string(res.Stdout) != "in place" {
+		t.Fatalf("job %q started %v res %+v err %v", job, started, res, err)
+	}
+	// A job id that is not one is refused, not passed on.
+	answer = ExecReply{Job: "../../etc"}
+	if _, _, started, err := ad.ExecAsync(ctx, req, workspace.Limits{}, ticket); started || code(err) != "provider" {
+		t.Fatalf("a malformed job id: started %v, %v", started, err)
+	}
+	// Without a life or a continuation there is nothing to hand over.
+	if _, _, _, err := ad.ExecAsync(ctx, workspace.ExecRequest{Command: "x"}, workspace.Limits{}, ticket); code(err) != "bad_request" {
+		t.Fatalf("no life: %v", err)
+	}
+	if _, _, _, err := ad.ExecAsync(ctx, req, workspace.Limits{}, workspace.AsyncTicket{}); code(err) != "bad_request" {
+		t.Fatalf("no continuation: %v", err)
+	}
+}
+
+func TestExecAsyncAwayAndUnknown(t *testing.T) {
+	r := newRig(t)
+	cred, key := r.enroll(testSpec)
+	ticket := workspace.AsyncTicket{OPC: "opc_1", Token: "tok_1"}
+	req := workspace.ExecRequest{Command: "x", Timeout: time.Hour}
+
+	// Nobody connected: the Manager would not get this far, but the claim
+	// may lapse between its read and ours.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	m := r.mustConnect(cred, key, handlerFunc{request: func(context.Context, Header) Reply {
+		<-release // never answers in time
+		return Reply{OK: true}
+	}})
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	comp, err := r.svc.Wake(ctx, testSpec, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, started, err := comp.(workspace.AsyncDispatcher).ExecAsync(ctx, req, workspace.Limits{}, ticket); started || code(err) != workspace.CodeUnknown {
+		t.Fatalf("an unanswered handoff: started %v, %v, want unknown", started, err)
+	}
+	m.cancel()
+	<-m.hubErr
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if _, _, started, err := comp.(workspace.AsyncDispatcher).ExecAsync(ctx2, req, workspace.Limits{}, ticket); started || code(err) != workspace.CodeAway {
+		t.Fatalf("a handoff to a machine that left: started %v, %v, want away", started, err)
+	}
+}
+
+func TestAsyncResultOf(t *testing.T) {
+	lim := workspace.Limits{MaxOutputBytes: 10}
+	b, _ := json.Marshal(ExecReply{Exit: 3, Stdout: strings.Repeat("x", 50), Stderr: "e", WallMS: 12, Job: "job_x", Stopped: true})
+	res, err := AsyncResultOf(b, lim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Result.Exit != 3 || len(res.Result.Stdout) != 10 || !res.Result.StdoutTruncated || !res.Stopped || res.Job != "job_x" || res.ErrCode != "" {
+		t.Fatalf("result = %+v", res)
+	}
+	b, _ = json.Marshal(ExecReply{Exit: -1, Error: &WireError{Code: "timeout", Message: "out of time"}})
+	if res, err := AsyncResultOf(b, lim); err != nil || res.ErrCode != "timeout" || res.ErrMessage != "out of time" {
+		t.Fatalf("an error result = %+v, %v", res, err)
+	}
+	if _, err := AsyncResultOf(json.RawMessage(`"not an object"`), lim); code(err) != "bad_request" {
+		t.Fatalf("a malformed payload: %v", err)
+	}
+}

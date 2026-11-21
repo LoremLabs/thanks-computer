@@ -148,6 +148,59 @@ A command that simply runs out of time is `timeout`, as on any workspace:
 the machine ends it and says so. `stream`, `tty`, `attach`, `connect`,
 `checkpoint` and `sleep` answer `unsupported` on an attached workspace.
 
+## Long commands: `mode = "async"`
+
+A laptop sleeps, and a connection drops. A command that takes an hour
+should not need either to hold.
+
+```txcl
+EXEC "workspace://computer/rain/exec"
+  WITH command = "make all", mode = "async", max_duration = "1h", into = "build"
+```
+
+The run **suspends** at this op, durably, as any async op does. The
+machine starts the command detached and answers at once. Nothing is held
+open while it runs. When it ends, the machine sends the result up its
+link, on whatever connection it then has, and the run resumes with the
+result under `into`, shaped exactly like a held exec's.
+
+- **`max_duration` is required.** It is the command's life and the run's
+  expiry. The machine ends the command a little before it, so that a
+  connected machine reports `timeout` before the run expires.
+- **`timeout` bounds only the handoff** to the machine, 30 s by default.
+- **The command outlives `txco attach`.** It runs under a wrapper that
+  does not depend on it. Stop `txco attach`, even with `kill -9`, and the
+  command runs on, its exit kept on disk; the next `txco attach` sends it.
+- **A failure is data.** A command that fails, runs out of time
+  (`timeout`) or could not be delivered (`away`) resumes the run with
+  `workspace.error`, so the scopes after it decide what to do.
+- **A handoff that was not confirmed is left open.** The command may be
+  running. Its own report settles the op when it arrives, and the run's
+  expiry does if it never does.
+- **A machine that never comes back** never reports. The run expires at
+  `max_duration`; a stack that must act on that keeps a deadline of its
+  own.
+- **Not with `secrets`, `grant`, `stream` or `tty`.** The result arrives
+  on a later request, where a secret's value is no longer there to redact
+  from it.
+
+`mode = "async"` needs a workspace whose machine reports a command's end
+itself, which today means an attached one. On any other workspace it
+answers `unsupported`; use `mode = "continuable"` there. A stack that
+serves both picks the mode with the workspace:
+
+```txcl
+WHEN .on_attached == true
+  WITH workspace = .workspace, command = .command,
+       mode = "async", max_duration = "1h", into = "build"
+  EXEC "workspace://pony/exec"
+
+WHEN .on_attached != true
+  WITH workspace = .workspace, command = .command,
+       mode = "continuable", timeout = "30m", into = "build"
+  EXEC "workspace://pony/exec"
+```
+
 ## Ending it
 
 - **`txco://attach/revoke`** takes effect at the very next request: the

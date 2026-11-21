@@ -1873,6 +1873,19 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 	if pu.Workspaces != nil && deps.Attach != nil && workspaceStore != nil && kv != nil {
 		attachSvc = attached.NewService(deps.Attach, attached.NewClaims(kvstore.New(kv, 0, 0)), resolveUsageNodeID(conf.Fqdn))
 		attachSvc.PublicURL = conf.AttachPublicURL
+		// The end of a command an async workspace op started, as its
+		// machine reports it up the link. The machine's payload is read
+		// into typed fields here and goes no further as JSON; the processor
+		// decides whether this machine may deliver it and builds the op's
+		// result itself (processor/workspace_async.go).
+		attachLim := workspace.Limits{MaxOutputBytes: int64(conf.WorkspaceMaxOutputBytes)}
+		attachSvc.Hub.Complete = func(ctx context.Context, cred *attached.Credential, opc, token string, raw json.RawMessage) error {
+			res, err := attached.AsyncResultOf(raw, attachLim)
+			if err != nil {
+				return err
+			}
+			return pu.CompleteWorkspaceAsync(ctx, cred.Tenant, cred.WorkspaceID, cred.ID, opc, token, res)
+		}
 		pu.Workspaces.SetAttached(attachSvc)
 	}
 	registerAttachOps(pu, attachDeps{svc: attachSvc})

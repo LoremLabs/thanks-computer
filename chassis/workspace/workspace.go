@@ -241,6 +241,42 @@ type Detacher interface {
 	ExecDetached(ctx context.Context, req ExecRequest, lim Limits) (DetachedJob, error)
 }
 
+// AsyncTicket names the suspended op an async exec belongs to: the op's
+// continuation, and the token that authorizes recording its result. Both
+// are the chassis's own; a computer carries them and hands them back.
+type AsyncTicket struct {
+	OPC   string
+	Token string
+}
+
+// AsyncDispatcher is the optional capability behind `exec WITH mode =
+// "async"`, implemented by a woken Computer whose command runs somewhere
+// that can report its end later, by itself (an attached machine). ExecAsync
+// hands the command over and returns at once, one of three ways:
+//
+//   - started: the command is running there as job; its result will arrive
+//     for the ticket, whenever it ends;
+//   - not started, no error: the computer ran it in place, and res is the
+//     whole result;
+//   - an error. CodeUnknown means the command MAY have been started: the
+//     caller records nothing and waits, since a result may yet arrive.
+//
+// req.Timeout is the command's life there. ctx bounds only the handoff.
+type AsyncDispatcher interface {
+	ExecAsync(ctx context.Context, req ExecRequest, lim Limits, t AsyncTicket) (job string, res ExecResult, started bool, err error)
+}
+
+// AsyncResult is the end of a command started by AsyncDispatcher, as its
+// computer reported it. Either Result holds, or ErrCode says why there is
+// none.
+type AsyncResult struct {
+	Result     ExecResult
+	Job        string
+	Stopped    bool
+	ErrCode    string
+	ErrMessage string
+}
+
 // DetachedJob names a command left running by Detacher.
 type DetachedJob struct {
 	ID        string
@@ -1143,6 +1179,36 @@ func (m *Manager) Destroy(ctx context.Context, spec Spec) error {
 		_ = m.store.MarkDestroyed(ctx, ID(spec.Tenant, spec.Stack, spec.Name), m.now())
 	}
 	return derr
+}
+
+// ExecAsync hands req to the workspace spec names for an async op: lookup,
+// wake, hand over, record. See AsyncDispatcher for the three answers. A
+// computer without the capability reports "unsupported".
+func (m *Manager) ExecAsync(ctx context.Context, spec Spec, req ExecRequest, t AsyncTicket) (job string, res ExecResult, started bool, h Handle, runID string, err error) {
+	e, err := m.lookup(ctx, spec)
+	if err != nil {
+		return "", ExecResult{Exit: -1}, false, Handle{}, "", err
+	}
+	comp, err := m.wake(ctx, spec, e)
+	if err != nil {
+		m.forget(spec)
+		return "", ExecResult{Exit: -1}, false, e.h, "", err
+	}
+	ad, ok := comp.(AsyncDispatcher)
+	if !ok {
+		m.remember(identityKey(spec), e)
+		return "", ExecResult{Exit: -1}, false, e.h, "", &Error{Code: "unsupported",
+			Message: `mode = "async" needs a workspace whose machine reports a command's end itself (an attached machine); use mode = "continuable" here`}
+	}
+	runID = m.runIDFor(e, comp)
+	job, res, started, err = ad.ExecAsync(ctx, req, m.lim, t)
+	now := m.now()
+	e.runID, e.lastUsed = runID, now
+	m.remember(identityKey(spec), e)
+	if m.store != nil {
+		_ = m.store.Touch(ctx, ID(spec.Tenant, spec.Stack, spec.Name), now, runID, StatusRunning)
+	}
+	return job, res, started, e.h, runID, err
 }
 
 // ExecDetached starts req in the workspace spec names and leaves it running

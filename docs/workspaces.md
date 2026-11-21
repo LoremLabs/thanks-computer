@@ -261,6 +261,15 @@ Only a provider whose commands run on the chassis's own machine can
 detach: the local provider, and an attached machine. Elsewhere it answers
 `unsupported`. `stream` and `tty` cannot be combined with it.
 
+## A command longer than a connection: `mode = "async"`
+
+`exec WITH mode = "async", max_duration = "1h"` suspends the run and hands
+the command to its machine, which reports the result itself when the
+command ends; nothing is held open in between. It needs a machine that can
+do that — an [attached](./advanced/protocols/attach.md#long-commands-mode--async)
+one — and answers `unsupported` anywhere else, where `mode =
+"continuable"` is the way to outlast a request.
+
 ## A TTY on exec
 
 `WITH tty = true` runs the command with a pseudo-terminal instead of pipes.

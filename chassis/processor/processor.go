@@ -1930,6 +1930,10 @@ func (pu *Unit) advanceAfterScope(
 //     itself in a background goroutine and writes the terminal
 //     directly — no worker, no callback URL needed. isLocalAsyncOp
 //     distinguishes the two so the dispatch path can branch.
+//   - Workspace async: workspace://<name>/exec. The command is handed to
+//     a machine that reports its end itself (an attached machine); the
+//     node holding that machine's link records the result. See
+//     isWorkspaceAsyncOp and workspace_async.go.
 func isAsyncOp(op operation.Operation) bool {
 	if op.Resonator == nil {
 		return false
@@ -1941,7 +1945,21 @@ func isAsyncOp(op operation.Operation) bool {
 	return strings.HasPrefix(ex, "http://") ||
 		strings.HasPrefix(ex, "https://") ||
 		strings.HasPrefix(ex, "mcp+http://") ||
-		strings.HasPrefix(ex, "mcp+https://")
+		strings.HasPrefix(ex, "mcp+https://") ||
+		isWorkspaceExec(ex)
+}
+
+// isWorkspaceExec reports whether ref is a workspace exec: the one
+// workspace verb that can run async.
+func isWorkspaceExec(ref string) bool {
+	return strings.HasPrefix(ref, "workspace://") && strings.HasSuffix(ref, "/exec")
+}
+
+// isWorkspaceAsyncOp reports whether op is `workspace://…/exec WITH mode =
+// "async"`: an async op with a dispatch of its own (neither a worker's
+// callback nor a goroutine here).
+func isWorkspaceAsyncOp(op operation.Operation) bool {
+	return isAsyncOp(op) && isWorkspaceExec(op.Resonator.Exec)
 }
 
 // isLocalAsyncOp reports whether op runs in a chassis-internal
@@ -2395,6 +2413,11 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 	// Only now dispatch. Every durable record exists, so a worker that
 	// calls back immediately (even before the 202 below) resolves fine.
 	var wg sync.WaitGroup
+	// settled counts async ops whose terminal was recorded during dispatch
+	// itself (a workspace exec that could not be handed over, or was run in
+	// place). No callback will ever arrive for those, so this function
+	// drives the resume itself once the 202 is out.
+	var settled atomic.Int32
 	for ordinal, idx := range order {
 		op := ops[idx]
 		name := opIdentity(op)
@@ -2414,6 +2437,16 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 		wg.Add(1)
 		go func(ordinal int, op operation.Operation, name string, async bool) {
 			defer wg.Done()
+			// A workspace async op has a dispatch of its own, with its own
+			// reading of WITH timeout (it bounds only the handoff), so it
+			// branches off before the checks below.
+			if async && isWorkspaceAsyncOp(op) {
+				cr := creds[ordinal]
+				if pu.dispatchWorkspaceAsync(ctx, op, runID, cstage, ordinal, name, cr.opc, cr.token) {
+					settled.Add(1)
+				}
+				return
+			}
 			timeout, over := pu.opMetaTimeout(op)
 			if over {
 				pu.Logger.Error("op timeout exceeds op-timeout-max; failing op",
@@ -2508,11 +2541,29 @@ func (pu *Unit) suspendBarrierScope(ctx context.Context, raw string, ops []opera
 	// forward).
 	if resuming {
 		pu.emitResumeSegmentUsage(ctx, raw, runID)
+		pu.resumeSettled(settled.Load(), runID, cstage)
 		return nil
 	}
 
 	pu.emitContinuation202(ctx, raw, rcid, resCh)
+	pu.resumeSettled(settled.Load(), runID, cstage)
 	return nil
+}
+
+// resumeSettled drives a stage's resume when dispatch itself recorded the
+// terminal of one of its async ops: no worker will call back for that op,
+// so nothing else would. In the background, on its own context — the
+// request's ends with the 202. ClaimResume has one winner, so a callback
+// for a sibling op that lands at the same moment is harmless.
+func (pu *Unit) resumeSettled(n int32, runID, stage string) {
+	if n == 0 {
+		return
+	}
+	endWork := pu.Work.Begin()
+	go func() {
+		defer endWork()
+		pu.DriveDeferredResume(runID, stage)
+	}()
 }
 
 // streamOpen reports whether the HTTP response is already streaming: a body

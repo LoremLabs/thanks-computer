@@ -196,6 +196,58 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 			}
 			grantScrub = vals
 		}
+		// `WITH mode = "async"`, dispatched from a suspended barrier
+		// (workspace_async.go): the command is handed to its machine and
+		// this op ends at once. Its result arrives later, for the op's
+		// continuation, on whichever node then holds the machine's link.
+		if ad := workspaceAsyncFrom(ctx); ad != nil {
+			switch {
+			case streamed || req.TTY:
+				return workspaceFailure(into, prov, "", "bad_request",
+					`mode = "async" cannot be combined with stream or tty: nothing stays to read the output`, 0), nil
+			case len(refs) > 0 || grant.Exists():
+				// The result arrives on another request, perhaps another
+				// node, where these values are not there to redact from it.
+				return workspaceFailure(into, prov, "", "bad_request",
+					`mode = "async" cannot be combined with secrets or grant: their values could not be redacted from a result that arrives later`, 0), nil
+			case gjson.Get(op.Meta, "detach").Bool():
+				return workspaceFailure(into, prov, "", "bad_request",
+					`mode = "async" already leaves the command running; drop WITH detach`, 0), nil
+			}
+			req.Timeout = ad.life
+			// Written BEFORE the handoff, so it is there before any result
+			// can arrive: where the result belongs, and who may deliver it.
+			if err := ad.record(workspaceDispatch{
+				Into: into, Tenant: tenant,
+				WorkspaceID:  workspace.ID(spec.Tenant, spec.Stack, spec.Name),
+				DispatchedAt: time.Now().UTC(),
+			}); err != nil {
+				return workspaceFailure(into, prov, "", "provider", "could not record the dispatch: "+err.Error(), 0), nil
+			}
+			start := time.Now()
+			job, res, started, h, runID, err := pu.Workspaces.ExecAsync(ctx, spec, req, workspace.AsyncTicket{OPC: ad.opc, Token: ad.token})
+			if h.Provider != "" {
+				prov = h.Provider
+			}
+			wall := time.Since(start).Milliseconds()
+			switch {
+			case err != nil && workspaceErrorCode(err) == workspace.CodeUnknown:
+				// It may have started. Nothing is recorded: the machine's own
+				// report settles it, or the run's expiry does.
+				ad.pending = true
+				return event.Payload{Raw: `{}`, Type: event.JSON}, nil
+			case err != nil:
+				return workspaceFailure(into, prov, h.Ref, workspaceErrorCode(err), err.Error(), wall), nil
+			case started:
+				ad.started, ad.job = true, job
+				return event.Payload{Raw: `{}`, Type: event.JSON}, nil
+			default:
+				// The machine's own stack ran it in place: this is the result.
+				pu.workspaceAccount(ctx, rid, tenant, opID, wall, nil, len(req.Stdin), len(res.Stdout)+len(res.Stderr))
+				return workspaceSuccess(into, prov, h.Ref, runID, res, wall, false), nil
+			}
+		}
+
 		// `WITH detach = true`: start the command and leave it running; the
 		// answer is its job, at once. Nothing waits for it here, so WITH
 		// timeout is not how long this op may take — it is the job's own

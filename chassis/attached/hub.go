@@ -82,8 +82,15 @@ func (c *hubConn) close(reason string) {
 	c.closeOnce.Do(func() {
 		c.reason = reason
 		if st, err := c.sess.OpenStream(); err == nil {
-			_ = st.SetDeadline(time.Now().Add(time.Second))
-			_ = writeMsg(st, Header{Kind: KindBye, Reason: reason})
+			// Wait, briefly, for the machine to say it read the reason. A
+			// session closed right behind the message can end the machine's
+			// accept loop before it has taken the stream, and a machine that
+			// never learns it was replaced or revoked would dial again.
+			_ = st.SetDeadline(time.Now().Add(2 * time.Second))
+			if writeMsg(st, Header{Kind: KindBye, Reason: reason}) == nil {
+				var ack Reply
+				_ = newMsgReader(st).read(&ack)
+			}
 			_ = st.Close()
 		}
 		_ = c.sess.Close()

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/loremlabs/thanks-computer/chassis/workspace"
+	"github.com/loremlabs/thanks-computer/chassis/workspace/detach"
 )
 
 // Service is attach as the rest of the chassis sees it: the answer for
@@ -291,6 +292,86 @@ func (c *computer) Exec(ctx context.Context, req workspace.ExecRequest, lim work
 		res.WallMS = time.Since(start).Milliseconds()
 	}
 	return res, err
+}
+
+// ExecAsync implements workspace.AsyncDispatcher: the command is started
+// DETACHED on the machine, which is handed the op's continuation and sends
+// the result for it when the command ends, on whatever connection it then
+// has. Nothing is held open here.
+func (c *computer) ExecAsync(ctx context.Context, req workspace.ExecRequest, lim workspace.Limits, t workspace.AsyncTicket) (string, workspace.ExecResult, bool, error) {
+	fail := func(err error) (string, workspace.ExecResult, bool, error) {
+		return "", workspace.ExecResult{Exit: -1}, false, err
+	}
+	if req.TTY || req.StdoutTo != nil || req.Tree != nil {
+		return fail(&workspace.Error{Code: "unsupported", Message: "an async exec on an attached workspace has no terminal, no streamed output and no stack tree"})
+	}
+	if req.Timeout <= 0 {
+		return fail(&workspace.Error{Code: "bad_request", Message: "an async exec needs the command's life (max_duration)"})
+	}
+	if t.OPC == "" || t.Token == "" {
+		return fail(&workspace.Error{Code: "bad_request", Message: "an async exec needs its continuation"})
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fail(&workspace.Error{Code: "bad_request", Message: "an async exec's handoff needs a deadline"})
+	}
+	payload, err := json.Marshal(ExecPayload{
+		Command: req.Command, Args: req.Args, Stdin: req.Stdin, Cwd: req.Cwd, Env: req.Env,
+		TimeoutMS: req.Timeout.Milliseconds(), Detach: true,
+	})
+	if err != nil {
+		return fail(&workspace.Error{Code: "bad_request", Message: err.Error()})
+	}
+	id, err := randomID("req_")
+	if err != nil {
+		return fail(&workspace.Error{Code: "provider", Message: err.Error()})
+	}
+	rep, err := c.svc.send(ctx, c.tenant, c.wid, Header{
+		Kind: KindRequest, ID: id, Deadline: deadline.Add(-replyMargin(time.Until(deadline))),
+		OPC: t.OPC, Token: t.Token, Payload: payload,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	job, res, err := asyncReplyOf(rep, lim)
+	return job, res, job != "", err
+}
+
+// asyncReplyOf reads the machine's answer to an async request: the job it
+// started, or — when its own stack ran the command in place — the result.
+func asyncReplyOf(rep Reply, lim workspace.Limits) (string, workspace.ExecResult, error) {
+	if rep.OK {
+		var er ExecReply
+		if json.Unmarshal(rep.Payload, &er) == nil && er.Error == nil && er.Job != "" {
+			if !detach.ValidID(er.Job) {
+				return "", workspace.ExecResult{Exit: -1}, &workspace.Error{Code: "provider", Message: "the machine named a job this chassis cannot accept"}
+			}
+			return er.Job, workspace.ExecResult{}, nil
+		}
+	}
+	res, err := resultOf(rep, lim)
+	return "", res, err
+}
+
+// AsyncResultOf reads a completion's payload — a machine's word for how a
+// detached job ended — into typed fields, cut to the chassis's own output
+// caps. Nothing of the payload is kept as JSON: what a machine supplies is
+// two strings, an exit code and a few flags.
+func AsyncResultOf(raw json.RawMessage, lim workspace.Limits) (workspace.AsyncResult, error) {
+	var er ExecReply
+	if err := json.Unmarshal(raw, &er); err != nil {
+		return workspace.AsyncResult{}, &workspace.Error{Code: "bad_request", Message: "the completion is not an exec result"}
+	}
+	out := workspace.AsyncResult{Job: er.Job, Stopped: er.Stopped}
+	if er.Error != nil {
+		out.ErrCode, out.ErrMessage = er.Error.Code, er.Error.Message
+		out.Result = workspace.ExecResult{Exit: -1, WallMS: er.WallMS}
+		return out, nil
+	}
+	b, _ := json.Marshal(er)
+	res, err := resultOf(Reply{OK: true, Payload: b}, lim)
+	out.Result = res
+	return out, err
 }
 
 // resultOf turns a machine's reply into an exec's result. The machine's

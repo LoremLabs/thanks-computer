@@ -78,6 +78,7 @@ func (l *Link) Run(ctx context.Context, rw io.ReadWriteCloser) error {
 	if err != nil {
 		return err
 	}
+	parent := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // ends every request this connection was running
 
@@ -117,8 +118,8 @@ func (l *Link) Run(ctx context.Context, rw io.ReadWriteCloser) error {
 			if reason != "" {
 				return &Refused{Reason: reason}
 			}
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if parent.Err() != nil {
+				return parent.Err()
 			}
 			return err
 		}
@@ -178,6 +179,7 @@ func (l *Link) serve(ctx context.Context, st *yamux.Stream) (bye string) {
 	}
 	switch h.Kind {
 	case KindBye:
+		_ = writeMsg(st, Reply{OK: true})
 		return h.Reason
 	case KindRequest:
 		_ = writeMsg(st, l.request(ctx, h))
