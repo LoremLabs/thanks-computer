@@ -102,9 +102,18 @@ func (pu *Unit) ExecWorkspace(ctx context.Context, op operation.Operation) (even
 	// attached machine, only the chassis's own `_attach` stack runs commands.
 	// The tenant asked about is the request's PINNED one, never a field of
 	// the envelope.
-	if g, ok := pu.Workspaces.Provider().(workspace.TenantGate); ok && !g.ServesTenant(tenant) {
+	gate, gated := pu.Workspaces.Provider().(workspace.TenantGate)
+	if gated && !gate.ServesTenant(tenant) {
 		return workspaceFailure(into, prov, "", "not_allowed",
 			"this chassis's workspace provider does not run commands for this stack", 0), nil
+	}
+	// The other way round: the `_attach` stack runs what an attached machine
+	// is sent, and it is built into every chassis. It may use a provider
+	// only where that provider says it serves it — the machine owner's. On
+	// a chassis whose provider makes machines for tenants, it runs nothing.
+	if tenant == workspace.AttachTenant && !gated {
+		return workspaceFailure(into, prov, "", "not_allowed",
+			"the _attach stack runs commands only on an attached machine", 0), nil
 	}
 
 	// `WITH grant` hands a run grant to ONE command, and `WITH sandbox` says

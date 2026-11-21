@@ -41,7 +41,7 @@ func init() {
 const OwnerName = "owner"
 
 // OwnerTenant is the one tenant the owner provider serves.
-const OwnerTenant = "_attach"
+const OwnerTenant = workspace.AttachTenant
 
 // Environment variables every owner-mode command is given, set last.
 const (

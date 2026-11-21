@@ -220,6 +220,15 @@ type Starter interface {
 	Start(ctx context.Context, req ExecRequest, lim Limits) (ExecSession, error)
 }
 
+// AttachTenant is the system tenant whose stack runs the commands an
+// attached machine is sent (`txco attach`). It exists in every chassis,
+// because system stacks are built in, but it means something only where
+// the workspace provider is the machine owner's: the processor lets it run
+// a command through a provider that names it in TenantGate, and through no
+// other. On a fleet, whose provider makes machines, `_attach` can run
+// nothing.
+const AttachTenant = "_attach"
+
 // TenantGate is the optional capability of a Provider that serves only
 // some tenants. The processor asks before any verb, with the request's
 // PINNED tenant, and refuses the rest as not_allowed. The owner provider on

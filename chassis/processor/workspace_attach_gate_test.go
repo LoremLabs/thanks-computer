@@ -67,6 +67,34 @@ func TestExecWorkspaceTenantGate(t *testing.T) {
 	}
 }
 
+// The `_attach` stack is built into every chassis. Where the provider is not
+// the machine owner's — a fleet's, which makes machines for tenants — it can
+// run nothing through it, whatever reached it and however.
+func TestAttachTenantRunsNothingOnAnOrdinaryProvider(t *testing.T) {
+	stub := &stubProvider{res: workspace.ExecResult{Exit: 0, Stdout: []byte("ran")}}
+	pu, _ := newTestUnit(t)
+	pu.Workspaces = workspace.NewManager(stub, workspace.Limits{}, nil)
+	ctx := WithTenant(context.Background(), workspace.AttachTenant)
+	for _, ref := range []string{"workspace://machine/exec", "workspace://machine/wake", "workspace://machine/destroy"} {
+		pl, err := pu.ExecWorkspace(ctx, workspaceOp(ref, `{"command":"id"}`))
+		if err != nil {
+			t.Fatalf("%s: %v", ref, err)
+		}
+		if got := gjson.Get(pl.Raw, "workspace.error.code").String(); got != "not_allowed" {
+			t.Errorf("%s as _attach on an ordinary provider: %s", ref, pl.Raw)
+		}
+	}
+	if stub.execs.Load() != 0 || stub.destroys.Load() != 0 {
+		t.Fatal("the _attach tenant reached an ordinary provider")
+	}
+	stub.mu.Lock()
+	created := stub.seenSpec.Name
+	stub.mu.Unlock()
+	if created != "" {
+		t.Fatalf("the _attach tenant had a workspace made for it: %q", created)
+	}
+}
+
 // `WITH detach = true` answers the job at once. WITH timeout is the job's
 // life, handed to the provider as such, and nothing waits on it here.
 func TestExecWorkspaceDetach(t *testing.T) {
