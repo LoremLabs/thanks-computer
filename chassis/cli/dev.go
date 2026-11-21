@@ -96,6 +96,7 @@ func runDev(args []string, stdout, stderr io.Writer) int {
 	tcpHead := fs.Bool("tcp", false, "start the TCP head (binds :5050; override with TXCO_TCP_LISTEN_ADDRS, e.g. 'irc=127.0.0.1:6697;self-signed' for a TLS/SNI listener). Disabled by default — most workflows only need web + cron + admin.")
 	dnsHead := fs.Bool("dns", false, "start the authoritative-DNS head with dev defaults: binds "+devDNSListenAddr+" (UDP+TCP) and pre-sets synthesis infra (nameservers ns1/ns2.localhost, edge 127.0.0.1, MX localhost) so a delegated zone resolves out of the box. Disabled by default. Override any of TXCO_DNS_NAMESERVERS/EDGE_IPS/MX_HOST.")
 	attachHead := fs.Bool("attach", false, "start the attach personality: the listener a machine dials with `txco attach <code>` to hold a workspace of this chassis. Disabled by default; listens on "+devAttachListenAddr+" unless TXCO_ATTACH_LISTEN_ADDRS names another. Needs a workspace provider (--allow-local-workspace).")
+	attachHost := fs.String("attach-host", "", "with --attach: serve the attach head on the web listener for this hostname instead of on a port of its own, as a fleet does (e.g. \"attach.localhost\"). Every web request for that host then goes to the attach head and to no stack.")
 	stateHead := fs.Bool("state", false, "start the state personality (the dispatcher behind txco://state/*; presents each committed transition into the tenant's _state stack). Disabled by default; the dev store lands at .txco/dev/state.db.")
 	grantHead := fs.Bool("grant", false, "start the grant personality: the Unix socket `txco sandbox` reaches the chassis on, so a program a command runs can open a sandbox itself. Disabled by default; without it a command holds only what `WITH sandbox` opened for it. Needs --allow-local-workspace to hand a grant to a command.")
 	scheduledHead := fs.Bool("scheduled", false, "start the scheduled personality (the durable-timer poller behind txco://schedule; fires due events into each tenant's _scheduled stack). Disabled by default; the dev store lands at .txco/dev/scheduled.db.")
@@ -308,7 +309,7 @@ Flags:
 			Heads: devHeads{
 				TCP: *tcpHead, DNS: *dnsHead, LMTP: *lmtpHead, Scheduled: *scheduledHead, Source: *sourceHead,
 				IMAP: *imapHead, Calendar: *calendarHead, Contacts: *contactsHead, WebDAV: *webdavHead,
-				Git: *gitHead, IPP: *ippHead, State: *stateHead, Grant: *grantHead, Attach: *attachHead,
+				Git: *gitHead, IPP: *ippHead, State: *stateHead, Grant: *grantHead, Attach: *attachHead, AttachHost: strings.TrimSpace(*attachHost),
 			},
 			AllowLocalWorkspace: *allowLocalWorkspace, LocalExec: *workspaceLocalExec, Verbose: *verbose,
 			Stdout: stdout, Stderr: stderr, Started: &started, Out: &chassisProc,
@@ -1181,6 +1182,9 @@ type devHeads struct {
 	Grant bool
 	// Attach is the listener a machine dials with `txco attach`.
 	Attach bool
+	// AttachHost, with Attach, mounts that head on the web listener for one
+	// hostname in place of a port of its own.
+	AttachHost string
 }
 
 // devAttachListenAddr is where the dev chassis's attach head listens.
@@ -1484,7 +1488,13 @@ func chassisEnv(o chassisOpts, a chassisAddrs, devDir, schemaDir string, parent 
 		// under .txco/dev could run past the 100 bytes a socket's path may be.
 		heads = append(heads, "grant")
 	}
-	if o.Heads.Attach {
+	if o.Heads.Attach && o.Heads.AttachHost != "" {
+		// Mounted on the web listener, by hostname: no port of its own. The
+		// code is answered with that host on the web head's own port.
+		heads = append(heads, "attach")
+		env = append(env, "TXCO_ATTACH_LISTEN_ADDRS=")
+		env = append(env, "TXCO_ATTACH_PUBLIC_URL=http://"+o.Heads.AttachHost+a.Web)
+	} else if o.Heads.Attach {
 		heads = append(heads, "attach")
 		addr := devAddr("TXCO_ATTACH_LISTEN_ADDRS", devAttachListenAddr)
 		env = append(env, "TXCO_ATTACH_LISTEN_ADDRS="+addr)

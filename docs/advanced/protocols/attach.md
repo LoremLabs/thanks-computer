@@ -227,18 +227,39 @@ WHEN .on_attached != true
 
 ## Running the head
 
-Off by default. Both must be set:
+Off by default: `attach` must be in `--personalities`. It is then served
+one of two ways.
 
-- `attach` in `--personalities`
-- `--attach-listen-addrs`, for example `:8090`
+**On the web head, with no port of its own.** Set `--attach-public-url`
+to the address machines dial, scheme and host, and leave
+`--attach-listen-addrs` empty:
 
-`--attach-public-url` is the address machines dial, scheme and host. It is
-appended to each code, as `<code>@<host>`, so the person pasting it does
-not have to know it. Put the listener behind the same edge as your other
-hosts; it speaks HTTP and upgrades to a WebSocket.
+```sh
+TXCO_PERSONALITIES=…,web,attach
+TXCO_ATTACH_PUBLIC_URL=https://attach.example.com
+```
 
-`txco dev --attach --allow-local-workspace` starts it on `:8090` for
-trying this on one machine.
+The web head then hands every request for exactly that hostname to the
+attach head, and no stack ever sees one. All it needs in front is the
+hostname pointing at your web head, as any other does. This is the shape
+for a fleet.
+
+**On a listener of its own.** Set `--attach-listen-addrs`, for example
+`:8090`. The head binds it and the web head is not involved. Use it to
+keep the head apart from web traffic, or where a hostname cannot tell the
+two apart.
+
+Either way `--attach-public-url` is appended to each code, as
+`<code>@<host>`, so the person pasting it does not have to know the
+address. The head speaks HTTP and upgrades one route to a WebSocket; put
+it behind the same edge as your other hosts.
+
+To try it on one machine:
+
+```sh
+txco dev --attach --allow-local-workspace                               # on :8090
+txco dev --attach --attach-host attach.localhost --allow-local-workspace   # on the web listener
+```
 
 ### More than one node
 

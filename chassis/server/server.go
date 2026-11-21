@@ -2951,6 +2951,15 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		webCtrl.MountHost(ippp.IsIPPHost, ippCtrl.Handler())
 	}
 
+	// attach: the head a machine dials with `txco attach`. With no listener
+	// of its own (--attach-listen-addrs empty) it is served by the web head
+	// on exactly the hostname of --attach-public-url, as ipp is on its own:
+	// no port, and no stack ever sees a request for that host.
+	attachCtrl := attachp.NewController(ctx, pu, attachSvc)
+	if host := attachCtrl.MountHost(); host != "" {
+		webCtrl.MountHost(attachp.MatchHost(host), attachCtrl.Handler())
+	}
+
 	// Bundled TLS: when --web-tls-addr is set the chassis terminates TLS
 	// itself, obtaining + renewing wildcard certs for delegated zones via
 	// in-process ACME DNS-01 against its OWN authoritative DNS head (the
@@ -3108,7 +3117,7 @@ func Start(ctx context.Context, conf config.Config, logger *zap.Logger, deps Dep
 		// attach: the listener a machine dials with `txco attach`. Off
 		// unless 'attach' is in --personalities AND --attach-listen-addrs
 		// is set.
-		attachp.NewController(ctx, pu, attachSvc),
+		attachCtrl,
 		// attachlink: this chassis as an attached machine. No listener: it
 		// dials out. Off unless 'attachlink' is in --personalities AND
 		// --attach-home is set, as `txco attach` sets them.
