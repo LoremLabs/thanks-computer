@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { tick } from 'svelte'
     import { COMPUTE_REF, getTrace, getTraceBody, traceRawUrl, type TraceResponse, type TraceStep } from '../lib/api'
     import { store } from '../lib/store.svelte'
     import Ago from './Ago.svelte'
@@ -31,6 +32,10 @@
     let fetched = $state<Record<string, { in?: unknown; out?: unknown }>>({})
     let fetching = $state<Record<string, 'loading' | 'unavailable'>>({})
     let modelCallsOnly = $state(false)
+    // The step the arrow keys move from: the last one opened or closed, by a
+    // click or a key.
+    let cursor = $state('')
+    const rowEls: Record<string, HTMLTableRowElement> = {}
 
     // Fetch when rid changes. Prefer the live-trace cache (populated
     // by TracesList as events arrive over /traces/stream) — this
@@ -44,6 +49,7 @@
         error = ''
         fetched = {}
         fetching = {}
+        cursor = ''
         const cached = store.getCachedTrace(target)
         if (cached) {
             trace = cached as unknown as TraceResponse
@@ -173,6 +179,7 @@
     }
 
     function toggleStep(key: string, s: TraceStep) {
+        cursor = key
         if (expandedStep[key]) {
             delete expandedStep[key]
         } else {
@@ -237,6 +244,37 @@
         orderedSteps.map((s, i) => ({ s, i })).filter(({ s }) => !modelCallsOnly || s.model),
     )
 
+    // ← and → step through the trace like a debugger: the open step moves to
+    // the previous or next row, which scrolls to the top of the view. From no
+    // step, → starts at the first row and ← at the last; the ends hold. With
+    // "show model calls" on, the steps are the model calls.
+    function onKeydown(e: KeyboardEvent) {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+        if (e.defaultPrevented || e.isComposing || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+        if (typingIn(e.target) || rows.length === 0) return
+        e.preventDefault()
+        const by = e.key === 'ArrowRight' ? 1 : -1
+        const at = rows.findIndex(({ s, i }) => stepKey(s, i) === cursor)
+        const n = at < 0 ? (by > 0 ? 0 : rows.length - 1) : Math.min(Math.max(at + by, 0), rows.length - 1)
+        stepTo(rows[n].s, rows[n].i)
+    }
+
+    function typingIn(t: EventTarget | null): boolean {
+        return t instanceof HTMLElement && (t.isContentEditable || !!t.closest('input, textarea, select'))
+    }
+
+    async function stepTo(s: TraceStep, i: number) {
+        const key = stepKey(s, i)
+        if (cursor && cursor !== key) delete expandedStep[cursor]
+        cursor = key
+        if (!expandedStep[key]) {
+            expandedStep[key] = true
+            loadBody(key, s)
+        }
+        await tick()
+        rowEls[key]?.scrollIntoView({ block: 'start' })
+    }
+
     const rawUrl = $derived(traceRawUrl(store.state.currentTenant, rid))
     // Capture into locally-named refs so the template doesn't have to
     // wrestle the narrowing back from `trace.stack` (which the type
@@ -244,6 +282,8 @@
     const stackName = $derived(trace?.stack ?? '')
     const routeName = $derived(trace?.route ?? '')
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <div class="flex h-full flex-col p-4">
     <header class="mb-3 flex items-start gap-3">
@@ -369,18 +409,27 @@
             </section>
         {/if}
 
-        {#if modelCalls.length}
+        {#if modelCalls.length || rows.length}
             <div class="mb-2 flex items-center gap-3 text-xs text-neutral-600">
-                <span>
-                    {modelCalls.length} model {modelCalls.length === 1 ? 'call' : 'calls'},
-                    <span class="font-mono">{modelTotals.in.toLocaleString()} → {modelTotals.out.toLocaleString()}</span> tokens
-                </span>
-                <button
-                    type="button"
-                    class="rounded border border-neutral-300 bg-white px-2 py-0.5 text-neutral-700 hover:bg-neutral-50"
-                    aria-pressed={modelCallsOnly}
-                    onclick={() => (modelCallsOnly = !modelCallsOnly)}
-                >{modelCallsOnly ? 'show all steps' : 'show model calls'}</button>
+                {#if modelCalls.length}
+                    <span>
+                        {modelCalls.length} model {modelCalls.length === 1 ? 'call' : 'calls'},
+                        <span class="font-mono">{modelTotals.in.toLocaleString()} → {modelTotals.out.toLocaleString()}</span> tokens
+                    </span>
+                    <button
+                        type="button"
+                        class="rounded border border-neutral-300 bg-white px-2 py-0.5 text-neutral-700 hover:bg-neutral-50"
+                        aria-pressed={modelCallsOnly}
+                        onclick={() => (modelCallsOnly = !modelCallsOnly)}
+                    >{modelCallsOnly ? 'show all steps' : 'show model calls'}</button>
+                {/if}
+                {#if rows.length}
+                    <span class="ml-auto text-neutral-400">
+                        <kbd class="rounded border border-neutral-300 bg-white px-1 font-mono text-[10px] text-neutral-500">←</kbd>
+                        <kbd class="rounded border border-neutral-300 bg-white px-1 font-mono text-[10px] text-neutral-500">→</kbd>
+                        step through
+                    </span>
+                {/if}
             </div>
         {/if}
 
@@ -413,7 +462,9 @@
                             {@const opHref = stepOpHref(s)}
                             {@const computeHref = stepComputeHref(s)}
                             {@const body = fetched[key]}
-                            <tr class="cursor-pointer border-l-4 hover:bg-neutral-50 {tone.border} {stackChanged ? 'border-t-2 border-t-neutral-300' : ''}"
+                            <tr class="cursor-pointer border-l-4 {key === cursor ? 'bg-brand-cyan/10' : 'hover:bg-neutral-50'} {tone.border} {stackChanged ? 'border-t-2 border-t-neutral-300' : ''}"
+                                aria-current={key === cursor ? 'true' : undefined}
+                                bind:this={rowEls[key]}
                                 onclick={() => toggleStep(key, s)}>
                                 <td class="px-3 py-2 align-top font-mono text-xs text-neutral-700">
                                     {#if modelCallsOnly}<span class="mr-1 text-neutral-400">{n + 1}.</span>{/if}<span class="mr-1 inline-block w-3 text-neutral-400 transition-transform {expanded ? 'rotate-90' : ''}">▶</span>{#if opHref}<a

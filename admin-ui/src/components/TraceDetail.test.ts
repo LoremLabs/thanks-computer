@@ -3,7 +3,7 @@
 // compute's operation opens its source instead. Clicking a link navigates
 // without toggling the step's in/out row.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen } from '@testing-library/svelte'
 import userEvent from '@testing-library/user-event'
 import TraceDetail from './TraceDetail.svelte'
@@ -174,5 +174,103 @@ describe('TraceDetail, a run seen from its resume trace', () => {
 
         await user.click(screen.getByText('7300-gone'))
         expect((await screen.findAllByText('not available: this body was not stored')).length).toBe(2)
+    })
+})
+
+describe('TraceDetail steps through with the arrow keys', () => {
+    const original = Element.prototype.scrollIntoView
+    let scrolled: Element[] = []
+    beforeEach(() => {
+        scrolled = []
+        Element.prototype.scrollIntoView = function (this: Element) {
+            scrolled.push(this)
+        }
+    })
+    afterEach(() => {
+        Element.prototype.scrollIntoView = original
+    })
+
+    const row = (label: string) => screen.getByText(label).closest('tr')!
+    const current = () => document.querySelector('tr[aria-current="true"]')
+    const openRows = () => screen.queryAllByText('in').length
+
+    it('opens the next step, closes the one it leaves, and scrolls to it', async () => {
+        const user = userEvent.setup()
+        render(TraceDetail, { props: { rid: RID, onBack: vi.fn() } })
+
+        await user.keyboard('{ArrowRight}')
+        expect(current()).toBe(row('0000-detect'))
+        expect(openRows()).toBe(1)
+
+        await user.keyboard('{ArrowRight}')
+        expect(current()).toBe(row('0396-route'))
+        expect(openRows()).toBe(1)
+        expect(scrolled[scrolled.length - 1]).toBe(row('0396-route'))
+
+        await user.keyboard('{ArrowLeft}')
+        expect(current()).toBe(row('0000-detect'))
+        expect(openRows()).toBe(1)
+    })
+
+    it('starts at the last step with ←, holds at the ends, and moves on from a clicked step', async () => {
+        const user = userEvent.setup()
+        render(TraceDetail, { props: { rid: RID, onBack: vi.fn() } })
+
+        await user.keyboard('{ArrowLeft}')
+        expect(current()).toBe(row('0005-calc'))
+        await user.keyboard('{ArrowRight}')
+        expect(current()).toBe(row('0005-calc'))
+        expect(openRows()).toBe(1)
+
+        await user.click(row('0396-route'))
+        expect(current()).toBe(row('0396-route'))
+        await user.keyboard('{ArrowRight}')
+        expect(current()).toBe(row('0100-close'))
+    })
+
+    it('leaves the keys alone while typing, and with a modifier held', async () => {
+        const user = userEvent.setup()
+        render(TraceDetail, { props: { rid: RID, onBack: vi.fn() } })
+        const input = document.createElement('input')
+        document.body.append(input)
+        try {
+            input.focus()
+            await user.keyboard('{ArrowRight}')
+            expect(current()).toBeNull()
+
+            input.blur()
+            await user.keyboard('{Alt>}{ArrowRight}{/Alt}')
+            await user.keyboard('{Meta>}{ArrowRight}{/Meta}')
+            expect(current()).toBeNull()
+            expect(openRows()).toBe(0)
+        } finally {
+            input.remove()
+        }
+    })
+
+    it('steps through only the model calls when they are shown, fetching their bodies', async () => {
+        store.cacheLiveTrace({
+            rid: 'CbStepModels',
+            cursor: 'CbStepModels',
+            steps: [
+                { stack: 'loop', scope: 7000, name: 'prep', operation: 'txco://kv/get', started_at: '2026-11-06T00:00:00.100Z' },
+                { stack: 'loop', scope: 7101, name: 'work', operation: 'ai://chat', started_at: '2026-11-06T00:00:00.200Z',
+                  model: { kind: 'chat', model: 'gpt-5.4', tokens_in: 10, tokens_out: 2 }, body_ref: 'k#0-10' },
+                { stack: 'loop', scope: 7102, name: 'save', operation: 'txco://kv/set', started_at: '2026-11-06T00:00:00.300Z' },
+                { stack: 'loop', scope: 7103, name: 'judge', operation: 'ai://decide', started_at: '2026-11-06T00:00:00.400Z',
+                  model: { kind: 'decide', model: 'jev', tokens_in: 5, tokens_out: 1 } },
+            ],
+        } as unknown as TraceCachedEvent)
+        const body = vi.spyOn(api, 'getTraceBody').mockResolvedValue(null)
+        const user = userEvent.setup()
+        render(TraceDetail, { props: { rid: 'CbStepModels', onBack: vi.fn() } })
+
+        await user.click(screen.getByRole('button', { name: 'show model calls' }))
+        await user.keyboard('{ArrowRight}')
+        expect(current()).toBe(row('7101-work'))
+        expect(body).toHaveBeenCalledWith(store.state.currentTenant, 'CbStepModels', 'k#0-10')
+
+        await user.keyboard('{ArrowRight}')
+        expect(current()).toBe(row('7103-judge'))
     })
 })
