@@ -22,6 +22,8 @@ import (
 
 // `txco attach` makes this computer a workspace of another chassis.
 //
+//	txco attach <site>      confirm in the browser (attach_browser.go), then
+//	                        as with a code
 //	txco attach <code>      enroll this computer for the workspace the code
 //	                        is for, working in the CURRENT directory, then
 //	                        serve it
@@ -60,8 +62,8 @@ func runAttach(args []string, stdin io.Reader, stdout, stderr io.Writer) (status
 	address := fs.String("address", "", "the chassis to attach to, when the code does not carry it (e.g. https://attach.example.com)")
 	yes := fs.Bool("yes", false, "attach without asking")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: txco attach [--address URL] [--yes] [<code> | list]")
-		fmt.Fprintln(stderr, "\nRun `txco attach <code>` in the folder the work should happen in.")
+		fmt.Fprintln(stderr, "usage: txco attach [--address URL] [--yes] [<site> | <code> | list]")
+		fmt.Fprintln(stderr, "\nRun it in the folder the work should happen in.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -78,6 +80,11 @@ func runAttach(args []string, stdin io.Reader, stdout, stderr io.Writer) (status
 		return 2, false
 	case fs.Arg(0) == "list":
 		return attachList(h, stdout, stderr), false
+	case fs.NArg() == 1 && *address == "" && isSite(fs.Arg(0)):
+		if err := attachBrowser(h, fs.Arg(0), *yes, stdin, stdout); err != nil {
+			fmt.Fprintln(stderr, "txco attach:", err)
+			return 1, false
+		}
 	case fs.NArg() == 1:
 		if err := attachEnroll(h, fs.Arg(0), *address, *yes, stdin, stdout, stderr); err != nil {
 			fmt.Fprintln(stderr, "txco attach:", err)
@@ -141,33 +148,61 @@ func attachEnroll(h home.Home, pasted, address string, yes bool, stdin io.Reader
 	if base == "" {
 		return fmt.Errorf("the code does not say where to attach; pass --address https://…")
 	}
-	root, err := os.Getwd()
+	root, err := attachRoot()
 	if err != nil {
 		return err
 	}
-	if real, err := filepath.EvalSymlinks(root); err == nil {
-		root = real
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	info, err := attached.PeekCode(ctx, nil, base, code)
-	if err != nil {
-		return err
-	}
-	what := info.Label
-	if what == "" {
-		what = "a workspace"
-	}
-	fmt.Fprintf(stdout, "Attach this computer to %s on %s,\nworking in %s?\n", what, strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), home.Pretty(root))
-	fmt.Fprintln(stdout, "Commands sent to it run as you, starting in that folder. It is not a sandbox.")
+	var ask func() bool
 	if !yes {
 		if !auth.StdinIsTTY() {
 			return fmt.Errorf("not a terminal: pass --yes to attach without asking")
 		}
-		fmt.Fprint(stdout, "Attach? [y/N] ")
-		line, _ := bufio.NewReader(stdin).ReadString('\n')
-		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+		in := bufio.NewReader(stdin)
+		ask = func() bool {
+			fmt.Fprint(stdout, "Attach? [y/N] ")
+			line, _ := in.ReadString('\n')
+			return isYes(line)
+		}
+	}
+	return spendCode(h, code, base, root, ask, stdout)
+}
+
+// attachRoot is the folder work starts in: the current directory, its
+// links resolved.
+func attachRoot() (string, error) {
+	root, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		root = real
+	}
+	return root, nil
+}
+
+func isYes(line string) bool {
+	a := strings.ToLower(strings.TrimSpace(line))
+	return a == "y" || a == "yes"
+}
+
+// spendCode enrolls this computer, working in root, with the code for base.
+// ask, when not nil, is first told what the code is for and must say yes.
+func spendCode(h home.Home, code, base, root string, ask func() bool, stdout io.Writer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if ask != nil {
+		info, err := attached.PeekCode(ctx, nil, base, code)
+		if err != nil {
+			return err
+		}
+		what := info.Label
+		if what == "" {
+			what = "a workspace"
+		}
+		fmt.Fprintf(stdout, "Attach this computer to %s on %s,\nworking in %s?\n", what, strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), home.Pretty(root))
+		fmt.Fprintln(stdout, "Commands sent to it run as you, starting in that folder. It is not a sandbox.")
+		if !ask() {
 			return fmt.Errorf("not attached")
 		}
 	}

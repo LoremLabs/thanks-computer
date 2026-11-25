@@ -4,6 +4,16 @@ class Txco < Formula
   version "@VERSION@"
   license "MPL-2.0"
 
+  # Prebuilt kegs from the release. Pouring one skips Homebrew's
+  # build-from-source checks, so no Command Line Tools are needed.
+  bottle do
+    root_url "@BASE@"
+    sha256 cellar: :any_skip_relocation, arm64_monterey: "@BOTTLE_ARM64_MONTEREY@"
+    sha256 cellar: :any_skip_relocation, monterey:       "@BOTTLE_MONTEREY@"
+    sha256 cellar: :any_skip_relocation, arm64_linux:    "@BOTTLE_ARM64_LINUX@"
+    sha256 cellar: :any_skip_relocation, x86_64_linux:   "@BOTTLE_X86_64_LINUX@"
+  end
+
   on_macos do
     on_arm do
       url "@BASE@/txco_@VERSION@_darwin_arm64.tar.gz"

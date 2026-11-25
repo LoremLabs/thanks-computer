@@ -3029,17 +3029,33 @@ func (pu *Unit) ExecCore(ctx context.Context, op operation.Operation) (event.Pay
 	return ep, err
 }
 
-// dispatchesToHandler reports whether the EXEC operand will cause the
-// chassis to hand the envelope to a handler — local or remote, any
-// transport. Stage jumps stay inside the chassis's routing machinery and
-// don't dispatch; unsupported schemes error out before reaching a
-// handler. Both skip envelope injection.
-// dispatchesToHandler reports whether opName is a handler transport that
-// gets the runtime identity stamp (_txc.op/_txc.step) on its input.
-// ai:// and mcp+http(s):// are deliberately excluded — stamping would leak
-// identity into the ai template env, and mcp argument extraction strips
-// _txc anyway. SELECT projection applies to ALL transports regardless;
-// only the identity stamp is scheme-gated.
+// dispatchesToHandler reports whether opName is a transport that hands the
+// op's input envelope to a handler, and so gets the runtime identity stamp
+// (_txc.op/_txc.step) on that input. The stamp is for the receiver: it says
+// which op called.
+//
+// This is an allowlist. A new transport is NOT stamped until it is named
+// here, so decide it when adding one. What is left out today, and why:
+//
+//   - ai:// and mcp+http(s)://: deliberate. The stamp would leak identity
+//     into the ai template env, and mcp argument extraction strips _txc
+//     anyway.
+//   - outlet://, workspace:// and cap://: no envelope leaves the chassis.
+//     The receiver gets only what the op wrote in WITH (a statement and its
+//     bound values, a command, a capability's arguments).
+//   - call://: the callee starts from a fresh envelope the chassis frames
+//     (frameEnvelope), never the caller's, and its own ops are stamped as
+//     they dispatch.
+//   - Stage jumps (goto:// and the bare stage form) and unsupported
+//     schemes never reach a handler.
+//
+// None of those branches needs the stamp to know who fired: each reads
+// op.Stack, op.Scope and op.Name directly, as the trace step does. The
+// visible effect is only that a trace's recorded input for such a step
+// carries no _txc.op/_txc.step.
+//
+// SELECT projection applies to ALL transports regardless; only the identity
+// stamp is scheme-gated.
 func dispatchesToHandler(opName string) bool {
 	switch {
 	case strings.HasPrefix(opName, "txco://"):
@@ -3178,11 +3194,11 @@ func (pu *Unit) dispatch(ctx context.Context, op operation.Operation) execResult
 	// dispatch's own, so parallel ops of different stacks never share it.
 	ctx = WithStack(ctx, op.Stack)
 
-	// Stamp the firing rule's identity on the envelope before any handler
-	// sees it. Transport-agnostic: every dispatching branch (txco://, HTTP
-	// today, future schemes like gRPC) shares this one site, so adding a
-	// new transport below automatically inherits the behavior. Stage jumps
-	// and unsupported schemes don't dispatch to a handler and are skipped.
+	// Stamp the firing op's identity on the envelope before any handler
+	// sees it. One site for every stamped transport, but which transports
+	// are stamped is dispatchesToHandler's allowlist (txco://, http(s)://,
+	// compute://): a transport added to the switch below is not stamped
+	// until it is named there. See that function for what is left out.
 	if dispatchesToHandler(opName) {
 		op.Input = injectRuntimeIdentity(op.Input, op.Stack, op.Name, op.Scope)
 	}

@@ -57,6 +57,34 @@ txco attach granite-pillow-…-otter@attach.example.com
 The command says what it is about to attach to and where, and asks. Then
 it serves, in the foreground, until it is stopped.
 
+### Or confirm in the browser
+
+```sh
+txco attach www.example.com
+```
+
+A site may make the code for you. It names its confirm page at
+`/.well-known/txco-attach`:
+
+```json
+{"page": "/attach"}
+```
+
+The command opens that page with `machine`, `folder`, `state` and a
+`redirect_uri` on this machine (`http://127.0.0.1:<port>/callback`). The
+page makes a code and sends the browser to `redirect_uri` with `code` and
+`state`, or `error` to cancel. The command takes only its own `state`, once,
+spends the code, and sends the browser back to the page with `result=ok`,
+`failed` or `cancelled`.
+
+If the browser is elsewhere, the command also prints the page without
+`redirect_uri` and asks for a code. The page then shows the code to type.
+Over ssh it opens no browser; `$BROWSER` names one.
+
+A query on the site goes to the page as it is: `txco attach
+'www.example.com?pony=sc'` opens the page with `pony=sc`. The command's own
+values always win.
+
 - **The folder is taken once.** It is the directory `txco attach <code>`
   was run in, recorded as an absolute path. Every command starts there
   unless it names another directory, and a relative `cwd` is below it.

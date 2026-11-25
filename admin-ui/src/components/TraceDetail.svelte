@@ -427,7 +427,6 @@
                     <span class="ml-auto text-neutral-400">
                         <kbd class="rounded border border-neutral-300 bg-white px-1 font-mono text-[10px] text-neutral-500">←</kbd>
                         <kbd class="rounded border border-neutral-300 bg-white px-1 font-mono text-[10px] text-neutral-500">→</kbd>
-                        step through
                     </span>
                 {/if}
             </div>

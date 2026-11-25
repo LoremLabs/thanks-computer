@@ -83,10 +83,22 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          set -euo pipefail
           mkdir -p dist
+          # macOS 12, Go 1.26's own floor. Without it the C parts (sqlite)
+          # take the runner's macOS and the binary refuses anything older.
+          # In the cgo flags too: the build cache keys on those, not on
+          # MACOSX_DEPLOYMENT_TARGET.
+          if [ "$GOOS" = darwin ]; then
+            export MACOSX_DEPLOYMENT_TARGET=12.0
+            export CGO_CFLAGS="-O2 -g -mmacosx-version-min=12.0" CGO_LDFLAGS="-mmacosx-version-min=12.0"
+          fi
           go build -tags sqlite_fts5 -trimpath \
             -ldflags "-X main.Version=${GITHUB_REF_NAME#v} -X main.CommitId=${GITHUB_SHA} -X main.BuildTimestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.InstallMethod=release" \
             -o dist/txco ./cmd/txco
+          if [ "$GOOS" = darwin ]; then
+            otool -l dist/txco | grep -A4 LC_BUILD_VERSION | grep -q 'minos 12.0' || { echo "txco does not run on macOS 12" >&2; exit 1; }
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -129,7 +141,24 @@ jobs:
             cp README.md LICENSE "$stage/"
             tar -C "$stage" -czf "dist/txco_${VERSION}_${platform}.tar.gz" txco README.md LICENSE
           done
-          ( cd dist && sha256sum txco_*.tar.gz > checksums.txt && cat checksums.txt )
+
+          # Homebrew bottles: the same binaries laid out as an installed keg
+          # (txco/<version>/bin/txco, and bin/thanks, which a poured bottle
+          # gets from here, not from the formula's install). Without a bottle
+          # Homebrew treats the formula as a build from source and wants the
+          # Xcode Command Line Tools; pony depends on txco, so that would be
+          # every pony install too. A macOS bottle pours on its release or
+          # any later one: monterey (12) is the build's floor.
+          for pair in darwin_arm64:arm64_monterey darwin_amd64:monterey linux_arm64:arm64_linux linux_amd64:x86_64_linux; do
+            plat="${pair%%:*}"; tag="${pair#*:}"
+            keg="dist/keg/${tag}/txco/${VERSION}"
+            mkdir -p "$keg/bin"
+            cp "dist/stage/${plat}/txco" "$keg/bin/txco"
+            ln -s txco "$keg/bin/thanks"
+            cp README.md LICENSE "$keg/"
+            tar -C "dist/keg/${tag}" -czf "dist/txco-${VERSION}.${tag}.bottle.tar.gz" txco
+          done
+          ( cd dist && sha256sum txco_*.tar.gz txco-*.bottle.tar.gz > checksums.txt && cat checksums.txt )
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           # A tag with a hyphen (v0.2.0-rc2) is a prerelease; it publishes a
           # GitHub prerelease but does NOT move the Homebrew formula.
@@ -144,11 +173,11 @@ jobs:
           # Idempotent so "Re-run failed jobs" works: upload --clobber if the
           # release already exists, otherwise create it.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/txco_*.tar.gz dist/checksums.txt --clobber
+            gh release upload "$TAG" dist/txco_*.tar.gz dist/txco-*.bottle.tar.gz dist/checksums.txt --clobber
           else
             pre=""
             [[ "${{ steps.pkg.outputs.prerelease }}" == "true" ]] && pre="--prerelease"
-            gh release create "$TAG" dist/txco_*.tar.gz dist/checksums.txt \
+            gh release create "$TAG" dist/txco_*.tar.gz dist/txco-*.bottle.tar.gz dist/checksums.txt \
               --title "$TAG" --generate-notes $pre
           fi
 
@@ -161,14 +190,20 @@ jobs:
           VERSION="${{ steps.pkg.outputs.version }}"
           BASE="https://github.com/loremlabs/thanks-computer/releases/download/${GITHUB_REF_NAME}"
           sha() { awk -v f="txco_${VERSION}_$1.tar.gz" '$2==f{print $1}' dist/checksums.txt; }
+          bsha() { awk -v f="txco-${VERSION}.$1.bottle.tar.gz" '$2==f{print $1}' dist/checksums.txt; }
 
           sed -e "s|@VERSION@|${VERSION}|g" \
               -e "s|@BASE@|${BASE}|g" \
+              -e "s|@BOTTLE_ARM64_MONTEREY@|$(bsha arm64_monterey)|g" \
+              -e "s|@BOTTLE_MONTEREY@|$(bsha monterey)|g" \
+              -e "s|@BOTTLE_ARM64_LINUX@|$(bsha arm64_linux)|g" \
+              -e "s|@BOTTLE_X86_64_LINUX@|$(bsha x86_64_linux)|g" \
               -e "s|@SHA_DARWIN_ARM64@|$(sha darwin_arm64)|g" \
               -e "s|@SHA_DARWIN_AMD64@|$(sha darwin_amd64)|g" \
               -e "s|@SHA_LINUX_ARM64@|$(sha linux_arm64)|g" \
               -e "s|@SHA_LINUX_AMD64@|$(sha linux_amd64)|g" \
               .github/homebrew/txco.rb.tmpl > txco.rb
+          if grep -qE '@[A-Z_0-9]+@|sha256 ""|: ""' txco.rb; then echo "unfilled placeholder in txco.rb" >&2; cat txco.rb >&2; exit 1; fi
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/loremlabs/homebrew-txco.git" tap
           mkdir -p tap/Formula
