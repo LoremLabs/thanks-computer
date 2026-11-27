@@ -27,7 +27,9 @@ import (
 //	txco attach <code>      enroll this computer for the workspace the code
 //	                        is for, working in the CURRENT directory, then
 //	                        serve it
-//	txco attach             serve every workspace this computer holds
+//	txco attach             serve every workspace this computer holds, but
+//	                        a while-running one, which only the process that
+//	                        made it serves
 //	txco attach list        say what this computer holds, and where
 //
 // It runs the txco binary as a small chassis with a fixed profile: one
@@ -96,9 +98,12 @@ func runAttach(args []string, stdin io.Reader, stdout, stderr io.Writer) (status
 		fmt.Fprintln(stderr, "txco attach:", err)
 		return 1, false
 	}
+	// A while-running share is served only by the process that made it.
+	// One nobody holds was left by a process that died: serving goes on so
+	// that it is cleared away (attachlink).
 	live := 0
 	for _, c := range creds {
-		if c.Ended == "" {
+		if c.Ended == "" && (!c.WhileRunning || h.Holds(c.ID) || h.Left(c.ID)) {
 			live++
 		}
 	}
@@ -129,8 +134,13 @@ func attachList(h home.Home, stdout, stderr io.Writer) int {
 			what = c.Name
 		}
 		state := ""
-		if c.Ended != "" {
+		switch {
+		case c.Ended != "":
 			state = "  (ended: " + c.Ended + ")"
+		case c.WhileRunning && h.Left(c.ID):
+			state = "  (ended: stopped)"
+		case c.WhileRunning:
+			state = "  (while its txco attach runs)"
 		}
 		fmt.Fprintf(stdout, "%s · %s · %s%s\n", what, home.Pretty(c.Root), c.Address, state)
 	}
@@ -164,7 +174,7 @@ func attachEnroll(h home.Home, pasted, address string, yes bool, stdin io.Reader
 			return isYes(line)
 		}
 	}
-	return spendCode(h, code, base, root, ask, stdout)
+	return spendCode(h, code, base, root, false, ask, stdout)
 }
 
 // attachRoot is the folder work starts in: the current directory, its
@@ -187,7 +197,9 @@ func isYes(line string) bool {
 
 // spendCode enrolls this computer, working in root, with the code for base.
 // ask, when not nil, is first told what the code is for and must say yes.
-func spendCode(h home.Home, code, base, root string, ask func() bool, stdout io.Writer) error {
+// whileRunning: the share ends when this process stops; it holds the
+// credential's lock from before the file exists.
+func spendCode(h home.Home, code, base, root string, whileRunning bool, ask func() bool, stdout io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -220,10 +232,17 @@ func spendCode(h home.Home, code, base, root string, ask func() bool, stdout io.
 	if err != nil {
 		return err
 	}
+	if whileRunning {
+		if err := h.Hold(out.Credential); err != nil {
+			return fmt.Errorf("enrolled, but the credential could not be kept (ask for a new code): %w", err)
+		}
+	}
 	if err := h.Save(home.Credential{
 		ID: out.Credential, Address: base, Name: out.Name, Label: out.Label,
 		Root: root, Seed: key.Seed(), Machine: machine, CreatedAt: time.Now().UTC(),
+		WhileRunning: whileRunning,
 	}); err != nil {
+		h.Release(out.Credential)
 		return fmt.Errorf("enrolled, but the credential could not be saved (ask for a new code): %w", err)
 	}
 	fmt.Fprintf(stdout, "Enrolled. Attached: %s · %s\n", machine, home.Pretty(root))

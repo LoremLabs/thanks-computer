@@ -115,7 +115,7 @@ func TestAttachPage(t *testing.T) {
 	}
 	read := func(srv *httptest.Server) (string, error) {
 		u, _ := url.Parse(srv.URL)
-		p, err := attachPage(t.Context(), nil, u)
+		p, _, err := attachPage(t.Context(), nil, u)
 		if err != nil {
 			return "", err
 		}
@@ -169,6 +169,8 @@ type site struct {
 	enrolled []attached.EnrollBody
 	peeked   int
 	refuse   bool
+	// whileRunning is what the site's well-known says.
+	whileRunning bool
 }
 
 func newSite(t *testing.T) *site {
@@ -178,7 +180,7 @@ func newSite(t *testing.T) *site {
 		defer s.mu.Unlock()
 		switch r.URL.Path {
 		case WellKnownAttach:
-			_ = json.NewEncoder(w).Encode(map[string]string{"page": "/attach?from=terminal"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"page": "/attach?from=terminal", "while_running": s.whileRunning})
 		case attached.PathCode:
 			s.peeked++
 			_ = json.NewEncoder(w).Encode(attached.CodeResult{Label: "the pony x", ExpiresAt: time.Now().Add(time.Minute)})
@@ -258,6 +260,9 @@ func TestAttachBrowserHandBack(t *testing.T) {
 	creds, err := h.Load()
 	if err != nil || len(creds) != 1 || creds[0].Address != s.URL || creds[0].Name != "computer/x" {
 		t.Fatalf("credentials: %+v, %v", creds, err)
+	}
+	if creds[0].WhileRunning || h.Holds(creds[0].ID) {
+		t.Error("the site did not ask for a while-running share")
 	}
 	if s.peeked != 0 {
 		t.Error("the page's code was asked about again")
@@ -383,3 +388,25 @@ func TestAttachBrowserNowhere(t *testing.T) {
 }
 
 var errNoBrowser = errors.New("no browser")
+
+// A site that asks for it gets a share that ends with this command: its
+// credential says so, and this process holds its lock from the start.
+func TestAttachBrowserWhileRunning(t *testing.T) {
+	s := newSite(t)
+	s.whileRunning = true
+	open, sent := browser(t, url.Values{"code": {"granite-pillow-otter@" + s.URL}})
+	h := useAttach(t, open, false)
+	var out bytes.Buffer
+	if err := attachBrowser(h, s.URL, false, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("attachBrowser: %v\n%s", err, out.String())
+	}
+	<-sent
+	creds, err := h.Load()
+	if err != nil || len(creds) != 1 {
+		t.Fatalf("credentials: %+v, %v", creds, err)
+	}
+	t.Cleanup(func() { h.Release(creds[0].ID) })
+	if !creds[0].WhileRunning || !h.Holds(creds[0].ID) {
+		t.Errorf("while running %v, held %v", creds[0].WhileRunning, h.Holds(creds[0].ID))
+	}
+}

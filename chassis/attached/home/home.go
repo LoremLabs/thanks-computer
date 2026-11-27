@@ -3,6 +3,7 @@
 //	<txco home>/attach/
 //	  credentials/<id>.json   one per attached workspace: the address, the
 //	                          credential's id, its folder and its key (0600)
+//	  credentials/<id>.lock   held by the txco attach serving a while-running one
 //	  OPS/_attach/…           the owner's own rules for the _attach stack
 //	  state/<id>/             TXCO_ATTACH_STATE: a product's own files
 //	  jobs/<job>/             detached jobs (chassis/workspace/detach)
@@ -24,6 +25,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -66,6 +69,12 @@ type Credential struct {
 	// (replaced or revoked). It is kept, not deleted, so the owner can see
 	// what happened; it is never dialed again.
 	Ended string `json:"ended,omitempty"`
+	// WhileRunning: the share ends when the `txco attach` that made it
+	// stops, as the site asked. Only that process serves it, holding its
+	// lock (Hold) all along, and it removes the credential as it stops. One
+	// whose lock is free was left by a process that died: the next `txco
+	// attach` removes it.
+	WhileRunning bool `json:"while_running,omitempty"`
 }
 
 // Key is the credential's private key.
@@ -176,6 +185,83 @@ func (h Home) End(id, reason string) error {
 	}
 	c.Ended = reason
 	return h.Save(c)
+}
+
+// The locks this process holds, by path. A lock is an flock on
+// credentials/<id>.lock: liveness is read by trying it, never from a pid.
+var (
+	heldMu sync.Mutex
+	held   = map[string]*os.File{}
+)
+
+func (h Home) lockPath(id string) string { return filepath.Join(h.CredentialsDir(), id+".lock") }
+
+// Hold takes id's lock for this process, until Release or Remove. It fails
+// while any other holder has it, in this process or another.
+func (h Home) Hold(id string) error {
+	if !ValidID(id) {
+		return fmt.Errorf("not a credential id: %q", id)
+	}
+	if err := os.MkdirAll(h.CredentialsDir(), 0o700); err != nil {
+		return err
+	}
+	p := h.lockPath(id)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return errors.New("another txco attach holds it")
+	}
+	heldMu.Lock()
+	held[p] = f
+	heldMu.Unlock()
+	return nil
+}
+
+// Holds reports whether this process holds id's lock.
+func (h Home) Holds(id string) bool {
+	heldMu.Lock()
+	defer heldMu.Unlock()
+	return held[h.lockPath(id)] != nil
+}
+
+// Release gives up id's lock, if this process holds it.
+func (h Home) Release(id string) {
+	p := h.lockPath(id)
+	heldMu.Lock()
+	f := held[p]
+	delete(held, p)
+	heldMu.Unlock()
+	if f != nil {
+		_ = f.Close()
+	}
+}
+
+// Left reports whether id is a while-running credential's that nobody
+// holds: its txco attach died.
+func (h Home) Left(id string) bool {
+	if h.Holds(id) || h.Hold(id) != nil {
+		return false
+	}
+	h.Release(id)
+	return true
+}
+
+// Remove deletes a credential and its lock, and releases it. Only its
+// holder removes one.
+func (h Home) Remove(id string) error {
+	if !ValidID(id) {
+		return nil
+	}
+	err := os.Remove(filepath.Join(h.CredentialsDir(), id+".json"))
+	if os.IsNotExist(err) {
+		err = nil
+	}
+	_ = os.Remove(h.lockPath(id))
+	h.Release(id)
+	return err
 }
 
 // Pretty shows a path with the home directory as "~", as it is shown to

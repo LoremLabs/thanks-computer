@@ -85,6 +85,17 @@ A query on the site goes to the page as it is: `txco attach
 'www.example.com?pony=sc'` opens the page with `pony=sc`. The command's own
 values always win.
 
+A site may ask that the share last only while the command runs:
+
+```json
+{"page": "/attach", "while_running": true}
+```
+
+Only that command serves it. Stop it, with Ctrl-C or by closing its
+terminal, and it stops the share's jobs, sends their ends, and deletes the
+credential. A share whose command died is deleted by the next `txco
+attach`.
+
 - **The folder is taken once.** It is the directory `txco attach <code>`
   was run in, recorded as an absolute path. Every command starts there
   unless it names another directory, and a relative `cwd` is below it.
@@ -92,7 +103,7 @@ values always win.
   not a fence.
 - **Running it again changes nothing.** `txco attach`, with no code and
   from any directory, serves every workspace the machine holds, each from
-  the folder it was enrolled in. Moving a workspace to another folder or
+  the folder it was enrolled in, except a while-running one. Moving a workspace to another folder or
   another machine is a new code, enrolled there; the old machine is told
   it was replaced and stops.
 - **`txco attach list`** says what the machine holds, and where.
@@ -238,7 +249,7 @@ WHEN .on_attached != true
 - **`workspace://<name>/destroy`** on an attached name revokes the
   credential and gives the name back. Nothing on the machine is removed.
 - **On the machine,** stop the command. Its credential stays; run `txco
-  attach` to serve again.
+  attach` to serve again. A while-running share's does not: it is over.
 
 ## How the connection is kept honest
 

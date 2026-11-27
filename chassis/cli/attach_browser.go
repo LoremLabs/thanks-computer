@@ -34,6 +34,9 @@ import (
 // Then the code is spent as a typed one is, without the question: the page
 // asked it.
 //
+// A site that answers `"while_running": true` gets a share that ends when
+// this command stops (home.Credential.WhileRunning).
+//
 // The fallback is the same page without the address to come back to: it
 // shows the code, typed at the terminal's prompt. A typed code is asked
 // about first, as with `txco attach <code>`.
@@ -111,43 +114,45 @@ func isLocalHost(h string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// attachPage reads where site's confirm page is.
-func attachPage(ctx context.Context, hc *http.Client, site *url.URL) (*url.URL, error) {
+// attachPage reads where site's confirm page is, and whether the site asks
+// that a share end when this command stops (`"while_running": true`).
+func attachPage(ctx context.Context, hc *http.Client, site *url.URL) (*url.URL, bool, error) {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, site.String()+WellKnownAttach, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	notHere := fmt.Errorf("%s does not take txco attach", site.Host)
 	if resp.StatusCode != http.StatusOK {
-		return nil, notHere
+		return nil, false, notHere
 	}
 	var out struct {
-		Page string `json:"page"`
+		Page         string `json:"page"`
+		WhileRunning bool   `json:"while_running"`
 	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	if json.Unmarshal(raw, &out) != nil || out.Page == "" {
-		return nil, notHere
+		return nil, false, notHere
 	}
 	ref, err := url.Parse(out.Page)
 	if err != nil {
-		return nil, notHere
+		return nil, false, notHere
 	}
 	// Relative to where the answer came from, after any redirect.
 	page := resp.Request.URL.ResolveReference(ref)
 	if err := webOK(page); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	page.Fragment = ""
-	return page, nil
+	return page, out.WhileRunning, nil
 }
 
 // withQuery is u with q added to its own query.
@@ -184,7 +189,7 @@ func attachBrowser(h home.Home, arg string, yes bool, stdin io.Reader, stdout io
 	defer cancel()
 
 	rctx, rcancel := context.WithTimeout(ctx, 30*time.Second)
-	page, err := attachPage(rctx, nil, site)
+	page, whileRunning, err := attachPage(rctx, nil, site)
 	rcancel()
 	if err != nil {
 		return err
@@ -264,7 +269,7 @@ func attachBrowser(h home.Home, arg string, yes bool, stdin io.Reader, stdout io
 			if u, err := url.Parse(base); err != nil || webOK(u) != nil {
 				return fmt.Errorf("the page sent a code for %s: https only", base)
 			}
-			if err := spendCode(h, code, base, root, nil, stdout); err != nil {
+			if err := spendCode(h, code, base, root, whileRunning, nil, stdout); err != nil {
 				return err
 			}
 			result = "ok"
@@ -287,7 +292,7 @@ func attachBrowser(h home.Home, arg string, yes bool, stdin io.Reader, stdout io
 					return ok && isYes(a)
 				}
 			}
-			return spendCode(h, code, base, root, ask, stdout)
+			return spendCode(h, code, base, root, whileRunning, ask, stdout)
 		}
 	}
 }

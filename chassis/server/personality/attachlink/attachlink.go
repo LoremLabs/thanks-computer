@@ -13,6 +13,12 @@
 // goes up the link, on this connection or a later one, until the chassis
 // acknowledges it.
 //
+// A while-running share (home.Credential.WhileRunning) is served only by the
+// process that made it, and ends with it: on stop, and when the terminal
+// closes, its jobs are stopped, their ends sent while the link is still up,
+// and its credential removed. One left by a process that died is cleared at
+// the next start.
+//
 // OFF unless `attachlink` is in --personalities and --attach-home is set.
 // `txco attach` sets both; a full chassis may too.
 package attachlink
@@ -24,6 +30,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -56,6 +63,9 @@ const (
 	jobPoll = time.Second
 	// jobKeep is how long a finished job's directory is kept.
 	jobKeep = 24 * time.Hour
+	// endWait bounds how long a stopping share waits for its jobs' ends to
+	// be acknowledged.
+	endWait = 5 * time.Second
 
 	replyFile    = "reply.json"
 	completeFile = "complete.json"
@@ -81,13 +91,18 @@ type Controller struct {
 	mu     sync.Mutex
 	links  map[string]*attached.Link // by credential id
 	served int
+	own    []home.Credential // while-running shares this process made
+	ending bool              // stopping: no new request is taken
 	logf   *os.File
 	wg     sync.WaitGroup
+	scanMu sync.Mutex // one job scan at a time
 }
 
-// NewController constructs (but does not start) the personality.
+// NewController constructs (but does not start) the personality. Its links
+// outlive the chassis's context, which is cancelled before Stop: a stopping
+// share still reports its jobs' ends. Stop ends them.
 func NewController(ctx context.Context, pu *processor.Unit) *Controller {
-	cctx, cancel := context.WithCancel(ctx)
+	cctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &Controller{ctx: cctx, cancel: cancel, pu: pu, links: map[string]*attached.Link{}}
 }
 
@@ -127,11 +142,35 @@ func (c *Controller) Start() {
 	if err != nil {
 		c.pu.Logger.Fatal("attachlink: read credentials", zap.Error(err))
 	}
-	served := 0
+	served, cleared := 0, 0
 	for _, cred := range creds {
 		switch st, err := os.Stat(cred.Root); {
 		case cred.Ended != "":
 			c.say("not serving %s: the chassis ended this attachment (%s)", describe(cred), cred.Ended)
+		case cred.WhileRunning && c.home.Holds(cred.ID):
+			c.mu.Lock()
+			c.own = append(c.own, cred)
+			c.mu.Unlock()
+			if err != nil || !st.IsDir() {
+				c.say("not serving %s: its folder is gone", describe(cred))
+				continue
+			}
+			served++
+			c.mu.Lock()
+			c.served++
+			c.mu.Unlock()
+			c.wg.Add(1)
+			go c.serve(cred)
+		case cred.WhileRunning:
+			// Another txco attach serves it, or none does: left by one that
+			// died. Its lock says which.
+			if c.home.Hold(cred.ID) != nil {
+				continue
+			}
+			c.dropJobs(cred.ID, "share ended")
+			_ = c.home.Remove(cred.ID)
+			cleared++
+			c.say("detached: %s (its txco attach had stopped)", describe(cred))
 		case err != nil || !st.IsDir():
 			// A folder that is gone is not served, and nothing is run
 			// somewhere else instead. The name reads away.
@@ -156,14 +195,34 @@ func (c *Controller) Start() {
 	}
 	if served == 0 {
 		c.say("nothing to serve: no attached workspace in %s", c.home.Dir)
+		if cleared > 0 && c.Idle != nil {
+			c.Idle()
+		}
+	}
+	if len(c.own) > 0 && c.Say != nil {
+		// The terminal is the share: closing it stops sharing, as Ctrl-C does.
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		go func() {
+			defer signal.Stop(hup)
+			select {
+			case <-hup:
+				if p, err := os.FindProcess(os.Getpid()); err == nil {
+					_ = p.Signal(syscall.SIGTERM)
+				}
+			case <-c.ctx.Done():
+			}
+		}()
 	}
 	c.wg.Add(1)
 	go c.watchJobs()
 }
 
 // Stop ends every link. Detached jobs are not this process's to end: they
-// run on, and their ends are reported after the next start.
+// run on, and their ends are reported after the next start. A while-running
+// share's are: it ends first (endOwn).
 func (c *Controller) Stop() {
+	c.endOwn()
 	c.cancel()
 	c.wg.Wait()
 	if c.logf != nil {
@@ -230,9 +289,16 @@ func (c *Controller) serve(cred home.Credential) {
 			// Replaced or revoked: this credential is finished. It is not
 			// dialed again, so two machines with one key never trade a
 			// name back and forth.
-			_ = c.home.End(cred.ID, ref.Reason)
-			if ref.Reason == attached.ReasonRevoked {
-				c.dropJobs(cred.ID)
+			if cred.WhileRunning {
+				// Nothing is kept to look at later: the share is over.
+				c.dropJobs(cred.ID, "credential "+ref.Reason)
+				_ = c.home.Remove(cred.ID)
+				c.forget(cred.ID)
+			} else {
+				_ = c.home.End(cred.ID, ref.Reason)
+				if ref.Reason == attached.ReasonRevoked {
+					c.dropJobs(cred.ID, "credential revoked")
+				}
 			}
 			c.say("no longer serving %s: %s", describe(cred), ref.Reason)
 			c.mu.Lock()
@@ -274,6 +340,13 @@ func fail(code, msg string) attached.Reply {
 
 // Request runs one request through `_attach` and returns its answer.
 func (h *handler) Request(ctx context.Context, hdr attached.Header) attached.Reply {
+	h.c.mu.Lock()
+	ending := h.c.ending
+	h.c.mu.Unlock()
+	if ending {
+		// Nothing ran: the chassis may safely be told so.
+		return attached.Reply{Error: &attached.WireError{Code: "unavailable", Message: "this machine is stopping"}}
+	}
 	start := time.Now()
 	var p attached.ExecPayload
 	if err := json.Unmarshal(hdr.Payload, &p); err != nil {
@@ -487,6 +560,8 @@ func (c *Controller) watchJobs() {
 }
 
 func (c *Controller) scanJobs() {
+	c.scanMu.Lock()
+	defer c.scanMu.Unlock()
 	ids, err := c.jobs.List()
 	if err != nil {
 		return
@@ -563,11 +638,16 @@ func (c *Controller) resultOf(id string) []byte {
 func (c *Controller) report(id, dir string, p pending, complete []byte) {
 	c.mu.Lock()
 	link := c.links[p.Credential]
+	ending := c.ending
 	c.mu.Unlock()
 	if link == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	limit := 30 * time.Second
+	if ending {
+		limit = endWait // stopping: a moment, not half a minute
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, limit)
 	defer cancel()
 	err := link.Complete(ctx, attached.Header{OPC: p.OPC, Token: p.Token, Job: id, Payload: complete})
 	var we *workspace.Error
@@ -590,16 +670,78 @@ func (c *Controller) finish(dir, how string) {
 	}
 }
 
-// dropJobs ends a revoked credential's detached jobs. Their ends could no
-// longer be received.
-func (c *Controller) dropJobs(credential string) {
+// dropJobs ends a credential's detached jobs whose ends could no longer be
+// received, and says why.
+func (c *Controller) dropJobs(credential, why string) {
+	c.scanMu.Lock()
+	defer c.scanMu.Unlock()
+	for _, id := range c.jobsOf(credential) {
+		_ = c.jobs.Stop(id)
+		if dir, err := c.jobs.Dir(id); err == nil {
+			c.finish(dir, why)
+		}
+	}
+}
+
+// jobsOf is a credential's jobs whose ends are still owed.
+func (c *Controller) jobsOf(credential string) []string {
 	ids, _ := c.jobs.List()
+	var out []string
 	for _, id := range ids {
 		if p, ok := c.readReply(id); ok && p.Credential == credential {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// endOwn ends the while-running shares this process made, while their links
+// are still up: no new request is taken, their jobs are stopped and their
+// ends sent (endWait at most), and each credential is removed. Nothing is
+// left on disk to serve again.
+func (c *Controller) endOwn() {
+	c.mu.Lock()
+	c.ending = true
+	own := append([]home.Credential(nil), c.own...)
+	c.mu.Unlock()
+	if len(own) == 0 || c.jobs == nil {
+		return
+	}
+	owed := func() int {
+		n := 0
+		for _, cred := range own {
+			n += len(c.jobsOf(cred.ID))
+		}
+		return n
+	}
+	for _, cred := range own {
+		for _, id := range c.jobsOf(cred.ID) {
 			_ = c.jobs.Stop(id)
-			if dir, err := c.jobs.Dir(id); err == nil {
-				c.finish(dir, "credential revoked")
-			}
+		}
+	}
+	for until := time.Now().Add(endWait); owed() > 0 && time.Now().Before(until); {
+		c.scanJobs()
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-c.ctx.Done():
+			until = time.Now()
+		}
+	}
+	for _, cred := range own {
+		c.dropJobs(cred.ID, "share ended")
+		_ = c.home.Remove(cred.ID)
+		c.say("detached: %s", describe(cred))
+	}
+}
+
+// forget drops a share the chassis ended from those this process made.
+func (c *Controller) forget(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, cred := range c.own {
+		if cred.ID == id {
+			c.own = append(c.own[:i], c.own[i+1:]...)
+			return
 		}
 	}
 }
